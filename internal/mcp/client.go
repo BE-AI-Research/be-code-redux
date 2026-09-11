@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,12 +25,13 @@ type ToolDef struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// Client is one connected stdio MCP server.
+// Client is one connected MCP server (stdio subprocess or TCP).
 type Client struct {
 	ServerName string
 
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
+	cmd    *exec.Cmd // stdio transport only
+	w      io.Writer // stdin pipe or net.Conn
+	closer func()    // transport shutdown
 	mu     sync.Mutex
 	nextID int64
 	// pending maps request id -> reply channel.
@@ -79,36 +81,75 @@ func Dial(ctx context.Context, name, command string, args []string, env map[stri
 		return nil, fmt.Errorf("mcp %s: %w", name, err)
 	}
 
-	c := &Client{ServerName: name, cmd: cmd, stdin: stdin, pending: map[int64]chan rpcResponse{}}
+	c := &Client{ServerName: name, cmd: cmd, w: stdin, pending: map[int64]chan rpcResponse{}}
+	c.closer = func() {
+		_ = stdin.Close()
+		if cmd.Process != nil {
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		}
+	}
 	go c.readLoop(stdout)
 
+	if err := c.handshake(ctx, nil); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// DialTCP connects to an MCP server listening on a loopback TCP address
+// (the editor extension) and completes the handshake, presenting token.
+func DialTCP(ctx context.Context, name, addr, token string) (*Client, error) {
+	d := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("mcp %s: %w", name, err)
+	}
+	c := &Client{ServerName: name, w: conn, pending: map[int64]chan rpcResponse{}}
+	c.closer = func() { _ = conn.Close() }
+	go c.readLoop(conn)
+	if err := c.handshake(ctx, map[string]any{"token": token}); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+// handshake runs initialize → initialized → tools/list. auth, when
+// non-nil, is sent as params.auth (the extension checks the token).
+func (c *Client) handshake(ctx context.Context, auth map[string]any) error {
 	initParams := map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "be-code", "version": ClientVersion},
 	}
+	if auth != nil {
+		initParams["auth"] = auth
+	}
 	if _, err := c.call(ctx, "initialize", initParams, 15*time.Second); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("mcp %s: initialize: %w", name, err)
+		return fmt.Errorf("mcp %s: initialize: %w", c.ServerName, err)
 	}
 	if err := c.notify("notifications/initialized", map[string]any{}); err != nil {
-		c.Close()
-		return nil, err
+		return err
 	}
 	res, err := c.call(ctx, "tools/list", map[string]any{}, 15*time.Second)
 	if err != nil {
-		c.Close()
-		return nil, fmt.Errorf("mcp %s: tools/list: %w", name, err)
+		return fmt.Errorf("mcp %s: tools/list: %w", c.ServerName, err)
 	}
 	var listed struct {
 		Tools []ToolDef `json:"tools"`
 	}
 	if err := json.Unmarshal(res, &listed); err != nil {
-		c.Close()
-		return nil, err
+		return err
 	}
 	c.tools = listed.Tools
-	return c, nil
+	return nil
 }
 
 // Tools returns the server's advertised tools.
@@ -140,20 +181,17 @@ func (c *Client) CallTool(ctx context.Context, tool string, args json.RawMessage
 	return strings.Join(parts, "\n"), out.IsError, nil
 }
 
-// Close terminates the server process.
+// Close shuts the transport down (idempotent).
 func (c *Client) Close() {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
 	c.closed = true
 	c.mu.Unlock()
-	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		done := make(chan struct{})
-		go func() { _ = c.cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			_ = c.cmd.Process.Kill()
-		}
+	if c.closer != nil {
+		c.closer()
 	}
 }
 
@@ -198,7 +236,7 @@ func (c *Client) send(v any) error {
 	if c.closed {
 		return fmt.Errorf("mcp %s: connection closed", c.ServerName)
 	}
-	_, err = c.stdin.Write(append(data, '\n'))
+	_, err = c.w.Write(append(data, '\n'))
 	return err
 }
 
