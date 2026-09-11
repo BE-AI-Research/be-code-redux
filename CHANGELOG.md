@@ -9,17 +9,19 @@
   one-line note about the active file/selection is folded into each prompt.
   Controlled by `ide.enabled` / `ide.auto_context` in config and the
   `--ide` / `--no-ide` flags; `be-code doctor` reports bridge status.
-- New `vscode/` companion extension providing the other half of the bridge: 17
-  tools over an MCP-over-TCP server (`context`, `open`, `definition`,
-  `references`, `hover`, `diagnostics`, ten `debug_*` tools — configs, start,
-  breakpoint, continue, step, stack, variables, evaluate, output, stop — and
-  `review_diff` for in-editor accept/reject of pending writes). The extension
+- New `vscode/` companion extension providing the other half of the bridge: 16
+  model-visible tools over an MCP-over-TCP server (`context`, `open`,
+  `definition`, `references`, `hover`, `diagnostics`, ten `debug_*` tools —
+  configs, start, breakpoint, continue, step, stack, variables, evaluate,
+  output, stop), plus an internal `review_diff` tool that BE-Code calls itself
+  for in-editor accept/reject of pending writes (hidden from `tools/list`, so
+  the model never sees or calls it). The extension
   is discovered via a lock file it writes to `~/.be-code/ide/<pid>.json`
   (port, auth token, workspace folders), pruned of dead processes on lookup.
 - `build.mk` gained a `vscode` target (`npm install`, `npm test`, `npm run
   package`, output into `dist/`) and `release` now depends on it, so
-  `dist/be-code-1.0.0.vsix` is produced alongside the cross-compiled
-  binaries.
+  `dist/be-code-<version>.vsix` (the extension's own package version) is
+  produced alongside the cross-compiled binaries.
 
 ## v0.4.2 — 2026-09-11 — TUI redesign, deeper compression, web search
 

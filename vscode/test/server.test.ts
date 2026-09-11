@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { createConnection } from "node:net";
 import { BridgeServer } from "../src/server";
 import { ToolRegistry } from "../src/tools/registry";
+import { AcceptAllTracker } from "../src/lib/acceptall";
 
 function rpc(port: number, msgs: object[]): Promise<any[]> {
   return new Promise((resolve, reject) => {
@@ -91,6 +92,54 @@ describe("BridgeServer", () => {
     expect(res[2].id).toBe(3);
     expect(res[1].result.content[0].text).toBe("slow-done");
     expect(res[2].result.content[0].text).toBe("fast-done");
+    await s.close();
+  });
+});
+
+describe("hidden tools", () => {
+  it("omits hidden tools from tools/list but still serves tools/call", async () => {
+    const reg = new ToolRegistry();
+    reg.add({ name: "visible", description: "v", inputSchema: { type: "object" }, handler: async () => "v-ok" });
+    reg.add({ name: "secret", description: "s", inputSchema: { type: "object" }, hidden: true, handler: async () => "s-ok" });
+    const s = new BridgeServer(reg, "tok");
+    const port = await s.listen(0);
+    const res = await rpc(port, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { auth: { token: "tok" } } },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "secret", arguments: {} } },
+    ]);
+    expect(res[1].result.tools.map((t: any) => t.name)).toEqual(["visible"]);
+    expect(res[2].result.content[0].text).toBe("s-ok");
+    expect(res[2].result.isError).toBe(false);
+    await s.close();
+  });
+});
+
+describe("per-connection state", () => {
+  it("keeps one connection's accept-all out of another's", async () => {
+    const reg = new ToolRegistry();
+    const tracker = new AcceptAllTracker();
+    reg.onConnectionClosed((c) => tracker.clear(c));
+    reg.add({
+      name: "review_like", description: "", inputSchema: { type: "object" }, hidden: true,
+      handler: async (_a, conn) => {
+        if (tracker.has(conn)) return "accept (remembered)";
+        tracker.set(conn);
+        return "asked";
+      },
+    });
+    const s = new BridgeServer(reg, "tok");
+    const port = await s.listen(0);
+    const call = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "review_like", arguments: {} } };
+    const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { auth: { token: "tok" } } };
+
+    const first = await rpc(port, [init, call, { ...call, id: 3 }]);
+    expect(first[1].result.content[0].text).toBe("asked");
+    expect(first[2].result.content[0].text).toBe("accept (remembered)");
+
+    // A second, independent connection must start from scratch.
+    const second = await rpc(port, [init, call]);
+    expect(second[1].result.content[0].text).toBe("asked");
     await s.close();
   });
 });

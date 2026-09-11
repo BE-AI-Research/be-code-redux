@@ -23,7 +23,7 @@ export class BridgeServer {
   }
 
   async close(): Promise<void> {
-    for (const s of this.socks) s.destroy();
+    for (const s of this.socks) { this.tools.onConnectionClosed?.(s); s.destroy(); }
     this.socks.clear();
     await new Promise<void>((r) => (this.srv ? this.srv.close(() => r()) : r()));
   }
@@ -34,7 +34,12 @@ export class BridgeServer {
     let queue: Promise<void> = Promise.resolve();
     this.socks.add(sock);
     this.onConnectionChange?.();
-    sock.on("close", () => { this.socks.delete(sock); this.onConnectionChange?.(); });
+    sock.on("close", () => {
+      this.socks.delete(sock);
+      // Let tools drop anything scoped to this connection (accept-all).
+      this.tools.onConnectionClosed?.(sock);
+      this.onConnectionChange?.();
+    });
     sock.on("error", () => {});
     sock.on("data", (chunk) => {
       for (const line of framer.push(chunk)) {
@@ -61,7 +66,7 @@ export class BridgeServer {
         break;
       case "tools/call": {
         if (!state.authed) { fail(-32001, "not authenticated"); break; }
-        const { text, isError } = await this.tools.call(req.params?.name, req.params?.arguments);
+        const { text, isError } = await this.tools.call(req.params?.name, req.params?.arguments, sock);
         reply({ content: [{ type: "text", text }], isError });
         break;
       }

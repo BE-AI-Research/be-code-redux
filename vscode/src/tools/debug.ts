@@ -65,16 +65,28 @@ class DebugManager {
     const started = new Promise<vscode.DebugSession>((resolve, reject) => {
       d = vscode.debug.onDidStartDebugSession((s) => {
         if (s.parentSession !== undefined) return; // wait for the root session; children are picked up separately
+        // Bind the session here, before resolving: owns() needs it to
+        // accept adapter traffic that arrives between the start event and
+        // the await below, which would otherwise be dropped.
+        this.session = s;
         cleanup();
         resolve(s);
       });
       timer = setTimeout(() => { cleanup(); reject(new Error("debug session did not report starting")); }, 15_000);
     });
-    if (!(await vscode.debug.startDebugging(folder, config))) {
-      cleanup();
+    // cleanup() must run if startDebugging rejects as well as when it
+    // returns false, or the listener and the 15s timer leak. It must NOT
+    // run on success: the listener is what resolves `started`.
+    let launched = false;
+    try {
+      launched = await vscode.debug.startDebugging(folder, config);
+    } finally {
+      if (!launched) cleanup();
+    }
+    if (!launched) {
       throw new Error("debug session failed to start (check the launch configuration and that the debugger extension is installed)");
     }
-    this.session = await started;
+    await started;
     return this.describe(await this.waiter.wait(WAIT_MS));
   }
 
@@ -159,9 +171,9 @@ export function registerDebugTools(reg: ToolRegistry, ctx: vscode.ExtensionConte
   reg.add({ name: "debug_step", description: "Step over, into or out, and wait for the stop.", inputSchema: { type: "object", properties: { step: { type: "string", enum: ["over", "into", "out"] } }, required: ["step"] },
     handler: (a) => dm.resume(a.step === "into" ? "stepIn" : a.step === "out" ? "stepOut" : "next") });
   reg.add({ name: "debug_stack", description: "Current call stack.", inputSchema: { type: "object", properties: { depth: { type: "integer" } } }, handler: (a) => dm.stack(a.depth ?? 10) });
-  reg.add({ name: "debug_variables", description: "Variables in a frame (default: top). scope: locals, args or all.", inputSchema: { type: "object", properties: { frame: { type: "integer" }, scope: { type: "string" } } },
+  reg.add({ name: "debug_variables", description: "Variables in a frame. frame: the number shown as [frame N] by debug_stack (default: top frame). scope: locals, args or all.", inputSchema: { type: "object", properties: { frame: { type: "integer" }, scope: { type: "string" } } },
     handler: (a) => dm.variables(a.frame, a.scope ?? "locals") });
-  reg.add({ name: "debug_evaluate", description: "Evaluate an expression in a frame (default: top).", inputSchema: { type: "object", properties: { expression: { type: "string" }, frame: { type: "integer" } }, required: ["expression"] },
+  reg.add({ name: "debug_evaluate", description: "Evaluate an expression in a frame. frame: the number shown as [frame N] by debug_stack (default: top frame).", inputSchema: { type: "object", properties: { expression: { type: "string" }, frame: { type: "integer" } }, required: ["expression"] },
     handler: async (a) => { const r = await dm.need().customRequest("evaluate", { expression: a.expression, frameId: a.frame ?? (await dm.topFrameId()), context: "repl" }); return `${r.result}${r.type ? " (" + r.type + ")" : ""}`; } });
   reg.add({ name: "debug_output", description: "Debug console output since the last read (pass the returned cursor next time).", inputSchema: { type: "object", properties: { since: { type: "integer" } } },
     handler: async (a) => { const r = dm.log.since(a.since ?? 0); return (r.lines.join("\n") || "(no new output)") + `\n[cursor ${r.cursor}]`; } });
