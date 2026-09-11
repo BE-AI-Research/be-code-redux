@@ -1,7 +1,10 @@
+import { StringDecoder } from "node:string_decoder";
+
 export class LineFramer {
   private buf = "";
+  private dec = new StringDecoder("utf8");
   push(chunk: Buffer): string[] {
-    this.buf += chunk.toString("utf8");
+    this.buf += this.dec.write(chunk);
     const lines: string[] = [];
     let i: number;
     while ((i = this.buf.indexOf("\n")) >= 0) {
