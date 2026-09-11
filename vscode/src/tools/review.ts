@@ -3,6 +3,8 @@ import { ToolRegistry } from "./registry";
 
 const SCHEME = "be-code-review";
 
+let reviewSeq = 0;
+
 export function registerReviewTool(reg: ToolRegistry, ctx: vscode.ExtensionContext) {
   const docs = new Map<string, string>();
   ctx.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(SCHEME, {
@@ -20,10 +22,10 @@ export function registerReviewTool(reg: ToolRegistry, ctx: vscode.ExtensionConte
 
       if (acceptAll) return JSON.stringify({ decision: "accept" });
 
-      const id = Date.now().toString(36);
-      const left = vscode.Uri.parse(`${SCHEME}:/${id}/original/${a.path}`);
-      const right = vscode.Uri.parse(`${SCHEME}:/${id}/proposed/${a.path}`);
-      const title = `BE-Code: ${a.path} (proposed change)`;
+      const id = `${reviewSeq++}-${Math.random().toString(36).slice(2, 8)}`;
+      const left = vscode.Uri.from({ scheme: SCHEME, path: `/${id}/original/${a.path}` });
+      const right = vscode.Uri.from({ scheme: SCHEME, path: `/${id}/proposed/${a.path}` });
+      const title = `BE-Code: ${a.path} (proposed change ${id})`;
 
       docs.set(left.toString(), a.original ?? "");
       docs.set(right.toString(), a.proposed ?? "");
