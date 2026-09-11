@@ -16,6 +16,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -34,7 +35,14 @@ var (
 	flagResume      string
 	flagJSON        bool
 	flagBenchModels string
+	flagIDE         bool
+	flagNoIDE       bool
 )
+
+// ideSession is the live editor bridge connection (nil when none), set by
+// attachIDE during buildAgent and closed by the caller (runInteractive or
+// the headless run command) on exit.
+var ideSession *ide.Session
 
 var rootCmd = &cobra.Command{
 	Use:   "be-code",
@@ -57,6 +65,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "auto-approve shell commands and file writes (headless use)")
 	rootCmd.Flags().BoolVar(&flagPlain, "plain", false, "use the inline REPL instead of the full-screen TUI")
 	rootCmd.PersistentFlags().StringVar(&flagResume, "resume", "", "resume a saved session by code, id, or 'last'")
+	rootCmd.PersistentFlags().BoolVar(&flagIDE, "ide", false, "connect to the editor bridge even outside an editor terminal")
+	rootCmd.PersistentFlags().BoolVar(&flagNoIDE, "no-ide", false, "never connect to the editor bridge")
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
@@ -141,6 +151,10 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
+	if sess := attachIDE(cfg, reg, ag); sess != nil {
+		ideSession = sess // package var; closed in runInteractive/run defers
+	}
+
 	// Checkpoints for turn-level undo. Undo is session-scoped, so each
 	// session's snapshot dir is deleted on clean exit; sweepStale catches
 	// leftovers from crashed sessions.
@@ -180,6 +194,49 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 	}
 	applyBackendWindow(cfg, p, ag, model)
 	return p, ag, nil
+}
+
+// attachIDE connects to an editor bridge when one is advertised and wanted,
+// registers its tools as ide_*, and wires context and review. Returns nil
+// (and prints nothing beyond an explicit --ide failure) when there is no
+// bridge to connect to, so ordinary terminal runs stay silent.
+func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent) *ide.Session {
+	if flagNoIDE || !cfg.IDE.Enabled {
+		return nil
+	}
+	if !flagIDE && os.Getenv("TERM_PROGRAM") != "vscode" {
+		return nil
+	}
+	dir, err := ide.LockDir()
+	if err != nil {
+		return nil
+	}
+	lock, err := ide.Discover(dir, reg.Root)
+	if err != nil || lock == nil {
+		if flagIDE {
+			fmt.Fprintln(os.Stderr, "warn: --ide given but no editor bridge is listening (is the BE-Code extension installed and active?)")
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sess, err := ide.Connect(ctx, lock)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: editor bridge at port %d: %v\n", lock.Port, err)
+		return nil
+	}
+	names := reg.AttachMCPPrefixed(sess.Client, "ide_")
+	ag.IDEName = lock.IDEName
+	if ag.IDEName == "" {
+		ag.IDEName = "ide"
+	}
+	if cfg.IDE.AutoContext {
+		ag.ContextProvider = sess.ContextNote
+	}
+	ag.SetGuidance(agent.IDEGuidance)
+	ag.RefreshSystem() // rebuilds the known-tool list (for embedded tool-call parsing) now that ide_* tools are attached, and recomposes the system prompt
+	fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+	return sess
 }
 
 // applyBackendWindow asks an Ollama backend what context window it will
@@ -293,6 +350,10 @@ func runInteractive(ctx context.Context) error {
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()
 	defer finishSession(ag, true, os.Stdout)
+	if ideSession != nil {
+		ag.Tools.ReviewWrite = ideSession.ReviewWrite
+		defer ideSession.Close()
+	}
 	usePlain := flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 	if usePlain {
 		if strings.EqualFold(cfg.Theme, "mono") {

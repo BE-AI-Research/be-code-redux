@@ -1,5 +1,15 @@
 # BE-Code Changelog
 
+## v0.4.3 — 2026-09-11 — VS Code editor bridge
+
+- BE-Code now connects to the companion VS Code extension when launched from
+  its integrated terminal (or with `--ide`): editor tools attach as `ide_*`
+  (diagnostics, symbols, definitions/references/hover, debugger), file writes
+  can be reviewed as a diff in the editor before landing on disk, and a
+  one-line note about the active file/selection is folded into each prompt.
+  Controlled by `ide.enabled` / `ide.auto_context` in config and the
+  `--ide` / `--no-ide` flags; `be-code doctor` reports bridge status.
+
 ## v0.4.2 — 2026-09-11 — TUI redesign, deeper compression, web search
 
 - TUI redesign: branded header (boxed "BE-Code Redux", logo, attribution,

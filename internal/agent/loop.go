@@ -147,6 +147,16 @@ func (a *Agent) SetGuidance(g string) {
 	}
 }
 
+// RefreshSystem recomposes the system prompt after tools or guidance
+// changed (used once at startup when the editor bridge attaches).
+func (a *Agent) RefreshSystem() {
+	a.knownTools = map[string]bool{}
+	for _, n := range a.Tools.Names() {
+		a.knownTools[n] = true
+	}
+	a.History.System.Content = a.composeSystem("")
+}
+
 // composeSystem builds the full system prompt: base + repo map + git state.
 func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride

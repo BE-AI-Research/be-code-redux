@@ -183,6 +183,21 @@ config; its tools appear to the agent as `mcp_<server>_<tool>`:
 "mcp_servers": { "mcpql": { "command": "be-mcpql", "args": ["--serve"] } }
 ```
 
+## VS Code
+
+Install the BE-Code extension from `dist/be-code-1.0.0.vsix` (Extensions view → `...` →
+**Install from VSIX...**), then run `be-code` from the editor's integrated terminal. When
+BE-Code detects it's running inside VS Code (or `--ide` is passed) it connects to the
+extension's editor bridge and gains `ide_*` tools — diagnostics, symbols/definitions/
+references/hover, and the debugger — plus a one-line note about the file and selection
+you're looking at, and in-editor diff review before a write lands on disk. Run
+`BE-Code: Open terminal` from the command palette to get a terminal already wired up.
+Shell command approvals still happen in the terminal, not the editor.
+
+Controlled by `ide.enabled` and `ide.auto_context` in config (both on by default) and the
+flags `--ide` (connect even outside an editor terminal) and `--no-ide` (never connect).
+`be-code doctor` reports whether an editor bridge is listening.
+
 ## Shell safety & background processes
 
 Commands are matched against `shell_deny` (never runs, never prompts) and `shell_allow`
@@ -291,6 +306,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
+- `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
 
 ## Status
 
