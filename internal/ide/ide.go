@@ -62,10 +62,18 @@ func Discover(dir, workspace string) (*Lock, error) {
 			continue
 		}
 		var l Lock
-		if json.Unmarshal(data, &l) != nil || l.Port == 0 {
+		if json.Unmarshal(data, &l) != nil {
+			// Malformed and can never become valid; remove it.
+			_ = os.Remove(p)
 			continue
 		}
-		if !processAlive(l.PID) {
+		if l.Port == 0 {
+			continue
+		}
+		if l.PID <= 0 || !processAlive(l.PID) {
+			// A missing/zero/negative PID is never a live process; treat it
+			// the same as a dead-process lock rather than "alive forever"
+			// (processAlive(0) targets the caller's own process group).
 			_ = os.Remove(p)
 			continue
 		}
