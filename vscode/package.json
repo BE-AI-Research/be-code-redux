@@ -1,0 +1,38 @@
+{
+  "name": "be-code",
+  "displayName": "BE-Code",
+  "description": "Editor bridge for BE-Code: diagnostics, symbols, debugger and diff review for the local coding agent.",
+  "version": "1.0.0",
+  "publisher": "be-ai-research",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "be-code.openTerminal", "title": "BE-Code: Open terminal" },
+      { "command": "be-code.status", "title": "BE-Code: Show connection status" }
+    ],
+    "configuration": {
+      "title": "BE-Code",
+      "properties": {
+        "be-code.port": { "type": "number", "default": 0, "description": "Port for the editor bridge (0 = random)." },
+        "be-code.autoStart": { "type": "boolean", "default": true, "description": "Start the bridge when VS Code starts." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "test": "vitest run",
+    "package": "npm run build && vsce package --no-dependencies -o ../dist/be-code-1.0.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
