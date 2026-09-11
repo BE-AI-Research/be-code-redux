@@ -12,15 +12,21 @@ import (
 type MCPTool struct {
 	Client *mcp.Client
 	Def    mcp.ToolDef
+	prefix string // "" → mcp_<server>_<tool>; "ide_" → ide_<tool>
 	r      *Registry
 }
 
 // AttachMCP registers all of a server's tools under mcp_<server>_<tool>.
-func (r *Registry) AttachMCP(client *mcp.Client) []string {
+func (r *Registry) AttachMCP(client *mcp.Client) []string { return r.AttachMCPPrefixed(client, "") }
+
+// AttachMCPPrefixed registers a server's tools under prefix+<tool>, for
+// servers whose tool names should be stable regardless of server name
+// (the editor bridge uses "ide_").
+func (r *Registry) AttachMCPPrefixed(client *mcp.Client, prefix string) []string {
 	r.mcpClients = append(r.mcpClients, client)
 	var names []string
 	for _, def := range client.Tools() {
-		t := &MCPTool{Client: client, Def: def, r: r}
+		t := &MCPTool{Client: client, Def: def, prefix: prefix, r: r}
 		r.AddTool(t)
 		names = append(names, t.Name())
 	}
@@ -28,6 +34,9 @@ func (r *Registry) AttachMCP(client *mcp.Client) []string {
 }
 
 func (t *MCPTool) Name() string {
+	if t.prefix != "" {
+		return t.prefix + t.Def.Name
+	}
 	return fmt.Sprintf("mcp_%s_%s", t.Client.ServerName, t.Def.Name)
 }
 

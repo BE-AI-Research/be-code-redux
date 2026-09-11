@@ -16,6 +16,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -34,7 +35,14 @@ var (
 	flagResume      string
 	flagJSON        bool
 	flagBenchModels string
+	flagIDE         bool
+	flagNoIDE       bool
 )
+
+// ideSession is the live editor bridge connection (nil when none), set by
+// attachIDE during buildAgent and closed by the caller (runInteractive or
+// the headless run command) on exit.
+var ideSession *ide.Session
 
 var rootCmd = &cobra.Command{
 	Use:   "be-code",
@@ -57,6 +65,8 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&flagYes, "yes", "y", false, "auto-approve shell commands and file writes (headless use)")
 	rootCmd.Flags().BoolVar(&flagPlain, "plain", false, "use the inline REPL instead of the full-screen TUI")
 	rootCmd.PersistentFlags().StringVar(&flagResume, "resume", "", "resume a saved session by code, id, or 'last'")
+	rootCmd.PersistentFlags().BoolVar(&flagIDE, "ide", false, "connect to the editor bridge even outside an editor terminal")
+	rootCmd.PersistentFlags().BoolVar(&flagNoIDE, "no-ide", false, "never connect to the editor bridge")
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
@@ -93,8 +103,10 @@ func loadOrWizard(ctx context.Context) (*config.Config, error) {
 }
 
 // buildAgent assembles registry + agent from config and flags. The caller
-// wires the approval func and events (UI-specific).
-func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
+// wires the approval func and events (UI-specific). headless is true for
+// scripted runs (`be-code run`), which stay off the editor bridge unless
+// --ide asks for it explicitly.
+func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Agent, error) {
 	if flagYes {
 		cfg.AutoApproveShell = true
 		cfg.ApproveFileWrites = false
@@ -141,6 +153,10 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
+	if sess := attachIDE(cfg, reg, ag, headless); sess != nil {
+		ideSession = sess // package var; closed in runInteractive/run defers
+	}
+
 	// Checkpoints for turn-level undo. Undo is session-scoped, so each
 	// session's snapshot dir is deleted on clean exit; sweepStale catches
 	// leftovers from crashed sessions.
@@ -180,6 +196,80 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 	}
 	applyBackendWindow(cfg, p, ag, model)
 	return p, ag, nil
+}
+
+// attachIDE connects to an editor bridge when one is advertised and wanted,
+// registers its tools as ide_*, and wires context and review. Returns nil
+// (and prints nothing beyond an explicit --ide failure) when there is no
+// bridge to connect to, so ordinary terminal runs stay silent.
+//
+// Wanting an editor is decided in this order: --no-ide always wins; --ide
+// then forces a connection attempt even when ide.enabled is false or the
+// run is headless; otherwise config must allow it, the run must be
+// interactive, and the terminal must be VS Code's own.
+func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+	if flagNoIDE {
+		return nil
+	}
+	if !flagIDE {
+		if !cfg.IDE.Enabled {
+			return nil
+		}
+		// Scripted runs must be reproducible and never block on an editor:
+		// no discovery unless --ide was passed on purpose.
+		if headless {
+			return nil
+		}
+		if os.Getenv("TERM_PROGRAM") != "vscode" {
+			return nil
+		}
+	}
+	dir, err := ide.LockDir()
+	if err != nil {
+		return nil
+	}
+	lock, err := ide.Discover(dir, reg.Root)
+	if err != nil || lock == nil {
+		if flagIDE {
+			fmt.Fprintln(os.Stderr, "warn: --ide given but no editor bridge is listening (is the BE-Code extension installed and active?)")
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sess, err := ide.Connect(ctx, lock)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: editor bridge at port %d: %v\n", lock.Port, err)
+		return nil
+	}
+	names := reg.AttachMCPPrefixed(sess.Client, "ide_")
+	ag.IDEName = lock.IDEName
+	if ag.IDEName == "" {
+		ag.IDEName = "ide"
+	}
+	ag.IDETools = len(names)
+	// A scripted run takes no interactive detours: no per-turn context
+	// note (it would make the same prompt behave differently depending on
+	// what happens to be open in the editor) and no ReviewWrite — the
+	// caller wires that only for interactive sessions.
+	if cfg.IDE.AutoContext && !headless {
+		ag.ContextProvider = sess.ContextNote
+	}
+	ag.SetGuidance(agent.IDEGuidance)
+	ag.RefreshSystem() // rebuilds the known-tool list (for embedded tool-call parsing) now that ide_* tools are attached, and recomposes the system prompt
+	// The TUI prints this itself (a dimmed transcript line) because stderr
+	// written before the alt screen opens is wiped; plain and headless
+	// runs have no alt screen, so stderr is the right place there.
+	if headless || usePlainUI(cfg) {
+		fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+	}
+	return sess
+}
+
+// usePlainUI reports whether the plain REPL (not the Bubble Tea TUI) will
+// drive this session.
+func usePlainUI(cfg *config.Config) bool {
+	return flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 }
 
 // applyBackendWindow asks an Ollama backend what context window it will
@@ -285,7 +375,7 @@ func runInteractive(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p, ag, err := buildAgent(cfg)
+	p, ag, err := buildAgent(cfg, false)
 	if err != nil {
 		return err
 	}
@@ -293,7 +383,11 @@ func runInteractive(ctx context.Context) error {
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()
 	defer finishSession(ag, true, os.Stdout)
-	usePlain := flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
+	if ideSession != nil {
+		ag.Tools.ReviewWrite = ideSession.ReviewWrite
+		defer ideSession.Close()
+	}
+	usePlain := usePlainUI(cfg)
 	if usePlain {
 		if strings.EqualFold(cfg.Theme, "mono") {
 			ui.SetMono()

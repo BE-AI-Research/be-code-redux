@@ -54,6 +54,19 @@ type Agent struct {
 	Profile profiles.Profile
 	// Stats is cumulative session usage.
 	Stats Stats
+	// ContextProvider, when set, returns a short note about what the user
+	// is looking at in their editor; it is prepended to each new request.
+	ContextProvider func(ctx context.Context) string
+	// Guidance is extra system-prompt text (editor tools, etc.). Exported
+	// so later wiring can read it, but set it via SetGuidance so the
+	// composed system prompt is refreshed immediately.
+	Guidance string
+	// IDEName is the connected editor's name (e.g. "vscode"), or "" when
+	// no editor is connected.
+	IDEName string
+	// IDETools is how many editor tools were attached (0 when none), so a
+	// UI can report the connection once it owns the screen.
+	IDETools int
 
 	projectNotes   string
 	handoff        string // briefing from the resumed session, kept in the system prompt
@@ -128,6 +141,25 @@ func (a *Agent) SetModel(model string) {
 	}
 }
 
+// SetGuidance sets extra system-prompt text and recomposes the prompt so it
+// takes effect on the next call even when nothing else triggers a refresh.
+func (a *Agent) SetGuidance(g string) {
+	a.Guidance = g
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem("")
+	}
+}
+
+// RefreshSystem recomposes the system prompt after tools or guidance
+// changed (used once at startup when the editor bridge attaches).
+func (a *Agent) RefreshSystem() {
+	a.knownTools = map[string]bool{}
+	for _, n := range a.Tools.Names() {
+		a.knownTools[n] = true
+	}
+	a.History.System.Content = a.composeSystem("")
+}
+
 // composeSystem builds the full system prompt: base + repo map + git state.
 func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride
@@ -139,6 +171,9 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	}
 	if a.handoff != "" {
 		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
+	}
+	if a.Guidance != "" {
+		sys += "\n\n" + a.Guidance
 	}
 	if gitInfo != "" {
 		sys += "\n\n" + gitInfo
@@ -190,6 +225,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.History.System.Content = a.composeSystem(gi)
 	}
 	expanded := ExpandMentions(a.Tools.Root, userInput)
+	if newTurn && a.ContextProvider != nil {
+		if note := a.ContextProvider(ctx); note != "" {
+			a.notice("%s", strings.SplitN(note, "\n", 2)[0])
+			expanded = note + "\n\n" + expanded
+		}
+	}
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
 
 	emptyRetries, lengthRetries := 0, 0

@@ -35,6 +35,16 @@ type Tool interface {
 // ApproveFunc asks the user to approve a dangerous action; returns false to deny.
 type ApproveFunc func(action, detail string) bool
 
+// ReviewDecision is the outcome of an editor-side review of a file change.
+type ReviewDecision int
+
+const (
+	ReviewUnavailable ReviewDecision = iota // editor could not review: fall back to Approve
+	ReviewAccept
+	ReviewReject
+	ReviewAcceptAll // accept and stop asking for the rest of the session
+)
+
 // Registry holds the active tool set, rooted at a workspace directory.
 type Registry struct {
 	Root string // absolute workspace root; all paths confined here
@@ -43,13 +53,25 @@ type Registry struct {
 	MaxOutput  int
 	mcpClients []*mcp.Client
 	Approve    ApproveFunc
-	// ApproveWrites gates write_file/edit_file behind a diff-preview
-	// approval (action "file_write"). Shell approval is always on unless
-	// the approver auto-approves.
+	// ApproveWrites gates write_file/edit_file behind a review of the
+	// change before it lands. It is the single switch for BOTH review
+	// paths: when set, the editor is asked first if ReviewWrite is wired
+	// (an in-editor diff), otherwise — or when the editor cannot answer —
+	// the terminal approval prompt (action "file_write") runs. Clearing
+	// it therefore stops editor diffs as well as terminal prompts, which
+	// is what "accept all / don't ask again" must do. Shell approval is
+	// separate and always on unless the approver auto-approves.
 	ApproveWrites bool
 	// OnBeforeWrite runs after approval, before a file is modified —
 	// the checkpoint hook. A returned error aborts the write.
 	OnBeforeWrite func(absPath string) error
+	// ReviewWrite, when set, is asked first for file changes (an editor
+	// diff review). ReviewUnavailable falls back to Approve. ctx is the
+	// tool call's context, so cancelling the run (Esc) also abandons a
+	// review the user has left sitting in the editor.
+	ReviewWrite func(ctx context.Context, rel, oldContent, newContent string) ReviewDecision
+	// OnStatus receives short progress notes for the UI's status line.
+	OnStatus func(msg string)
 	// ShellAllow / ShellDeny are glob patterns matched against shell
 	// commands. Deny wins; an allow match skips the approval prompt.
 	ShellAllow []string

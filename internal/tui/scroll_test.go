@@ -22,7 +22,10 @@ func (nullProvider) Chat(context.Context, provider.ChatRequest, provider.StreamF
 func (nullProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (nullProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
 
-func newTestModel(t *testing.T) *Model {
+// newTestModel builds a model and gives it its first WindowSizeMsg. Each
+// prep func runs on the agent before the model is created, for state the
+// UI reads at startup (e.g. an attached editor).
+func newTestModel(t *testing.T, prep ...func(*agent.Agent)) *Model {
 	t.Helper()
 	cfg := config.Default()
 	cfg.RepoMap = false
@@ -31,6 +34,9 @@ func newTestModel(t *testing.T) *Model {
 		t.Fatal(err)
 	}
 	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
+	for _, f := range prep {
+		f(ag)
+	}
 	m := New(cfg, ag, nullProvider{})
 	m.rootCtx = context.Background()
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

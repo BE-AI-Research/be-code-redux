@@ -183,6 +183,34 @@ config; its tools appear to the agent as `mcp_<server>_<tool>`:
 "mcp_servers": { "mcpql": { "command": "be-mcpql", "args": ["--serve"] } }
 ```
 
+## VS Code
+
+Build the extension with `make -f build.mk vscode` (or as part of `make -f build.mk
+release`), which type-checks, runs its tests and packages
+`dist/be-code-<version>.vsix`. Install it from
+the Extensions view → `...` → **Install from VSIX...**. To run it from source instead —
+for development, or to try changes before packaging — `cd vscode && npm install && npm
+run build`, then use VS Code's "Run Extension" launch configuration to open an Extension
+Development Host with it loaded.
+
+Either way, run `be-code` from the editor's integrated terminal. When BE-Code detects
+it's running inside VS Code (or `--ide` is passed) it connects to the extension's editor
+bridge and gains `ide_*` tools — diagnostics, symbols/definitions/references/hover, and
+the debugger — plus a one-line note about the file and selection you're looking at, and
+in-editor diff review before a write lands on disk. Run `BE-Code: Open terminal` from the
+command palette to get a terminal already wired up. Shell command approvals still happen
+in the terminal, not the editor.
+
+Controlled by `ide.enabled` and `ide.auto_context` in config (both on by default) and the
+flags `--ide` (connect even outside an editor terminal, and even when `ide.enabled` is
+false) and `--no-ide` (never connect, which wins over everything else). Headless `be-code
+run` never touches the editor unless `--ide` is passed explicitly, so scripted runs stay
+reproducible; even then it only attaches the `ide_*` tools — no editor diff review and no
+per-turn `[editor: …]` context note.
+`be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for
+the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
+end-to-end checklist.
+
 ## Shell safety & background processes
 
 Commands are matched against `shell_deny` (never runs, never prompts) and `shell_allow`
@@ -291,6 +319,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
+- `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
 
 ## Status
 

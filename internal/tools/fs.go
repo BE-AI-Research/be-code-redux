@@ -24,7 +24,9 @@ func (r *Registry) beforeWrite(absPath string) error {
 
 // approveWrite shows a diff preview through the approval hook when write
 // approvals are enabled. Returns (denialResult, false) when the user says no.
-func (r *Registry) approveWrite(absPath, newContent string) (Result, bool) {
+// ctx is the tool call's context: it bounds an editor-side review, so a
+// cancelled run does not stay blocked on a diff nobody answers.
+func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string) (Result, bool) {
 	if !r.ApproveWrites || r.Approve == nil {
 		return Result{}, true
 	}
@@ -33,12 +35,37 @@ func (r *Registry) approveWrite(absPath, newContent string) (Result, bool) {
 		oldContent = string(data)
 	}
 	rel, _ := filepath.Rel(r.Root, absPath)
+	rejected := Result{IsError: true,
+		Content: "user rejected this file change; ask what they want instead or take a different approach"}
+	if r.ReviewWrite != nil {
+		if r.OnStatus != nil {
+			r.OnStatus("reviewing change in VS Code…")
+		}
+		d := r.ReviewWrite(ctx, rel, oldContent, newContent)
+		if r.OnStatus != nil {
+			r.OnStatus("")
+		}
+		switch d {
+		case ReviewAccept:
+			return Result{}, true
+		case ReviewAcceptAll:
+			r.ApproveWrites = false
+			return Result{}, true
+		case ReviewReject:
+			return rejected, false
+		}
+		// A cancelled run (Esc during the editor diff) is a rejection, not a
+		// broken bridge: never re-ask in the terminal for a write nobody wants.
+		if ctx.Err() != nil {
+			return rejected, false
+		}
+		// ReviewUnavailable: fall through to the terminal prompt.
+	}
 	preview := diff.Preview(rel, oldContent, newContent, false)
 	if r.Approve("file_write", preview) {
 		return Result{}, true
 	}
-	return Result{IsError: true,
-		Content: "user rejected this file change; ask what they want instead or take a different approach"}, false
+	return rejected, false
 }
 
 // ---- read_file -------------------------------------------------------------
@@ -111,7 +138,7 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if !has {
 		return Result{IsError: true, Content: "write_file requires a 'content' argument (missing key would have written an empty file); pass the full file content"}
 	}
-	if res, ok := t.r.approveWrite(p, content); !ok {
+	if res, ok := t.r.approveWrite(ctx, p, content); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {
@@ -169,7 +196,7 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 		return Result{IsError: true, Content: fmt.Sprintf("old_text matches %d locations; include more surrounding lines so it matches exactly once", n)}
 	}
 	updated := strings.Replace(s, oldText, newText, 1)
-	if res, ok := t.r.approveWrite(p, updated); !ok {
+	if res, ok := t.r.approveWrite(ctx, p, updated); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {

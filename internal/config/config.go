@@ -109,6 +109,17 @@ type Config struct {
 	// VerifyOnDone runs the verification pipeline automatically when the
 	// agent believes it has finished a coding task.
 	VerifyOnDone bool `json:"verify_on_done"`
+
+	// IDE controls the editor bridge (VS Code extension): discovery of the
+	// lock file when running inside the editor's terminal, and whether a
+	// note about the active file/selection is added to each prompt.
+	IDE IDEConfig `json:"ide"`
+}
+
+// IDEConfig controls the editor bridge (see internal/ide).
+type IDEConfig struct {
+	Enabled     bool `json:"enabled"`
+	AutoContext bool `json:"auto_context"`
 }
 
 // Default returns the out-of-the-box configuration: Ollama on localhost,
@@ -167,6 +178,7 @@ func Default() *Config {
 		CompactWithModel: true,
 		RepoMap:          true,
 		RepoMapBudget:    6144,
+		IDE:              IDEConfig{Enabled: true, AutoContext: true},
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/bench"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -45,7 +46,7 @@ var runCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		_, ag, err := buildAgent(cfg)
+		_, ag, err := buildAgent(cfg, true)
 		if err != nil {
 			return err
 		}
@@ -58,6 +59,9 @@ var runCmd = &cobra.Command{
 		defer ag.Tools.Close()
 		defer ag.Checkpoints.Cleanup()
 		defer finishSession(ag, false, os.Stderr)
+		if ideSession != nil {
+			defer ideSession.Close()
+		}
 		answer, rep, err := ag.RunFull(cmd.Context(), prompt)
 		if err != nil {
 			return err
@@ -344,6 +348,13 @@ var doctorCmd = &cobra.Command{
 			fmt.Printf("web search: google pse cx=%s (%s)\n", cfg.WebSearch.CX, keyState)
 		} else {
 			fmt.Println("web search: off (set web_search.cx in config to enable)")
+		}
+		if dir, err := ide.LockDir(); err == nil {
+			if lock, _ := ide.Discover(dir, mustAbs(flagDir)); lock != nil {
+				fmt.Printf("editor bridge: %s v%s on port %d (workspace %s)\n", lock.IDEName, lock.Version, lock.Port, strings.Join(lock.WorkspaceFolders, ", "))
+			} else {
+				fmt.Println("editor bridge: none listening (install the BE-Code VS Code extension)")
+			}
 		}
 		proj := verify.Detect(mustAbs(flagDir))
 		fmt.Printf("workspace: %s project detected", proj.Kind)
