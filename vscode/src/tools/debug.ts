@@ -22,7 +22,7 @@ class DebugManager {
       vscode.debug.registerDebugAdapterTrackerFactory("*", {
         createDebugAdapterTracker: (session) => ({
           onDidSendMessage: (m: any) => {
-            if (!(session === this.session || session.parentSession === this.session) || m.type !== "event") return;
+            if (!this.owns(session) || m.type !== "event") return;
             if (m.event === "output" && m.body?.output) for (const l of String(m.body.output).split("\n")) if (l) this.log.push(l);
             if (m.event === "stopped") {
               this.active = session;
@@ -32,13 +32,20 @@ class DebugManager {
           },
         }),
       }),
-      vscode.debug.onDidStartDebugSession((s) => { if (s.parentSession === this.session) this.active = s; }),
+      vscode.debug.onDidStartDebugSession((s) => { if (this.owns(s)) this.active = s; }),
       vscode.debug.onDidTerminateDebugSession((s) => {
         if (s === this.session) this.session = undefined;
         if (s === this.active) this.active = undefined;
       }),
     );
   }
+
+  // A session belongs to the current debug run only if we already have a root
+  // session bound: without this guard, `undefined === undefined` would match
+  // any unrelated session before the first debug_start, after debug_stop, or
+  // after the root has terminated, polluting the ring log, `active` and
+  // `threadId` with a foreign session's traffic.
+  owns(s: vscode.DebugSession): boolean { return !!this.session && (s === this.session || s.parentSession === this.session); }
 
   async start(args: any): Promise<string> {
     if (this.session) await vscode.debug.stopDebugging(this.session);
@@ -159,5 +166,5 @@ export function registerDebugTools(reg: ToolRegistry, ctx: vscode.ExtensionConte
   reg.add({ name: "debug_output", description: "Debug console output since the last read (pass the returned cursor next time).", inputSchema: { type: "object", properties: { since: { type: "integer" } } },
     handler: async (a) => { const r = dm.log.since(a.since ?? 0); return (r.lines.join("\n") || "(no new output)") + `\n[cursor ${r.cursor}]`; } });
   reg.add({ name: "debug_stop", description: "Stop the debug session.", inputSchema: { type: "object", properties: {} },
-    handler: async () => { if (dm.session) await vscode.debug.stopDebugging(dm.session); dm.session = undefined; dm.active = undefined; return "stopped"; } });
+    handler: async () => { if (dm.session) await vscode.debug.stopDebugging(dm.session); dm.session = undefined; dm.active = undefined; dm.threadId = undefined; return "stopped"; } });
 }
