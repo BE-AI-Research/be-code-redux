@@ -8,6 +8,11 @@ const folders = () => (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri
 
 class DebugManager {
   session?: vscode.DebugSession;
+  // The session actually carrying DAP traffic right now: usually the root
+  // session, but some debuggers (e.g. debugpy) launch a parent session plus a
+  // child session that does the real work, so `active` tracks whichever of
+  // the two (root or child) most recently reported a stop.
+  active?: vscode.DebugSession;
   waiter = new StopWaiter();
   log = new RingLog(2000);
   threadId?: number;
@@ -17,20 +22,27 @@ class DebugManager {
       vscode.debug.registerDebugAdapterTrackerFactory("*", {
         createDebugAdapterTracker: (session) => ({
           onDidSendMessage: (m: any) => {
-            if (session !== this.session || m.type !== "event") return;
+            if (!(session === this.session || session.parentSession === this.session) || m.type !== "event") return;
             if (m.event === "output" && m.body?.output) for (const l of String(m.body.output).split("\n")) if (l) this.log.push(l);
-            if (m.event === "stopped" && m.body?.threadId) this.threadId = m.body.threadId;
+            if (m.event === "stopped") {
+              this.active = session;
+              if (m.body?.threadId) this.threadId = m.body.threadId;
+            }
             this.waiter.onEvent(m);
           },
         }),
       }),
-      vscode.debug.onDidTerminateDebugSession((s) => { if (s === this.session) this.session = undefined; }),
+      vscode.debug.onDidStartDebugSession((s) => { if (s.parentSession === this.session) this.active = s; }),
+      vscode.debug.onDidTerminateDebugSession((s) => {
+        if (s === this.session) this.session = undefined;
+        if (s === this.active) this.active = undefined;
+      }),
     );
   }
 
   async start(args: any): Promise<string> {
     if (this.session) await vscode.debug.stopDebugging(this.session);
-    this.waiter = new StopWaiter(); this.log = new RingLog(2000); this.threadId = undefined;
+    this.waiter = new StopWaiter(); this.log = new RingLog(2000); this.threadId = undefined; this.active = undefined;
     const folder = vscode.workspace.workspaceFolders?.[0];
     let config: string | vscode.DebugConfiguration;
     if (args.config) config = args.config;
@@ -40,20 +52,35 @@ class DebugManager {
         ? { type: "python", request: "launch", name: "be-code", program: absPath(folders(), args.program), args: args.args ?? [], console: "internalConsole", justMyCode: false }
         : { type: "go", request: "launch", name: "be-code", mode: "debug", program: absPath(folders(), args.program), args: args.args ?? [] };
     } else throw new Error("give config (a launch.json name) or program (+ type go|python)");
-    const started = new Promise<vscode.DebugSession>((resolve) => {
-      const d = vscode.debug.onDidStartDebugSession((s) => { d.dispose(); resolve(s); });
+    let d: vscode.Disposable | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => { d?.dispose(); if (timer) clearTimeout(timer); };
+    const started = new Promise<vscode.DebugSession>((resolve, reject) => {
+      d = vscode.debug.onDidStartDebugSession((s) => {
+        if (s.parentSession !== undefined) return; // wait for the root session; children are picked up separately
+        cleanup();
+        resolve(s);
+      });
+      timer = setTimeout(() => { cleanup(); reject(new Error("debug session did not report starting")); }, 15_000);
     });
-    if (!(await vscode.debug.startDebugging(folder, config))) throw new Error("debug session failed to start (check the launch configuration and that the debugger extension is installed)");
+    if (!(await vscode.debug.startDebugging(folder, config))) {
+      cleanup();
+      throw new Error("debug session failed to start (check the launch configuration and that the debugger extension is installed)");
+    }
     this.session = await started;
     return this.describe(await this.waiter.wait(WAIT_MS));
   }
 
-  need(): vscode.DebugSession { if (!this.session) throw new Error("no debug session; use debug_start first"); return this.session; }
+  need(): vscode.DebugSession { if (!this.session) throw new Error("no debug session; use debug_start first"); return this.active ?? this.session; }
 
   async describe(r: StopResult): Promise<string> {
     if (r.kind === "stopped") {
-      const top = await this.stack(3);
-      return `stopped (${r.reason ?? "unknown"})\n${top}`;
+      try {
+        const top = await this.stack(3);
+        return `stopped (${r.reason ?? "unknown"})\n${top}`;
+      } catch {
+        return `stopped (${r.reason ?? "unknown"})\n(session ended before the stack could be read)`;
+      }
     }
     if (r.kind === "timeout") return `still running after ${WAIT_MS / 1000}s (no breakpoint hit); use debug_output or debug_stop`;
     return r.kind === "exited" ? `program exited with code ${r.exitCode ?? "?"}` : "debug session terminated";
@@ -132,5 +159,5 @@ export function registerDebugTools(reg: ToolRegistry, ctx: vscode.ExtensionConte
   reg.add({ name: "debug_output", description: "Debug console output since the last read (pass the returned cursor next time).", inputSchema: { type: "object", properties: { since: { type: "integer" } } },
     handler: async (a) => { const r = dm.log.since(a.since ?? 0); return (r.lines.join("\n") || "(no new output)") + `\n[cursor ${r.cursor}]`; } });
   reg.add({ name: "debug_stop", description: "Stop the debug session.", inputSchema: { type: "object", properties: {} },
-    handler: async () => { if (dm.session) await vscode.debug.stopDebugging(dm.session); dm.session = undefined; return "stopped"; } });
+    handler: async () => { if (dm.session) await vscode.debug.stopDebugging(dm.session); dm.session = undefined; dm.active = undefined; return "stopped"; } });
 }
