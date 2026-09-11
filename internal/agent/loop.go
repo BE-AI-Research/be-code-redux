@@ -61,6 +61,9 @@ type Agent struct {
 	// so later wiring can read it, but set it via SetGuidance so the
 	// composed system prompt is refreshed immediately.
 	Guidance string
+	// IDEName is the connected editor's name (e.g. "vscode"), or "" when
+	// no editor is connected.
+	IDEName string
 
 	projectNotes   string
 	handoff        string // briefing from the resumed session, kept in the system prompt

@@ -17,6 +17,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/mcp"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // contextNoteTimeout bounds how long a per-turn editor context lookup may
@@ -174,4 +175,33 @@ func (s *Session) ContextNote(ctx context.Context) string {
 		return ""
 	}
 	return ContextNote(c)
+}
+
+// ReviewWrite shows the change in the editor and returns the decision;
+// any transport or protocol problem yields ReviewUnavailable so the TUI
+// prompt takes over.
+func (s *Session) ReviewWrite(rel, oldContent, newContent string) tools.ReviewDecision {
+	args, _ := json.Marshal(map[string]string{"path": rel, "original": oldContent, "proposed": newContent,
+		"summary": fmt.Sprintf("BE-Code wants to change %s", rel)})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	out, isErr, err := s.Client.CallTool(ctx, "review_diff", args)
+	if err != nil || isErr {
+		return tools.ReviewUnavailable
+	}
+	var r struct {
+		Decision string `json:"decision"`
+	}
+	if json.Unmarshal([]byte(out), &r) != nil {
+		return tools.ReviewUnavailable
+	}
+	switch r.Decision {
+	case "accept":
+		return tools.ReviewAccept
+	case "accept_all":
+		return tools.ReviewAcceptAll
+	case "reject":
+		return tools.ReviewReject
+	}
+	return tools.ReviewUnavailable
 }

@@ -51,6 +51,9 @@ type toolEndMsg struct {
 }
 type noticeMsg string
 type thinkingMsg int // cumulative hidden-reasoning characters this turn
+// statusMsg sets the bottom-line status note directly, without adding a
+// transcript line (used for editor-side review progress).
+type statusMsg string
 type turnDoneMsg struct {
 	rep *agent.ReviewedReport
 	err error
@@ -186,6 +189,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 			}
 		}(),
 	}
+	ag.Tools.OnStatus = func(s string) { m.send(statusMsg(s)) }
 	m.usage = m.usageSnapshot() // pre-run, single-threaded: safe
 	return m
 }
@@ -296,6 +300,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case noticeMsg:
 		m.flushStreaming()
 		m.appendLine(stWarn.Render("note ") + string(msg))
+	case statusMsg:
+		m.statusNote = string(msg)
+		if m.statusNote == "" && m.running {
+			m.statusNote = "thinking"
+		}
 	case approvalMsg:
 		msgCopy := msg
 		m.approval = &msgCopy
@@ -740,6 +749,9 @@ func (m *Model) bottomLine() string {
 	}
 	line := " " + stAccent.Render("/menu") + " " + stAccent.Render("/help") +
 		stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
+	if m.ag.IDEName != "" {
+		line += stAccent.Render(" ⌘ ide")
+	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
 	}

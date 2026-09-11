@@ -187,6 +187,9 @@ func (m *Model) menuStatus() string {
 		{"context", fmt.Sprintf("%d of %d tokens (%d%%)", m.usage.ctxTokens, m.usage.budget, m.ctxPercent())},
 		{"session total", fmt.Sprintf("%dk tokens", m.usage.total/1000)},
 	}
+	if m.ag.IDEName != "" {
+		rows = append(rows, [2]string{"editor", m.ag.IDEName})
+	}
 	var b strings.Builder
 	for _, r := range rows {
 		fmt.Fprintf(&b, "%s %s\n", stDim.Render(fmt.Sprintf("%-14s", r[0])), r[1])

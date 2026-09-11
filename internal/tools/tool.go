@@ -35,6 +35,16 @@ type Tool interface {
 // ApproveFunc asks the user to approve a dangerous action; returns false to deny.
 type ApproveFunc func(action, detail string) bool
 
+// ReviewDecision is the outcome of an editor-side review of a file change.
+type ReviewDecision int
+
+const (
+	ReviewUnavailable ReviewDecision = iota // editor could not review: fall back to Approve
+	ReviewAccept
+	ReviewReject
+	ReviewAcceptAll // accept and stop asking for the rest of the session
+)
+
 // Registry holds the active tool set, rooted at a workspace directory.
 type Registry struct {
 	Root string // absolute workspace root; all paths confined here
@@ -50,6 +60,11 @@ type Registry struct {
 	// OnBeforeWrite runs after approval, before a file is modified —
 	// the checkpoint hook. A returned error aborts the write.
 	OnBeforeWrite func(absPath string) error
+	// ReviewWrite, when set, is asked first for file changes (an editor
+	// diff review). ReviewUnavailable falls back to Approve.
+	ReviewWrite func(rel, oldContent, newContent string) ReviewDecision
+	// OnStatus receives short progress notes for the UI's status line.
+	OnStatus func(msg string)
 	// ShellAllow / ShellDeny are glob patterns matched against shell
 	// commands. Deny wins; an allow match skips the approval prompt.
 	ShellAllow []string

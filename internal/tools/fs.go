@@ -33,12 +33,32 @@ func (r *Registry) approveWrite(absPath, newContent string) (Result, bool) {
 		oldContent = string(data)
 	}
 	rel, _ := filepath.Rel(r.Root, absPath)
+	rejected := Result{IsError: true,
+		Content: "user rejected this file change; ask what they want instead or take a different approach"}
+	if r.ReviewWrite != nil {
+		if r.OnStatus != nil {
+			r.OnStatus("reviewing change in VS Code…")
+		}
+		d := r.ReviewWrite(rel, oldContent, newContent)
+		if r.OnStatus != nil {
+			r.OnStatus("")
+		}
+		switch d {
+		case ReviewAccept:
+			return Result{}, true
+		case ReviewAcceptAll:
+			r.ApproveWrites = false
+			return Result{}, true
+		case ReviewReject:
+			return rejected, false
+		}
+		// ReviewUnavailable: fall through to the terminal prompt.
+	}
 	preview := diff.Preview(rel, oldContent, newContent, false)
 	if r.Approve("file_write", preview) {
 		return Result{}, true
 	}
-	return Result{IsError: true,
-		Content: "user rejected this file change; ask what they want instead or take a different approach"}, false
+	return rejected, false
 }
 
 // ---- read_file -------------------------------------------------------------
