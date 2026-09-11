@@ -13,10 +13,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 )
+
+// contextNoteTimeout bounds how long a per-turn editor context lookup may
+// block a new request, independent of the MCP client's own call timeout.
+const contextNoteTimeout = 3 * time.Second
 
 type Lock struct {
 	PID              int      `json:"pid"`
@@ -155,6 +160,11 @@ func ContextNote(c Context) string {
 
 // ContextNote asks the editor for the current focus; any failure yields "".
 func (s *Session) ContextNote(ctx context.Context) string {
+	if s == nil || s.Client == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, contextNoteTimeout)
+	defer cancel()
 	out, isErr, err := s.Client.CallTool(ctx, "context", json.RawMessage(`{}`))
 	if err != nil || isErr {
 		return ""

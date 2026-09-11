@@ -1,6 +1,7 @@
 package ide
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -22,5 +23,16 @@ func TestContextNoteFormats(t *testing.T) {
 	long := strings.Repeat("x", 3000)
 	if n := ContextNote(Context{File: "a.go", Line: 1, SelStart: 1, SelEnd: 9, Selection: long}); strings.Contains(n, long) {
 		t.Fatal("selection over 2KB must be omitted from the note")
+	}
+}
+
+func TestSessionContextNoteNilSafe(t *testing.T) {
+	var s *Session
+	if s.ContextNote(context.Background()) != "" {
+		t.Fatal("nil session must yield empty note")
+	}
+	s = &Session{}
+	if s.ContextNote(context.Background()) != "" {
+		t.Fatal("session with nil client must yield empty note")
 	}
 }

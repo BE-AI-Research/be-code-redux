@@ -33,9 +33,14 @@ func TestContextProviderPrependsNoteOnNewTurnsOnly(t *testing.T) {
 }
 
 func TestGuidanceAppendedToSystemPrompt(t *testing.T) {
-	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
-	ag.Guidance = IDEGuidance
-	if !strings.Contains(ag.composeSystem(""), "ide_diagnostics") {
-		t.Fatal("guidance missing from system prompt")
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	ag.SetGuidance(IDEGuidance)
+	ag.Run(context.Background(), "hi")
+	sys := p.reqs[0].Messages[0].Content
+	if !strings.Contains(sys, "ide_diagnostics") {
+		t.Fatalf("guidance missing from system prompt actually sent: %q", sys)
 	}
 }

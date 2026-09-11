@@ -57,7 +57,9 @@ type Agent struct {
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
-	// Guidance is extra system-prompt text (editor tools, etc.).
+	// Guidance is extra system-prompt text (editor tools, etc.). Exported
+	// so later wiring can read it, but set it via SetGuidance so the
+	// composed system prompt is refreshed immediately.
 	Guidance string
 
 	projectNotes   string
@@ -130,6 +132,15 @@ func (a *Agent) SetModel(model string) {
 			w = a.Cfg.ContextTokens
 		}
 		a.applyReserve(w)
+	}
+}
+
+// SetGuidance sets extra system-prompt text and recomposes the prompt so it
+// takes effect on the next call even when nothing else triggers a refresh.
+func (a *Agent) SetGuidance(g string) {
+	a.Guidance = g
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem("")
 	}
 }
 
