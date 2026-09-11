@@ -24,7 +24,9 @@ func (r *Registry) beforeWrite(absPath string) error {
 
 // approveWrite shows a diff preview through the approval hook when write
 // approvals are enabled. Returns (denialResult, false) when the user says no.
-func (r *Registry) approveWrite(absPath, newContent string) (Result, bool) {
+// ctx is the tool call's context: it bounds an editor-side review, so a
+// cancelled run does not stay blocked on a diff nobody answers.
+func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string) (Result, bool) {
 	if !r.ApproveWrites || r.Approve == nil {
 		return Result{}, true
 	}
@@ -39,7 +41,7 @@ func (r *Registry) approveWrite(absPath, newContent string) (Result, bool) {
 		if r.OnStatus != nil {
 			r.OnStatus("reviewing change in VS Code…")
 		}
-		d := r.ReviewWrite(rel, oldContent, newContent)
+		d := r.ReviewWrite(ctx, rel, oldContent, newContent)
 		if r.OnStatus != nil {
 			r.OnStatus("")
 		}
@@ -131,7 +133,7 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if !has {
 		return Result{IsError: true, Content: "write_file requires a 'content' argument (missing key would have written an empty file); pass the full file content"}
 	}
-	if res, ok := t.r.approveWrite(p, content); !ok {
+	if res, ok := t.r.approveWrite(ctx, p, content); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {
@@ -189,7 +191,7 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 		return Result{IsError: true, Content: fmt.Sprintf("old_text matches %d locations; include more surrounding lines so it matches exactly once", n)}
 	}
 	updated := strings.Replace(s, oldText, newText, 1)
-	if res, ok := t.r.approveWrite(p, updated); !ok {
+	if res, ok := t.r.approveWrite(ctx, p, updated); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {

@@ -201,7 +201,11 @@ command palette to get a terminal already wired up. Shell command approvals stil
 in the terminal, not the editor.
 
 Controlled by `ide.enabled` and `ide.auto_context` in config (both on by default) and the
-flags `--ide` (connect even outside an editor terminal) and `--no-ide` (never connect).
+flags `--ide` (connect even outside an editor terminal, and even when `ide.enabled` is
+false) and `--no-ide` (never connect, which wins over everything else). Headless `be-code
+run` never touches the editor unless `--ide` is passed explicitly, so scripted runs stay
+reproducible; even then it only attaches the `ide_*` tools — no editor diff review and no
+per-turn `[editor: …]` context note.
 `be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for
 the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
 end-to-end checklist.

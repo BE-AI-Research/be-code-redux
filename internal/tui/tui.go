@@ -107,6 +107,8 @@ type Model struct {
 	height   int
 	ready    bool
 	quitHint bool
+	// ideAnnounced keeps the editor-bridge line to one appearance.
+	ideAnnounced bool
 
 	transcript strings.Builder // finished content
 	streaming  strings.Builder // current assistant text
@@ -258,6 +260,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sel = nil // columns no longer line up after a rewrap
 		m.layout()
 		m.ready = true
+		// Announce the editor bridge here, not on stderr: the alt screen
+		// wipes anything printed before it opened. Once only.
+		if !m.ideAnnounced && m.ag.IDEName != "" {
+			m.ideAnnounced = true
+			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
+		}
 		m.refreshTranscript()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -299,7 +307,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case noticeMsg:
 		m.flushStreaming()
-		m.appendLine(stWarn.Render("note ") + string(msg))
+		// The editor context note is ambient information, not a warning:
+		// render it dimmed and unlabelled.
+		if strings.HasPrefix(string(msg), "[editor:") {
+			m.appendLine(stDim.Render(string(msg)))
+		} else {
+			m.appendLine(stWarn.Render("note ") + string(msg))
+		}
 	case statusMsg:
 		m.statusNote = string(msg)
 		if m.statusNote == "" && m.running {
@@ -480,7 +494,10 @@ func (m *Model) handleApprovalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cfg.AutoApproveShell = true
 			m.resolveApproval(true, "shell auto-approve enabled for this session")
 		} else {
+			// Both switches: cfg stops the terminal prompt, the registry
+			// flag stops the editor diff review (see Registry.ApproveWrites).
 			m.cfg.ApproveFileWrites = false
+			m.ag.Tools.ApproveWrites = false
 			m.resolveApproval(true, "file-write previews disabled for this session")
 		}
 	default:

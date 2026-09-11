@@ -179,14 +179,22 @@ func (s *Session) ContextNote(ctx context.Context) string {
 
 // ReviewWrite shows the change in the editor and returns the decision;
 // any transport or protocol problem yields ReviewUnavailable so the TUI
-// prompt takes over.
-func (s *Session) ReviewWrite(rel, oldContent, newContent string) tools.ReviewDecision {
+// prompt takes over. The 10-minute review window hangs off the caller's
+// ctx, so cancelling the run (Esc) abandons a diff left sitting in the
+// editor instead of blocking the tool call for the full window.
+func (s *Session) ReviewWrite(ctx context.Context, rel, oldContent, newContent string) tools.ReviewDecision {
 	if s == nil || s.Client == nil {
+		return tools.ReviewUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
 		return tools.ReviewUnavailable
 	}
 	args, _ := json.Marshal(map[string]string{"path": rel, "original": oldContent, "proposed": newContent,
 		"summary": fmt.Sprintf("BE-Code wants to change %s", rel)})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	out, isErr, err := s.Client.CallTool(ctx, "review_diff", args)
 	if err != nil || isErr {

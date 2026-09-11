@@ -39,6 +39,10 @@ type Client struct {
 	pmu     sync.Mutex
 	tools   []ToolDef
 	closed  bool
+	// dead is set when readLoop ends (EOF or a read error): the transport
+	// is gone, so further sends and calls fail at once instead of waiting
+	// out the per-call timeout on a connection nobody is answering.
+	dead bool
 }
 
 type rpcRequest struct {
@@ -217,7 +221,11 @@ func (c *Client) readLoop(r io.Reader) {
 			ch <- resp
 		}
 	}
-	// EOF: fail all pending calls.
+	// EOF: the transport is gone. Mark the client dead, then fail all
+	// pending calls.
+	c.mu.Lock()
+	c.dead = true
+	c.mu.Unlock()
 	c.pmu.Lock()
 	for id, ch := range c.pending {
 		delete(c.pending, id)
@@ -236,6 +244,9 @@ func (c *Client) send(v any) error {
 	if c.closed {
 		return fmt.Errorf("mcp %s: connection closed", c.ServerName)
 	}
+	if c.dead {
+		return fmt.Errorf("mcp %s: server exited", c.ServerName)
+	}
 	_, err = c.w.Write(append(data, '\n'))
 	return err
 }
@@ -246,6 +257,16 @@ func (c *Client) notify(method string, params any) error {
 
 func (c *Client) call(ctx context.Context, method string, params any, timeout time.Duration) (json.RawMessage, error) {
 	c.mu.Lock()
+	// Nothing will ever answer a call on a closed or dead transport: fail
+	// now rather than register a pending entry and wait out the timeout.
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("mcp %s: connection closed", c.ServerName)
+	}
+	if c.dead {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("mcp %s: server exited", c.ServerName)
+	}
 	c.nextID++
 	id := c.nextID
 	c.mu.Unlock()
@@ -256,6 +277,7 @@ func (c *Client) call(ctx context.Context, method string, params any, timeout ti
 	c.pmu.Unlock()
 
 	if err := c.send(rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params}); err != nil {
+		c.forget(id)
 		return nil, err
 	}
 	// When ctx already carries its own deadline, that deadline is the only

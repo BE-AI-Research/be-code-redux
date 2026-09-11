@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -19,23 +20,23 @@ func TestReviewWriteDecisions(t *testing.T) {
 	write := func() Result {
 		return reg.Dispatch(context.Background(), provider.ToolCall{Name: "write_file", Arguments: `{"path":"a.txt","content":"v"}`})
 	}
-	reg.ReviewWrite = func(rel, oldC, newC string) ReviewDecision { return ReviewReject }
+	reg.ReviewWrite = func(_ context.Context, rel, oldC, newC string) ReviewDecision { return ReviewReject }
 	if res := write(); !res.IsError {
 		t.Fatal("reject not honoured")
 	}
-	reg.ReviewWrite = func(rel, oldC, newC string) ReviewDecision { return ReviewAccept }
+	reg.ReviewWrite = func(_ context.Context, rel, oldC, newC string) ReviewDecision { return ReviewAccept }
 	if res := write(); res.IsError {
 		t.Fatal(res.Content)
 	}
 	if prompted != 0 {
 		t.Fatalf("TUI approver called %d times although the editor decided", prompted)
 	}
-	reg.ReviewWrite = func(rel, oldC, newC string) ReviewDecision { return ReviewUnavailable }
+	reg.ReviewWrite = func(_ context.Context, rel, oldC, newC string) ReviewDecision { return ReviewUnavailable }
 	write()
 	if prompted != 1 {
 		t.Fatal("fallback to Approve did not happen")
 	}
-	reg.ReviewWrite = func(rel, oldC, newC string) ReviewDecision { return ReviewAcceptAll }
+	reg.ReviewWrite = func(_ context.Context, rel, oldC, newC string) ReviewDecision { return ReviewAcceptAll }
 	write()
 	if reg.ApproveWrites {
 		t.Fatal("accept-all must stop asking for the session")
@@ -45,5 +46,32 @@ func TestReviewWriteDecisions(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "a.txt")); string(b) != "v" {
 		t.Fatal("file not written after accept")
+	}
+}
+
+// Esc during an editor review must abort the run: the dispatch context is
+// cancelled, so a ReviewWrite still waiting on the editor has to return
+// instead of holding the tool call open for its own (10-minute) deadline.
+func TestReviewWriteHonoursDispatchContext(t *testing.T) {
+	dir := t.TempDir()
+	reg, _ := NewRegistry(dir, func(a, d string) bool { return true })
+	reg.ApproveWrites = true
+	entered := make(chan struct{})
+	reg.ReviewWrite = func(ctx context.Context, rel, oldC, newC string) ReviewDecision {
+		close(entered)
+		<-ctx.Done() // the editor never answers; only cancellation frees us
+		return ReviewUnavailable
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan Result, 1)
+	go func() {
+		done <- reg.Dispatch(ctx, provider.ToolCall{Name: "write_file", Arguments: `{"path":"a.txt","content":"v"}`})
+	}()
+	<-entered
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("write_file did not return after the dispatch context was cancelled")
 	}
 }

@@ -103,8 +103,10 @@ func loadOrWizard(ctx context.Context) (*config.Config, error) {
 }
 
 // buildAgent assembles registry + agent from config and flags. The caller
-// wires the approval func and events (UI-specific).
-func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
+// wires the approval func and events (UI-specific). headless is true for
+// scripted runs (`be-code run`), which stay off the editor bridge unless
+// --ide asks for it explicitly.
+func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Agent, error) {
 	if flagYes {
 		cfg.AutoApproveShell = true
 		cfg.ApproveFileWrites = false
@@ -151,7 +153,7 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
-	if sess := attachIDE(cfg, reg, ag); sess != nil {
+	if sess := attachIDE(cfg, reg, ag, headless); sess != nil {
 		ideSession = sess // package var; closed in runInteractive/run defers
 	}
 
@@ -200,12 +202,27 @@ func buildAgent(cfg *config.Config) (provider.Provider, *agent.Agent, error) {
 // registers its tools as ide_*, and wires context and review. Returns nil
 // (and prints nothing beyond an explicit --ide failure) when there is no
 // bridge to connect to, so ordinary terminal runs stay silent.
-func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent) *ide.Session {
-	if flagNoIDE || !cfg.IDE.Enabled {
+//
+// Wanting an editor is decided in this order: --no-ide always wins; --ide
+// then forces a connection attempt even when ide.enabled is false or the
+// run is headless; otherwise config must allow it, the run must be
+// interactive, and the terminal must be VS Code's own.
+func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+	if flagNoIDE {
 		return nil
 	}
-	if !flagIDE && os.Getenv("TERM_PROGRAM") != "vscode" {
-		return nil
+	if !flagIDE {
+		if !cfg.IDE.Enabled {
+			return nil
+		}
+		// Scripted runs must be reproducible and never block on an editor:
+		// no discovery unless --ide was passed on purpose.
+		if headless {
+			return nil
+		}
+		if os.Getenv("TERM_PROGRAM") != "vscode" {
+			return nil
+		}
 	}
 	dir, err := ide.LockDir()
 	if err != nil {
@@ -230,13 +247,29 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent) *ide.Se
 	if ag.IDEName == "" {
 		ag.IDEName = "ide"
 	}
-	if cfg.IDE.AutoContext {
+	ag.IDETools = len(names)
+	// A scripted run takes no interactive detours: no per-turn context
+	// note (it would make the same prompt behave differently depending on
+	// what happens to be open in the editor) and no ReviewWrite — the
+	// caller wires that only for interactive sessions.
+	if cfg.IDE.AutoContext && !headless {
 		ag.ContextProvider = sess.ContextNote
 	}
 	ag.SetGuidance(agent.IDEGuidance)
 	ag.RefreshSystem() // rebuilds the known-tool list (for embedded tool-call parsing) now that ide_* tools are attached, and recomposes the system prompt
-	fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+	// The TUI prints this itself (a dimmed transcript line) because stderr
+	// written before the alt screen opens is wiped; plain and headless
+	// runs have no alt screen, so stderr is the right place there.
+	if headless || usePlainUI(cfg) {
+		fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+	}
 	return sess
+}
+
+// usePlainUI reports whether the plain REPL (not the Bubble Tea TUI) will
+// drive this session.
+func usePlainUI(cfg *config.Config) bool {
+	return flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 }
 
 // applyBackendWindow asks an Ollama backend what context window it will
@@ -342,7 +375,7 @@ func runInteractive(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p, ag, err := buildAgent(cfg)
+	p, ag, err := buildAgent(cfg, false)
 	if err != nil {
 		return err
 	}
@@ -354,7 +387,7 @@ func runInteractive(ctx context.Context) error {
 		ag.Tools.ReviewWrite = ideSession.ReviewWrite
 		defer ideSession.Close()
 	}
-	usePlain := flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
+	usePlain := usePlainUI(cfg)
 	if usePlain {
 		if strings.EqualFold(cfg.Theme, "mono") {
 			ui.SetMono()

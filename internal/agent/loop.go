@@ -64,6 +64,9 @@ type Agent struct {
 	// IDEName is the connected editor's name (e.g. "vscode"), or "" when
 	// no editor is connected.
 	IDEName string
+	// IDETools is how many editor tools were attached (0 when none), so a
+	// UI can report the connection once it owns the screen.
+	IDETools int
 
 	projectNotes   string
 	handoff        string // briefing from the resumed session, kept in the system prompt

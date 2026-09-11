@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,8 +15,10 @@ import (
 // fakeTCPServer answers initialize/tools/list/tools/call over newline
 // JSON-RPC. When hangOnCall is true, tools/call is accepted (the handshake
 // still completes) but never answered, so a caller relying on it must be
-// bounded by its own context deadline.
-func fakeTCPServer(t *testing.T, token string, hangOnCall bool) (addr string, gotToken *string) {
+// bounded by its own context deadline. The returned drop func closes the
+// server's side of the accepted connection, standing in for the editor
+// quitting mid-session.
+func fakeTCPServer(t *testing.T, token string, hangOnCall bool) (addr string, gotToken *string, drop func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -23,11 +26,16 @@ func fakeTCPServer(t *testing.T, token string, hangOnCall bool) (addr string, go
 	}
 	t.Cleanup(func() { ln.Close() })
 	got := new(string)
+	var mu sync.Mutex
+	var accepted net.Conn
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		mu.Lock()
+		accepted = conn
+		mu.Unlock()
 		defer conn.Close()
 		sc := bufio.NewScanner(conn)
 		for sc.Scan() {
@@ -66,11 +74,17 @@ func fakeTCPServer(t *testing.T, token string, hangOnCall bool) (addr string, go
 			conn.Write(append(b, '\n'))
 		}
 	}()
-	return ln.Addr().String(), got
+	return ln.Addr().String(), got, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if accepted != nil {
+			accepted.Close()
+		}
+	}
 }
 
 func TestDialTCPHandshakeAndCall(t *testing.T) {
-	addr, got := fakeTCPServer(t, "secret", false)
+	addr, got, _ := fakeTCPServer(t, "secret", false)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, err := DialTCP(ctx, "vscode", addr, "secret")
@@ -91,7 +105,7 @@ func TestDialTCPHandshakeAndCall(t *testing.T) {
 }
 
 func TestDialTCPRejectsBadToken(t *testing.T) {
-	addr, _ := fakeTCPServer(t, "secret", false)
+	addr, _, _ := fakeTCPServer(t, "secret", false)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := DialTCP(ctx, "vscode", addr, "wrong"); err == nil || !strings.Contains(err.Error(), "bad token") {
@@ -105,7 +119,7 @@ func TestDialTCPRejectsBadToken(t *testing.T) {
 // Here the server never answers tools/call at all, so this only returns
 // quickly if the context deadline is actually honoured.
 func TestCallHonoursContextDeadline(t *testing.T) {
-	addr, _ := fakeTCPServer(t, "secret", true)
+	addr, _, _ := fakeTCPServer(t, "secret", true)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
 	c, err := DialTCP(dialCtx, "vscode", addr, "secret")
@@ -135,7 +149,7 @@ func TestCallHonoursContextDeadline(t *testing.T) {
 // timeout and a longer context deadline, standing in for that relationship
 // at a testable timescale: the short fixed timeout must not fire early.
 func TestCallContextDeadlineNotCappedByFixedTimeout(t *testing.T) {
-	addr, _ := fakeTCPServer(t, "secret", true)
+	addr, _, _ := fakeTCPServer(t, "secret", true)
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()
 	c, err := DialTCP(dialCtx, "vscode", addr, "secret")
@@ -157,5 +171,44 @@ func TestCallContextDeadlineNotCappedByFixedTimeout(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("call took %s; too slow", elapsed)
+	}
+}
+
+// When the bridge dies (the editor quits, or the socket drops), the read
+// loop ends. A call issued afterwards must fail immediately rather than
+// block for the fixed 120s per-call timeout, which would hang the run.
+func TestCallAfterTransportDiesFailsFast(t *testing.T) {
+	addr, _, drop := fakeTCPServer(t, "secret", false)
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	c, err := DialTCP(dialCtx, "vscode", addr, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	drop()
+	// Give the read loop a moment to notice EOF and mark the client dead.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		dead := c.dead
+		c.mu.Unlock()
+		if dead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	start := time.Now()
+	// No deadline on the context: only the dead-transport check can make
+	// this return quickly (the fixed timeout is 120s).
+	_, _, err = c.CallTool(context.Background(), "diagnostics", json.RawMessage(`{}`))
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("call on a dead transport returned no error")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("call took %s; a dead transport must fail immediately", elapsed)
 	}
 }

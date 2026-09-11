@@ -46,7 +46,7 @@ var runCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		_, ag, err := buildAgent(cfg)
+		_, ag, err := buildAgent(cfg, true)
 		if err != nil {
 			return err
 		}
