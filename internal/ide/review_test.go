@@ -78,6 +78,20 @@ func TestSessionReviewWriteMapsDecision(t *testing.T) {
 	}
 }
 
+// A nil *Session, or a Session with no Client yet (e.g. before Connect
+// succeeds), must yield ReviewUnavailable rather than panicking — mirrors
+// the same guard on Session.ContextNote.
+func TestSessionReviewWriteNilSafe(t *testing.T) {
+	var s *Session
+	if d := s.ReviewWrite("a.go", "old", "new"); d != tools.ReviewUnavailable {
+		t.Fatalf("nil session: decision = %v", d)
+	}
+	s = &Session{}
+	if d := s.ReviewWrite("a.go", "old", "new"); d != tools.ReviewUnavailable {
+		t.Fatalf("session with nil client: decision = %v", d)
+	}
+}
+
 func TestSessionReviewWriteMapsAllDecisions(t *testing.T) {
 	cases := []struct {
 		reply string

@@ -258,6 +258,14 @@ func (c *Client) call(ctx context.Context, method string, params any, timeout ti
 	if err := c.send(rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params}); err != nil {
 		return nil, err
 	}
+	// When ctx already carries its own deadline, that deadline is the only
+	// limit — a caller (e.g. an editor-side review that may take minutes)
+	// can ask for longer than the fixed per-call timeout. Only fall back
+	// to the fixed timer when ctx has no deadline of its own.
+	var timedOut <-chan time.Time
+	if _, ok := ctx.Deadline(); !ok {
+		timedOut = time.After(timeout)
+	}
 	select {
 	case resp, ok := <-ch:
 		if !ok {
@@ -267,7 +275,7 @@ func (c *Client) call(ctx context.Context, method string, params any, timeout ti
 			return nil, fmt.Errorf("mcp %s: %s (%d)", c.ServerName, resp.Error.Message, resp.Error.Code)
 		}
 		return resp.Result, nil
-	case <-time.After(timeout):
+	case <-timedOut:
 		c.forget(id)
 		return nil, fmt.Errorf("mcp %s: %s timed out after %s", c.ServerName, method, timeout)
 	case <-ctx.Done():

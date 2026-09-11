@@ -181,6 +181,9 @@ func (s *Session) ContextNote(ctx context.Context) string {
 // any transport or protocol problem yields ReviewUnavailable so the TUI
 // prompt takes over.
 func (s *Session) ReviewWrite(rel, oldContent, newContent string) tools.ReviewDecision {
+	if s == nil || s.Client == nil {
+		return tools.ReviewUnavailable
+	}
 	args, _ := json.Marshal(map[string]string{"path": rel, "original": oldContent, "proposed": newContent,
 		"summary": fmt.Sprintf("BE-Code wants to change %s", rel)})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
