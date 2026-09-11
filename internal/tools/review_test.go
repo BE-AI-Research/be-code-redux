@@ -75,3 +75,28 @@ func TestReviewWriteHonoursDispatchContext(t *testing.T) {
 		t.Fatal("write_file did not return after the dispatch context was cancelled")
 	}
 }
+
+// A review cancelled by the run's context (Esc during the editor diff) must
+// reject the write outright, never fall through to the terminal prompt.
+func TestCancelledReviewRejectsWithoutTerminalPrompt(t *testing.T) {
+	dir := t.TempDir()
+	prompted := 0
+	reg, _ := NewRegistry(dir, func(a, d string) bool { prompted++; return true })
+	reg.ApproveWrites = true
+	reg.ReviewWrite = func(ctx context.Context, rel, oldC, newC string) ReviewDecision {
+		<-ctx.Done()
+		return ReviewUnavailable
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	res := reg.Dispatch(ctx, provider.ToolCall{Name: "write_file", Arguments: `{"path":"a.txt","content":"v"}`})
+	if !res.IsError {
+		t.Fatal("cancelled review must reject the write")
+	}
+	if prompted != 0 {
+		t.Fatalf("terminal prompt shown %d times after a cancelled review", prompted)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "a.txt")); err == nil {
+		t.Fatal("file written after a cancelled review")
+	}
+}

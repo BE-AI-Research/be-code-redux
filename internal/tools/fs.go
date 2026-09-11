@@ -54,6 +54,11 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 		case ReviewReject:
 			return rejected, false
 		}
+		// A cancelled run (Esc during the editor diff) is a rejection, not a
+		// broken bridge: never re-ask in the terminal for a write nobody wants.
+		if ctx.Err() != nil {
+			return rejected, false
+		}
 		// ReviewUnavailable: fall through to the terminal prompt.
 	}
 	preview := diff.Preview(rel, oldContent, newContent, false)
