@@ -1,0 +1,7 @@
+/be-code
+/be-code.exe
+/dist/
+/vscode/node_modules/
+/vscode/dist/
+/.superpowers/
+*.log

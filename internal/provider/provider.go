@@ -1,0 +1,115 @@
+// Package provider defines the inference backend abstraction for BE-Code.
+//
+// All backends (Ollama, llama.cpp server, vLLM, LM Studio, BE AI Engine)
+// are reached through the OpenAI-compatible chat completions API, which is
+// the de-facto universal adapter for local inference. Ollama additionally
+// gets native management calls (list/pull/ps) via the Ollama type.
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
+
+// Role identifies the author of a chat message.
+type Role string
+
+const (
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+)
+
+// Message is one turn in a conversation.
+type Message struct {
+	Role       Role       `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
+}
+
+// ToolCall is a model-requested tool invocation.
+type ToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // raw JSON object
+}
+
+// ToolSpec describes a tool the model may call.
+type ToolSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+}
+
+// ChatRequest is a provider-agnostic completion request.
+type ChatRequest struct {
+	Model       string
+	Messages    []Message
+	Tools       []ToolSpec
+	Temperature float64
+	MaxTokens   int
+	// OnReasoning receives hidden reasoning deltas from thinking models
+	// (Ollama "reasoning", llama.cpp/vLLM "reasoning_content"). Optional.
+	OnReasoning StreamFunc
+	// NoThink asks the backend to skip hidden reasoning for this call —
+	// used for auxiliary work (summaries, briefings) where minutes of
+	// deliberation buy nothing. Backends that cannot honor it ignore it.
+	NoThink bool
+}
+
+// Usage reports token accounting when the backend supplies it.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
+// ChatResponse is the final assembled result of a (streamed) completion.
+type ChatResponse struct {
+	Content      string
+	Reasoning    string // hidden reasoning, when the backend exposes it separately
+	ToolCalls    []ToolCall
+	FinishReason string
+	Usage        Usage
+}
+
+// StreamFunc receives incremental text deltas during generation.
+type StreamFunc func(delta string)
+
+// Provider is an inference backend.
+type Provider interface {
+	// Name returns the configured provider name (e.g. "ollama", "be-ai-engine").
+	Name() string
+	// Chat runs one completion. onDelta may be nil (non-streaming display).
+	Chat(ctx context.Context, req ChatRequest, onDelta StreamFunc) (*ChatResponse, error)
+	// ListModels enumerates models available on the backend.
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+	// Ping checks reachability; returns a short human-readable status.
+	Ping(ctx context.Context) (string, error)
+}
+
+// BackendStatus is implemented by providers that can say whether a model is
+// resident and what context window it is currently loaded with (Ollama).
+// The agent uses it to notice evictions and window changes caused by other
+// clients sharing the server.
+type BackendStatus interface {
+	Status(ctx context.Context, model string) (window int, loaded bool, err error)
+}
+
+// KeepAliver is implemented by providers that can extend a model's
+// residency (Ollama keep_alive), so idle expiry between prompts does not
+// evict it and force a slow reload plus prompt re-processing.
+type KeepAliver interface {
+	KeepAlive(ctx context.Context, model string, d time.Duration) error
+}
+
+// ModelInfo describes an available model.
+type ModelInfo struct {
+	ID           string
+	SizeBytes    int64
+	Family       string
+	Quantization string
+}
