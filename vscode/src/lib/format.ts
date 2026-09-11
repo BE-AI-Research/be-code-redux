@@ -1,5 +1,12 @@
 export interface DiagItem { path: string; line: number; col: number; severity: "error" | "warning" | "info" | "hint"; source: string; message: string }
 
+export function severitiesFor(severity?: string): string[] {
+  if (severity === "all") return ["error", "warning", "info", "hint"];
+  if (severity === "error") return ["error"];
+  if (severity === "warning") return ["warning"];
+  return ["error", "warning"];
+}
+
 export function formatDiagnostics(items: DiagItem[]): string {
   if (items.length === 0) return "no diagnostics";
   const byFile = new Map<string, DiagItem[]>();

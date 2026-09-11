@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatDiagnostics } from "../src/lib/format";
+import { formatDiagnostics, severitiesFor } from "../src/lib/format";
 import { relPath } from "../src/lib/paths";
 
 describe("formatDiagnostics", () => {
@@ -15,6 +15,21 @@ describe("formatDiagnostics", () => {
   });
   it("says so when clean", () => {
     expect(formatDiagnostics([])).toBe("no diagnostics");
+  });
+});
+
+describe("severitiesFor", () => {
+  it("defaults to errors and warnings", () => {
+    expect(severitiesFor(undefined)).toEqual(["error", "warning"]);
+  });
+  it("narrows to error only", () => {
+    expect(severitiesFor("error")).toEqual(["error"]);
+  });
+  it("narrows to warning only", () => {
+    expect(severitiesFor("warning")).toEqual(["warning"]);
+  });
+  it("expands to everything for all", () => {
+    expect(severitiesFor("all")).toEqual(["error", "warning", "info", "hint"]);
   });
 });
 

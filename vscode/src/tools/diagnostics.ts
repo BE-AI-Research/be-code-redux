@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { ToolRegistry } from "./registry";
-import { formatDiagnostics, DiagItem } from "../lib/format";
+import { formatDiagnostics, severitiesFor, DiagItem } from "../lib/format";
 import { relPath } from "../lib/paths";
 
 const sev = (s: vscode.DiagnosticSeverity): DiagItem["severity"] =>
@@ -13,7 +13,7 @@ export function registerDiagnosticsTool(reg: ToolRegistry) {
     inputSchema: { type: "object", properties: { path: { type: "string" }, severity: { type: "string", enum: ["error", "warning", "all"] } } },
     handler: async (args) => {
       const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
-      const want = args.severity === "all" ? ["error", "warning", "info", "hint"] : args.severity === "error" ? ["error"] : ["error", "warning"];
+      const want = severitiesFor(args.severity);
       const items: DiagItem[] = [];
       for (const [uri, diags] of vscode.languages.getDiagnostics()) {
         const p = relPath(folders, uri.fsPath);
