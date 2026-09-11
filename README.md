@@ -185,18 +185,26 @@ config; its tools appear to the agent as `mcp_<server>_<tool>`:
 
 ## VS Code
 
-Install the BE-Code extension from `dist/be-code-1.0.0.vsix` (Extensions view → `...` →
-**Install from VSIX...**), then run `be-code` from the editor's integrated terminal. When
-BE-Code detects it's running inside VS Code (or `--ide` is passed) it connects to the
-extension's editor bridge and gains `ide_*` tools — diagnostics, symbols/definitions/
-references/hover, and the debugger — plus a one-line note about the file and selection
-you're looking at, and in-editor diff review before a write lands on disk. Run
-`BE-Code: Open terminal` from the command palette to get a terminal already wired up.
-Shell command approvals still happen in the terminal, not the editor.
+Build the extension with `make -f build.mk vscode` (or as part of `make -f build.mk
+release`), which runs its tests and packages `dist/be-code-1.0.0.vsix`. Install it from
+the Extensions view → `...` → **Install from VSIX...**. To run it from source instead —
+for development, or to try changes before packaging — `cd vscode && npm install && npm
+run build`, then use VS Code's "Run Extension" launch configuration to open an Extension
+Development Host with it loaded.
+
+Either way, run `be-code` from the editor's integrated terminal. When BE-Code detects
+it's running inside VS Code (or `--ide` is passed) it connects to the extension's editor
+bridge and gains `ide_*` tools — diagnostics, symbols/definitions/references/hover, and
+the debugger — plus a one-line note about the file and selection you're looking at, and
+in-editor diff review before a write lands on disk. Run `BE-Code: Open terminal` from the
+command palette to get a terminal already wired up. Shell command approvals still happen
+in the terminal, not the editor.
 
 Controlled by `ide.enabled` and `ide.auto_context` in config (both on by default) and the
 flags `--ide` (connect even outside an editor terminal) and `--no-ide` (never connect).
-`be-code doctor` reports whether an editor bridge is listening.
+`be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for
+the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
+end-to-end checklist.
 
 ## Shell safety & background processes
 

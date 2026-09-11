@@ -1,8 +1,8 @@
 BINARY := be-code
-VERSION := 0.4.2
+VERSION := 0.4.3
 LDFLAGS := -s -w -X github.com/brown-enterprises/be-code/cmd.Version=$(VERSION)
 
-.PHONY: build test vet verify clean release
+.PHONY: build test vet verify clean release vscode
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -19,7 +19,11 @@ clean:
 	rm -f $(BINARY) $(BINARY).exe
 	rm -rf dist
 
-release: verify
+vscode: ## build and package the VS Code extension into dist/
+	mkdir -p dist
+	cd vscode && npm install --no-audit --no-fund && npm test && npm run package
+
+release: build vscode
 	mkdir -p dist
 	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64 .
 	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64 .

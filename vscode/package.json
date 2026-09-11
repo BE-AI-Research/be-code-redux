@@ -4,6 +4,8 @@
   "description": "Editor bridge for BE-Code: diagnostics, symbols, debugger and diff review for the local coding agent.",
   "version": "1.0.0",
   "publisher": "be-ai-research",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/BE-AI-Research/be-code" },
   "engines": { "vscode": "^1.90.0" },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
