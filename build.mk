@@ -23,7 +23,7 @@ vscode: ## build and package the VS Code extension into dist/
 	mkdir -p dist
 	cd vscode && npm install --no-audit --no-fund && npm test && npm run package
 
-release: build vscode
+release: verify vscode
 	mkdir -p dist
 	GOOS=linux   GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64 .
 	GOOS=linux   GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64 .
