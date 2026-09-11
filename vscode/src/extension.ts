@@ -27,27 +27,42 @@ export async function activate(ctx: vscode.ExtensionContext) {
     }),
   );
   if (vscode.workspace.getConfiguration("be-code").get<boolean>("autoStart", true)) {
-    await start(ctx);
+    try {
+      await start(ctx);
+    } catch (err) {
+      // start() already reports failure via the status bar and an error
+      // message; swallow here so a rejection never escapes activate().
+    }
   }
 }
 
 async function start(ctx: vscode.ExtensionContext) {
-  const tools = new ToolRegistry();
-  registerEditorTools(tools);
-  registerDiagnosticsTool(tools);
-  registerDebugTools(tools, ctx);
-  registerReviewTool(tools, ctx);
-  const token = randomBytes(24).toString("hex");
-  server = new BridgeServer(tools, token);
-  const port = await server.listen(vscode.workspace.getConfiguration("be-code").get<number>("port", 0));
-  await writeLock(homedir(), {
-    pid: process.pid, port, token,
-    workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
-    ideName: "vscode", version: ctx.extension.packageJSON.version,
-  });
-  const refresh = () => { status.text = server && server.connections > 0 ? "$(plug) BE-Code: connected" : "$(radio-tower) BE-Code: listening"; status.show(); };
-  server.onConnectionChange = refresh;
-  refresh();
+  try {
+    const tools = new ToolRegistry();
+    registerEditorTools(tools);
+    registerDiagnosticsTool(tools);
+    registerDebugTools(tools, ctx);
+    registerReviewTool(tools, ctx);
+    const token = randomBytes(24).toString("hex");
+    server = new BridgeServer(tools, token);
+    const port = await server.listen(vscode.workspace.getConfiguration("be-code").get<number>("port", 0));
+    await writeLock(homedir(), {
+      pid: process.pid, port, token,
+      workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
+      ideName: "vscode", version: ctx.extension.packageJSON.version,
+    });
+    const refresh = () => { status.text = server && server.connections > 0 ? "$(plug) BE-Code: connected" : "$(radio-tower) BE-Code: listening"; status.show(); };
+    server.onConnectionChange = refresh;
+    refresh();
+  } catch (err) {
+    await server?.close();
+    server = undefined;
+    status.text = "$(warning) BE-Code: bridge failed";
+    status.tooltip = String(err);
+    status.show();
+    vscode.window.showErrorMessage(`BE-Code bridge failed to start: ${err}`);
+    throw err;
+  }
 }
 
 export async function deactivate() {

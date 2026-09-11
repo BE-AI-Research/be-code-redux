@@ -58,4 +58,39 @@ describe("BridgeServer", () => {
     expect(res[1].result.content[0].text).toContain("bad");
     await s.close();
   });
+  it("replies in request order even when an earlier call is slower than a later one", async () => {
+    const reg = new ToolRegistry();
+    reg.add({ name: "slow", description: "", inputSchema: { type: "object" }, handler: async () => new Promise((r) => setTimeout(() => r("slow-done"), 150)) });
+    reg.add({ name: "fast", description: "", inputSchema: { type: "object" }, handler: async () => "fast-done" });
+    const s = new BridgeServer(reg, "tok");
+    const port = await s.listen(0);
+    const res: any[] = await new Promise((resolve, reject) => {
+      const out: any[] = [];
+      const c = createConnection({ host: "127.0.0.1", port }, () => {
+        c.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { auth: { token: "tok" } } }) + "\n");
+      });
+      let buf = "";
+      let sentCalls = false;
+      c.on("data", (d) => {
+        buf += d.toString();
+        let i: number;
+        while ((i = buf.indexOf("\n")) >= 0) { out.push(JSON.parse(buf.slice(0, i))); buf = buf.slice(i + 1); }
+        if (!sentCalls && out.some((m) => m.id === 1)) {
+          sentCalls = true;
+          c.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "slow", arguments: {} } }) + "\n");
+          setImmediate(() => {
+            c.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "fast", arguments: {} } }) + "\n");
+          });
+        }
+        if (out.length >= 3) { c.end(); resolve(out); }
+      });
+      c.on("error", reject);
+      c.on("close", () => resolve(out));
+    });
+    expect(res[1].id).toBe(2);
+    expect(res[2].id).toBe(3);
+    expect(res[1].result.content[0].text).toBe("slow-done");
+    expect(res[2].result.content[0].text).toBe("fast-done");
+    await s.close();
+  });
 });

@@ -30,41 +30,46 @@ export class BridgeServer {
 
   private handle(sock: Socket) {
     const framer = new LineFramer();
-    let authed = false;
+    const state = { authed: false };
+    let queue: Promise<void> = Promise.resolve();
     this.socks.add(sock);
     this.onConnectionChange?.();
     sock.on("close", () => { this.socks.delete(sock); this.onConnectionChange?.(); });
     sock.on("error", () => {});
-    sock.on("data", async (chunk) => {
+    sock.on("data", (chunk) => {
       for (const line of framer.push(chunk)) {
-        let req: any;
-        try { req = JSON.parse(line); } catch { continue; }
-        if (req.id === undefined) continue; // notification
-        const reply = (result: unknown) => sock.write(encode({ jsonrpc: "2.0", id: req.id, result }));
-        const fail = (code: number, message: string) => sock.write(encode({ jsonrpc: "2.0", id: req.id, error: { code, message } }));
-        switch (req.method) {
-          case "initialize":
-            if (req.params?.auth?.token !== this.token) { fail(-32001, "bad token"); sock.end(); return; }
-            authed = true;
-            reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "be-code-vscode", version: "1.0.0" } });
-            break;
-          case "tools/list":
-            if (!authed) { fail(-32001, "not authenticated"); break; }
-            reply({ tools: this.tools.list() });
-            break;
-          case "tools/call": {
-            if (!authed) { fail(-32001, "not authenticated"); break; }
-            const { text, isError } = await this.tools.call(req.params?.name, req.params?.arguments);
-            reply({ content: [{ type: "text", text }], isError });
-            break;
-          }
-          case "ping":
-            reply({});
-            break;
-          default:
-            fail(-32601, `unknown method ${req.method}`);
-        }
+        queue = queue.then(() => this.handleLine(sock, state, line)).catch(() => {});
       }
     });
+  }
+
+  private async handleLine(sock: Socket, state: { authed: boolean }, line: string): Promise<void> {
+    let req: any;
+    try { req = JSON.parse(line); } catch { return; }
+    if (req.id === undefined) return; // notification
+    const reply = (result: unknown) => sock.write(encode({ jsonrpc: "2.0", id: req.id, result }));
+    const fail = (code: number, message: string) => sock.write(encode({ jsonrpc: "2.0", id: req.id, error: { code, message } }));
+    switch (req.method) {
+      case "initialize":
+        if (req.params?.auth?.token !== this.token) { fail(-32001, "bad token"); sock.end(); return; }
+        state.authed = true;
+        reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "be-code-vscode", version: "1.0.0" } });
+        break;
+      case "tools/list":
+        if (!state.authed) { fail(-32001, "not authenticated"); break; }
+        reply({ tools: this.tools.list() });
+        break;
+      case "tools/call": {
+        if (!state.authed) { fail(-32001, "not authenticated"); break; }
+        const { text, isError } = await this.tools.call(req.params?.name, req.params?.arguments);
+        reply({ content: [{ type: "text", text }], isError });
+        break;
+      }
+      case "ping":
+        reply({});
+        break;
+      default:
+        fail(-32601, `unknown method ${req.method}`);
+    }
   }
 }
