@@ -123,3 +123,45 @@ func (s *Session) Close() {
 		s.Client.Close()
 	}
 }
+
+// Context is what the editor reports about the user's focus.
+type Context struct {
+	File      string   `json:"file"`
+	Line      int      `json:"line"`
+	SelStart  int      `json:"selStart"`
+	SelEnd    int      `json:"selEnd"`
+	Selection string   `json:"selection"`
+	Open      []string `json:"open"`
+}
+
+const maxSelectionNote = 2048
+
+// ContextNote renders the one-line note prepended to a prompt, plus the
+// selected text when present and small. Empty when nothing is active.
+func ContextNote(c Context) string {
+	if c.File == "" {
+		return ""
+	}
+	n := fmt.Sprintf("[editor: %s, cursor line %d", c.File, c.Line)
+	if c.SelStart > 0 && c.SelEnd >= c.SelStart {
+		n += fmt.Sprintf(", selection lines %d–%d", c.SelStart, c.SelEnd)
+	}
+	n += "]"
+	if sel := strings.TrimRight(c.Selection, "\n"); sel != "" && len(sel) <= maxSelectionNote {
+		n += "\n" + sel
+	}
+	return n
+}
+
+// ContextNote asks the editor for the current focus; any failure yields "".
+func (s *Session) ContextNote(ctx context.Context) string {
+	out, isErr, err := s.Client.CallTool(ctx, "context", json.RawMessage(`{}`))
+	if err != nil || isErr {
+		return ""
+	}
+	var c Context
+	if json.Unmarshal([]byte(out), &c) != nil {
+		return ""
+	}
+	return ContextNote(c)
+}

@@ -54,6 +54,11 @@ type Agent struct {
 	Profile profiles.Profile
 	// Stats is cumulative session usage.
 	Stats Stats
+	// ContextProvider, when set, returns a short note about what the user
+	// is looking at in their editor; it is prepended to each new request.
+	ContextProvider func(ctx context.Context) string
+	// Guidance is extra system-prompt text (editor tools, etc.).
+	Guidance string
 
 	projectNotes   string
 	handoff        string // briefing from the resumed session, kept in the system prompt
@@ -140,6 +145,9 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.handoff != "" {
 		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
 	}
+	if a.Guidance != "" {
+		sys += "\n\n" + a.Guidance
+	}
 	if gitInfo != "" {
 		sys += "\n\n" + gitInfo
 	}
@@ -190,6 +198,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.History.System.Content = a.composeSystem(gi)
 	}
 	expanded := ExpandMentions(a.Tools.Root, userInput)
+	if newTurn && a.ContextProvider != nil {
+		if note := a.ContextProvider(ctx); note != "" {
+			a.notice("%s", strings.SplitN(note, "\n", 2)[0])
+			expanded = note + "\n\n" + expanded
+		}
+	}
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
 
 	emptyRetries, lengthRetries := 0, 0
