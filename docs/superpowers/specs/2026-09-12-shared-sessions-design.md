@@ -70,8 +70,8 @@ with turns, or with other clients, keeps running.
 omitempty). A hosted program stamps its pid on every save. Before saving, the
 agent reloads the on-disk stamp; if it names a different, live process, the
 save is skipped, autosave stays off for the rest of the run, and the
-transcript shows one dimmed warning: `session file is owned by live host
-<pid>; autosave disabled for this session`. This is the last line of defence,
+transcript shows one notice-styled `note` line: `session file is owned by
+live host <pid>; autosave disabled for this session`. This is the last line of defence,
 not the primary mechanism. In-process runs stamp their own pid too; a stale
 stamp (dead pid) is ignored.
 
@@ -112,9 +112,9 @@ which has exactly one client and is otherwise unchanged).
 - **Input mode:** the key goes to that client's own textarea. Enter submits
   that client's text: it starts a turn if the agent is idle, or queues it
   while busy, exactly as today. Because the frame is one shared rendering,
-  the transcript's user line is prefixed `<label>:` for every sender
+  the transcript's user line is prefixed `<label>> ` for every sender
   (including your own) whenever more than one client is attached; with a
-  single client the prefix is omitted, as today.
+  single client it is the usual `you> `, as today.
 - **Queue:** `Agent.Enqueue` records the sender's client id with the message.
   Up on an empty input (or `Ctrl+Q`) opens the queue popup showing only the
   opener's messages; editing pulls the message into the opener's textarea.
@@ -182,7 +182,7 @@ replaces it (the served TUI wires it to the parser). `DetachHolder()` becomes
 **Config.** No new keys. New flag `--new` (start a fresh hosted session even when the workspace has a live one).
 
 **Docs.** README "Live sessions and handoff" rewritten around shared sessions
-(everyone has an input line, `<label>:` prefixes, switching from the picker,
+(everyone has an input line, `<label>> ` prefixes, switching from the picker,
 shared modals, `Ctrl+] d` only). CHANGELOG `v0.6.0 — shared sessions`. Root
 CLAUDE.md "Live sessions" updated (tagged input, overlay, join-not-fork, save
 guard). `docs/live-checklist.md` gains: two terminals typing at once, resuming
@@ -230,8 +230,9 @@ switch.
 
 ## Resolved questions
 
-- Transcript prefix: `<label>:` for every sender when more than one client is
-  attached; none with a single client. (One rendering means no `you:`.)
+- Transcript prefix: `<label>> ` for every sender when more than one client
+  is attached; the usual `you> ` with a single client. (One rendering means
+  there is no per-terminal "you".)
 - Input height in served mode: fixed three rows (one in compact); the textarea
   scrolls internally for longer messages.
 - The `takeover` chord is removed rather than kept as a no-op.
