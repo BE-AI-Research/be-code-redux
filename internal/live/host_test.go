@@ -2,10 +2,12 @@ package live
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -196,6 +198,70 @@ func TestHostOverlayGoesToOneClientAndFollowsEveryFrame(t *testing.T) {
 		t.Fatal("unchanged overlay was re-sent")
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate is a regression
+// test for a lost-update race between fanout.Write and SetOverlay: both used
+// to read/enqueue a client's overlay outside a shared critical section, so a
+// SetOverlay landing between another write's snapshot and its enqueue could
+// have its new value silently overwritten by that write's now-stale one —
+// permanently, since a private keystroke need not change the shared view
+// and so there may be no next frame to correct it. It drives both
+// concurrently for a few hundred iterations, then sequences one final
+// SetOverlay strictly after both stop, and asserts the last FOverlay the
+// client ever receives is that final value.
+func TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	idA := idByLabel(t, h, "a")
+
+	const n = 3000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			h.Output().Write([]byte("x"))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			h.SetOverlay(idA, fmt.Sprintf("O%d", i))
+		}
+	}()
+
+	// Drain both streams throughout, or the client's own buffered channels
+	// (or the host's per-client queue) could back up and stall delivery of
+	// the very frame this test is waiting for. Deliberately never stopped:
+	// it idles itself out (via the timeout below) once nothing more arrives.
+	var mu sync.Mutex
+	var last string
+	go func() {
+		for {
+			select {
+			case <-a.out:
+			case p := <-a.overlay:
+				mu.Lock()
+				last = string(p)
+				mu.Unlock()
+			case <-time.After(2 * time.Second):
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	// Sequenced strictly after both loops above have returned, so this is
+	// unambiguously "the last value SetOverlay set" for idA.
+	h.SetOverlay(idA, "FINAL")
+
+	within(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return last == "FINAL"
+	})
 }
 
 func TestHostSwitchAndDetachByID(t *testing.T) {

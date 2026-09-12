@@ -236,13 +236,9 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// final keystrokes right before EOF are never dropped.
 			if n > 0 {
 				fwd, act := chord.Feed(buf[:n], time.Now())
-				// A takeover is claimed before the bytes that shared the
-				// read are forwarded: those bytes are what the user typed
-				// after Ctrl+] t, and they are only delivered to the
-				// program if this client already holds input.
-				if act == ActionTakeover {
-					writeFrame(FOverlay, nil)
-				}
+				// Task 3 removes the takeover action (and gives Ctrl+] t its
+				// new meaning); act == ActionTakeover is otherwise unhandled
+				// here for now.
 				// Forward any plain bytes the same Read delivered ahead of
 				// the chord (e.g. pasted text ending in Ctrl+] d) before
 				// acting on act, so they reach the program instead of

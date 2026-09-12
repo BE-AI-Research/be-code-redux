@@ -17,10 +17,12 @@ import (
 // this.
 const byeWait = 500 * time.Millisecond
 
-// maxQueuedOutput caps how many FOutput frames a client's queue may hold
-// before the oldest is evicted. Only FOutput entries are ever evicted (each
-// is a full repaint, so only the newest matters); control frames (FSize,
-// FClients, FBye) are never dropped.
+// maxQueuedOutput caps how many frames of a screen-frame type (FOutput,
+// FOverlay) a client's queue may hold before the oldest of that type is
+// evicted — each type independently, so 8 FOutput and 8 FOverlay frames can
+// be queued at once. Each is a full repaint (of the shared view, or of one
+// client's private rows), so only the newest of each matters; control frames
+// (FSize, FClients, FBye) are never dropped.
 const maxQueuedOutput = 8
 
 // qframe is one frame pending delivery to a client.
@@ -159,7 +161,10 @@ func NewHost(token string, log io.Writer) *Host {
 // OnInput registers the program's tagged-keystroke callback: f is called
 // with the id of the client that sent them and the raw bytes, once per
 // FInput frame, for every attached client (there is no holder any more — the
-// served program decides what each client's bytes mean).
+// served program decides what each client's bytes mean). f runs on that
+// client's own connection-handling goroutine (see handle), not a dedicated
+// one, so it must not block for long: doing so stalls that same client's
+// resize, detach and quit frames behind it.
 func (h *Host) OnInput(f func(client int, b []byte)) { h.mu.Lock(); h.onInput = f; h.mu.Unlock() }
 
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
@@ -443,15 +448,20 @@ func (h *Host) DetachHolder() {}
 // another live session in the same terminal.
 const ReasonSwitchPrefix = "switch:"
 
-func (h *Host) byID(id int) *client {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// byIDLocked is byID's search, for callers that already hold h.mu.
+func (h *Host) byIDLocked(id int) *client {
 	for _, c := range h.clients {
 		if c.id == id {
 			return c
 		}
 	}
 	return nil
+}
+
+func (h *Host) byID(id int) *client {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.byIDLocked(id)
 }
 
 // Detach drops one client with the ordinary detached reason.
@@ -471,20 +481,23 @@ func (h *Host) Switch(id int, code string) {
 // SetOverlay records a client's private input rows and sends them. The
 // same rows are appended to every shared frame that client receives, so a
 // full repaint never erases them. An unchanged overlay is not re-sent.
+//
+// h.mu is held across the enqueue (enqueue itself never blocks — it only
+// appends under c.qmu and does a non-blocking wake — and nothing that holds
+// c.qmu ever takes h.mu), so this can never interleave with fanout.Write's
+// own read-then-enqueue of the same client's overlay: without that, a
+// concurrent frame write could snapshot this client's overlay just before
+// this call updates it, then enqueue that stale value after this call's own
+// FOverlay, permanently reverting the client's rendered overlay with no next
+// frame to correct it (a private keystroke need not change the shared view).
 func (h *Host) SetOverlay(id int, s string) {
 	h.mu.Lock()
-	var c *client
-	for _, x := range h.clients {
-		if x.id == id {
-			c = x
-		}
-	}
+	defer h.mu.Unlock()
+	c := h.byIDLocked(id)
 	if c == nil || c.overlay == s {
-		h.mu.Unlock()
 		return
 	}
 	c.overlay = s
-	h.mu.Unlock()
 	c.enqueue(FOverlay, []byte(s))
 }
 
@@ -516,19 +529,19 @@ func (h *Host) Close(reason string) {
 // it.
 type fanout struct{ h *Host }
 
+// Write holds h.mu across every client's pair of enqueues (see SetOverlay's
+// doc for why: releasing it between reading c.overlay and enqueueing it
+// would let a concurrent SetOverlay's own newer value be overwritten by this
+// call's now-stale one). enqueue itself never blocks, so this never holds
+// h.mu across anything that could stall.
 func (f fanout) Write(p []byte) (int, error) {
 	cp := append([]byte(nil), p...)
 	f.h.mu.Lock()
-	clients := append([]*client(nil), f.h.clients...)
-	overlays := make([]string, len(clients))
-	for i, c := range clients {
-		overlays[i] = c.overlay
-	}
-	f.h.mu.Unlock()
-	for i, c := range clients {
+	defer f.h.mu.Unlock()
+	for _, c := range f.h.clients {
 		c.enqueue(FOutput, cp)
-		if overlays[i] != "" {
-			c.enqueue(FOverlay, []byte(overlays[i]))
+		if c.overlay != "" {
+			c.enqueue(FOverlay, []byte(c.overlay))
 		}
 	}
 	return len(p), nil
