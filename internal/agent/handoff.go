@@ -160,7 +160,7 @@ func (a *Agent) heuristicHandoff() string {
 // Resume loads a saved conversation into this agent's history, carrying the
 // previous session's handoff into the system prompt.
 func (a *Agent) Resume(s *store.Session) {
-	a.Session = s
+	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
 	a.handoff = s.Handoff
 	a.History.System.Content = a.composeSystem("")

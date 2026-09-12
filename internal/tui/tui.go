@@ -1114,7 +1114,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.appendLine(stDim.Render(help))
 	case "/clear":
 		m.ag.History.Messages = nil
-		m.ag.Session = store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root)
+		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
 		m.appendLine(stOK.Render("history cleared; new session started"))
 	case "/tools":
 		m.appendLine(stDim.Render(strings.Join(m.ag.Tools.Names(), " · ")))

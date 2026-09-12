@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +12,12 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // testFlags mirrors the root command's persistent flags, so the argument
@@ -373,3 +378,159 @@ func TestDecideStart(t *testing.T) {
 		t.Fatalf("--resume of an unknown code = %+v, %q", got, msg)
 	}
 }
+
+// A host's session lives in its memory from the moment it starts; the file
+// only appears on its first autosave. Joining must not go through the
+// store, or `be-code --resume CODE` against a live session that has not
+// finished a turn would report "no such session" and start a second one.
+func TestDecideStartJoinsALiveCodeWithNoSessionFileYet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	rec := live.Record{
+		Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load("ABC123"); err == nil {
+		t.Fatal("this case is only meaningful while the session file does not exist")
+	}
+	for _, typed := range []string{"ABC123", "abc123", " ABC123 "} {
+		got, msg := decideStart(dir, "/elsewhere", typed, false)
+		if got == nil || got.Code != "ABC123" || msg != "joining live session ABC123" {
+			t.Fatalf("--resume %q = %+v, %q", typed, got, msg)
+		}
+	}
+}
+
+// wireLiveRegistry is how the agent's save guard reaches the live records
+// without importing them.
+func TestWireLiveRegistryAnswersFromTheRecords(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	wireLiveRegistry()
+	if pid, ok := agent.LiveOwner("ABC123"); !ok || pid != os.Getpid() {
+		t.Fatalf("LiveOwner = %d, %v; want %d, true", pid, ok, os.Getpid())
+	}
+	if pid, ok := agent.LiveOwner("NOPE11"); ok {
+		t.Fatalf("LiveOwner for a code with no host = %d, %v", pid, ok)
+	}
+	if !agent.PIDAlive(os.Getpid()) || agent.PIDAlive(deadPID(t)) {
+		t.Fatal("PIDAlive is not wired to the real process check")
+	}
+}
+
+// A session file a live host owns is that host's to write. The transcript
+// this run produced is still real work, so it is written to a session of
+// its own rather than dropped with a warning.
+func TestFinishSessionSavesElsewhereWhenALiveHostOwnsTheFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Skip("no sleep binary")
+	}
+	t.Cleanup(func() { _ = owner.Process.Kill(); _ = owner.Wait() })
+
+	reg, err := tools.NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RepoMap = false
+	ag := agent.New(cfg, stubProvider{}, "m", reg, "")
+	s := store.NewSession("ollama", "m", "/ws")
+	s.Title = "shared work"
+	s.HostPID = owner.Process.Pid
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ag.SetSession(s)
+	ag.History.Messages = []provider.Message{
+		{Role: provider.RoleUser, Content: "hi"}, {Role: provider.RoleAssistant, Content: "hello"},
+	}
+	// The live record is what turns the pid stamp into ownership.
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: s.ResumeCode(), PID: owner.Process.Pid, Socket: filepath.Join(dir, s.ResumeCode()+".sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	wireLiveRegistry()
+
+	var out strings.Builder
+	quiet(t, func() { finishSession(ag, false, &out) })
+
+	onDisk, err := store.Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.HostPID != owner.Process.Pid || len(onDisk.Messages) != 0 {
+		t.Fatalf("the live host's file was written: %+v", onDisk)
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("want the owned session plus a new one, got %d: %+v", len(metas), metas)
+	}
+	var alt store.Meta
+	for _, mt := range metas {
+		if mt.ID != s.ID {
+			alt = mt
+		}
+	}
+	if !strings.Contains(out.String(), "saved as a new session: be-code --resume "+alt.Code) {
+		t.Fatalf("finishSession printed:\n%s\nwant the new session's code %s", out.String(), alt.Code)
+	}
+	saved, err := store.Load(alt.ID)
+	if err != nil || len(saved.Messages) != 2 || saved.HostPID != os.Getpid() {
+		t.Fatalf("the transcript was not carried over: %v %+v", err, saved)
+	}
+}
+
+// quiet runs fn with os.Stderr on the null device: finishSession reports
+// the blocked save there by design, and a passing test should print
+// nothing.
+func quiet(t *testing.T, fn func()) {
+	t.Helper()
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		fn()
+		return
+	}
+	prev := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = prev; f.Close() }()
+	fn()
+}
+
+// stubProvider is enough for the agent constructor; no test here talks to a
+// backend.
+type stubProvider struct{}
+
+func (stubProvider) Name() string { return "stub" }
+func (stubProvider) Chat(context.Context, provider.ChatRequest, provider.StreamFunc) (*provider.ChatResponse, error) {
+	return &provider.ChatResponse{}, nil
+}
+func (stubProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
+func (stubProvider) Ping(context.Context) (string, error)                     { return "ok", nil }

@@ -10,12 +10,21 @@ import (
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
+// tempHome points the dotdir at a temp directory: no test may read or
+// write the real ~/.be-code, whatever a missing stub might fall back to.
+func tempHome(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir()) // windows
+}
+
 // The session picker is the path that used to fork a live session: picking
 // a row whose code is already live must hand this terminal over to that
 // session's host instead of loading its file into a second program. The
 // switch goes out as a tea.Cmd — calling the host from inside Update would
 // deadlock the program (see /detach).
 func TestSessionPickerMarksLiveRowsAndSwitches(t *testing.T) {
+	tempHome(t)
 	m := twoClients(t)
 	var switched []string
 	m.switchClient = func(id int, code string) { switched = append(switched, fmt.Sprint(id, ":", code)) }
@@ -62,6 +71,7 @@ func TestSessionPickerMarksLiveRowsAndSwitches(t *testing.T) {
 // An in-process TUI (--no-host) has no host to switch through, so it says
 // how to join the live session by hand and loads nothing.
 func TestInProcessResumeOfALiveCodePrintsInsteadOfLoading(t *testing.T) {
+	tempHome(t)
 	m := newTestModel(t)
 	m.liveCodes = func() map[string]bool { return map[string]bool{"ABC123": true} }
 	m.loadSession = func(id string) (*store.Session, error) {
@@ -80,6 +90,7 @@ func TestInProcessResumeOfALiveCodePrintsInsteadOfLoading(t *testing.T) {
 // The host's own session is live in the records by definition; re-picking it
 // must not switch the terminal to itself.
 func TestResumingTheSessionThisProgramAlreadyRunsIsANoSwitch(t *testing.T) {
+	tempHome(t)
 	m := twoClients(t)
 	var switched int
 	m.switchClient = func(id int, code string) { switched++ }
@@ -100,14 +111,29 @@ func TestResumingTheSessionThisProgramAlreadyRunsIsANoSwitch(t *testing.T) {
 // rather than lingering; one with turns, or with a client left, keeps
 // running.
 func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
+	tempHome(t)
+	// The switch emptied the roster: nothing left to render for.
 	m := twoClients(t)
+	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
+	m.switchPending = true
+	if cmd := m.updateClients(clientsMsg{}); cmd == nil {
+		t.Fatal("an empty fresh host must quit after a switch")
+	}
+
+	// A client left behind keeps the host running, and forgets the switch:
+	// that client was told the session is still running, so its own later
+	// detach must not quit it.
+	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
 	if cmd := m.updateClients(clientsMsg{{ID: 1, Label: "desk", UTF8: true}}); cmd != nil {
 		t.Fatal("a host with a client left must keep running")
 	}
-	if cmd := m.updateClients(clientsMsg{}); cmd == nil {
-		t.Fatal("an empty fresh host must quit after a switch")
+	if m.switchPending {
+		t.Fatal("a non-empty roster must clear the pending switch")
+	}
+	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+		t.Fatal("the remaining client detaching later must not quit the session")
 	}
 
 	// With turns recorded, the session outlives its terminals.
@@ -139,6 +165,7 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	// A client arriving cancels the pending switch.
 	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
+	m.clients = nil
 	m.switchPending = true
 	m.updateClients(clientsMsg{{ID: 3, Label: "new", UTF8: true}})
 	if m.switchPending {

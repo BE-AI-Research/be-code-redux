@@ -124,12 +124,16 @@ func (m *Model) updateClients(msg clientsMsg) tea.Cmd {
 			m.ascii = true
 		}
 	}
+	if len(m.clients) > 0 {
+		// Someone is still watching, so the switch that set this flag did
+		// not empty the session. Clearing it here, not only on an attach,
+		// keeps a later ordinary detach from quitting a host whose client
+		// was told it is still running.
+		m.switchPending = false
+	}
 	for _, c := range m.clients {
 		if !hasClient(prev, c.ID) {
 			m.appendLine(stDim.Render("attached: " + c.Label))
-			// Someone is watching after all: this host stays up whatever a
-			// switch was about to leave behind.
-			m.switchPending = false
 		}
 	}
 	for _, c := range prev {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -205,12 +206,23 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 // ask for a second session on a workspace that already has one.
 func decideStart(dir, workspace, resume string, fresh bool) (*live.Record, string) {
 	if resume != "" {
+		// The live registry first, and by the code as typed: a host's
+		// session exists in its memory from the moment it starts, but the
+		// file only appears on the first autosave — so a live session with
+		// no turns yet is not loadable from the store, and going through it
+		// would turn "join the session I can see running" into "no such
+		// session".
+		if rec := live.LiveCode(dir, strings.ToUpper(strings.TrimSpace(resume))); rec != nil {
+			return rec, "joining live session " + rec.Code
+		}
 		s, err := store.Load(resume)
 		if err != nil {
 			// Not a session we can resolve: let the ordinary --resume path
 			// report it.
 			return nil, ""
 		}
+		// A saved session resumed by id (or "last") may still be live under
+		// its code.
 		if rec := live.LiveCode(dir, s.ResumeCode()); rec != nil {
 			return rec, "joining live session " + rec.Code
 		}

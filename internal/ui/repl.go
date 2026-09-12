@@ -436,7 +436,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Cfg.MaxRepairs, r.Cfg.CompatToolCalls, r.Cfg.ApproveFileWrites, r.Cfg.AutoApproveShell)
 	case "/clear":
 		r.Agent.History.Messages = nil
-		r.Agent.Session = store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root)
+		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
 	case "/undo":
 		restored, err := r.Agent.Undo()
