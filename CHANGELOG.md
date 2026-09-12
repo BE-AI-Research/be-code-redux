@@ -1,21 +1,27 @@
 # BE-Code Changelog
 
-## v0.4.4 — 2026-09-11 — editable message queue, colour themes
+## v0.4.5 — 2026-09-11 — terminal window colours, python verification fix
 
+- The ten named themes also recolour the terminal window itself (OSC 11 for
+  the background, OSC 10 for the foreground on light themes) on terminals
+  that support it, and restore the terminal's own colours on exit or when
+  switching to dark/light/mono. `theme_terminal_colors: false` disables it;
+  plain mode never sends it.
 - Python verification uses the workspace virtualenv's interpreter
   (`.venv/bin/python`, `venv/…`, Windows `Scripts\python.exe`) when present,
   so the project's own pytest is found. A missing pytest module or "no tests
   collected" (exit 5) is now reported as `[SKIP]` with the reason instead of
   a failure the model was asked to repair.
 
+
+## v0.4.4 — 2026-09-11 — editable message queue, colour themes
+
 - Ten colour themes join dark, light and mono: dracula, nord, gruvbox,
   monokai, one-dark, solarized-dark, solarized-light, tokyo-night,
   catppuccin (Mocha) and github-light. `/theme` opens a picker (also under
   /menu › Settings › Theme); `/theme <name>` sets one directly. The choice
   applies immediately and is saved to config. Hex palettes render as true
-  colour where supported and degrade to 256 colours otherwise. The named
-  themes also recolour the terminal window (OSC 11/10), restored on exit;
-  `theme_terminal_colors: false` disables that.
+  colour where supported and degrade to 256 colours otherwise.
 
 - Change your mind about queued messages: while the agent works, press Up on
   an empty input (or Ctrl+Q) to open the queue popup. Enter pulls the
