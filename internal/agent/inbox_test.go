@@ -65,3 +65,19 @@ func TestQueuedMessageLeftoverAfterRun(t *testing.T) {
 		t.Fatal("drain did not empty the inbox")
 	}
 }
+
+// Queued messages remember which terminal typed them, so a shared session
+// can show each client only its own queue. Enqueue keeps meaning "from the
+// local terminal" (client 0), and Peek still yields plain texts in order.
+func TestEnqueueFromRecordsSender(t *testing.T) {
+	a := &Agent{}
+	a.Enqueue("plain")
+	a.EnqueueFrom("from two", 2)
+	items := a.Items()
+	if len(items) != 2 || items[0].From != 0 || items[1].From != 2 || items[1].Text != "from two" {
+		t.Fatalf("%+v", items)
+	}
+	if got := a.Peek(); len(got) != 2 || got[1] != "from two" {
+		t.Fatalf("Peek must still return texts in order: %v", got)
+	}
+}
