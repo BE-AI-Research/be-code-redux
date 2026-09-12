@@ -86,6 +86,14 @@ take an argument), Tab fills, Esc keeps what you typed. `/menu` opens a full-scr
 grouped menu with a status block (provider, model, profile, window, context usage,
 session total).
 
+## Themes
+
+Thirteen palettes: `dark` (default), `light`, `mono`, `dracula`, `nord`, `gruvbox`,
+`monokai`, `one-dark`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`
+and `github-light`. `/theme` opens a picker, `/theme nord` sets one directly; the choice
+applies at once and is saved as `theme` in the config. Plain mode uses your terminal's
+own colours, so there `/theme` only records the choice for the TUI.
+
 ## Select and copy
 
 Drag with the mouse over the transcript to select text (Shift-drag uses your
