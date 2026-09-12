@@ -97,7 +97,7 @@ func TestUsageSnapshotUsesLimit(t *testing.T) {
 func TestBusyEnterQueuesMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.mode = modeBusy
-	m.input.SetValue("also add tests")
+	m.inputFor(0).SetValue("also add tests")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.ag.Pending() != 1 {
 		t.Fatalf("pending = %d, want 1", m.ag.Pending())

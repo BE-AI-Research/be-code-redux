@@ -28,6 +28,11 @@ type Session struct {
 	Model     string             `json:"model"`
 	Workspace string             `json:"workspace"`
 	Messages  []provider.Message `json:"messages"`
+	// HostPID is the pid of the program that last saved this session. A
+	// live process here means the file has an owner: another program must
+	// not write over it (see the save guard in internal/agent). Zero, or a
+	// pid that is gone, means the file is free.
+	HostPID int `json:"host_pid,omitempty"`
 	// Handoff is a compact briefing written when the session ends: task,
 	// user-stated requirements, decisions, files changed, outstanding work.
 	// It is injected into the system prompt on resume.

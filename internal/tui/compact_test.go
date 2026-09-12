@@ -72,14 +72,14 @@ func TestCompactPopupDescRespectsLayoutOverride(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 56, Height: 18})
 
 	m.cfg.Layout = "full"
-	m.openPalette("")
+	m.openPalette("", 0)
 	v := m.View()
 	if !strings.Contains(v, "command reference") {
 		t.Fatalf("layout=full must show palette descriptions even under 60 columns:\n%s", v)
 	}
 
 	m.cfg.Layout = "auto"
-	m.openPalette("")
+	m.openPalette("", 0)
 	v = m.View()
 	if strings.Contains(v, "command reference") {
 		t.Fatalf("layout=auto must omit palette descriptions under 60 columns:\n%s", v)

@@ -101,14 +101,19 @@ type Model struct {
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
 
-	vp       viewport.Model
-	input    textarea.Model
-	spin     spinner.Model
-	mode     mode
-	width    int
-	height   int
-	ready    bool
-	quitHint bool
+	vp     viewport.Model
+	inputs map[int]*textarea.Model // one input line per client; 0 is the local terminal
+	spin   spinner.Model
+	mode   mode
+	width  int
+	height int
+	ready  bool
+	// quitHint remembers, per terminal, that this client's last key was a
+	// Ctrl+C on an empty input: the second one quits. It is per client
+	// because the confirmation belongs to the person who pressed it —
+	// otherwise A's Ctrl+C plus B's unrelated Ctrl+C would end a session
+	// neither of them asked to end.
+	quitHint map[int]bool
 	// ideAnnounced keeps the editor-bridge line to one appearance.
 	ideAnnounced bool
 
@@ -138,7 +143,23 @@ type Model struct {
 	clipboardWrite func(string) error
 	clipboardRead  func() (string, error)
 
-	queueCursor int // highlighted row in the queue popup
+	queueCursor  int // highlighted row in the queue popup
+	queueOwner   int // client whose queue the popup is showing
+	paletteOwner int // client that opened the "/" palette
+	menuOwner    int // client that opened /menu or the right-click menu
+	pickerOwner  int // client a picked row acts for (see handlePickerKey)
+
+	// Joining a live session instead of forking it (see resumeFrom):
+	// liveCodes reports which session codes have a host running somewhere,
+	// loadSession reads a saved session, and switchClient (served only,
+	// host.Switch) hands one terminal over to another session's host. All
+	// three are fields so tests can stand in for the filesystem and host.
+	liveCodes    func() map[string]bool
+	loadSession  func(id string) (*store.Session, error)
+	switchClient func(id int, code string)
+	// switchPending is set between asking the host to switch a terminal and
+	// the roster that shows whether anyone is left (see updateClients).
+	switchPending bool
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
 
@@ -147,32 +168,27 @@ type Model struct {
 	host    *live.Host
 	served  bool
 	clients []live.ClientInfo
-	// detachHolder is host.DetachHolder when served, nil in-process. It must
-	// never be called from inside Update: it notifies the host's callbacks,
-	// which p.Send into the very channel this goroutine is receiving from
-	// (see /detach, and the warning on live.Host.recompute). /detach hands it
-	// to Bubble Tea as a tea.Cmd, which runs on its own goroutine.
-	detachHolder func()
-	ascii        bool      // some attached client cannot show UTF-8 glyphs
-	idleSince    time.Time // last moment the session had a client or a run
+	// detachClient is host.Detach when served, nil in-process: it drops one
+	// attached terminal. It must never be called from inside Update: it
+	// notifies the host's callbacks, which p.Send into the very channel this
+	// goroutine is receiving from (see /detach, and the warning on
+	// live.Host.recompute). /detach hands it to Bubble Tea as a tea.Cmd,
+	// which runs on its own goroutine.
+	detachClient func(id int)
+	// dropKeyClient is the key pump's Drop when served: it retires a
+	// departed client's escape-sequence parser.
+	dropKeyClient func(id int)
+	// setOverlay is host.SetOverlay when served, nil in-process: it publishes
+	// one client's private input rows to the host so they ride on top of the
+	// next shared frame that client receives. See overlayFor/publishOverlay
+	// in served.go.
+	setOverlay func(id int, s string)
+	ascii      bool      // some attached client cannot show UTF-8 glyphs
+	idleSince  time.Time // last moment the session had a client or a run
 }
 
 // New builds the TUI model.
 func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
-	ta := textarea.New()
-	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
-	ta.SetHeight(3)
-	ta.SetPromptFunc(5, func(lineIdx int) string {
-		if lineIdx == 0 {
-			return "(>): "
-		}
-		return "     "
-	})
-	ta.CharLimit = 0
-	ta.ShowLineNumbers = false
-	ta.Focus()
-	ta.KeyMap.InsertNewline.SetKeys("ctrl+j")
-
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 	sp.Style = stAccent
@@ -180,7 +196,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 	SetTheme(cfg.Theme)
 	m := &Model{
 		cfg: cfg, ag: ag, prov: prov,
-		input: ta, spin: sp,
+		spin:     sp,
 		histFile: loadInputHistory(ui.HistoryFile()),
 		custom:   commands.Load(ag.Tools.Root),
 		richText: cfg.Theme != "mono",
@@ -188,6 +204,9 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 		clipboardWrite: writeClipboard,
 		clipboardRead:  readClipboard,
 		termWrite:      writeTerminal,
+
+		liveCodes:   liveSessionCodes,
+		loadSession: store.Load,
 	}
 	ag.Tools.Approve = m.approveFromAgent
 	ag.Events = agent.Events{
@@ -213,6 +232,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 		}(),
 	}
 	ag.Tools.OnStatus = func(s string) { m.send(statusMsg(s)) }
+	m.inputFor(0)               // the local terminal's input line; sized by the first layout()
 	m.usage = m.usageSnapshot() // pre-run, single-threaded: safe
 	return m
 }
@@ -277,7 +297,67 @@ func (m *Model) pingCmd() tea.Cmd {
 	}
 }
 
+// Update dispatches msg, then publishes overlays for whatever it changed.
+// A mode transition that hides the input row (a full-screen modal —
+// approval, plan, picker/menu — taking over the frame; see overlayVisible)
+// clears every roster client's cached overlay at the host, not just
+// whoever's key triggered it: Host.fanout.Write unconditionally re-appends
+// a client's last overlay after every frame it writes (so an ordinary full
+// repaint never erases a draft), and without clearing it first that stale
+// draft would keep getting stamped, at its old input-row coordinates, over
+// every render of the modal for as long as it stays open. The reverse
+// transition (the modal closing back to a mode that renders the row)
+// republishes the real rows for the whole roster the same way. Either
+// transition can be driven by a key (approval y/n, plan y/n, picker/menu
+// escape) or by a plain message (approvalMsg opens it; pickerUpdate's
+// load-error path closes it), so this lives here rather than at each
+// individual call site. Otherwise, a keystroke republishes only its
+// sender — update's own cases (WindowSizeMsg, clientsMsg, and the
+// modeInput tail loop) already republish everyone for their own triggers.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	wasVisible := m.overlayVisible()
+	model, cmd := m.update(msg)
+	nowVisible := m.overlayVisible()
+	switch t := msg.(type) {
+	case tea.KeyMsg:
+		m.publishAfterKey(wasVisible, nowVisible, 0)
+	case live.ClientKeyMsg:
+		m.publishAfterKey(wasVisible, nowVisible, t.Client)
+	default:
+		m.publishVisibilityChange(wasVisible, nowVisible)
+	}
+	return model, cmd
+}
+
+// publishAfterKey publishes the right set of overlays after a keystroke:
+// clear/republish the whole roster if the key just flipped overlayVisible
+// (see publishVisibilityChange), or just the sender otherwise.
+func (m *Model) publishAfterKey(wasVisible, nowVisible bool, client int) {
+	if m.publishVisibilityChange(wasVisible, nowVisible) {
+		return
+	}
+	m.publishOverlay(client)
+}
+
+// publishVisibilityChange clears every roster client's overlay if
+// overlayVisible just went true→false (a modal opened), or republishes the
+// real rows if it just went false→true (a modal closed). Reports whether
+// either happened, so callers know not to do anything more granular of
+// their own for this message.
+func (m *Model) publishVisibilityChange(wasVisible, nowVisible bool) bool {
+	switch {
+	case wasVisible && !nowVisible:
+		m.clearAllOverlays()
+		return true
+	case !wasVisible && nowVisible:
+		m.publishAllOverlays()
+		return true
+	}
+	return false
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	enteredMode := m.mode
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -292,6 +372,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
 		}
 		m.refreshTranscript()
+		// A resize moves every input row's absolute position; republish for
+		// the whole roster, not just whoever happens to type next.
+		m.publishAllOverlays()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -359,8 +442,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalVP.SetContent(ui.ColorizeDiff(msg.detail, true))
 	case turnDoneMsg:
 		if m.mode == modeQueue {
-			m.ag.Hold(false)
-			m.mode = modeBusy
+			m.closeQueue()
 		}
 		m.flushStreaming()
 		if msg.err != nil {
@@ -393,18 +475,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeInput
 		}
 		m.statusNote = ""
-		m.input.Focus()
+		m.focusInputs()
 		// Anything queued during the run that the model never got to see
-		// becomes the next turn.
-		if left := m.ag.DrainInbox(); len(left) > 0 {
-			return m.startTurn(strings.Join(left, "\n"))
+		// becomes the next turn — as one request, but echoed line by line
+		// under the terminal each message came from.
+		if left := m.ag.DrainItems(); len(left) > 0 {
+			texts := make([]string, 0, len(left))
+			for _, it := range left {
+				m.appendLine(stUser.Render(m.userPrefix(it.From)) + it.Text)
+				texts = append(texts, it.Text)
+			}
+			return m.startTurn(strings.Join(texts, "\n"))
 		}
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
 			m.appendLine(stErr.Render("plan failed: ") + msg.err.Error())
 			m.mode = modeInput
-			m.input.Focus()
+			m.focusInputs()
 			break
 		}
 		msgCopy := msg
@@ -415,21 +503,55 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageMsg:
 		m.usage = msg
 	case clientsMsg:
-		m.updateClients(msg)
+		cmds = append(cmds, m.updateClients(msg))
+		// A roster change can drop or add textareas; republish for whoever
+		// remains (updateClients walks m.clients, so this never resurrects a
+		// dropped client's textarea).
+		m.publishAllOverlays()
 	case idleTickMsg:
 		return m.updateIdleTick(msg)
+	case hostQuitMsg:
+		m.clearAllOverlays() // see the /quit path
+		return m, tea.Quit
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		// Overlay publishing for the sender (or the roster, if this key
+		// closed a modal) happens in Update, the exported wrapper around
+		// this method — see publishAfterKey.
+		return m.handleKey(msg, 0)
+	case live.ClientKeyMsg:
+		return m.handleKey(msg.Key, msg.Client)
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		return m.handleMouse(msg, 0)
+	case live.ClientMouseMsg:
+		return m.handleMouse(msg.Mouse, msg.Client)
 	}
 
 	if m.mode == modeInput {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		cmds = append(cmds, cmd)
+		// Cursor blinks and the like are not tagged with a sender: every
+		// client's input line gets them.
+		for _, ta := range m.inputs {
+			updated, cmd := ta.Update(msg)
+			*ta = updated
+			cmds = append(cmds, cmd)
+		}
+		// A non-key update can still change a textarea's rendered view (e.g.
+		// a paste message that reached here rather than through handleKey);
+		// republish so no client is left showing a stale draft. Cursors are
+		// static in served mode (see newInputArea), so a genuine blink never
+		// changes the view and this is not a per-blink publish. WindowSizeMsg
+		// and clientsMsg already republished above, in their own cases; a
+		// message that just switched the mode to modeInput from a hidden one
+		// is Update's job (see publishAfterKey and publishVisibilityChange),
+		// not this one, to avoid publishing the whole roster twice.
+		switch msg.(type) {
+		case tea.WindowSizeMsg, clientsMsg:
+		default:
+			if m.served && enteredMode == modeInput {
+				m.publishAllOverlays()
+			}
+		}
 	}
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
@@ -437,27 +559,113 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleKey routes one keystroke, tagged with the client that typed it (0
+// is the local terminal). Drafts, the palette and the queue popup belong to
+// their sender; modals that speak for the whole session (approvals, plans,
+// pickers) stay shared.
+func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeApproval:
 		return m.handleApprovalKey(k)
 	case modePicker:
-		return m.handlePickerKey(k)
+		return m.handlePickerKey(k, from)
 	case modePlan:
 		return m.handlePlanKey(k)
 	case modePalette:
-		return m.handlePaletteKey(k)
+		return m.handlePaletteKey(k, from)
 	case modeMenu:
-		return m.handleMenuKey(k)
+		return m.handleMenuKey(k, from)
 	case modeContextMenu:
-		return m.handleContextMenuKey(k)
+		return m.handleContextMenuKey(k, from)
 	case modeQueue:
-		return m.handleQueueKey(k)
+		return m.handleQueueKey(k, from)
 	case modeBusy:
-		return m.handleBusyKey(k)
+		return m.handleBusyKey(k, from)
 	}
+	return m.handleInputKey(k, from)
+}
 
-	// modeInput
+// handleGuestKey routes a key from a client that is *not* the owner of the
+// popup currently on screen (the palette, /menu, the right-click menu, the
+// queue popup — the ones that belong to whoever opened them).
+//
+// Dropping those keys, as this used to, deadens every other terminal's
+// keyboard for as long as someone else browses a menu: not only their Esc
+// and Ctrl+C but every ordinary letter they type. Instead the key goes to
+// that client's own input line exactly as it would in the mode underneath —
+// busy while a run is in progress, otherwise input — so they keep typing
+// into their own draft (their overlay shows it) and their Esc/Ctrl+C acts
+// on their own draft or selection, never on the owner's popup.
+//
+// The owner's popup stays open regardless: there is one m.mode and one
+// m.picker for the whole session, so a guest's key is not allowed to change
+// either. A guest key that would have opened a popup of its own (its own
+// palette, its own queue) is therefore undone here rather than fighting for
+// the screen — everything else it did (editing, submitting, queueing) has
+// already happened. A turn a guest starts this way really does start; only
+// the mode switch that would have hidden the owner's popup is rolled back,
+// and the owner's own Esc lands them in m.idleMode(), which is modeBusy
+// while that turn runs.
+func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	// Everything the popup is made of, put back exactly as it was once the
+	// guest's key has had its effect on the guest's own draft. A guest key
+	// that would have opened a popup of its own (its own palette, its own
+	// queue) is undone this way rather than fighting for the one m.mode,
+	// m.picker and owner the session has; everything else it did —
+	// editing, submitting, queueing, cancelling a run — has already
+	// happened and stands. A turn a guest starts really does start: only
+	// the mode switch that would have hidden the owner's popup is rolled
+	// back, and the owner's own Esc then lands in m.idleMode(), which is
+	// modeBusy while that turn runs.
+	// A slash command, though, is refused outright while the popup is up:
+	// its work arrives later as a message (pickerItemsMsg, planReadyMsg,
+	// turnDoneMsg) that would rewrite or close whatever popup is open by
+	// then — the owner's. Busy mode already refuses commands.
+	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
+		m.appendLine(stDim.Render("commands wait until the open popup closes; plain text still sends"))
+		return m, nil
+	}
+	mode, pick, prev := m.mode, m.picker, m.prevMode
+	pal, menu, queue := m.paletteOwner, m.menuOwner, m.queueOwner
+	cursor := m.queueCursor
+	held := m.ag.Held()
+	var model tea.Model
+	var cmd tea.Cmd
+	if m.running {
+		model, cmd = m.handleBusyKey(k, from)
+	} else {
+		model, cmd = m.handleInputKey(k, from)
+	}
+	m.mode, m.picker, m.prevMode = mode, pick, prev
+	m.paletteOwner, m.menuOwner, m.queueOwner = pal, menu, queue
+	m.queueCursor = cursor
+	if m.ag.Held() != held {
+		// openQueue/closeQueue ran for a popup that is not going to be
+		// shown: the owner's hold is what counts.
+		m.ag.Hold(held)
+	}
+	return model, cmd
+}
+
+// setQuitHint arms one terminal's "press Ctrl+C again to quit", and
+// clearQuitHint disarms it. Only the sender's own hint moves: a Ctrl+C from
+// another terminal is about that terminal's draft, not this one's.
+func (m *Model) setQuitHint(from int) {
+	if m.quitHint == nil {
+		m.quitHint = map[int]bool{}
+	}
+	m.quitHint[from] = true
+}
+
+func (m *Model) clearQuitHint(from int) {
+	delete(m.quitHint, from)
+}
+
+// handleInputKey is modeInput: the key edits, submits or acts on the
+// sender's own draft. Reached both from handleKey and, for a client that
+// does not own the popup currently on screen, from handleGuestKey.
+func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC:
 		if m.sel != nil {
@@ -465,31 +673,32 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearSelection()
 			return m, nil
 		}
-		if m.input.Value() != "" {
-			m.input.Reset()
-			m.quitHint = false
+		if in.Value() != "" {
+			in.Reset()
+			m.clearQuitHint(from)
 			return m, nil
 		}
-		if m.quitHint {
+		if m.quitHint[from] {
+			m.clearAllOverlays() // see the /quit path: no draft may follow the teardown frame
 			return m, tea.Quit
 		}
-		m.quitHint = true
+		m.setQuitHint(from)
 		m.appendLine(stDim.Render("press Ctrl+C again to quit"))
 		return m, nil
 	case tea.KeyEnter:
-		text := strings.TrimSpace(m.input.Value())
+		text := strings.TrimSpace(in.Value())
 		if text == "" {
 			return m, nil
 		}
-		m.quitHint = false
-		m.histFile.add(text)
-		m.input.Reset()
+		m.clearQuitHint(from)
+		m.histFile.add(text, from)
+		in.Reset()
 		if strings.HasPrefix(text, "/") {
-			return m.slashCommand(text)
+			return m.slashCommand(text, from)
 		}
-		return m.startTurn(text)
+		return m.startTurnFrom(text, from)
 	case tea.KeyTab:
-		m.completeSlash()
+		m.completeSlash(from)
 		return m, nil
 	case tea.KeyEsc:
 		if m.sel != nil {
@@ -497,22 +706,22 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.KeyRunes:
-		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(m.input.Value()) == "" {
-			return m.openPalette("")
+		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(in.Value()) == "" {
+			return m.openPalette("", from)
 		}
 	case tea.KeyUp:
-		if m.input.LineCount() <= 1 {
-			if prev, ok := m.histFile.prev(); ok {
-				m.input.SetValue(prev)
-				m.input.CursorEnd()
+		if in.LineCount() <= 1 {
+			if prev, ok := m.histFile.prev(from); ok {
+				in.SetValue(prev)
+				in.CursorEnd()
 			}
 			return m, nil
 		}
 	case tea.KeyDown:
-		if m.input.LineCount() <= 1 {
-			next, _ := m.histFile.next()
-			m.input.SetValue(next)
-			m.input.CursorEnd()
+		if in.LineCount() <= 1 {
+			next, _ := m.histFile.next(from)
+			in.SetValue(next)
+			in.CursorEnd()
 			return m, nil
 		}
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -520,8 +729,8 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp, cmd = m.vp.Update(k)
 		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(k)
+	updated, cmd := in.Update(k)
+	*in = updated
 	return m, cmd
 }
 
@@ -567,13 +776,25 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	m.mode = modeBusy
 }
 
-// startTurn launches the agent in a goroutine.
+// startTurnFrom echoes the request under its sender's prefix and launches
+// the agent.
+func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
+	m.appendLine(stUser.Render(m.userPrefix(from)) + text)
+	return m.startTurn(text)
+}
+
+// startTurn launches the agent in a goroutine. The caller has already
+// echoed the request into the transcript.
 func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
-	m.appendLine(stUser.Render("you> ") + text)
 	m.mode = modeBusy
 	m.running = true
 	m.statusNote = "thinking"
-	m.input.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+	for _, ta := range m.inputs {
+		ta.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+	}
+	// The placeholder just changed for every client, not only the one whose
+	// key started this turn.
+	m.publishAllOverlays()
 	root := m.rootCtx
 	if root == nil {
 		root = context.Background()
@@ -591,7 +812,8 @@ func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
 // handleBusyKey: while the agent works the input stays live. Enter queues
 // the text for delivery at the model's next call; Esc/Ctrl-C cancels the
 // run and discards the queue; PgUp/PgDn scroll; everything else edits.
-func (m *Model) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
 		if k.Type == tea.KeyCtrlC && m.sel != nil {
@@ -607,32 +829,36 @@ func (m *Model) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyEnter:
-		text := strings.TrimSpace(m.input.Value())
+		text := strings.TrimSpace(in.Value())
 		if text == "" {
 			return m, nil
 		}
-		m.input.Reset()
+		in.Reset()
 		if strings.HasPrefix(text, "/") {
 			m.appendLine(stDim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
 			return m, nil
 		}
-		m.histFile.add(text)
-		m.ag.Enqueue(text)
-		m.appendLine(stDim.Render("queued (delivered at the next step)> ") + text)
+		m.histFile.add(text, from)
+		m.ag.EnqueueFrom(text, from)
+		if len(m.clients) > 1 {
+			m.appendLine(stDim.Render("queued> ") + m.userPrefix(from) + text)
+		} else {
+			m.appendLine(stDim.Render("queued (delivered at the next step)> ") + text)
+		}
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(k)
 		return m, cmd
 	case tea.KeyUp:
-		if strings.TrimSpace(m.input.Value()) == "" {
-			return m.openQueue()
+		if strings.TrimSpace(in.Value()) == "" {
+			return m.openQueue(from)
 		}
 	case tea.KeyCtrlQ:
-		return m.openQueue()
+		return m.openQueue(from)
 	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(k)
+	updated, cmd := in.Update(k)
+	*in = updated
 	return m, cmd
 }
 
@@ -660,7 +886,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pending = nil
 		m.appendLine(stWarn.Render("plan discarded"))
 		m.mode = modeInput
-		m.input.Focus()
+		m.focusInputs()
 	default:
 		var cmd tea.Cmd
 		m.modalVP, cmd = m.modalVP.Update(k)
@@ -720,32 +946,28 @@ func (m *Model) headerHeight() int {
 }
 
 func (m *Model) layout() {
-	inputH := 3
 	bottomH := 1
-	vpH := m.height - m.headerHeight() - inputH - bottomH - 1
+	vpH := m.height - m.headerHeight() - m.inputRows() - bottomH - 1
 	if vpH < 3 {
 		vpH = 3
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	ww := wheelWidth
-	if m.compact() {
-		ww = 5 // glyph + "NN%", no fixed-width padding
-		m.input.SetPromptFunc(2, func(i int) string {
-			if i == 0 {
-				return "> "
-			}
-			return "  "
-		})
-	} else {
-		m.input.SetPromptFunc(5, func(i int) string {
-			if i == 0 {
-				return "(>): "
-			}
-			return "     "
-		})
+	for _, ta := range m.inputs {
+		setInputPrompt(ta, m.compact())
+		ta.SetWidth(m.inputWidth())
+		ta.SetHeight(m.inputRows())
 	}
-	m.input.SetWidth(m.width - ww - 2)
+}
+
+// focusInputs refocuses every client's input line after a modal closes, and
+// republishes every client's overlay since a focus change can alter what a
+// textarea renders.
+func (m *Model) focusInputs() {
+	for _, ta := range m.inputs {
+		ta.Focus()
+	}
+	m.publishAllOverlays()
 }
 
 func (m *Model) modalHeight() int {
@@ -815,7 +1037,7 @@ func (m *Model) View() string {
 	}
 	b.WriteString(transcript)
 	b.WriteString("\n")
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView()))
+	b.WriteString(m.inputRow())
 	b.WriteString("\n")
 	b.WriteString(m.bottomLine())
 	return b.String()
@@ -856,15 +1078,11 @@ func (m *Model) bottomLine() string {
 	if m.ag.IDEName != "" {
 		line += stAccent.Render(" " + m.ideMarker())
 	}
-	if len(m.clients) > 1 {
-		holder := "?"
-		for _, c := range m.clients {
-			if c.Holder {
-				holder = c.Label
-			}
+	if n := len(m.clients); n > 1 {
+		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
+		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
+			line += stDim.Render(" · " + labels)
 		}
-		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients))) +
-			stDim.Render(" · input: "+holder+" · Ctrl+] d detach · Ctrl+] t take over")
 	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -901,16 +1119,17 @@ func (m *Model) viewApproval() string {
 
 // ---- slash commands --------------------------------------------------------
 
-func (m *Model) completeSlash() {
-	v := m.input.Value()
+func (m *Model) completeSlash(from int) {
+	in := m.inputFor(from)
+	v := in.Value()
 
 	// @path completion on the last token.
 	if i := strings.LastIndex(v, "@"); i >= 0 && !strings.ContainsAny(v[i:], " \n") {
 		prefix := v[i+1:]
 		matches := agent.CompleteMention(m.ag.Tools.Root, prefix)
 		if len(matches) == 1 {
-			m.input.SetValue(v[:i+1] + matches[0])
-			m.input.CursorEnd()
+			in.SetValue(v[:i+1] + matches[0])
+			in.CursorEnd()
 		} else if len(matches) > 1 {
 			m.appendLine(stDim.Render("@" + strings.Join(matches, "  @")))
 		}
@@ -931,20 +1150,27 @@ func (m *Model) completeSlash() {
 		}
 	}
 	if len(matches) == 1 {
-		m.input.SetValue(matches[0] + " ")
-		m.input.CursorEnd()
+		in.SetValue(matches[0] + " ")
+		in.CursorEnd()
 	} else if len(matches) > 1 {
 		m.appendLine(stDim.Render(strings.Join(matches, "  ")))
 	}
 }
 
-func (m *Model) slashCommand(text string) (tea.Model, tea.Cmd) {
+// slashCommand runs a command typed by client from (0 is the local
+// terminal): commands that fill an input line or act on a terminal need to
+// know whose.
+func (m *Model) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
+		// Clear the overlays before the quit, not only after the program
+		// returns: Bubble Tea's own teardown flushes one last frame, and
+		// the host would re-append every client's draft to it.
+		m.clearAllOverlays()
 		return m, tea.Quit
 	case "/menu":
-		return m.openMenu()
+		return m.openMenu(from)
 	case "/theme":
 		if len(fields) > 1 {
 			return m.applyTheme(strings.ToLower(fields[1]))
@@ -968,7 +1194,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.appendLine(stDim.Render(help))
 	case "/clear":
 		m.ag.History.Messages = nil
-		m.ag.Session = store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root)
+		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
 		m.appendLine(stOK.Render("history cleared; new session started"))
 	case "/tools":
 		m.appendLine(stDim.Render(strings.Join(m.ag.Tools.Names(), " · ")))
@@ -1014,7 +1240,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.send(turnDoneMsg{})
 		}()
 	case "/init":
-		return m.startTurn(agent.InitPrompt)
+		return m.startTurnFrom(agent.InitPrompt, from)
 	case "/compact":
 		m.mode = modeBusy
 		m.statusNote = "compacting"
@@ -1047,7 +1273,12 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.appendLine(stUser.Render("plan> ") + req)
 		m.mode = modeBusy
 		m.statusNote = "planning (read-only)"
-		m.input.Blur()
+		for _, ta := range m.inputs {
+			ta.Blur()
+		}
+		// Blurring changed every client's textarea rendering, not only the
+		// one that typed /plan.
+		m.publishAllOverlays()
 		go func() {
 			plan, err := m.ag.Plan(m.rootCtx, req)
 			m.send(m.usageSnapshot())
@@ -1078,15 +1309,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			return m, nil
 		}
 		for _, c := range m.clients {
-			mark := "  "
-			if c.Holder {
-				mark = "> "
-			}
-			m.appendLine(stDim.Render(fmt.Sprintf("%s%s  %dx%d", mark, c.Label, c.Cols, c.Rows)))
+			m.appendLine(stDim.Render(fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)))
 		}
 		return m, nil
 	case "/detach":
-		if m.detachHolder == nil {
+		if m.detachClient == nil {
 			m.appendLine(stDim.Render("nothing to detach: not served"))
 			return m, nil
 		}
@@ -1095,17 +1322,17 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// on the goroutine that receives them, so calling the host here would
 		// deadlock the session for good (holding the host's notifyMu, so no
 		// later attach or `sessions kill` could recover it).
-		detach := m.detachHolder
-		return m, func() tea.Msg { detach(); return nil }
+		detach, id := m.detachClient, from
+		return m, func() tea.Msg { detach(id); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
-			return m.resumeSession(fields[1])
+			return m.resumeFrom(fields[1], from)
 		}
-		return m.openSessionPicker()
+		return m.openSessionPicker(from)
 	default:
 		if c, ok := m.custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
-			return m.startTurn(c.Expand(args))
+			return m.startTurnFrom(c.Expand(args), from)
 		}
 		m.appendLine(stErr.Render("unknown command " + fields[0] + " (/help)"))
 	}
@@ -1125,10 +1352,31 @@ func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 	return m, m.pingCmd()
 }
 
-func (m *Model) resumeSession(id string) (tea.Model, tea.Cmd) {
-	s, err := store.Load(id)
+// resumeFrom loads a saved session into this program — unless that session
+// already has a host running somewhere, in which case it is joined, never
+// forked: two programs on one session file are blind to each other's turns
+// and overwrite each other's saves. from is the terminal that asked, which
+// is the one handed over to the live host.
+func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
+	s, err := m.loadSession(id)
 	if err != nil {
 		m.appendLine(stErr.Render(err.Error()))
+		return m, nil
+	}
+	code := s.ResumeCode()
+	// This program's own session is live by definition; resuming it is a
+	// no-op, not a switch to itself.
+	own := m.ag.Session != nil && m.ag.Session.ResumeCode() == code
+	if m.liveCodes()[code] && !own {
+		if m.served && m.switchClient != nil {
+			m.switchPending = true
+			// As a command, not a call: the host notifies its callbacks,
+			// which p.Send into the channel this goroutine receives from
+			// (see /detach).
+			sw, c := m.switchClient, from
+			return m, func() tea.Msg { sw(c, code); return nil }
+		}
+		m.appendLine(stDim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
 		return m, nil
 	}
 	m.ag.Resume(s)

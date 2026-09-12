@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,15 @@ type AttachOptions struct {
 	Raw    func() (restore func(), err error)
 	Size   func() (cols, rows int)
 	UTF8   bool
+	// Joined, when non-nil, is set the moment the host sends this terminal
+	// its first frame of rendered output — the proof that it actually
+	// joined a running session rather than arriving at one already on its
+	// way out. A host in its shutdown window still advertises its record
+	// and still answers on its socket, so a launcher joining at that
+	// instant can be accepted and told "session ended" without ever seeing
+	// the session; cmd's join paths read this to tell that apart from an
+	// ordinary end and start a fresh host instead (see cmd.joinMissed).
+	Joined *atomic.Bool
 }
 
 // ClientLabel describes this terminal for the clients list.
@@ -47,7 +57,7 @@ func DefaultAttachOptions() AttachOptions {
 	fd := int(os.Stdin.Fd())
 	return AttachOptions{
 		Label:  ClientLabel(),
-		Stdin:  os.Stdin,
+		Stdin:  stdinPump,
 		Stdout: os.Stdout,
 		Raw: func() (func(), error) {
 			st, err := term.MakeRaw(uintptr(fd))
@@ -100,10 +110,11 @@ const (
 const ExitAltScreen = "\x1b[?1049l\x1b[?25h"
 
 // ReasonDetached is the host's bye reason when it detached a client rather
-// than the client detaching itself: `/detach` from inside the session, or a
-// takeover elsewhere. The terminal is going back to its shell with the
-// session still running, so the caller reports it the same way as a local
-// Ctrl+] d rather than as a session that stopped (see cmd.attachLive).
+// than the client detaching itself: `/detach` typed in that terminal, or
+// `Detach` called for it from inside the session. The terminal is going
+// back to its shell with the session still running, so the caller reports
+// it the same way as a local Ctrl+] d rather than as a session that stopped
+// (see cmd.attachLive).
 const ReasonDetached = "detached"
 
 // ReasonEnded is Host.Close's reason when the served program has finished
@@ -112,6 +123,19 @@ const ReasonDetached = "detached"
 // the normal screen, so Attach must not clear (or re-exit the alt screen) on
 // its way out.
 const ReasonEnded = "session ended"
+
+// ErrDial wraps every failure to reach a host's socket at all, so a caller
+// can tell a host that is simply not there from a session that refused,
+// ended or broke mid-attach.
+var ErrDial = errors.New("cannot reach the session host")
+
+// SwitchTarget extracts the session code from a "switch:CODE" bye reason.
+func SwitchTarget(reason string) (string, bool) {
+	if strings.HasPrefix(reason, ReasonSwitchPrefix) && len(reason) > len(ReasonSwitchPrefix) {
+		return reason[len(ReasonSwitchPrefix):], true
+	}
+	return "", false
+}
 
 // deadlineReader is implemented by *os.File (a real terminal, since Go
 // 1.23) but not by the in-memory pipes the tests use. When available,
@@ -126,12 +150,82 @@ type deadlineReader interface {
 	SetReadDeadline(t time.Time) error
 }
 
+// ChunkReader is an input source that hands out whole reads on a channel
+// and can be abandoned without a blocked Read outliving the caller. Attach
+// prefers it over plain Read: a blocking terminal read cannot be
+// interrupted (an inherited os.Stdin is not in Go's poller, so its
+// SetReadDeadline is a no-op), which means the stdin goroutine of a
+// previous Attach — a picker switch reattaches in the same terminal —
+// would otherwise stay parked in Read, swallow the first keystrokes typed
+// after the switch, and die on its already-closed connection.
+type ChunkReader interface {
+	Chunks() <-chan []byte
+}
+
+// StdinPump reads one terminal for the life of the process and serves its
+// bytes to successive Attach calls through Chunks. The channel is closed
+// when the underlying reader ends.
+type StdinPump struct {
+	src     io.Reader
+	ch      chan []byte
+	once    sync.Once
+	mu      sync.Mutex // guards pending (Read path only)
+	pending []byte
+}
+
+func NewStdinPump(r io.Reader) *StdinPump {
+	return &StdinPump{src: r, ch: make(chan []byte, 64)}
+}
+
+func (p *StdinPump) Chunks() <-chan []byte {
+	p.once.Do(func() {
+		go func() {
+			defer close(p.ch)
+			buf := make([]byte, 4096)
+			for {
+				n, err := p.src.Read(buf)
+				if n > 0 {
+					p.ch <- append([]byte(nil), buf[:n]...)
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	})
+	return p.ch
+}
+
+// Read satisfies io.Reader for callers that do not use Chunks: it drains
+// the channel one chunk at a time, keeping any remainder for the next call.
+func (p *StdinPump) Read(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pending) == 0 {
+		chunk, ok := <-p.Chunks()
+		if !ok {
+			return 0, io.EOF
+		}
+		p.pending = chunk
+	}
+	n := copy(b, p.pending)
+	p.pending = p.pending[n:]
+	return n, nil
+}
+
+// stdinPump is the process-wide reader DefaultAttachOptions hands out, so
+// every Attach in this process shares one terminal reader.
+var stdinPump = NewStdinPump(os.Stdin)
+
 // Attach connects to a live session and runs until detach, host exit, or
 // ctx cancel. Returns the host's bye reason ("" on a local detach).
 func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error) {
 	conn, err := net.Dial("unix", rec.Socket)
 	if err != nil {
-		return "", fmt.Errorf("live: %w", err)
+		// ErrDial as well as the underlying error: a caller that is joining
+		// rather than attaching on purpose needs to tell "the host's socket
+		// is gone" from every other failure (see AttachOptions.Joined).
+		return "", fmt.Errorf("live: %w: %w", ErrDial, err)
 	}
 	defer conn.Close()
 
@@ -207,7 +301,10 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 				return
 			}
 			switch typ {
-			case FOutput:
+			case FOutput, FOverlay:
+				if typ == FOutput && opt.Joined != nil {
+					opt.Joined.Store(true)
+				}
 				opt.Stdout.Write(p)
 			case FSize:
 				io.WriteString(opt.Stdout, clearScreen)
@@ -224,9 +321,62 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	}()
 
 	// stdin → host, with chords
+	stopStdin := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
 		var chord Chord
+		// handle forwards one read's bytes and reports whether the goroutine
+		// must stop (detach chord, or the connection is gone).
+		handle := func(b []byte) bool {
+			fwd, act := chord.Feed(b, time.Now())
+			// Forward any plain bytes the same read delivered ahead of the
+			// chord (e.g. pasted text ending in Ctrl+] d) before acting on
+			// act, so they reach the program instead of being dropped.
+			if len(fwd) > 0 && !opt.View {
+				if werr := writeFrame(FInput, fwd); werr != nil {
+					select {
+					case result <- "connection closed":
+					default:
+					}
+					return true
+				}
+			}
+			if act == ActionDetach {
+				localDetach.Store(true)
+				writeFrame(FDetach, nil)
+				select {
+				case result <- "":
+				default:
+				}
+				return true
+			}
+			return false
+		}
+		eof := func() {
+			select {
+			case result <- "":
+			default:
+			}
+		}
+		if cr, ok := opt.Stdin.(ChunkReader); ok {
+			// A shared reader: consume until told to stop, so no goroutine
+			// from this Attach can outlive it and steal keys from the next.
+			chunks := cr.Chunks()
+			for {
+				select {
+				case <-stopStdin:
+					return
+				case b, ok := <-chunks:
+					if !ok {
+						eof()
+						return
+					}
+					if handle(b) {
+						return
+					}
+				}
+			}
+		}
 		buf := make([]byte, 4096)
 		for {
 			n, err := opt.Stdin.Read(buf)
@@ -234,43 +384,11 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// read of a stream, per the io.Reader contract); process those
 			// bytes before acting on the error so a detach chord or the
 			// final keystrokes right before EOF are never dropped.
-			if n > 0 {
-				fwd, act := chord.Feed(buf[:n], time.Now())
-				// A takeover is claimed before the bytes that shared the
-				// read are forwarded: those bytes are what the user typed
-				// after Ctrl+] t, and they are only delivered to the
-				// program if this client already holds input.
-				if act == ActionTakeover {
-					writeFrame(FTakeover, nil)
-				}
-				// Forward any plain bytes the same Read delivered ahead of
-				// the chord (e.g. pasted text ending in Ctrl+] d) before
-				// acting on act, so they reach the program instead of
-				// being dropped by an early return below.
-				if len(fwd) > 0 && !opt.View {
-					if werr := writeFrame(FInput, fwd); werr != nil {
-						select {
-						case result <- "connection closed":
-						default:
-						}
-						return
-					}
-				}
-				if act == ActionDetach {
-					localDetach.Store(true)
-					writeFrame(FDetach, nil)
-					select {
-					case result <- "":
-					default:
-					}
-					return
-				}
+			if n > 0 && handle(buf[:n]) {
+				return
 			}
 			if err != nil {
-				select {
-				case result <- "":
-				default:
-				}
+				eof()
 				return
 			}
 		}
@@ -323,6 +441,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	// pending write, as in tests) can't be interrupted and is left to exit
 	// on its own later.
 	conn.Close()
+	close(stopStdin)
 	if d, ok := opt.Stdin.(deadlineReader); ok {
 		d.SetReadDeadline(time.Now())
 	}
@@ -348,7 +467,12 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	// that ended normally is the exception — the host already took this
 	// terminal back to the normal screen and printed the resume line there,
 	// which a clear (or a second alt-screen exit) would wipe.
-	ended = reason == ReasonEnded
+	// A session that ended without ever rendering a frame here never sent
+	// this terminal the alt-screen exit that makes ReasonEnded special (it
+	// wrote it before this attach existed), so this is an ordinary exit: the
+	// alt screen has to be left the normal way or the shell comes back
+	// inside it.
+	ended = reason == ReasonEnded && (opt.Joined == nil || opt.Joined.Load())
 	if !ended {
 		io.WriteString(opt.Stdout, clearScreen)
 	}

@@ -1,6 +1,11 @@
 package cmd
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +16,12 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // testFlags mirrors the root command's persistent flags, so the argument
@@ -27,6 +37,7 @@ func testFlags() *pflag.FlagSet {
 	fs.Bool("ide", false, "")
 	fs.Bool("no-ide", false, "")
 	fs.Bool("no-host", false, "")
+	fs.Bool("new", false, "")
 	fs.String("session-host", "", "")
 	return fs
 }
@@ -175,32 +186,9 @@ func TestSetResumeBindsTheRootFlagVariable(t *testing.T) {
 	}
 }
 
-// The attach-or-new offer must not override an explicit --resume: answering
-// the default "yes" would attach the user to a different session than the one
-// they named.
-func TestOfferAttachRespectsResume(t *testing.T) {
-	live1 := &live.Record{Code: "AAA111"}
-	cases := []struct {
-		name   string
-		rec    *live.Record
-		resume string
-		code   string
-		want   bool
-	}{
-		{"no live session", nil, "", "AAA111", false},
-		{"live session, no resume flag", live1, "", "BBB222", true},
-		{"resume names another session", live1, "old-one", "BBB222", false},
-		{"resume names the live session", live1, "AAA111", "AAA111", true},
-	}
-	for _, c := range cases {
-		if got := offerAttach(c.rec, c.resume, c.code); got != c.want {
-			t.Errorf("%s: offerAttach = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// The offer is made once, for the newest live session serving this workspace,
-// and never for a record whose host is gone (live.List prunes those).
+// newestLiveIn is what an unflagged `be-code` joins: the newest live session
+// serving this workspace, never a record whose host is gone (live.List prunes
+// those).
 func TestNewestLiveInPicksTheNewestAndSkipsDeadHosts(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
@@ -221,6 +209,36 @@ func TestNewestLiveInPicksTheNewestAndSkipsDeadHosts(t *testing.T) {
 	}
 	if r := newestLiveIn(dir, "/nothing-here"); r != nil {
 		t.Fatalf("newestLiveIn for an unknown workspace = %+v, want nil", r)
+	}
+}
+
+// TestNextAttach covers nextAttach's interpretation of every bye reason
+// attachLive's loop can see: a switch to a still-live session hands over the
+// record silently, a switch to a session that is gone (or was never live)
+// ends the attach with an explanatory line, a local/host-initiated detach
+// prints the "still running" line, and any other reason (host close, "session
+// ended" included) is reported verbatim.
+func TestNextAttach(t *testing.T) {
+	dir := t.TempDir()
+	target := live.Record{Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"), Workspace: "/ws", StartedAt: time.Now()}
+	if err := target.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec, msg := nextAttach(dir, "OLD001", "switch:ABC123"); rec == nil || rec.Code != "ABC123" || msg != "" {
+		t.Fatalf("switch to a live target = %+v, %q; want the ABC123 record and no message", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", "switch:GONE99"); rec != nil || msg != "GONE99 ended before you could join it" {
+		t.Fatalf("switch to a dead target = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", ""); rec != nil || msg != "detached from OLD001 (still running); be-code attach OLD001 to return" {
+		t.Fatalf("local detach = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", live.ReasonDetached); rec != nil || msg != "detached from OLD001 (still running); be-code attach OLD001 to return" {
+		t.Fatalf("host detach = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", live.ReasonEnded); rec != nil || msg != "OLD001: session ended" {
+		t.Fatalf("ended = %+v, %q", rec, msg)
 	}
 }
 
@@ -288,4 +306,352 @@ func TestSessionsKillEscalatesAndOnlyThenRetiresTheRecord(t *testing.T) {
 	if _, err := live.Load(dir, "KILL01"); err == nil {
 		t.Fatal("the record is still there after a successful kill")
 	}
+}
+
+// --new must reach the host like any other changed root flag: it is
+// harmless there (the host never runs the join decision), but hostArgs
+// forwards flags wholesale and a silently dropped one is the bug that
+// wholesale forwarding exists to prevent.
+func TestHostArgsForwardsNew(t *testing.T) {
+	fs := testFlags()
+	if err := fs.Set("new", "true"); err != nil {
+		t.Fatal(err)
+	}
+	got := hostArgs("A1B2C3", "/work/space", fs)
+	if !contains(got, "--new=true") {
+		t.Fatalf("hostArgs = %q, want it to include --new=true", got)
+	}
+}
+
+// decideStart is the "join, never fork" decision the launcher makes before
+// it spawns anything: a live session for this workspace is joined with no
+// prompt, an explicit --resume of a live code joins that code, --new skips
+// the join, and anything not live starts a fresh host (nil record).
+func TestDecideStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+
+	// Two saved sessions: one live, one not.
+	liveSess := store.NewSession("ollama", "m", "/ws")
+	if err := liveSess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	coldSess := store.NewSession("ollama", "m", "/ws")
+	// A distinct id: NewSession's ids are millisecond-stamped, so two made
+	// in the same instant would be one session saved twice.
+	coldSess.ID += "-cold"
+	coldSess.Code = store.CodeFor(coldSess.ID)
+	if err := coldSess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: liveSess.ResumeCode(), PID: os.Getpid(),
+		Socket:    filepath.Join(dir, liveSess.ResumeCode()+".sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	join := "joining live session " + rec.Code
+
+	if got, msg := decideStart(dir, "/ws", "", false); got == nil || got.Code != rec.Code ||
+		msg != join+" (be-code --new starts a fresh one)" {
+		t.Fatalf("workspace with a live session = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/ws", "", true); got != nil || msg != "" {
+		t.Fatalf("--new must start a fresh session, got %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/elsewhere", "", false); got != nil || msg != "" {
+		t.Fatalf("workspace with no live session = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/elsewhere", liveSess.ResumeCode(), false); got == nil ||
+		got.Code != rec.Code || msg != join {
+		t.Fatalf("--resume of a live code = %+v, %q", got, msg)
+	}
+	// --resume wins over --new: the user named the session they want.
+	if got, _ := decideStart(dir, "/ws", liveSess.ResumeCode(), true); got == nil || got.Code != rec.Code {
+		t.Fatalf("--resume of a live code with --new = %+v", got)
+	}
+	// A saved session that is not live is resumed by a fresh host, even
+	// though this workspace has another live session.
+	if got, msg := decideStart(dir, "/ws", coldSess.ResumeCode(), false); got != nil || msg != "" {
+		t.Fatalf("--resume of a cold code = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/ws", "NOSUCH", false); got != nil || msg != "" {
+		t.Fatalf("--resume of an unknown code = %+v, %q", got, msg)
+	}
+}
+
+// A host's session lives in its memory from the moment it starts; the file
+// only appears on its first autosave. Joining must not go through the
+// store, or `be-code --resume CODE` against a live session that has not
+// finished a turn would report "no such session" and start a second one.
+func TestDecideStartJoinsALiveCodeWithNoSessionFileYet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	rec := live.Record{
+		Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load("ABC123"); err == nil {
+		t.Fatal("this case is only meaningful while the session file does not exist")
+	}
+	for _, typed := range []string{"ABC123", "abc123", " ABC123 "} {
+		got, msg := decideStart(dir, "/elsewhere", typed, false)
+		if got == nil || got.Code != "ABC123" || msg != "joining live session ABC123" {
+			t.Fatalf("--resume %q = %+v, %q", typed, got, msg)
+		}
+	}
+}
+
+// wireLiveRegistry is how the agent's save guard reaches the live records
+// without importing them.
+func TestWireLiveRegistryAnswersFromTheRecords(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	wireLiveRegistry()
+	if pid, ok := agent.LiveOwner("ABC123"); !ok || pid != os.Getpid() {
+		t.Fatalf("LiveOwner = %d, %v; want %d, true", pid, ok, os.Getpid())
+	}
+	if pid, ok := agent.LiveOwner("NOPE11"); ok {
+		t.Fatalf("LiveOwner for a code with no host = %d, %v", pid, ok)
+	}
+	if !agent.PIDAlive(os.Getpid()) || agent.PIDAlive(deadPID(t)) {
+		t.Fatal("PIDAlive is not wired to the real process check")
+	}
+}
+
+// A session file a live host owns is that host's to write. The transcript
+// this run produced is still real work, so it is written to a session of
+// its own rather than dropped with a warning.
+func TestFinishSessionSavesElsewhereWhenALiveHostOwnsTheFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Skip("no sleep binary")
+	}
+	t.Cleanup(func() { _ = owner.Process.Kill(); _ = owner.Wait() })
+
+	reg, err := tools.NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.RepoMap = false
+	ag := agent.New(cfg, stubProvider{}, "m", reg, "")
+	s := store.NewSession("ollama", "m", "/ws")
+	s.Title = "shared work"
+	s.HostPID = owner.Process.Pid
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ag.SetSession(s)
+	ag.History.Messages = []provider.Message{
+		{Role: provider.RoleUser, Content: "hi"}, {Role: provider.RoleAssistant, Content: "hello"},
+	}
+	// The live record is what turns the pid stamp into ownership.
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: s.ResumeCode(), PID: owner.Process.Pid, Socket: filepath.Join(dir, s.ResumeCode()+".sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	wireLiveRegistry()
+
+	var out strings.Builder
+	quiet(t, func() { finishSession(ag, false, &out) })
+
+	onDisk, err := store.Load(s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.HostPID != owner.Process.Pid || len(onDisk.Messages) != 0 {
+		t.Fatalf("the live host's file was written: %+v", onDisk)
+	}
+	metas, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("want the owned session plus a new one, got %d: %+v", len(metas), metas)
+	}
+	var alt store.Meta
+	for _, mt := range metas {
+		if mt.ID != s.ID {
+			alt = mt
+		}
+	}
+	if !strings.Contains(out.String(), "saved as a new session: be-code --resume "+alt.Code) {
+		t.Fatalf("finishSession printed:\n%s\nwant the new session's code %s", out.String(), alt.Code)
+	}
+	saved, err := store.Load(alt.ID)
+	if err != nil || len(saved.Messages) != 2 || saved.HostPID != os.Getpid() {
+		t.Fatalf("the transcript was not carried over: %v %+v", err, saved)
+	}
+}
+
+// quiet runs fn with os.Stderr on the null device: finishSession reports
+// the blocked save there by design, and a passing test should print
+// nothing.
+func quiet(t *testing.T, fn func()) {
+	t.Helper()
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		fn()
+		return
+	}
+	prev := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = prev; f.Close() }()
+	fn()
+}
+
+// stubProvider is enough for the agent constructor; no test here talks to a
+// backend.
+type stubProvider struct{}
+
+func (stubProvider) Name() string { return "stub" }
+func (stubProvider) Chat(context.Context, provider.ChatRequest, provider.StreamFunc) (*provider.ChatResponse, error) {
+	return &provider.ChatResponse{}, nil
+}
+func (stubProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
+func (stubProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
+
+// TestJoinMissed is the decision by itself: what counts as "the record we
+// found was a host on its way out, not a session to join".
+func TestJoinMissed(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		joined bool
+		err    error
+		want   bool
+	}{
+		{"socket is gone", "", false, fmt.Errorf("live: %w: %w", live.ErrDial, os.ErrNotExist), true},
+		{"ended before a single frame", live.ReasonEnded, false, nil, true},
+		{"ended after the session rendered", live.ReasonEnded, true, nil, false},
+		{"ordinary detach", "", true, nil, false},
+		{"host detached us", live.ReasonDetached, true, nil, false},
+		{"some other attach error", "", false, errors.New("write: broken pipe"), false},
+		{"connection died mid-session", "connection closed", true, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := joinMissed(c.reason, c.joined, c.err); got != c.want {
+				t.Fatalf("joinMissed(%q, %v, %v) = %v, want %v", c.reason, c.joined, c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// TestJoinLiveFallsThroughWhenTheHostIsShuttingDown: a host in
+// finishSession still advertises its record and still answers on its
+// socket, but every client it accepts there is told "session ended"
+// straight away. Joining must never leave the user at their shell with no
+// session, so the launcher treats that as "no live host after all" and
+// starts a fresh one.
+func TestJoinLiveFallsThroughWhenTheHostIsShuttingDown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// A host past h.Close: it accepts, reads the hello and says goodbye.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				live.ReadFrame(conn)
+				live.WriteJSON(conn, live.FBye, live.Bye{Reason: live.ReasonEnded})
+				conn.Close()
+			}()
+		}
+	}()
+	rec := &live.Record{Code: "ABC123", PID: os.Getpid(), Socket: sock, Workspace: "/ws", StartedAt: time.Now()}
+
+	var out strings.Builder
+	restore := stubAttachOptions(t, &out)
+	defer restore()
+
+	joined, err := joinLive(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("joinLive: %v", err)
+	}
+	if joined {
+		t.Fatal("joinLive reported a join against a host that had already ended")
+	}
+	// It must also have left the terminal the ordinary way: the host never
+	// sent this client the alt-screen exit that ReasonEnded normally
+	// implies, so the client owes it.
+	if !strings.Contains(out.String(), "\x1b[?1049l") {
+		t.Fatalf("terminal left in the alt screen: %q", out.String())
+	}
+}
+
+// TestJoinLiveFallsThroughWhenTheSocketIsGone: the same window a moment
+// later — the host has closed its socket but not yet retired its record.
+func TestJoinLiveFallsThroughWhenTheSocketIsGone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	rec := &live.Record{Code: "ABC123", PID: os.Getpid(),
+		Socket: filepath.Join(dir, "nothing-here.sock"), Workspace: "/ws", StartedAt: time.Now()}
+	var out strings.Builder
+	restore := stubAttachOptions(t, &out)
+	defer restore()
+	joined, err := joinLive(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("joinLive: %v", err)
+	}
+	if joined {
+		t.Fatal("joinLive reported a join against a socket that is not there")
+	}
+}
+
+// stubAttachOptions points attachLive at in-memory pipes: a test has no
+// terminal to put in raw mode.
+func stubAttachOptions(t *testing.T, out *strings.Builder) func() {
+	t.Helper()
+	prev := attachOptions
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	attachOptions = func() live.AttachOptions {
+		return live.AttachOptions{
+			Label:  "test",
+			Stdin:  pr,
+			Stdout: out,
+			Raw:    func() (func(), error) { return func() {}, nil },
+			Size:   func() (int, int) { return 80, 24 },
+		}
+	}
+	return func() { attachOptions = prev }
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -82,8 +83,14 @@ type Agent struct {
 	stallAfter       time.Duration // silence before a "waiting for backend" notice
 	unloadedNotified bool          // one notice per eviction, not per turn
 	repoMap          string
-	knownTools       map[string]bool
-	compat           bool // current session uses embedded tool calls
+	// saveDisabled latches on when another live process is found to own the
+	// session file; saveOwner is its pid and saveWarned keeps the warning to
+	// one line per run (see SaveGuard, autosave).
+	saveDisabled bool
+	saveOwner    int
+	saveWarned   bool
+	knownTools   map[string]bool
+	compat       bool // current session uses embedded tool calls
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -362,11 +369,74 @@ func (a *Agent) specsTokens() int {
 	return a.History.est(string(b))
 }
 
+// PIDAlive reports whether a pid is a running process. It is injected from
+// cmd (live.Alive), like ReviewerFactory, so this package does not depend on
+// the live-session registry. The default answers no: a build that never
+// wires it up simply has no session hosts to collide with.
+var PIDAlive = func(pid int) bool { return false }
+
+// LiveOwner returns the pid of the advertised live host for a session code,
+// and whether there is one. Injected from cmd over ~/.be-code/live.
+var LiveOwner = func(code string) (pid int, ok bool) { return 0, false }
+
+// SaveGuard reports whether a live session host owns this session's file,
+// and which. Two programs owning one session file is what resuming an
+// already-live session used to produce: each is blind to the other's turns
+// and overwrites its saves. Every entry point that loads a session now
+// joins the live one instead (see cmd/live.go:decideStart), so this is the
+// last line of defence and should never fire in practice.
+//
+// Ownership takes two matching answers, not one: the file's pid stamp must
+// be alive *and* be the pid the live registry advertises as this code's
+// host. A bare pid is not evidence — pids are recycled, and an unrelated
+// process inheriting the number of a host that crashed would otherwise lock
+// a session out of its own file for good. A stamp that names no live host
+// is taken over.
+//
+// The answer latches: a file that changes hands mid-run cannot un-block a
+// program that already stood down from it.
+func (a *Agent) SaveGuard() (blocked bool, owner int) {
+	if a.Session == nil {
+		return false, 0
+	}
+	if a.saveDisabled {
+		return true, a.saveOwner
+	}
+	on, err := store.Load(a.Session.ID)
+	if err != nil || on.HostPID == 0 || on.HostPID == os.Getpid() || !PIDAlive(on.HostPID) {
+		return false, 0
+	}
+	if host, ok := LiveOwner(a.Session.ResumeCode()); !ok || host != on.HostPID {
+		return false, 0
+	}
+	a.saveDisabled, a.saveOwner = true, on.HostPID
+	return true, on.HostPID
+}
+
+// SetSession installs a session, clearing the save-guard latch: the new
+// session is a different file with a different owner, and a run that stood
+// down from one session must still be able to save the next (/clear, a
+// resume after a blocked save).
+func (a *Agent) SetSession(s *store.Session) {
+	a.Session = s
+	a.saveDisabled, a.saveOwner, a.saveWarned = false, 0, false
+}
+
 // autosave persists the conversation; failures are non-fatal by design.
+// A session file a live host owns is never written (see SaveGuard); this
+// program's own pid is stamped on every save it does make.
 func (a *Agent) autosave(userInput string) {
 	if a.Session == nil {
 		return
 	}
+	if blocked, owner := a.SaveGuard(); blocked {
+		if !a.saveWarned {
+			a.saveWarned = true
+			a.notice("session file is owned by live host %d; autosave disabled for this session", owner)
+		}
+		return
+	}
+	a.Session.HostPID = os.Getpid()
 	if a.Session.Title == "" {
 		a.Session.Title = store.TitleFrom(userInput)
 	}

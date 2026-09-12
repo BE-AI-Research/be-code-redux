@@ -98,3 +98,16 @@ func Remove(dir, code string) error {
 	}
 	return err
 }
+
+// LiveCode returns the record for code when a host is live under it, or nil
+// when there is none. List prunes records whose process is gone, so a stale
+// record never passes for a live session.
+func LiveCode(dir, code string) *Record {
+	lives, _ := List(dir)
+	for i := range lives {
+		if lives[i].Code == code {
+			return &lives[i]
+		}
+	}
+	return nil
+}

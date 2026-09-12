@@ -18,6 +18,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -39,6 +40,7 @@ var (
 	flagIDE         bool
 	flagNoIDE       bool
 	flagNoHost      bool
+	flagNew         bool
 	flagView        bool
 	flagSessionHost string
 )
@@ -77,6 +79,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagIDE, "ide", false, "connect to the editor bridge even outside an editor terminal")
 	rootCmd.PersistentFlags().BoolVar(&flagNoIDE, "no-ide", false, "never connect to the editor bridge")
 	rootCmd.PersistentFlags().BoolVar(&flagNoHost, "no-host", false, "run the session in this process instead of a detachable host")
+	rootCmd.PersistentFlags().BoolVar(&flagNew, "new", false, "start a fresh session even when this workspace has a live one")
 	rootCmd.PersistentFlags().StringVar(&flagSessionHost, "session-host", "", "internal: serve the live session with this code")
 	_ = rootCmd.PersistentFlags().MarkHidden("session-host")
 	attachCmd.Flags().BoolVar(&flagView, "view", false, "attach read-only: never send input to the session")
@@ -182,6 +185,8 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		}
 	}
 
+	wireLiveRegistry()
+
 	// Reviewer factory (avoids an agent→provider-registry import cycle).
 	agent.ReviewerFactory = func(c *config.Config) (provider.Provider, string, error) {
 		pname := c.Reviewer.Provider
@@ -205,7 +210,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			fmt.Fprintf(os.Stderr, "resumed %s (%s) with handoff briefing\n", s.ResumeCode(), s.Title)
 		}
 	} else {
-		ag.Session = store.NewSession(p.Name(), model, reg.Root)
+		ag.SetSession(store.NewSession(p.Name(), model, reg.Root))
 	}
 	applyBackendWindow(cfg, p, ag, model)
 	return p, ag, nil
@@ -340,13 +345,62 @@ func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	if _, err := ag.WriteHandoff(ctx, withModel); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: handoff: %v\n", err)
 	}
+	// The same guard autosave runs: a session file a live host owns is that
+	// program's to write, and the briefing just composed must not land on
+	// top of its transcript. The transcript is still this run's work, so it
+	// is written to a session of its own rather than dropped.
+	if blocked, owner := ag.SaveGuard(); blocked {
+		fmt.Fprintf(os.Stderr, "warn: session %s is owned by live host %d; this transcript was not written to it\n",
+			s.ResumeCode(), owner)
+		alt := store.NewSession(s.Provider, ag.Model, s.Workspace)
+		// Session ids are stamped to the millisecond, so a fresh one can
+		// collide with an existing file — including the very file this
+		// branch exists to protect. Take the first id nothing answers to.
+		for base, n := alt.ID, 1; ; n++ {
+			if _, err := store.Load(alt.ID); err != nil {
+				break
+			}
+			alt.ID = fmt.Sprintf("%s-%d", base, n)
+			alt.Code = store.CodeFor(alt.ID)
+		}
+		alt.Title = s.Title
+		alt.Handoff = s.Handoff
+		alt.Messages = ag.History.Messages
+		alt.HostPID = os.Getpid()
+		if err := alt.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: session save: %v\n", err)
+			return
+		}
+		fmt.Fprintf(out, "saved as a new session: be-code --resume %s   (%s)\n", alt.ResumeCode(), alt.Title)
+		return
+	}
 	s.Messages = ag.History.Messages
 	s.Model = ag.Model
+	s.HostPID = os.Getpid()
 	if err := s.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: session save: %v\n", err)
 		return
 	}
 	fmt.Fprintf(out, "resume: be-code --resume %s   (%s)\n", s.ResumeCode(), s.Title)
+}
+
+// wireLiveRegistry injects the live-session lookups the agent's save guard
+// needs, for the same reason as ReviewerFactory: internal/agent must not
+// import the registry. Together they answer "does an advertised live host
+// own this session file?" — see agent.SaveGuard.
+func wireLiveRegistry() {
+	agent.PIDAlive = live.Alive
+	agent.LiveOwner = func(code string) (int, bool) {
+		dir, err := live.Dir()
+		if err != nil {
+			return 0, false
+		}
+		rec := live.LiveCode(dir, code)
+		if rec == nil {
+			return 0, false
+		}
+		return rec.PID, true
+	}
 }
 
 // sweepStale removes checkpoint dirs older than maxAge (crashed sessions).

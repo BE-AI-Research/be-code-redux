@@ -35,62 +35,71 @@ func (m *Model) slashEntries() []pickItem {
 }
 
 // openPalette shows the command popup with an initial filter (text typed
-// after the slash).
-func (m *Model) openPalette(initial string) (tea.Model, tea.Cmd) {
+// after the slash). The popup belongs to the client that opened it: it
+// fills that client's input line, and only its keys reach it.
+func (m *Model) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
+	m.paletteOwner = from
 	m.picker = &picker{title: "Commands", items: m.slashEntries(), filter: initial, inline: true, prefix: true,
 		onPick: func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
 			if it.args {
-				m.input.SetValue(it.id + " ")
-				m.input.CursorEnd()
+				in := m.inputFor(m.paletteOwner)
+				in.SetValue(it.id + " ")
+				in.CursorEnd()
 				return m, nil
 			}
-			return m.slashCommand(it.id)
+			return m.slashCommand(it.id, m.paletteOwner)
 		}}
 	m.mode = modePalette
-	m.input.SetValue("")
+	m.inputFor(from).SetValue("")
 	return m, nil
 }
 
-func (m *Model) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.paletteOwner {
+		// Another terminal's keys are none of this popup's business — but
+		// they are that terminal's own business (see handleGuestKey).
+		return m.handleGuestKey(k, from)
+	}
 	p := m.picker
 	if p == nil {
-		m.mode = modeInput
+		m.mode = m.idleMode()
+		return m, nil
+	}
+	in := m.inputFor(m.paletteOwner)
+	// handBack gives the typed text back to the owner's input line and
+	// closes the popup, so nothing is lost on the way out.
+	handBack := func(text string) (tea.Model, tea.Cmd) {
+		in.SetValue(text)
+		in.CursorEnd()
+		m.picker = nil
+		m.mode = m.idleMode()
 		return m, nil
 	}
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
-		// Leave what was typed in the input so nothing is lost.
-		m.input.SetValue("/" + p.filter)
-		m.input.CursorEnd()
-		m.picker = nil
-		m.mode = modeInput
-		return m, nil
+		return handBack("/" + p.filter)
 	case tea.KeyBackspace:
 		if p.filter == "" {
-			m.picker = nil
-			m.mode = modeInput
-			return m, nil
+			return handBack("")
 		}
+	case tea.KeySpace:
+		// A space ends the command name: hand over to the input, so an
+		// argument (`/resume ABC123`) can be typed at the prompt. Bubble Tea
+		// delivers a space as KeySpace, not as a KeyRunes " ", but a
+		// terminal or a paste can still produce the runes form — both end
+		// the command name.
+		return handBack("/" + p.filter + " ")
 	case tea.KeyRunes:
 		if len(k.Runes) == 1 && k.Runes[0] == ' ' {
-			// A space ends the command name: hand over to the input.
-			m.input.SetValue("/" + p.filter + " ")
-			m.input.CursorEnd()
-			m.picker = nil
-			m.mode = modeInput
-			return m, nil
+			return handBack("/" + p.filter + " ")
 		}
 	case tea.KeyTab:
 		if items := p.filtered(); len(items) > 0 {
-			it := items[p.cursor]
-			m.input.SetValue(it.id + " ")
-			m.input.CursorEnd()
-			m.picker = nil
-			m.mode = modeInput
+			return handBack(items[p.cursor].id + " ")
 		}
 		return m, nil
 	}
-	return m.handlePickerKey(k)
+	return m.handlePickerKey(k, from)
 }
 
 // paletteBox renders the popup: title, up to 8 matching entries.
@@ -181,12 +190,15 @@ type menuEntry struct {
 	run                func(m *Model) (tea.Model, tea.Cmd)
 }
 
-func (m *Model) menuEntries() []menuEntry {
+// menuEntries builds the grouped menu. Its commands run as the client that
+// opened the menu — "Detach this terminal" has to mean the terminal whose
+// user picked it, not whoever happened to press a key.
+func (m *Model) menuEntries(owner int) []menuEntry {
 	cmd := func(c string) func(*Model) (tea.Model, tea.Cmd) {
-		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c) }
+		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
 	}
 	return []menuEntry{
-		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
+		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker(owner) }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
 		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},
@@ -206,8 +218,9 @@ func (m *Model) menuEntries() []menuEntry {
 	}
 }
 
-func (m *Model) openMenu() (tea.Model, tea.Cmd) {
-	entries := m.menuEntries()
+func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
+	m.menuOwner = from
+	entries := m.menuEntries(from)
 	items := make([]pickItem, 0, len(entries))
 	for i, e := range entries {
 		items = append(items, pickItem{id: fmt.Sprint(i),
@@ -225,8 +238,13 @@ func (m *Model) openMenu() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return m.handlePickerKey(k)
+func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.menuOwner {
+		// The menu acts for the terminal that opened it; everyone else
+		// keeps typing into their own input line (see handleGuestKey).
+		return m.handleGuestKey(k, from)
+	}
+	return m.handlePickerKey(k, from)
 }
 
 // menuStatus is the block above the menu entries: everything the old

@@ -15,6 +15,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -385,6 +386,16 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
+		// Join, never fork: a session with a host running somewhere is not
+		// loaded a second time here — two programs on one session file are
+		// blind to each other's turns. Plain mode has no host of its own to
+		// switch through, so it says how to join instead.
+		if dir, derr := live.Dir(); derr == nil {
+			if rec := live.LiveCode(dir, s.ResumeCode()); rec != nil {
+				fmt.Printf("%s\n", dim(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", rec.Code, rec.Code)))
+				break
+			}
+		}
 		r.Agent.Resume(s)
 		fmt.Printf("resumed %s — %s (%d messages)\n", s.ResumeCode(), s.Title, len(s.Messages))
 		if s.Handoff != "" {
@@ -425,7 +436,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Cfg.MaxRepairs, r.Cfg.CompatToolCalls, r.Cfg.ApproveFileWrites, r.Cfg.AutoApproveShell)
 	case "/clear":
 		r.Agent.History.Messages = nil
-		r.Agent.Session = store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root)
+		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
 	case "/undo":
 		restored, err := r.Agent.Undo()

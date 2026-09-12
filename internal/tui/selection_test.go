@@ -60,7 +60,7 @@ func TestCtrlCCopiesSelection(t *testing.T) {
 	if len(*got) != 1 || (*got)[0] != "copy me" {
 		t.Fatalf("clipboard = %v", *got)
 	}
-	if m.sel != nil || m.quitHint {
+	if m.sel != nil || m.quitHint[0] {
 		t.Fatal("selection not cleared or quit armed")
 	}
 }
@@ -92,8 +92,8 @@ func TestCopyCommandTargets(t *testing.T) {
 	m.Update(deltaMsg("The answer is 42."))
 	m.flushStreaming()
 	m.Update(toolEndMsg{name: "shell", res: toolResult("total 3\nfile a\nfile b")})
-	m.slashCommand("/copy reply")
-	m.slashCommand("/copy tool")
+	m.slashCommand("/copy reply", 0)
+	m.slashCommand("/copy tool", 0)
 	if len(*got) != 2 || (*got)[0] != "The answer is 42." || (*got)[1] != "total 3\nfile a\nfile b" {
 		t.Fatalf("clipboard = %q", *got)
 	}

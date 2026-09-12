@@ -2,10 +2,13 @@ package live
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,11 +28,12 @@ func startHost(t *testing.T) (*Host, string) {
 }
 
 type fakeClient struct {
-	conn net.Conn
-	out  chan []byte // FOutput payloads
-	size chan Size
-	cl   chan []ClientInfo
-	bye  chan string
+	conn    net.Conn
+	out     chan []byte // FOutput payloads
+	overlay chan []byte // FOverlay payloads
+	size    chan Size
+	cl      chan []ClientInfo
+	bye     chan string
 }
 
 func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
@@ -38,7 +42,7 @@ func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc := &fakeClient{conn: c, out: make(chan []byte, 64), size: make(chan Size, 8), cl: make(chan []ClientInfo, 8), bye: make(chan string, 1)}
+	fc := &fakeClient{conn: c, out: make(chan []byte, 64), overlay: make(chan []byte, 64), size: make(chan Size, 8), cl: make(chan []ClientInfo, 8), bye: make(chan string, 1)}
 	WriteJSON(c, FHello, Hello{Token: token, Cols: cols, Rows: rows, Label: label, UTF8: true})
 	go func() {
 		for {
@@ -49,6 +53,8 @@ func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
 			switch typ {
 			case FOutput:
 				fc.out <- p
+			case FOverlay:
+				fc.overlay <- p
 			case FSize:
 				var s Size
 				json.Unmarshal(p, &s)
@@ -79,17 +85,31 @@ func within(t *testing.T, d time.Duration, f func() bool) {
 	t.Fatal("condition not met in time")
 }
 
-func TestHostFansOutAndElectsHolder(t *testing.T) {
+// idByLabel looks a client's id up by its label rather than its position in
+// h.Clients(): two dials issued back to back race each other's own handle()
+// goroutine for the lock that appends to h.clients, so which one lands first
+// is not guaranteed even though the connections themselves were made in
+// order — a test that assumed cl[0] was always the first dial flaked.
+func idByLabel(t *testing.T, h *Host, label string) int {
+	t.Helper()
+	for _, c := range h.Clients() {
+		if c.Label == label {
+			return c.ID
+		}
+	}
+	t.Fatalf("no client labeled %q in %+v", label, h.Clients())
+	return 0
+}
+
+// TestHostFansOutToAllClients covers what remains of the old holder-election
+// test once holder election is gone: every client gets the shared size (the
+// minimum across attached clients) and every output frame.
+func TestHostFansOutToAllClients(t *testing.T) {
 	h, sock := startHost(t)
 	a := dial(t, sock, "tok", "a", 100, 40)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
 	b := dial(t, sock, "tok", "b", 80, 24)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
-	// newest attacher holds input
-	cl := h.Clients()
-	if !cl[1].Holder || cl[0].Holder {
-		t.Fatalf("holder election: %+v", cl)
-	}
 	// shared size is the minimum
 	if c, r := h.Size(); c != 80 || r != 24 {
 		t.Fatalf("size = %dx%d", c, r)
@@ -106,26 +126,274 @@ func TestHostFansOutAndElectsHolder(t *testing.T) {
 			t.Fatal("client did not receive the frame")
 		}
 	}
-	// only the holder's input reaches the program
-	buf := make([]byte, 8)
-	aInputDone := make(chan struct{})
-	go func() { WriteFrame(a.conn, FInput, []byte("A")); close(aInputDone) }()
+}
+
+func TestHostDeliversTaggedInputFromEveryClient(t *testing.T) {
+	h, sock := startHost(t)
+	type in struct {
+		id int
+		b  string
+	}
+	got := make(chan in, 8)
+	h.OnInput(func(id int, b []byte) { got <- in{id, string(b)} })
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	b := dial(t, sock, "tok", "b", 80, 24)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
+	WriteFrame(a.conn, FInput, []byte("A"))
 	WriteFrame(b.conn, FInput, []byte("B"))
-	n, _ := h.InputReader().Read(buf)
-	if string(buf[:n]) != "B" {
-		t.Fatalf("program got %q, want B", buf[:n])
+	seen := map[int]string{}
+	for i := 0; i < 2; i++ {
+		select {
+		case x := <-got:
+			seen[x.id] += x.b
+		case <-time.After(time.Second):
+			t.Fatal("input not delivered")
+		}
 	}
-	<-aInputDone // wait for the goroutine's write to finish before reusing a.conn: two
-	// goroutines writing frames on the same net.Conn without ordering can interleave a
-	// header from one frame with the payload of another and corrupt the wire protocol.
-	// takeover moves input; detach of the holder passes it back
-	WriteFrame(a.conn, FTakeover, nil)
-	within(t, time.Second, func() bool { c := h.Clients(); return len(c) == 2 && c[0].Holder })
-	WriteFrame(a.conn, FDetach, nil)
-	within(t, time.Second, func() bool { c := h.Clients(); return len(c) == 1 && c[0].Holder && c[0].Label == "b" })
-	if c, r := h.Size(); c != 80 || r != 24 {
-		t.Fatalf("size after detach = %dx%d", c, r)
+	idA, idB := idByLabel(t, h, "a"), idByLabel(t, h, "b")
+	if seen[idA] != "A" || seen[idB] != "B" {
+		t.Fatalf("tagging: %+v (a=%d b=%d)", seen, idA, idB)
 	}
+}
+
+// TestHostBuffersEarlyInputAndReplaysOnOnInput covers the window between a
+// client attaching and the served program registering OnInput: keystrokes
+// typed in that window must not be lost.
+func TestHostBuffersEarlyInputAndReplaysOnOnInput(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+
+	// Send more than the per-client cap in one frame: only the first
+	// maxEarlyInput bytes must be kept, the rest silently dropped.
+	early := strings.Repeat("E", 5*1024)
+	WriteFrame(a.conn, FInput, []byte(early))
+	// Force a round trip on the same connection: handle() reads frames from
+	// one connection strictly in order on a single goroutine, so once this
+	// resize is visible the FInput frame above (sent first, while OnInput
+	// was still nil) is guaranteed to have already been read and buffered.
+	WriteJSON(a.conn, FResize, Size{Cols: 90, Rows: 30})
+	within(t, time.Second, func() bool {
+		for _, c := range h.Clients() {
+			if c.Cols == 90 {
+				return true
+			}
+		}
+		return false
+	})
+
+	got := make(chan string, 1)
+	h.OnInput(func(id int, b []byte) { got <- string(b) })
+	var replayed string
+	select {
+	case replayed = <-got:
+	case <-time.After(time.Second):
+		t.Fatal("early input was never replayed")
+	}
+	if len(replayed) != maxEarlyInput {
+		t.Fatalf("replayed %d bytes, want the %d-byte cap", len(replayed), maxEarlyInput)
+	}
+	if replayed != early[:maxEarlyInput] {
+		t.Fatal("replayed bytes are not exactly the first bytes sent")
+	}
+
+	// A second registration must not redeliver what the first already
+	// consumed: pendingIn is cleared the moment it is replayed.
+	redelivered := make(chan string, 1)
+	h.OnInput(func(id int, b []byte) { redelivered <- string(b) })
+	select {
+	case s := <-redelivered:
+		t.Fatalf("second OnInput registration redelivered early input: %q", s)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestHostOverlayGoesToOneClientAndFollowsEveryFrame(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	b := dial(t, sock, "tok", "b", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
+	idA := idByLabel(t, h, "a")
+	h.SetOverlay(idA, "OVERLAY-A")
+	select {
+	case p := <-a.overlay:
+		if string(p) != "OVERLAY-A" {
+			t.Fatalf("overlay payload %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a did not get its overlay")
+	}
+	select {
+	case p := <-b.overlay:
+		t.Fatalf("b received a's overlay: %q", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+	h.Output().Write([]byte("FRAME"))
+	<-a.out
+	select { // a's overlay is re-sent right after the shared frame
+	case p := <-a.overlay:
+		if string(p) != "OVERLAY-A" {
+			t.Fatalf("re-sent overlay %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overlay not re-sent after a frame")
+	}
+	<-b.out
+	select {
+	case <-b.overlay:
+		t.Fatal("b has no overlay yet must not receive one")
+	case <-time.After(200 * time.Millisecond):
+	}
+	h.SetOverlay(idA, "OVERLAY-A") // unchanged: no write
+	select {
+	case <-a.overlay:
+		t.Fatal("unchanged overlay was re-sent")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestHostClearedOverlaySendsNoTrailingFrame covers the served TUI's need to
+// stop a stale overlay from being stamped onto a full-screen modal:
+// SetOverlay(id, "") must clear the cached value so fanout.Write's
+// "re-append the client's overlay after every frame" behaviour (see
+// TestHostOverlayGoesToOneClientAndFollowsEveryFrame) has nothing left to
+// re-append.
+func TestHostClearedOverlaySendsNoTrailingFrame(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	idA := idByLabel(t, h, "a")
+
+	h.SetOverlay(idA, "x")
+	select {
+	case p := <-a.overlay:
+		if string(p) != "x" {
+			t.Fatalf("overlay payload %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a did not get its overlay")
+	}
+
+	h.SetOverlay(idA, "")
+	select {
+	case p := <-a.overlay:
+		// An empty overlay frame is harmless (the client writes zero bytes
+		// to its terminal), so either nothing at all or an empty payload is
+		// acceptable here — what matters is what happens after the next
+		// frame, checked below.
+		if len(p) != 0 {
+			t.Fatalf("clearing sent a non-empty overlay: %q", p)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	h.Output().Write([]byte("FRAME"))
+	select {
+	case p := <-a.out:
+		if string(p) != "FRAME" {
+			t.Fatalf("frame payload %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a did not get the frame")
+	}
+	select {
+	case p := <-a.overlay:
+		t.Fatalf("cleared overlay was re-sent after a frame: %q", p)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate is a regression
+// test for a lost-update race between fanout.Write and SetOverlay: both used
+// to read/enqueue a client's overlay outside a shared critical section, so a
+// SetOverlay landing between another write's snapshot and its enqueue could
+// have its new value silently overwritten by that write's now-stale one —
+// permanently, since a private keystroke need not change the shared view
+// and so there may be no next frame to correct it. It drives both
+// concurrently for a few hundred iterations, then sequences one final
+// SetOverlay strictly after both stop, and asserts the last FOverlay the
+// client ever receives is that final value.
+func TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	idA := idByLabel(t, h, "a")
+
+	const n = 3000
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			h.Output().Write([]byte("x"))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			h.SetOverlay(idA, fmt.Sprintf("O%d", i))
+		}
+	}()
+
+	// Drain both streams throughout, or the client's own buffered channels
+	// (or the host's per-client queue) could back up and stall delivery of
+	// the very frame this test is waiting for. Deliberately never stopped:
+	// it idles itself out (via the timeout below) once nothing more arrives.
+	var mu sync.Mutex
+	var last string
+	go func() {
+		for {
+			select {
+			case <-a.out:
+			case p := <-a.overlay:
+				mu.Lock()
+				last = string(p)
+				mu.Unlock()
+			case <-time.After(2 * time.Second):
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	// Sequenced strictly after both loops above have returned, so this is
+	// unambiguously "the last value SetOverlay set" for idA.
+	h.SetOverlay(idA, "FINAL")
+
+	within(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return last == "FINAL"
+	})
+}
+
+func TestHostSwitchAndDetachByID(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	b := dial(t, sock, "tok", "b", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
+	idA, idB := idByLabel(t, h, "a"), idByLabel(t, h, "b")
+	h.Switch(idA, "ZZZ999")
+	select {
+	case r := <-a.bye:
+		if r != ReasonSwitchPrefix+"ZZZ999" {
+			t.Fatalf("switch reason %q", r)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no switch bye")
+	}
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.Detach(idB)
+	select {
+	case r := <-b.bye:
+		if r != ReasonDetached {
+			t.Fatalf("detach reason %q", r)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no detach bye")
+	}
+	h.Detach(12345) // unknown id: no-op
 }
 
 func TestHostRejectsBadToken(t *testing.T) {
@@ -187,7 +455,7 @@ func TestHostListenSocketPermissions(t *testing.T) {
 	}
 }
 
-func TestHostDetachHolderPassesToMostRecentRemaining(t *testing.T) {
+func TestHostDetachByIDKeepsOthers(t *testing.T) {
 	h, sock := startHost(t)
 	dial(t, sock, "tok", "a", 100, 40)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
@@ -196,20 +464,25 @@ func TestHostDetachHolderPassesToMostRecentRemaining(t *testing.T) {
 	dial(t, sock, "tok", "c", 80, 24)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 3 })
 	cl := h.Clients()
-	if !cl[2].Holder || cl[2].Label != "c" {
-		t.Fatalf("expected newest attacher c to hold: %+v", cl)
+	var bID int
+	for _, c := range cl {
+		if c.Label == "b" {
+			bID = c.ID
+		}
 	}
-	h.DetachHolder()
+	h.Detach(bID)
 	within(t, time.Second, func() bool {
 		c := h.Clients()
-		return len(c) == 2 && c[1].Holder && c[1].Label == "b"
+		if len(c) != 2 {
+			return false
+		}
+		labels := map[string]bool{c[0].Label: true, c[1].Label: true}
+		return labels["a"] && labels["c"]
 	})
-	// DetachHolder with a single remaining client, then with none: neither panics.
-	h.DetachHolder()
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	h.DetachHolder()
-	within(t, time.Second, func() bool { return len(h.Clients()) == 0 })
-	h.DetachHolder() // no holder left; must be a no-op
+	// size is recomputed from the remaining clients (a=100x40, c=80x24)
+	if c, r := h.Size(); c != 80 || r != 24 {
+		t.Fatalf("size after detach = %dx%d", c, r)
+	}
 }
 
 func TestHostOnQuitViaFQuitFrame(t *testing.T) {
@@ -400,20 +673,87 @@ func TestHostReplaysQuitRequestedBeforeOnQuit(t *testing.T) {
 	}
 }
 
-// The bye reason for a host-side detach is ReasonDetached, which is what
-// tells the attaching command to print "detached ... still running" (the
-// session is still there) instead of reporting a session that stopped.
-func TestHostDetachHolderSaysDetached(t *testing.T) {
+// Once the served program has returned, the host's closing lines must not
+// be followed by overlays: ClearOverlays makes later frames arrive bare.
+func TestHostClearOverlaysStopsReappending(t *testing.T) {
 	h, sock := startHost(t)
-	a := dial(t, sock, "tok", "a", 80, 24)
+	a := dial(t, sock, "tok", "a", 100, 40)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	h.DetachHolder()
+	h.SetOverlay(h.Clients()[0].ID, "DRAFT")
 	select {
-	case reason := <-a.bye:
-		if reason != ReasonDetached {
-			t.Fatalf("bye reason = %q, want %q", reason, ReasonDetached)
+	case <-a.overlay:
+	case <-time.After(time.Second):
+		t.Fatal("overlay never arrived")
+	}
+	h.ClearOverlays()
+	h.Output().Write([]byte("resume line"))
+	select {
+	case p := <-a.out:
+		if string(p) != "resume line" {
+			t.Fatalf("frame %q", p)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("no bye after DetachHolder")
+		t.Fatal("frame never arrived")
+	}
+	select {
+	case p := <-a.overlay:
+		if len(p) > 0 {
+			t.Fatalf("overlay %q re-appended after ClearOverlays", p)
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestSanitizeLabel: a client's label is text it chose, and it lands in
+// every other terminal's transcript, bottom line and /clients list — so the
+// host, not the renderer, is where it stops being able to move the cursor,
+// recolour the screen or wrap the status row.
+func TestSanitizeLabel(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain label survives", "ssh from 10.0.0.2 (pid 12)", "ssh from 10.0.0.2 (pid 12)"},
+		{"newlines and tabs go", "two\nlines\there", "twolineshere"},
+		{"csi colour goes", "\x1b[31mred\x1b[0m", "red"},
+		{"cursor move goes", "\x1b[2J\x1b[Hwiped", "wiped"},
+		{"osc title goes", "\x1b]0;title\x07after", "after"},
+		{"osc with st goes", "\x1b]0;title\x1b\\after", "after"},
+		{"alt key sequence goes", "\x1bxab", "ab"},
+		{"del byte goes", "a\x7fb", "ab"},
+		{"empty becomes client", "", "client"},
+		{"control-only becomes client", "\x1b[31m\n\t", "client"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeLabel(c.in); got != c.want {
+				t.Fatalf("sanitizeLabel(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	long := sanitizeLabel(strings.Repeat("x", 100))
+	if r := []rune(long); len(r) != maxLabelRunes || r[len(r)-1] != '…' {
+		t.Fatalf("100-rune label = %q (%d runes), want %d ending in an ellipsis", long, len(r), maxLabelRunes)
+	}
+}
+
+// TestHostSanitizesHelloLabel checks the trust boundary itself: the label
+// is cleaned where the hello frame is accepted, so nothing downstream (the
+// roster, the transcript, the bottom line) ever sees the raw bytes.
+func TestHostSanitizesHelloLabel(t *testing.T) {
+	h, sock := startHost(t)
+	fc := dial(t, sock, "tok", "\x1b[31mevil\nname"+strings.Repeat("x", 100), 80, 24)
+	defer fc.conn.Close()
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 1 })
+	cl := h.Clients()
+	if len(cl) != 1 {
+		t.Fatalf("client never attached (%d in the roster)", len(cl))
+	}
+	label := cl[0].Label
+	if strings.ContainsAny(label, "\x1b\n") {
+		t.Fatalf("roster label still carries control bytes: %q", label)
+	}
+	if len([]rune(label)) > maxLabelRunes {
+		t.Fatalf("roster label is %d runes: %q", len([]rune(label)), label)
+	}
+	if !strings.HasPrefix(label, "evilname") {
+		t.Fatalf("roster label = %q, want it to start with evilname", label)
 	}
 }

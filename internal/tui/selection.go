@@ -45,11 +45,15 @@ func (m *Model) transcriptCoords(x, y int) (line, col int, ok bool) {
 	return m.vp.YOffset + row, x, true
 }
 
-func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+// handleMouse routes one mouse event, tagged with the client it came from
+// (0 is the local terminal). Selection is shared — everyone sees the same
+// highlight in the same frame — but a paste has to land in the input line of
+// whoever asked for it.
+func (m *Model) handleMouse(msg tea.MouseMsg, from int) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Button == tea.MouseButtonRight && msg.Action == tea.MouseActionPress:
 		if m.mode == modeInput || m.mode == modeBusy {
-			return m.openContextMenu()
+			return m.openContextMenu(from)
 		}
 		return m, nil
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
@@ -193,7 +197,11 @@ func (m *Model) copyTarget(target string) {
 
 // ---- right-click context menu ------------------------------------------------
 
-func (m *Model) openContextMenu() (tea.Model, tea.Cmd) {
+// openContextMenu opens the right-click copy/paste popup for one terminal:
+// like the menu it acts for its opener (a paste lands in that terminal's
+// draft), so it shares menuOwner.
+func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
+	m.menuOwner = from
 	var items []pickItem
 	if m.sel != nil {
 		items = append(items, pickItem{id: "sel", label: "Copy selection", desc: fmt.Sprintf("%d chars", len([]rune(m.selectionText())))})
@@ -226,8 +234,9 @@ func (m *Model) openContextMenu() (tea.Model, tea.Cmd) {
 				if err != nil {
 					m.appendLine(stErr.Render("paste failed: ") + err.Error())
 				} else {
-					m.input.SetValue(m.input.Value() + text)
-					m.input.CursorEnd()
+					in := m.inputFor(from)
+					in.SetValue(in.Value() + text)
+					in.CursorEnd()
 				}
 			case "clear":
 				m.clearSelection()
@@ -246,17 +255,20 @@ func (m *Model) idleMode() mode {
 	return modeInput
 }
 
-func (m *Model) handleContextMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleContextMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.menuOwner {
+		// The popup acts for the terminal that opened it; everyone else
+		// keeps typing into their own input line (see handleGuestKey).
+		return m.handleGuestKey(k, from)
+	}
 	if k.Type == tea.KeyEsc || k.Type == tea.KeyCtrlC {
 		m.picker = nil
 		m.mode = m.idleMode()
 		return m, nil
 	}
-	model, cmd := m.handlePickerKey(k)
-	if m.picker == nil && m.mode == modeInput && m.running {
-		m.mode = modeBusy
-	}
-	return model, cmd
+	// handlePickerKey (and this popup's own onPick) leave through
+	// m.idleMode(), so a run still in progress keeps modeBusy on its own.
+	return m.handlePickerKey(k, from)
 }
 
 func (m *Model) contextMenuBox() string {

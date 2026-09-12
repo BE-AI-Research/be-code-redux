@@ -155,23 +155,27 @@ decisions, files changed, current state, next steps). Resuming injects that brie
 into the system prompt so the next session keeps your requirements and decisions
 even after history is trimmed; `/handoff` shows it. `be-code sessions` lists codes;
 resume with `--resume <code>`, `--resume <id>`, `--resume last`, `/resume <code>`, or
-the `/sessions` picker; `be-code sessions delete <code>` removes one. A session being served right now is
-marked `live` and is attachable rather than resumable (see "Live sessions and handoff"). Headless `run` prints the resume line to stderr and writes a
+the `/sessions` picker; `be-code sessions delete <code>` removes one. A session
+being served right now is marked `live`; resuming it by any route joins the
+running session rather than loading a second copy of its file (see "Shared
+sessions"). Headless `run` prints the resume line to stderr and writes a
 quick heuristic briefing (no extra model call). `/clear` starts a fresh session.
 
-## Live sessions and handoff
+## Shared sessions
 
 Starting `be-code` on a terminal does not run the session in that terminal: it
 starts a **detached host process** and attaches to it. The host owns the agent,
 the tools, the MCP servers and the editor bridge; your terminal is a thin pipe
 that paints what the host renders and forwards your keystrokes. So the session
-outlives the terminal — close the VS Code window, lose the SSH link, suspend the
+outlives the terminal — close the VS Code window, lose the SSH link, shut the
 laptop lid on a train — and you pick it up exactly where it was, from anywhere
 you can reach the machine:
 
 ```bash
-be-code                       # starts a session and attaches; ⧉ in the bottom line means served
+be-code                       # joins this workspace's live session, or starts one
+be-code --new                 # start a fresh session even though one is live here
 be-code sessions              # the LIVE column marks sessions being served right now
+be-code --resume A1B2C3       # live? joins it. not live? resumes the saved file
 be-code attach A1B2C3         # attach another terminal to the same session
 be-code attach last           # attach to the most recently started live session
 ssh workstation be-code attach A1B2C3    # ...from your phone, over SSH
@@ -179,22 +183,57 @@ be-code attach A1B2C3 --view  # watch only: this terminal never sends input
 be-code sessions kill A1B2C3  # end a live session from outside it
 ```
 
-Any number of terminals can be attached at once. One of them **holds input** at a
-time (the newest to attach); the others are live viewers of the same screen. The
-bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) and who is holding input,
-and `/clients` lists every attached terminal with its size. Chords, typed in the
-attached terminal rather than sent to the session:
+**One live instance per session code.** A session that is running somewhere is
+never loaded a second time — every way in joins it instead of forking it, and no
+path prompts you first:
+
+- `be-code` in a workspace that already has a live session joins the newest one,
+  printing `joining live session <code> (be-code --new starts a fresh one)`.
+  `--new` is the only way to get a second session on the same files.
+- `be-code --resume <code>` prints `joining live session <code>` and attaches,
+  whether you named it by code, by id or as `last`.
+- The session picker (`/menu` → "Resume a saved session", `/sessions`, `/resume
+  <code>`) marks a running session `LIVE`; picking that row moves *your* terminal
+  into it, leaving the other terminals on your old session where they were. If
+  the session you left was fresh and nobody else is attached to it, it exits
+  rather than linger as an empty host.
+- Without a host (`--no-host`, `host_sessions: false`) and in plain mode there
+  is nothing to join in-process, so `/resume` of a running code says
+  `<code> is live elsewhere; join it with: be-code attach <code>` and loads
+  nothing.
+
+The session file is guarded as well: it carries the pid of the host that owns
+it, and a second program that finds a *live* owner stops autosaving rather than
+overwrite that host's turns (`session file is owned by live host <pid>; autosave
+disabled for this session`). On exit that run is written out under a fresh code
+instead — `saved as a new session: be-code --resume <code>`.
+
+**Every terminal has its own input line.** Any number of terminals can be
+attached at once, and each one types into its own prompt: your half-written
+message stays on your screen and nobody else's, and the palette you opened with
+`/`, the `/menu` you opened, the right-click menu, your command history and your
+queued-message popup all belong to the terminal that opened them. Press Enter
+and the message goes into the one shared transcript, prefixed with the terminal
+that sent it (`local (pid 4321)> …`) whenever more than one terminal is
+attached — with a single terminal the prefix is the usual `you> `. Everything
+else is one shared rendering: the transcript, the header, the context wheel, the
+bottom line, and every modal (approvals, the model/provider/session/theme
+pickers, plan mode) — an approval prompt can be answered from whichever terminal
+is nearest, and Esc from any of them closes it.
+
+The bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) followed by the
+attached terminals' labels, and `/clients` lists them with their sizes. Chords
+are typed in the attached terminal rather than sent to the session:
 
 | Chord | Does |
 | --- | --- |
 | `Ctrl+] d` | detach this terminal; the session keeps running |
 | `Ctrl+] Ctrl+]` | the same detach, without reaching for `d` |
-| `Ctrl+] t` | take input back from whoever is holding it |
 | `Ctrl+]` then anything else | sends the literal `Ctrl+]` on to the session (so does `Ctrl+]` on its own, a second later) |
 
-`/detach` does the same as `Ctrl+] d` from inside the session, and `/quit` ends the
-session for everybody: every attached terminal prints the `resume:` line and drops
-back to its shell.
+`/detach` does the same as `Ctrl+] d` for the terminal that types it, and
+`/quit` ends the session for everybody: every attached terminal prints the
+`resume:` line and drops back to its shell.
 
 **Everyone runs at the smallest size.** One session renders one screen, so the
 shared size is the *minimum* across attached terminals — attach a phone and your
@@ -210,9 +249,7 @@ process the old way — nothing to attach to, and `/clients` says so. Plain mode
 (`--plain`, `ui: plain`), non-TTY runs and headless `be-code run` are never
 hosted. `live_idle_limit` (minutes) exits a served session that has been sitting
 with no attached terminals and no run in progress, so a forgotten host does not
-hold a model resident forever. Starting `be-code` in a workspace that already has
-a live session offers to attach to that instead of starting a second one on the
-same files.
+hold a model resident forever.
 
 Records live in `~/.be-code/live/<code>.json` (0600, with the socket's auth token)
 next to the host's own socket and its startup log `<code>.log` — the place to look
@@ -407,7 +444,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   and no run in progress before it exits (0 = never)
 - `host_sessions` (true) — run each interactive TUI session in a detached host
   process this terminal attaches to, so it survives the terminal and other
-  terminals can attach (`--no-host` for one run); see "Live sessions and handoff"
+  terminals can attach (`--no-host` for one run); see "Shared sessions"
 
 ## Status
 

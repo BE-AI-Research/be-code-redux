@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestChordDetachAndTakeover(t *testing.T) {
+func TestChordDetachAndLiterals(t *testing.T) {
 	now := time.Now()
 	var c Chord
 	fwd, act := c.Feed([]byte("ab"), now)
@@ -24,8 +24,9 @@ func TestChordDetachAndTakeover(t *testing.T) {
 		t.Fatalf("Ctrl+] Ctrl+]: %v", act)
 	}
 	c.Feed([]byte{0x1d}, now)
-	if _, act = c.Feed([]byte("t"), now); act != ActionTakeover {
-		t.Fatalf("Ctrl+] t: %v", act)
+	fwd, act = c.Feed([]byte("t"), now)
+	if string(fwd) != "\x1dt" || act != ActionNone {
+		t.Fatalf("Ctrl+] t is no longer a chord; both bytes forward: %q %v", fwd, act)
 	}
 	c.Feed([]byte{0x1d}, now)
 	fwd, act = c.Feed([]byte("x"), now)
@@ -39,24 +40,24 @@ func TestChordDetachAndTakeover(t *testing.T) {
 	}
 }
 
-// TestChordTakeoverKeepsProcessingTheRest covers a takeover chord that shares
-// its Read with the keystrokes typed straight after it (or with a paste): the
-// point of taking input back is to type, so those bytes must be returned for
-// forwarding rather than dropped with the chord.
-func TestChordTakeoverKeepsProcessingTheRest(t *testing.T) {
+// TestChordForwardsBytesAroundAnUnknownChordKey covers a chord byte that
+// shares its Read with the keystrokes on both sides of it (or a paste): since
+// Ctrl+] followed by an unrecognised key (now including 't') forwards both
+// bytes rather than consuming them, the rest of the buffer must still come
+// back for forwarding.
+//
+// This replaces the old TestChordTakeoverKeepsProcessingTheRest, which
+// exercised ActionTakeover: Task 3 removes that action entirely (Ctrl+] t no
+// longer forwards to the host's take-input-back logic - see client.go), so
+// there is nothing left for that test to assert beyond ordinary forwarding,
+// already covered by TestChordDetachAndLiterals's "unknown chord key" case
+// and this one's multi-byte read.
+func TestChordForwardsBytesAroundAnUnknownChordKey(t *testing.T) {
 	now := time.Now()
 	var c Chord
 	fwd, act := c.Feed([]byte{0x1d, 't', 'h', 'i'}, now)
-	if act != ActionTakeover {
-		t.Fatalf("act = %v, want ActionTakeover", act)
-	}
-	if string(fwd) != "hi" {
-		t.Fatalf("forward = %q, want \"hi\"", fwd)
-	}
-	// Bytes on both sides of the chord survive.
-	fwd, act = c.Feed([]byte("ab\x1dtcd"), now)
-	if act != ActionTakeover || string(fwd) != "abcd" {
-		t.Fatalf("forward = %q, act = %v; want \"abcd\" and ActionTakeover", fwd, act)
+	if act != ActionNone || string(fwd) != "\x1dthi" {
+		t.Fatalf("forward = %q, act = %v; want \"\\x1dthi\" and ActionNone", fwd, act)
 	}
 	// A detach later in the same buffer still ends the scan and wins: this
 	// client is leaving, so there is nowhere to deliver the rest.
@@ -64,12 +65,12 @@ func TestChordTakeoverKeepsProcessingTheRest(t *testing.T) {
 	if act != ActionDetach {
 		t.Fatalf("act = %v, want ActionDetach", act)
 	}
-	if string(fwd) != "xy" {
-		t.Fatalf("forward = %q, want \"xy\" (bytes after the detach are dropped)", fwd)
+	if string(fwd) != "x\x1dty" {
+		t.Fatalf("forward = %q, want \"x\\x1dty\" (bytes after the detach are dropped)", fwd)
 	}
-	// The chord state is not left pending after a takeover.
+	// The chord state is not left pending afterward.
 	fwd, act = c.Feed([]byte("z"), now)
 	if string(fwd) != "z" || act != ActionNone {
-		t.Fatalf("after a takeover: %q %v", fwd, act)
+		t.Fatalf("after processing: %q %v", fwd, act)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,11 +18,20 @@ import (
 // this.
 const byeWait = 500 * time.Millisecond
 
-// maxQueuedOutput caps how many FOutput frames a client's queue may hold
-// before the oldest is evicted. Only FOutput entries are ever evicted (each
-// is a full repaint, so only the newest matters); control frames (FSize,
-// FClients, FBye) are never dropped.
+// maxQueuedOutput caps how many frames of a screen-frame type (FOutput,
+// FOverlay) a client's queue may hold before the oldest of that type is
+// evicted — each type independently, so 8 FOutput and 8 FOverlay frames can
+// be queued at once. Each is a full repaint (of the shared view, or of one
+// client's private rows), so only the newest of each matters; control frames
+// (FSize, FClients, FBye) are never dropped.
 const maxQueuedOutput = 8
+
+// maxEarlyInput bounds how many bytes of a client's keystrokes are buffered
+// per client while OnInput has not yet been registered (the served program
+// listens and serves a client before RunServed calls OnInput; see
+// tui.RunServed and TestSeedFromHostClientsAlreadyAttached). Bytes beyond
+// this are dropped rather than grown without bound.
+const maxEarlyInput = 4096
 
 // qframe is one frame pending delivery to a client.
 type qframe struct {
@@ -37,6 +47,18 @@ type client struct {
 	utf8  bool
 	conn  net.Conn
 
+	// overlay is this client's private input rows, guarded by Host.mu (not
+	// qmu: it is read and written alongside the client slice in fanout.Write
+	// and SetOverlay, never on its own).
+	overlay string
+
+	// pendingIn buffers this client's FInput bytes, in arrival order, from
+	// before OnInput was registered (guarded by Host.mu, same convention as
+	// overlay). Replayed and cleared the moment OnInput registers; capped at
+	// maxEarlyInput so an attach with nobody listening yet cannot grow
+	// without bound.
+	pendingIn []byte
+
 	// qmu guards queue. Only writer() ever reads/drains it; enqueue is called
 	// from any goroutine (recompute, detach, fanout, handle) and must never
 	// block its caller — that is the whole point of routing every frame
@@ -50,31 +72,101 @@ type client struct {
 	once       sync.Once
 }
 
+// maxLabelRunes bounds a client's label. It is shown in the bottom line's
+// clients marker, in every transcript line that client sends, and in
+// /clients, so a label long enough to wrap the row is a nuisance for every
+// other terminal, not just its own.
+const maxLabelRunes = 40
+
+// sanitizeLabel makes a client-supplied label safe to render. The label
+// arrives in that client's hello frame, so it is attacker-controlled text
+// that reaches the shared screen: control bytes, and anything an ESC
+// introduces, would let one terminal repaint or recolour everyone else's
+// session. Everything below 0x20, DEL, and every ESC-introduced sequence is
+// dropped; what is left is clamped to maxLabelRunes (with an ellipsis) and
+// an empty result becomes "client".
+func sanitizeLabel(s string) string {
+	const (
+		plain    = iota
+		afterESC // the byte after an ESC decides what kind of sequence it is
+		inCSI    // ESC [ or ESC O: runs to a final byte (0x40-0x7e)
+		inString // ESC ] or ESC P: runs to BEL or the ESC of an ST
+	)
+	var b strings.Builder
+	state := plain
+	for _, r := range s {
+		switch state {
+		case afterESC:
+			switch r {
+			case '[', 'O':
+				state = inCSI
+			case ']', 'P', '^', '_':
+				state = inString
+			case 0x1b: // ESC ESC: still waiting for an introducer
+			default:
+				state = plain // a two-byte sequence (alt+key); both bytes gone
+			}
+			continue
+		case inCSI:
+			if r >= 0x40 && r <= 0x7e {
+				state = plain
+			}
+			continue
+		case inString:
+			switch r {
+			case 0x07:
+				state = plain
+			case 0x1b:
+				state = afterESC // the ESC of an ST; its '\' goes with it
+			}
+			continue
+		}
+		switch {
+		case r == 0x1b:
+			state = afterESC
+		case r < 0x20 || r == 0x7f:
+			// A bare control byte (newline, carriage return, BEL…).
+		default:
+			b.WriteRune(r)
+		}
+	}
+	label := strings.TrimSpace(b.String())
+	if r := []rune(label); len(r) > maxLabelRunes {
+		label = string(r[:maxLabelRunes-1]) + "…"
+	}
+	if label == "" {
+		return "client"
+	}
+	return label
+}
+
 func newClient(hello Hello, conn net.Conn) *client {
 	return &client{
-		label: hello.Label, cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
+		label: sanitizeLabel(hello.Label), cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
 		wake:       make(chan struct{}, 1),
 		writerDone: make(chan struct{}),
 	}
 }
 
 // enqueue appends a frame for the client's writer goroutine to send. It never
-// blocks: a full queue of FOutput frames evicts its oldest FOutput entry to
-// make room (control frames are never evicted, so this queue can grow beyond
-// maxQueuedOutput only through control traffic, which is bounded by real
-// events — attach/detach/resize/takeover — not by output volume).
+// blocks: a full queue of FOutput or FOverlay frames evicts that type's
+// oldest entry to make room (control frames are never evicted, so this queue
+// can grow beyond maxQueuedOutput only through control traffic, which is
+// bounded by real events — attach/detach/resize — not by output volume).
+// FOutput and FOverlay are both screen bytes for which only the newest
+// matters, so each is capped and evicted independently by its own type.
 func (c *client) enqueue(t FrameType, payload []byte) {
 	c.qmu.Lock()
-	if t == FOutput {
+	if t == FOutput || t == FOverlay {
 		n := 0
 		for _, f := range c.queue {
-			if f.typ == FOutput {
+			if f.typ == t {
 				n++
 			}
 		}
 		if n >= maxQueuedOutput {
 			for i, f := range c.queue {
-				if f.typ == FOutput {
+				if f.typ == t {
 					c.queue = append(c.queue[:i], c.queue[i+1:]...)
 					break
 				}
@@ -115,7 +207,6 @@ type Host struct {
 
 	mu      sync.Mutex
 	clients []*client // attach order
-	holder  *client
 	nextID  int
 	cols    int
 	rows    int
@@ -124,11 +215,7 @@ type Host struct {
 	// recompute for why h.mu alone is not enough).
 	notifyMu sync.Mutex
 
-	inR       *io.PipeReader
-	inW       *io.PipeWriter
-	inCh      chan []byte   // holder keystrokes, drained by pumpInput into inW
-	stopInput chan struct{} // closed once by Close to stop pumpInput
-
+	onInput   func(client int, b []byte)
 	onSize    func(cols, rows int)
 	onClients func([]ClientInfo)
 	onQuit    func()
@@ -143,36 +230,45 @@ type Host struct {
 }
 
 func NewHost(token string, log io.Writer) *Host {
-	r, w := io.Pipe()
-	h := &Host{token: token, log: log, inR: r, inW: w, inCh: make(chan []byte, 256), stopInput: make(chan struct{})}
-	go h.pumpInput()
-	return h
+	return &Host{token: token, log: log}
 }
 
-// pumpInput is the sole writer to inW. It is a dedicated goroutine so that a
-// program that is momentarily not reading InputReader() (or never reads it,
-// as in a headless caller) cannot block a client connection's read loop: a
-// per-connection goroutine only ever sends to inCh, which is non-blocking,
-// so it stays free to process that same client's control frames (resize,
-// takeover, detach, quit) instead of stalling behind an unconsumed pipe.
-// It exits on stopInput rather than a closed inCh, since inCh may still have
-// concurrent senders right up to Close.
-func (h *Host) pumpInput() {
-	for {
-		select {
-		case <-h.stopInput:
-			return
-		case p := <-h.inCh:
-			if _, err := h.inW.Write(p); err != nil {
-				return
+// OnInput registers the program's tagged-keystroke callback: f is called
+// with the id of the client that sent them and the raw bytes, once per
+// FInput frame, for every attached client (there is no holder any more — the
+// served program decides what each client's bytes mean). f runs on that
+// client's own connection-handling goroutine (see handle), not a dedicated
+// one, so it must not block for long: doing so stalls that same client's
+// resize, detach and quit frames behind it.
+//
+// Registering also replays any input that arrived, per client, while no
+// callback was registered yet — otherwise keystrokes typed in the first
+// milliseconds after attaching (the host serves a client before the served
+// program calls OnInput) would simply be lost.
+func (h *Host) OnInput(f func(client int, b []byte)) {
+	type early struct {
+		id int
+		b  []byte
+	}
+	h.mu.Lock()
+	h.onInput = f
+	var buffered []early
+	if f != nil {
+		for _, c := range h.clients {
+			if len(c.pendingIn) > 0 {
+				buffered = append(buffered, early{c.id, c.pendingIn})
+				c.pendingIn = nil
 			}
 		}
+	}
+	h.mu.Unlock()
+	for _, e := range buffered {
+		f(e.id, e.b)
 	}
 }
 
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
-func (h *Host) InputReader() io.Reader         { return h.inR }
 func (h *Host) Output() io.Writer              { return fanout{h} }
 
 // OnQuit registers the program's shutdown hook. A quit requested before this
@@ -239,7 +335,6 @@ func (h *Host) handle(conn net.Conn) {
 	h.nextID++
 	c.id = h.nextID
 	h.clients = append(h.clients, c)
-	h.holder = c // newest attacher holds input
 	h.mu.Unlock()
 	go h.writer(c)
 	h.recomputeAttach(c)
@@ -253,13 +348,19 @@ func (h *Host) handle(conn net.Conn) {
 		switch typ {
 		case FInput:
 			h.mu.Lock()
-			isHolder := h.holder == c
-			h.mu.Unlock()
-			if isHolder {
-				select {
-				case h.inCh <- payload:
-				default: // program isn't keeping up; drop rather than block this connection
+			f := h.onInput
+			if f == nil {
+				if room := maxEarlyInput - len(c.pendingIn); room > 0 {
+					add := payload
+					if len(add) > room {
+						add = add[:room]
+					}
+					c.pendingIn = append(c.pendingIn, add...)
 				}
+			}
+			h.mu.Unlock()
+			if f != nil {
+				f(c.id, append([]byte(nil), payload...))
 			}
 		case FResize:
 			var s Size
@@ -269,11 +370,6 @@ func (h *Host) handle(conn net.Conn) {
 				h.mu.Unlock()
 				h.recompute()
 			}
-		case FTakeover:
-			h.mu.Lock()
-			h.holder = c
-			h.mu.Unlock()
-			h.recompute()
 		case FDetach:
 			h.detach(c, ReasonDetached)
 			return
@@ -314,12 +410,6 @@ func (h *Host) detach(c *client, reason string) {
 				break
 			}
 		}
-		if h.holder == c {
-			h.holder = nil
-			if n := len(h.clients); n > 0 {
-				h.holder = h.clients[n-1] // most recently attached remaining client
-			}
-		}
 		h.mu.Unlock()
 
 		c.enqueueJSON(FBye, Bye{Reason: reason})
@@ -352,7 +442,7 @@ func (h *Host) detach(c *client, reason string) {
 // program must never call into the host from inside its own update loop.
 // tui.RunServed's callbacks are `p.Send(...)` on an unbuffered channel that
 // only the program's update goroutine receives from, so a synchronous
-// DetachHolder/Close/RequestQuit from inside Update would block that
+// Detach/Close/RequestQuit from inside Update would block that
 // goroutine on its own p.Send — with notifyMu held, which then hangs every
 // later attach and detach too. Route such calls through a tea.Cmd (they run
 // on their own goroutine) instead.
@@ -407,10 +497,13 @@ func (h *Host) recomputeAttach(attached *client) {
 	}
 }
 
+// infosLocked snapshots the attached clients. There is no holder: every
+// client's input is tagged with its id and the served program decides what
+// each one means.
 func (h *Host) infosLocked() []ClientInfo {
 	out := make([]ClientInfo, 0, len(h.clients))
 	for _, c := range h.clients {
-		out = append(out, ClientInfo{ID: c.id, Label: c.label, Holder: c == h.holder, Cols: c.cols, Rows: c.rows, UTF8: c.utf8})
+		out = append(out, ClientInfo{ID: c.id, Label: c.label, Cols: c.cols, Rows: c.rows, UTF8: c.utf8})
 	}
 	return out
 }
@@ -454,13 +547,76 @@ func (h *Host) RequestQuit() {
 	}
 }
 
-func (h *Host) DetachHolder() {
+// ReasonSwitchPrefix prefixes a bye that tells the client to reattach to
+// another live session in the same terminal.
+const ReasonSwitchPrefix = "switch:"
+
+// byIDLocked is byID's search, for callers that already hold h.mu.
+func (h *Host) byIDLocked(id int) *client {
+	for _, c := range h.clients {
+		if c.id == id {
+			return c
+		}
+	}
+	return nil
+}
+
+func (h *Host) byID(id int) *client {
 	h.mu.Lock()
-	c := h.holder
-	h.mu.Unlock()
-	if c != nil {
+	defer h.mu.Unlock()
+	return h.byIDLocked(id)
+}
+
+// Detach drops one client with the ordinary detached reason.
+func (h *Host) Detach(id int) {
+	if c := h.byID(id); c != nil {
 		h.detach(c, ReasonDetached)
 	}
+}
+
+// Switch hands one client over to another live session.
+func (h *Host) Switch(id int, code string) {
+	if c := h.byID(id); c != nil {
+		h.detach(c, ReasonSwitchPrefix+code)
+	}
+}
+
+// ClearOverlays forgets every client's overlay so the fan-out stops
+// re-appending them. The served program calls it on its way into a quit,
+// and the host process again the moment that program returns: the closing
+// lines (leaving the alt screen, the resume line) are ordinary output
+// frames, and an overlay appended after each of them would paint the
+// client's draft onto the main screen and drag the cursor away from
+// column 0.
+func (h *Host) ClearOverlays() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.clients {
+		c.overlay = ""
+	}
+}
+
+// SetOverlay records a client's private input rows and sends them. The
+// same rows are appended to every shared frame that client receives, so a
+// full repaint never erases them. An unchanged overlay is not re-sent.
+//
+// h.mu is held across the enqueue (enqueue itself never blocks — it only
+// appends under c.qmu and does a non-blocking wake — and nothing that holds
+// c.qmu ever takes h.mu), so this can never interleave with fanout.Write's
+// own read-then-enqueue of the same client's overlay: without that, a
+// concurrent frame write could snapshot this client's overlay just before
+// this call updates it, then enqueue that stale value after this call's own
+// FOverlay, permanently reverting the client's rendered overlay with no next
+// frame to correct it (a private keystroke need not change the shared view).
+func (h *Host) SetOverlay(id int, s string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.byIDLocked(id)
+	if c == nil || c.overlay == s {
+		return
+	}
+	c.overlay = s
+	c.enqueue(FOverlay, []byte(s))
 }
 
 // Close says goodbye to every client and stops accepting.
@@ -483,20 +639,27 @@ func (h *Host) Close(reason string) {
 	for _, c := range clients {
 		h.detach(c, reason) // each bounded by byeWait; a stalled client cannot delay this loop
 	}
-	close(h.stopInput)
-	h.inW.Close()
 }
 
-// fanout copies program output to every attached client.
+// fanout copies program output to every attached client, followed by that
+// client's private overlay (if it has one) so a full repaint never erases
+// it.
 type fanout struct{ h *Host }
 
+// Write holds h.mu across every client's pair of enqueues (see SetOverlay's
+// doc for why: releasing it between reading c.overlay and enqueueing it
+// would let a concurrent SetOverlay's own newer value be overwritten by this
+// call's now-stale one). enqueue itself never blocks, so this never holds
+// h.mu across anything that could stall.
 func (f fanout) Write(p []byte) (int, error) {
 	cp := append([]byte(nil), p...)
 	f.h.mu.Lock()
-	clients := append([]*client(nil), f.h.clients...)
-	f.h.mu.Unlock()
-	for _, c := range clients {
+	defer f.h.mu.Unlock()
+	for _, c := range f.h.clients {
 		c.enqueue(FOutput, cp)
+		if c.overlay != "" {
+			c.enqueue(FOverlay, []byte(c.overlay))
+		}
 	}
 	return len(p), nil
 }

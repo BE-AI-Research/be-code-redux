@@ -17,7 +17,7 @@ const (
 	FInput
 	FResize
 	FDetach
-	FTakeover
+	FOverlay // host→client: one client's private input rows
 	FQuit
 	FOutput
 	FSize
@@ -41,12 +41,11 @@ type Size struct {
 }
 
 type ClientInfo struct {
-	ID     int    `json:"id"`
-	Label  string `json:"label"`
-	Holder bool   `json:"holder"`
-	Cols   int    `json:"cols"`
-	Rows   int    `json:"rows"`
-	UTF8   bool   `json:"utf8"`
+	ID    int    `json:"id"`
+	Label string `json:"label"`
+	Cols  int    `json:"cols"`
+	Rows  int    `json:"rows"`
+	UTF8  bool   `json:"utf8"`
 }
 
 type Bye struct {

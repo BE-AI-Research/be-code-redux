@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,24 +19,30 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 )
 
-// With two clients the bottom line names the holder and the chords.
-func TestClientsMsgRendersHolder(t *testing.T) {
+// With two clients the bottom line counts them and names them all: there
+// is no holder any more, so nobody is singled out.
+func TestClientsMsgRendersRoster(t *testing.T) {
 	m := newTestModel(t)
-	// UTF8: true on both — this test is about the holder label and chord
-	// hints, not the ASCII fallback (see TestASCIIFallbacks in compact_test.go);
-	// m.ascii now has a reader (the clients marker glyph), so a fixture that
-	// leaves UTF8 at its zero value would render the ASCII marker instead.
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", Holder: true, UTF8: true}})
+	// UTF8: true on both — this test is about the labels, not the ASCII
+	// fallback (see TestASCIIFallbacks in compact_test.go); m.ascii has a
+	// reader (the clients marker glyph), so a fixture that leaves UTF8 at its
+	// zero value would render the ASCII marker instead.
+	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true}})
 	v := m.View()
-	for _, want := range []string{"⧉ 2", "input: ssh from 10.0.0.5", "Ctrl+] d", "Ctrl+] t"} {
+	for _, want := range []string{"⧉ 2", "vscode (pid 1), ssh from 10.0.0.5 (pid 2)"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("bottom line lacks %q:\n%s", want, v)
 		}
 	}
-	if !strings.Contains(m.transcript.String(), "attached: ssh from 10.0.0.5 (pid 2), now holding input") {
+	for _, gone := range []string{"input:", "Ctrl+] d", "Ctrl+] t"} {
+		if strings.Contains(v, gone) {
+			t.Fatalf("holder text %q survives:\n%s", gone, v)
+		}
+	}
+	if !strings.Contains(m.transcript.String(), "attached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatalf("no attach line:\n%s", m.transcript.String())
 	}
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", Holder: true}})
+	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)"}})
 	if !strings.Contains(m.transcript.String(), "detached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatal("no detach line")
 	}
@@ -44,23 +51,27 @@ func TestClientsMsgRendersHolder(t *testing.T) {
 	}
 }
 
-// /clients lists clients; /detach asks the host to drop the holder.
+// /clients lists clients; /detach asks the host to drop the terminal the
+// command was typed on.
 func TestClientsAndDetachCommands(t *testing.T) {
 	m := newTestModel(t)
-	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)", Holder: true}})
-	m.slashCommand("/clients")
+	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)"}})
+	m.slashCommand("/clients", 1)
 	if !strings.Contains(m.transcript.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
-	detached := make(chan struct{}, 1)
-	m.detachHolder = func() { detached <- struct{}{} }
-	_, cmd := m.slashCommand("/detach")
+	detached := make(chan int, 1)
+	m.detachClient = func(id int) { detached <- id }
+	_, cmd := m.slashCommand("/detach", 1)
 	if cmd == nil {
 		t.Fatal("/detach returned no command")
 	}
 	cmd() // Bubble Tea runs this on its own goroutine
 	select {
-	case <-detached:
+	case id := <-detached:
+		if id != 1 {
+			t.Fatalf("detached client %d, want the one that typed /detach", id)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("/detach did not call the host")
 	}
@@ -86,7 +97,7 @@ func TestClientsNotServedMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = false
 	m.clients = nil
-	m.slashCommand("/clients")
+	m.slashCommand("/clients", 0)
 	if !strings.Contains(m.transcript.String(), "not served") {
 		t.Fatalf("expected a not-served note:\n%s", m.transcript.String())
 	}
@@ -98,7 +109,7 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = true
 	m.clients = nil
-	m.slashCommand("/clients")
+	m.slashCommand("/clients", 0)
 	if !strings.Contains(m.transcript.String(), "no terminals attached") {
 		t.Fatalf("expected a no-terminals-attached note:\n%s", m.transcript.String())
 	}
@@ -258,21 +269,22 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 		}
 	}()
 	if err := live.WriteJSON(conn, live.FHello, live.Hello{
-		Token: "tok", Cols: 80, Rows: 24, Label: "holder", UTF8: true,
+		Token: "tok", Cols: 80, Rows: 24, Label: "phone", UTF8: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	waitForClients(t, h, 1)
+	id := h.Clients()[0].ID
 
 	m := newTestModel(t)
 	m.served = true
-	m.detachHolder = h.DetachHolder
+	m.detachClient = h.Detach
 
 	// "Update" runs with nothing draining msgs, exactly as Bubble Tea does.
 	type result struct{ cmd tea.Cmd }
 	res := make(chan result, 1)
 	go func() {
-		_, cmd := m.slashCommand("/detach")
+		_, cmd := m.slashCommand("/detach", id)
 		res <- result{cmd}
 	}()
 	var cmd tea.Cmd
@@ -301,5 +313,121 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the attached client was never told goodbye")
+	}
+}
+
+func TestOverlayPositionsEachRowAndParksTheCursor(t *testing.T) {
+	m := twoClients(t) // 100x30, served, 3 input rows
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("typed")})
+	ov := m.overlayFor(2)
+	first := m.headerHeight() + m.vp.Height + 1 // 1-based row of the first input line, as View lays it out
+	for r := 0; r < m.inputRows(); r++ {
+		if !strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", first+r)) {
+			t.Fatalf("overlay lacks a move to row %d:\n%q", first+r, ov)
+		}
+	}
+	if !strings.Contains(ov, "typed") {
+		t.Fatal("overlay lacks the client's text")
+	}
+	if !strings.HasSuffix(ov, fmt.Sprintf("\x1b[%d;%dH", m.height, m.width)) {
+		t.Fatalf("overlay must park the cursor at the bottom-right:\n%q", ov)
+	}
+	bottom := m.headerHeight() + m.vp.Height + m.inputRows() + 1 // the bottom line's row
+	if strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", bottom)) {
+		t.Fatalf("overlay must not write the bottom line's row %d:\n%q", bottom, ov)
+	}
+	if strings.Contains(ov, "\x1b[K") {
+		t.Fatal("overlay must pad rows, not clear to end of line (the wheel lives to the right)")
+	}
+}
+
+func TestOverlayIsPublishedAfterAKeyAndForEveryoneOnResize(t *testing.T) {
+	m := twoClients(t)
+	var pub []int
+	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("a")})
+	if len(pub) != 1 || pub[0] != 1 {
+		t.Fatalf("after a key: %v", pub)
+	}
+	pub = nil
+	m.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
+	sort.Ints(pub)
+	if len(pub) != 2 || pub[0] != 1 || pub[1] != 2 {
+		t.Fatalf("after a resize: %v", pub)
+	}
+}
+
+// A full-screen modal (approval, picker, menu, plan) replaces the whole
+// frame with no reserved input row: overlayFor's absolute positioning would
+// land on the modal's own content, so publishing must stop while one is up,
+// and every roster client's draft must be repainted the moment it closes.
+// A stale overlay must not be re-stamped onto an open modal: Host.fanout.Write
+// unconditionally re-appends a client's last-published overlay after every
+// frame it writes (so an ordinary full repaint never erases a draft), so the
+// TUI must actively clear it — publish "" — the instant a full-screen modal
+// takes over the frame, not just stop publishing new content.
+func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
+	m := twoClients(t)
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("draft1")})
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("draft2")})
+
+	type call struct {
+		id int
+		s  string
+	}
+	var calls []call
+	m.setOverlay = func(id int, s string) { calls = append(calls, call{id, s}) }
+
+	m.Update(approvalMsg{action: "shell", detail: "echo hi", resp: make(chan bool, 1)})
+	if m.mode != modeApproval {
+		t.Fatalf("mode = %v, want modeApproval", m.mode)
+	}
+	cleared := map[int]bool{}
+	for _, c := range calls {
+		if c.s != "" {
+			t.Fatalf("opening the modal published a non-empty overlay for %d: %q", c.id, c.s)
+		}
+		cleared[c.id] = true
+	}
+	if !cleared[1] || !cleared[2] {
+		t.Fatalf("opening the modal did not clear every roster client's overlay: %+v", calls)
+	}
+
+	calls = nil
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("x")}) // scrolls the modal viewport, does not close it
+	if len(calls) != 0 {
+		t.Fatalf("a key during the modal published: %+v", calls)
+	}
+
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("n")}) // denies and closes the modal
+	if m.mode == modeApproval {
+		t.Fatal("modal did not close")
+	}
+	got := map[int]string{}
+	for _, c := range calls {
+		got[c.id] = c.s
+	}
+	if len(got) != 2 {
+		t.Fatalf("closing the modal did not republish every roster client: %+v", calls)
+	}
+	if !strings.Contains(got[1], "draft1") || !strings.Contains(got[2], "draft2") {
+		t.Fatalf("closing the modal did not republish the real drafts: %+v", got)
+	}
+}
+
+// startTurn mutates every client's textarea (the placeholder flips to the
+// busy hint), not only the one whose Enter started the turn.
+func TestStartTurnRepublishesEveryClientsOverlay(t *testing.T) {
+	m := twoClients(t)
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("hi")})
+	var pub []int
+	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	seen := map[int]bool{}
+	for _, id := range pub {
+		seen[id] = true
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("starting a turn did not republish every client's overlay: %v", pub)
 	}
 }

@@ -133,3 +133,29 @@ func TestSessionHandoffRoundTrip(t *testing.T) {
 		t.Fatalf("handoff lost: %v %q", err, got.Handoff)
 	}
 }
+
+// A hosted program stamps its pid on the session file so a second program
+// can tell that the file already has a live owner (see the save guard in
+// internal/agent). The stamp is worthless unless it survives a round trip.
+func TestSessionHostPIDRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	s := NewSession("ollama", "m", "/ws")
+	s.HostPID = 4242
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(s.ID)
+	if err != nil || got.HostPID != 4242 {
+		t.Fatalf("host pid lost: %v %d", err, got.HostPID)
+	}
+	// Sessions written before the stamp existed load as unowned, not as
+	// owned-by-pid-zero.
+	s.HostPID = 0
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = Load(s.ID); err != nil || got.HostPID != 0 {
+		t.Fatalf("unstamped session: %v %d", err, got.HostPID)
+	}
+}

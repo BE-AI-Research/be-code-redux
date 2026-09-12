@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -118,6 +120,10 @@ func runSessionHost(code string) error {
 	// taken back to the normal screen first, so the resume line survives
 	// their restore instead of vanishing with the alt buffer.
 	out := live.NewCRLFWriter(h.Output())
+	// The program is gone: stop splicing each client's input rows after the
+	// closing lines below, or the draft lands on the main screen and the
+	// resume line starts wherever the overlay parked the cursor.
+	h.ClearOverlays()
 	fmt.Fprint(out, live.ExitAltScreen)
 	fmt.Fprintln(out, "\nfinishing session (writing the handoff briefing)...")
 	finishSession(ag, true, out)
@@ -137,6 +143,29 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	if err != nil {
 		return err
 	}
+	// Join, never fork: a session that is already live anywhere is attached
+	// to, not loaded a second time. No question is asked — a second program
+	// on one session file is never what the user meant, and --new is there
+	// for the one case where they do want a second session.
+	if rec, msg := decideStart(dir, workspace, flagResume, flagNew); rec != nil {
+		fmt.Println(msg)
+		joined, err := joinLive(ctx, rec)
+		if err != nil {
+			return err
+		}
+		if joined {
+			return nil
+		}
+		// The host was on its way out as we arrived (it advertises its
+		// record and answers on its socket until the very last moment of
+		// finishSession). Joining must never refuse or fork, so this is not
+		// an error: there is simply no live session after all, and the
+		// fresh-host path below starts one — resuming the saved file when
+		// --resume named it. Give the record a moment to be retired first,
+		// or the guard below would see the host that has just gone.
+		fmt.Printf("%s ended as you joined it; starting a session instead\n", rec.Code)
+		gone(dir, rec.Code, 2*time.Second)
+	}
 	code := store.CodeFor(live.NewToken()) // fresh; the host stamps it on its session
 	if flagResume != "" {
 		s, err := store.Load(flagResume)
@@ -145,20 +174,11 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 		}
 		code = s.ResumeCode()
 	}
-	// Offer to attach to a live session for this workspace instead of
-	// starting a second one on the same files. It is one question about one
-	// session (the newest), never a walk through every record; and an
-	// explicit --resume has already said which session the user wants, so the
-	// offer only stands when the live one *is* that session.
-	if r := newestLiveIn(dir, workspace); offerAttach(r, flagResume, code) {
-		fmt.Printf("a live session for this workspace is running (%s, since %s). Attach to it? [Y/n] ",
-			r.Code, r.StartedAt.Format("15:04"))
-		var ans string
-		fmt.Scanln(&ans)
-		if ans == "" || strings.HasPrefix(strings.ToLower(ans), "y") {
-			return attachLive(ctx, r, false)
-		}
-	}
+	// Normally unreachable for --resume (decideStart has just joined any
+	// live host for that code) and vanishingly unlikely for a fresh code,
+	// but a second host on one session file is exactly what this whole path
+	// exists to prevent, so the guard stays — and a join that missed by a
+	// hair (above) comes through here with the departing host's own code.
 	// findLive, not live.Load: a record left behind by a host that is gone
 	// must not block a new session under the same code.
 	if findLive(dir, code) != nil {
@@ -201,21 +221,50 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	return attachLive(ctx, &rec, false)
 }
 
-// offerAttach reports whether to offer attaching to the live session r
-// instead of starting a new one. An explicit --resume names the session the
-// user wants, so the offer only stands when the live session is that one —
-// otherwise the answer "yes" would silently attach them to a different
-// session than the one they asked to resume.
-func offerAttach(r *live.Record, resume, code string) bool {
-	if r == nil {
-		return false
+// decideStart picks a live session to join, or nil to start a fresh host,
+// and returns the line to print before joining. An explicit --resume names
+// the session the user wants, so it is looked up by itself and the
+// workspace's other live sessions are left alone; --new is the only way to
+// ask for a second session on a workspace that already has one.
+func decideStart(dir, workspace, resume string, fresh bool) (*live.Record, string) {
+	if resume = strings.TrimSpace(resume); resume != "" {
+		// The live registry first, and by the code as typed: a host's
+		// session exists in its memory from the moment it starts, but the
+		// file only appears on the first autosave — so a live session with
+		// no turns yet is not loadable from the store, and going through it
+		// would turn "join the session I can see running" into "no such
+		// session". Resume codes are upper-case; the store gets the same
+		// string untouched, because what --resume names may equally be a
+		// session id or "last", neither of which survives upper-casing (and
+		// store.Load upper-cases for itself when it falls back to a code).
+		if rec := live.LiveCode(dir, strings.ToUpper(resume)); rec != nil {
+			return rec, "joining live session " + rec.Code
+		}
+		s, err := store.Load(resume)
+		if err != nil {
+			// Not a session we can resolve: let the ordinary --resume path
+			// report it.
+			return nil, ""
+		}
+		// A saved session resumed by id (or "last") may still be live under
+		// its code.
+		if rec := live.LiveCode(dir, s.ResumeCode()); rec != nil {
+			return rec, "joining live session " + rec.Code
+		}
+		return nil, ""
 	}
-	return resume == "" || r.Code == code
+	if fresh {
+		return nil, ""
+	}
+	if rec := newestLiveIn(dir, workspace); rec != nil {
+		return rec, fmt.Sprintf("joining live session %s (be-code --new starts a fresh one)", rec.Code)
+	}
+	return nil, ""
 }
 
 // newestLiveIn returns the most recently started live session serving
 // workspace, or nil when there is none. live.List prunes records whose host
-// is gone, so a stale record never produces an offer to attach to nothing.
+// is gone, so a stale record never joins a session that is not there.
 func newestLiveIn(dir, workspace string) *live.Record {
 	lives, _ := live.List(dir)
 	var newest *live.Record
@@ -334,45 +383,106 @@ func tailLog(path string, stop <-chan struct{}, w io.Writer) {
 	}
 }
 
+// attachOptions is live.DefaultAttachOptions, indirected so tests can run
+// an attach without a real terminal to put in raw mode.
+var attachOptions = live.DefaultAttachOptions
+
 // attachLive runs this terminal as a client of rec's host until it detaches
-// or the session ends.
+// or the session ends. A "switch:CODE" bye reason hands the terminal to
+// another live session instead of ending the attach: the loop reattaches to
+// the named record and only returns once there is nowhere left to go.
 func attachLive(ctx context.Context, rec *live.Record, view bool) error {
-	opt := live.DefaultAttachOptions()
-	opt.View = view
-	reason, err := live.Attach(ctx, rec, opt)
+	_, err := attachOrJoin(ctx, rec, view, false)
+	return err
+}
+
+// joinLive is attachLive on a launcher's join path, where an attach that
+// never joined is not a failure but a fresh session waiting to be started:
+// it reports whether this terminal actually joined rec's session (see
+// joinMissed). Only the first attach can miss — once the session has
+// rendered here, a later switch is an ordinary attach.
+func joinLive(ctx context.Context, rec *live.Record) (bool, error) {
+	return attachOrJoin(ctx, rec, false, true)
+}
+
+// joinMissed reports whether an attach on a join path never joined at all:
+// the host's socket could not be dialled, or the host said the session had
+// ended before it had rendered a single frame to this terminal. Both mean
+// the record we found was a host in its shutdown window (it retires the
+// record last of all), not a session to join.
+func joinMissed(reason string, joined bool, err error) bool {
 	if err != nil {
-		return err
+		return errors.Is(err, live.ErrDial)
+	}
+	return !joined && reason == live.ReasonEnded
+}
+
+func attachOrJoin(ctx context.Context, rec *live.Record, view, join bool) (bool, error) {
+	dir, err := live.Dir()
+	if err != nil {
+		return false, err
+	}
+	for {
+		opt := attachOptions()
+		opt.View = view
+		var joined atomic.Bool
+		opt.Joined = &joined
+		reason, err := live.Attach(ctx, rec, opt)
+		if join {
+			// Only the first attach of a join can miss; after that this is
+			// an ordinary attach loop following switches.
+			join = false
+			if joinMissed(reason, joined.Load(), err) {
+				return false, nil
+			}
+		}
+		if err != nil {
+			return true, err
+		}
+		next, msg := nextAttach(dir, rec.Code, reason)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		if next == nil {
+			return true, nil
+		}
+		rec = next
+	}
+}
+
+// nextAttach interprets a bye reason: a switch names the record to attach
+// next (silently, no message — the terminal is handed straight over);
+// everything else ends the attach with a line for the user.
+func nextAttach(dir, code, reason string) (*live.Record, string) {
+	if target, ok := live.SwitchTarget(reason); ok {
+		if rec := findLive(dir, target); rec != nil {
+			return rec, ""
+		}
+		return nil, fmt.Sprintf("%s ended before you could join it", target)
 	}
 	// "" is this terminal's own Ctrl+] d; ReasonDetached is the host having
 	// detached it (a `/detach` typed inside the session). Both leave the
 	// session running, so both get the line that says how to come back.
 	if reason == "" || reason == live.ReasonDetached {
-		fmt.Printf("detached from %s (still running); be-code attach %s to return\n", rec.Code, rec.Code)
-	} else {
-		fmt.Printf("%s: %s\n", rec.Code, reason)
+		return nil, fmt.Sprintf("detached from %s (still running); be-code attach %s to return", code, code)
 	}
-	return nil
+	return nil, fmt.Sprintf("%s: %s", code, reason)
 }
 
 // findLive resolves a code (or "last") to a live record, or nil when there
 // is no live host for it.
 func findLive(dir, code string) *live.Record {
+	if code != "last" {
+		return live.LiveCode(dir, code)
+	}
 	lives, _ := live.List(dir)
-	if code == "last" {
-		var newest *live.Record
-		for i := range lives {
-			if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {
-				newest = &lives[i]
-			}
-		}
-		return newest
-	}
+	var newest *live.Record
 	for i := range lives {
-		if lives[i].Code == code {
-			return &lives[i]
+		if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {
+			newest = &lives[i]
 		}
 	}
-	return nil
+	return newest
 }
 
 var attachCmd = &cobra.Command{
@@ -483,9 +593,9 @@ func requestQuit(rec *live.Record) error {
 	}
 	defer conn.Close()
 	// Oversized dimensions so this client never becomes the smallest one and
-	// reflows the session for the terminals that are really watching it. It
-	// does briefly hold input (the host hands that to the newest client),
-	// which is harmless for a connection whose only frame is "quit".
+	// reflows the session for the terminals that are really watching it.
+	// Its keystrokes would be delivered tagged like any other client's, but
+	// it sends none: the only frame it writes is "quit".
 	hello := live.Hello{Token: rec.Token, Cols: 9999, Rows: 9999, Label: "sessions kill", UTF8: true}
 	if err := live.WriteJSON(conn, live.FHello, hello); err != nil {
 		return err

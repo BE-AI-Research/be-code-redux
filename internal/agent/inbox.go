@@ -16,19 +16,40 @@ import (
 // the UI to start the next turn with.
 type Inbox struct {
 	mu    sync.Mutex
-	items []string
+	items []InboxItem
 	held  bool // the UI has the queue open for editing: delivery pauses
 }
 
-// Enqueue queues a user message for delivery at the next model call.
-func (a *Agent) Enqueue(text string) {
+// InboxItem is a queued message and the client that queued it (0 = the
+// local terminal). A shared session has one input line per attached
+// terminal, so the UI needs to know whose message each one is to show each
+// client only its own queue.
+type InboxItem struct {
+	Text string
+	From int
+}
+
+// Enqueue queues a user message typed at the local terminal.
+func (a *Agent) Enqueue(text string) { a.EnqueueFrom(text, 0) }
+
+// EnqueueFrom queues a user message for delivery at the next model call,
+// remembering which attached terminal typed it.
+func (a *Agent) EnqueueFrom(text string, from int) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
 	a.inbox.mu.Lock()
-	a.inbox.items = append(a.inbox.items, text)
+	a.inbox.items = append(a.inbox.items, InboxItem{Text: text, From: from})
 	a.inbox.mu.Unlock()
+}
+
+// Items returns a copy of the queued messages, with their senders, in
+// delivery order.
+func (a *Agent) Items() []InboxItem {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	return append([]InboxItem(nil), a.inbox.items...)
 }
 
 // Pending reports how many messages are queued.
@@ -39,7 +60,10 @@ func (a *Agent) Pending() int {
 }
 
 // DrainInbox removes and returns every queued message.
-func (a *Agent) DrainInbox() []string {
+func (a *Agent) DrainInbox() []string { return texts(a.DrainItems()) }
+
+// DrainItems removes and returns every queued message with its sender.
+func (a *Agent) DrainItems() []InboxItem {
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()
 	out := a.inbox.items
@@ -51,7 +75,16 @@ func (a *Agent) DrainInbox() []string {
 func (a *Agent) Peek() []string {
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()
-	return append([]string(nil), a.inbox.items...)
+	return texts(a.inbox.items)
+}
+
+// texts projects queued items onto their message texts, in order.
+func texts(items []InboxItem) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Text)
+	}
+	return out
 }
 
 // Remove takes the i-th queued message out of the queue. ok is false when
@@ -62,7 +95,7 @@ func (a *Agent) Remove(i int) (string, bool) {
 	if i < 0 || i >= len(a.inbox.items) {
 		return "", false
 	}
-	text := a.inbox.items[i]
+	text := a.inbox.items[i].Text
 	a.inbox.items = append(a.inbox.items[:i], a.inbox.items[i+1:]...)
 	return text, true
 }
