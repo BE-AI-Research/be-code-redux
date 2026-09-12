@@ -2,6 +2,12 @@
 
 ## v0.4.4 — 2026-09-11 — editable message queue, colour themes
 
+- Python verification uses the workspace virtualenv's interpreter
+  (`.venv/bin/python`, `venv/…`, Windows `Scripts\python.exe`) when present,
+  so the project's own pytest is found. A missing pytest module or "no tests
+  collected" (exit 5) is now reported as `[SKIP]` with the reason instead of
+  a failure the model was asked to repair.
+
 - Ten colour themes join dark, light and mono: dracula, nord, gruvbox,
   monokai, one-dark, solarized-dark, solarized-light, tokyo-night,
   catppuccin (Mocha) and github-light. `/theme` opens a picker (also under
