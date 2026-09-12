@@ -285,6 +285,49 @@ func TestAttachKeepsTheResumeLineVisibleAfterAnEndedSession(t *testing.T) {
 	}
 }
 
+func TestAttachWritesOverlayFramesVerbatim(t *testing.T) {
+	h, sock := startHost(t)
+	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
+	stdinR, _ := io.Pipe()
+	var stdout syncBuffer
+	go Attach(context.Background(), rec, AttachOptions{Label: "t", Stdin: stdinR, Stdout: &stdout,
+		Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true})
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.SetOverlay(h.Clients()[0].ID, "\x1b[22;1Hhello")
+	within(t, time.Second, func() bool { return strings.Contains(stdout.String(), "\x1b[22;1Hhello") })
+}
+
+func TestSwitchTarget(t *testing.T) {
+	if code, ok := SwitchTarget("switch:ABC123"); !ok || code != "ABC123" {
+		t.Fatalf("%q %v", code, ok)
+	}
+	if _, ok := SwitchTarget("detached"); ok {
+		t.Fatal("plain reason is not a switch")
+	}
+}
+
+func TestAttachReturnsSwitchReason(t *testing.T) {
+	h, sock := startHost(t)
+	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
+	stdinR, _ := io.Pipe()
+	done := make(chan string, 1)
+	go func() {
+		r, _ := Attach(context.Background(), rec, AttachOptions{Label: "t", Stdin: stdinR, Stdout: io.Discard,
+			Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true})
+		done <- r
+	}()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.Switch(h.Clients()[0].ID, "NEW001")
+	select {
+	case r := <-done:
+		if r != "switch:NEW001" {
+			t.Fatalf("reason %q", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Attach did not return on switch")
+	}
+}
+
 // The old TestAttachTakeoverClaimsInputBeforeForwarding lived here. It
 // exercised holder election (a second client's takeover moving whose input
 // reached the program), which no longer exists — every client's input now

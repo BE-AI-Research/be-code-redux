@@ -224,6 +224,36 @@ func TestNewestLiveInPicksTheNewestAndSkipsDeadHosts(t *testing.T) {
 	}
 }
 
+// TestNextAttach covers nextAttach's interpretation of every bye reason
+// attachLive's loop can see: a switch to a still-live session hands over the
+// record silently, a switch to a session that is gone (or was never live)
+// ends the attach with an explanatory line, a local/host-initiated detach
+// prints the "still running" line, and any other reason (host close, "session
+// ended" included) is reported verbatim.
+func TestNextAttach(t *testing.T) {
+	dir := t.TempDir()
+	target := live.Record{Code: "ABC123", PID: os.Getpid(), Socket: filepath.Join(dir, "ABC123.sock"), Workspace: "/ws", StartedAt: time.Now()}
+	if err := target.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if rec, msg := nextAttach(dir, "OLD001", "switch:ABC123"); rec == nil || rec.Code != "ABC123" || msg != "" {
+		t.Fatalf("switch to a live target = %+v, %q; want the ABC123 record and no message", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", "switch:GONE99"); rec != nil || msg != "GONE99 ended before you could join it" {
+		t.Fatalf("switch to a dead target = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", ""); rec != nil || msg != "detached from OLD001 (still running); be-code attach OLD001 to return" {
+		t.Fatalf("local detach = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", live.ReasonDetached); rec != nil || msg != "detached from OLD001 (still running); be-code attach OLD001 to return" {
+		t.Fatalf("host detach = %+v, %q", rec, msg)
+	}
+	if rec, msg := nextAttach(dir, "OLD001", live.ReasonEnded); rec != nil || msg != "OLD001: session ended" {
+		t.Fatalf("ended = %+v, %q", rec, msg)
+	}
+}
+
 // deadPID returns a pid that is certainly not running: a child started and
 // reaped, so its pid is free (and not a zombie, which would still look alive).
 func deadPID(t *testing.T) int {

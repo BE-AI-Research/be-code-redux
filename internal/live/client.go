@@ -113,6 +113,14 @@ const ReasonDetached = "detached"
 // its way out.
 const ReasonEnded = "session ended"
 
+// SwitchTarget extracts the session code from a "switch:CODE" bye reason.
+func SwitchTarget(reason string) (string, bool) {
+	if strings.HasPrefix(reason, ReasonSwitchPrefix) && len(reason) > len(ReasonSwitchPrefix) {
+		return reason[len(ReasonSwitchPrefix):], true
+	}
+	return "", false
+}
+
 // deadlineReader is implemented by *os.File (a real terminal, since Go
 // 1.23) but not by the in-memory pipes the tests use. When available,
 // Attach uses it to interrupt a stdin goroutine parked in Read once the
@@ -207,7 +215,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 				return
 			}
 			switch typ {
-			case FOutput:
+			case FOutput, FOverlay:
 				opt.Stdout.Write(p)
 			case FSize:
 				io.WriteString(opt.Stdout, clearScreen)
@@ -236,9 +244,6 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// final keystrokes right before EOF are never dropped.
 			if n > 0 {
 				fwd, act := chord.Feed(buf[:n], time.Now())
-				// Task 3 removes the takeover action (and gives Ctrl+] t its
-				// new meaning); act == ActionTakeover is otherwise unhandled
-				// here for now.
 				// Forward any plain bytes the same Read delivered ahead of
 				// the chord (e.g. pasted text ending in Ctrl+] d) before
 				// acting on act, so they reach the program instead of

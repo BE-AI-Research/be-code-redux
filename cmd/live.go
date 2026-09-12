@@ -335,23 +335,49 @@ func tailLog(path string, stop <-chan struct{}, w io.Writer) {
 }
 
 // attachLive runs this terminal as a client of rec's host until it detaches
-// or the session ends.
+// or the session ends. A "switch:CODE" bye reason hands the terminal to
+// another live session instead of ending the attach: the loop reattaches to
+// the named record and only returns once there is nowhere left to go.
 func attachLive(ctx context.Context, rec *live.Record, view bool) error {
-	opt := live.DefaultAttachOptions()
-	opt.View = view
-	reason, err := live.Attach(ctx, rec, opt)
+	dir, err := live.Dir()
 	if err != nil {
 		return err
+	}
+	for {
+		opt := live.DefaultAttachOptions()
+		opt.View = view
+		reason, err := live.Attach(ctx, rec, opt)
+		if err != nil {
+			return err
+		}
+		next, msg := nextAttach(dir, rec.Code, reason)
+		if msg != "" {
+			fmt.Println(msg)
+		}
+		if next == nil {
+			return nil
+		}
+		rec = next
+	}
+}
+
+// nextAttach interprets a bye reason: a switch names the record to attach
+// next (silently, no message — the terminal is handed straight over);
+// everything else ends the attach with a line for the user.
+func nextAttach(dir, code, reason string) (*live.Record, string) {
+	if target, ok := live.SwitchTarget(reason); ok {
+		if rec := findLive(dir, target); rec != nil {
+			return rec, ""
+		}
+		return nil, fmt.Sprintf("%s ended before you could join it", target)
 	}
 	// "" is this terminal's own Ctrl+] d; ReasonDetached is the host having
 	// detached it (a `/detach` typed inside the session). Both leave the
 	// session running, so both get the line that says how to come back.
 	if reason == "" || reason == live.ReasonDetached {
-		fmt.Printf("detached from %s (still running); be-code attach %s to return\n", rec.Code, rec.Code)
-	} else {
-		fmt.Printf("%s: %s\n", rec.Code, reason)
+		return nil, fmt.Sprintf("detached from %s (still running); be-code attach %s to return", code, code)
 	}
-	return nil
+	return nil, fmt.Sprintf("%s: %s", code, reason)
 }
 
 // findLive resolves a code (or "last") to a live record, or nil when there
