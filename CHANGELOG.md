@@ -1,5 +1,42 @@
 # BE-Code Changelog
 
+## v0.5.0 — 2026-09-11 — live sessions & handoff
+
+- **Sessions now outlive their terminal.** Starting `be-code` on a terminal
+  starts a detached **session host** process and attaches to it; the host owns
+  the agent, tools, MCP servers and editor bridge, and your terminal is a thin
+  pipe. Close the terminal (or lose the SSH link) and the session keeps
+  running.
+- `be-code attach <code|last>` attaches another terminal — locally, from the
+  VS Code terminal, or over SSH from a phone — to a running session;
+  `--view` attaches read-only. Any number of terminals can watch one session;
+  the newest to attach holds input, the others are live viewers.
+- Chords in an attached terminal: `Ctrl+] d` or `Ctrl+] Ctrl+]` detach,
+  `Ctrl+] t` take input back; `Ctrl+]` followed by any other key (or left
+  alone for a second) sends a literal `Ctrl+]`. From inside the session,
+  `/detach` detaches this terminal and `/clients` lists every attached
+  terminal with its size; the bottom line shows `⧉ <n>` and who holds input.
+- `be-code sessions` gained a `LIVE` column (and lists a live session that has
+  no saved turns yet); `be-code sessions kill <code>` ends one from outside —
+  it asks the host to quit, waits, and only then terminates it.
+- One session renders one screen, so the shared size is the smallest attached
+  terminal's. Below 70 columns or 20 rows the TUI switches to a **compact
+  layout** (no header, one-line status, bare `>` prompt, popups without
+  descriptions), which makes a phone SSH app a usable second head; `layout`:
+  `auto` (default) | `compact` | `full`.
+- The resume line written on exit (`resume: be-code --resume <code>`) now
+  reaches every attached terminal, not just the process that happened to own
+  the session, and a fresh served session's resume code is the same code used
+  to attach to it.
+- New config: `host_sessions` (true; `--no-host` for one run) and
+  `live_idle_limit` (0 = never — minutes a served session may sit with no
+  attached terminals and no run before exiting). Plain mode, non-TTY runs and
+  headless `be-code run` are never hosted.
+- Live records live in `~/.be-code/live/<code>.json` (0600, socket auth token)
+  beside the host's unix socket and its startup log `<code>.log`. Attaching is
+  local-only by design; remote access is SSH, not a network port.
+
+
 ## v0.4.5 — 2026-09-11 — terminal window colours, python verification fix
 
 - The ten named themes also recolour the terminal window itself (OSC 11 for

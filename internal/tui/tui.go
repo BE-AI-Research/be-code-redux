@@ -19,6 +19,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -140,6 +141,20 @@ type Model struct {
 	queueCursor int // highlighted row in the queue popup
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
+
+	// Served mode (see served.go): running over a live.Host instead of the
+	// local terminal.
+	host    *live.Host
+	served  bool
+	clients []live.ClientInfo
+	// detachHolder is host.DetachHolder when served, nil in-process. It must
+	// never be called from inside Update: it notifies the host's callbacks,
+	// which p.Send into the very channel this goroutine is receiving from
+	// (see /detach, and the warning on live.Host.recompute). /detach hands it
+	// to Bubble Tea as a tea.Cmd, which runs on its own goroutine.
+	detachHolder func()
+	ascii        bool      // some attached client cannot show UTF-8 glyphs
+	idleSince    time.Time // last moment the session had a client or a run
 }
 
 // New builds the TUI model.
@@ -293,8 +308,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolStartMsg:
 		m.flushStreaming()
 		args := msg.args
-		if len(args) > 140 {
-			args = args[:140] + "…"
+		limit := 140
+		if m.compact() {
+			limit = m.width - 12
+			if limit < 10 {
+				limit = 10
+			}
+		}
+		if len(args) > limit {
+			args = args[:limit] + "…"
 		}
 		m.appendLine(stTool.Render("● "+msg.name) + " " + stDim.Render(args))
 		m.statusNote = "running " + msg.name
@@ -392,6 +414,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalVP.SetContent(msg.plan)
 	case usageMsg:
 		m.usage = msg
+	case clientsMsg:
+		m.updateClients(msg)
+	case idleTickMsg:
+		return m.updateIdleTick(msg)
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
@@ -684,7 +710,7 @@ const PublicVersion = "v1.0"
 // drawn; below it the rows go to the transcript.
 const headerMinRows = 30
 
-func (m *Model) showHeader() bool { return m.height >= headerMinRows }
+func (m *Model) showHeader() bool { return m.height >= headerMinRows && !m.compact() }
 
 func (m *Model) headerHeight() int {
 	if m.showHeader() {
@@ -702,10 +728,34 @@ func (m *Model) layout() {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	m.input.SetWidth(m.width - wheelWidth - 2)
+	ww := wheelWidth
+	if m.compact() {
+		ww = 5 // glyph + "NN%", no fixed-width padding
+		m.input.SetPromptFunc(2, func(i int) string {
+			if i == 0 {
+				return "> "
+			}
+			return "  "
+		})
+	} else {
+		m.input.SetPromptFunc(5, func(i int) string {
+			if i == 0 {
+				return "(>): "
+			}
+			return "     "
+		})
+	}
+	m.input.SetWidth(m.width - ww - 2)
 }
 
 func (m *Model) modalHeight() int {
+	if m.compact() {
+		h := m.height - 3
+		if h < 3 {
+			h = 3
+		}
+		return h
+	}
 	h := m.height - 8
 	if h < 5 {
 		h = 5
@@ -727,9 +777,13 @@ func (m *Model) View() string {
 	case modeMenu:
 		return m.viewMenu()
 	case modePlan:
+		hint := " y execute · n discard · ↑↓ scroll"
+		if m.compact() {
+			hint = " y/n · ↑↓"
+		}
 		body := stBorder.Width(m.width - 4).Render(
 			stModalTi.Render("Implementation plan — approve to execute") + "\n\n" + m.modalVP.View())
-		return body + "\n" + stDim.Render(" y execute · n discard · ↑↓ scroll")
+		return body + "\n" + stDim.Render(hint)
 	}
 
 	var b strings.Builder
@@ -787,6 +841,9 @@ func (m *Model) headerView() string {
 
 // bottomLine is the single row under the input: menu hint, model, state.
 func (m *Model) bottomLine() string {
+	if m.compact() {
+		return m.compactBottomLine()
+	}
 	state := stOK.Render("ready")
 	if m.running {
 		state = m.spin.View() + " " + m.statusNote + stDim.Render(" · Enter queues · Esc cancels")
@@ -797,7 +854,17 @@ func (m *Model) bottomLine() string {
 	line := " " + stAccent.Render("/menu") + " " + stAccent.Render("/help") +
 		stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
 	if m.ag.IDEName != "" {
-		line += stAccent.Render(" ⌘ ide")
+		line += stAccent.Render(" " + m.ideMarker())
+	}
+	if len(m.clients) > 1 {
+		holder := "?"
+		for _, c := range m.clients {
+			if c.Holder {
+				holder = c.Label
+			}
+		}
+		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients))) +
+			stDim.Render(" · input: "+holder+" · Ctrl+] d detach · Ctrl+] t take over")
 	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -823,6 +890,9 @@ func (m *Model) viewApproval() string {
 	if m.approval != nil && m.approval.action == "file_write" {
 		title = "File change"
 		hint = "y approve · n deny · a stop asking for writes · ↑↓ scroll"
+	}
+	if m.compact() {
+		hint = "y/n/a · ↑↓"
 	}
 	body := stBorder.Width(m.width - 4).Render(
 		stModalTi.Render(title+" — approval required") + "\n\n" + m.modalVP.View())
@@ -998,6 +1068,35 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		} else {
 			m.appendLine(stDim.Render("no handoff briefing in this session"))
 		}
+	case "/clients":
+		if !m.served {
+			m.appendLine(stDim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
+			return m, nil
+		}
+		if len(m.clients) == 0 {
+			m.appendLine(stDim.Render("no terminals attached"))
+			return m, nil
+		}
+		for _, c := range m.clients {
+			mark := "  "
+			if c.Holder {
+				mark = "> "
+			}
+			m.appendLine(stDim.Render(fmt.Sprintf("%s%s  %dx%d", mark, c.Label, c.Cols, c.Rows)))
+		}
+		return m, nil
+	case "/detach":
+		if m.detachHolder == nil {
+			m.appendLine(stDim.Render("nothing to detach: not served"))
+			return m, nil
+		}
+		// As a command, not a call: detaching makes the host notify its
+		// callbacks, which p.Send messages to this program — and Update runs
+		// on the goroutine that receives them, so calling the host here would
+		// deadlock the session for good (holding the host's notifyMu, so no
+		// later attach or `sessions kill` could recover it).
+		detach := m.detachHolder
+		return m, func() tea.Msg { detach(); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
 			return m.resumeSession(fields[1])

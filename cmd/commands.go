@@ -15,6 +15,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/bench"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -191,16 +192,45 @@ var sessionsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if len(metas) == 0 {
+		// Live hosts: a session being served right now is attachable rather
+		// than resumable, and a brand-new one has no saved file yet, so it is
+		// listed even when store.List does not know about it.
+		liveByCode := map[string]live.Record{}
+		if dir, derr := live.Dir(); derr == nil {
+			recs, _ := live.List(dir)
+			for _, r := range recs {
+				liveByCode[r.Code] = r
+			}
+		}
+		anyLive := len(liveByCode) > 0
+		if len(metas) == 0 && !anyLive {
 			fmt.Println("no saved sessions")
 			return nil
 		}
-		fmt.Printf("%-6s  %-19s  %-16s  %-5s  %s\n", "CODE", "ID", "UPDATED", "TURNS", "TITLE")
+		fmt.Printf("%-6s  %-4s  %-19s  %-16s  %-5s  %s\n", "CODE", "LIVE", "ID", "UPDATED", "TURNS", "TITLE")
 		for _, m := range metas {
-			fmt.Printf("%-6s  %-19s  %-16s  %5d  %s\n",
-				m.Code, m.ID, m.UpdatedAt.Format("2006-01-02 15:04"), m.Turns, m.Title)
+			mark := "-"
+			if _, ok := liveByCode[m.Code]; ok {
+				mark = "live"
+				delete(liveByCode, m.Code)
+			}
+			fmt.Printf("%-6s  %-4s  %-19s  %-16s  %5d  %s\n",
+				m.Code, mark, m.ID, m.UpdatedAt.Format("2006-01-02 15:04"), m.Turns, m.Title)
+		}
+		codes := make([]string, 0, len(liveByCode))
+		for code := range liveByCode {
+			codes = append(codes, code)
+		}
+		sort.Strings(codes)
+		for _, code := range codes {
+			r := liveByCode[code]
+			fmt.Printf("%-6s  %-4s  %-19s  %-16s  %5s  %s\n",
+				r.Code, "live", "-", r.StartedAt.Format("2006-01-02 15:04"), "-", "(no saved turns yet) "+r.Workspace)
 		}
 		fmt.Println("\nresume with: be-code --resume <code>")
+		if anyLive {
+			fmt.Println("attach to a live one with: be-code attach <code>   (end it with: be-code sessions kill <code>)")
+		}
 		return nil
 	},
 }

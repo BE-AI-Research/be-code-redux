@@ -155,8 +155,69 @@ decisions, files changed, current state, next steps). Resuming injects that brie
 into the system prompt so the next session keeps your requirements and decisions
 even after history is trimmed; `/handoff` shows it. `be-code sessions` lists codes;
 resume with `--resume <code>`, `--resume <id>`, `--resume last`, `/resume <code>`, or
-the `/sessions` picker; `be-code sessions delete <code>` removes one. Headless `run` prints the resume line to stderr and writes a
+the `/sessions` picker; `be-code sessions delete <code>` removes one. A session being served right now is
+marked `live` and is attachable rather than resumable (see "Live sessions and handoff"). Headless `run` prints the resume line to stderr and writes a
 quick heuristic briefing (no extra model call). `/clear` starts a fresh session.
+
+## Live sessions and handoff
+
+Starting `be-code` on a terminal does not run the session in that terminal: it
+starts a **detached host process** and attaches to it. The host owns the agent,
+the tools, the MCP servers and the editor bridge; your terminal is a thin pipe
+that paints what the host renders and forwards your keystrokes. So the session
+outlives the terminal — close the VS Code window, lose the SSH link, suspend the
+laptop lid on a train — and you pick it up exactly where it was, from anywhere
+you can reach the machine:
+
+```bash
+be-code                       # starts a session and attaches; ⧉ in the bottom line means served
+be-code sessions              # the LIVE column marks sessions being served right now
+be-code attach A1B2C3         # attach another terminal to the same session
+be-code attach last           # attach to the most recently started live session
+ssh workstation be-code attach A1B2C3    # ...from your phone, over SSH
+be-code attach A1B2C3 --view  # watch only: this terminal never sends input
+be-code sessions kill A1B2C3  # end a live session from outside it
+```
+
+Any number of terminals can be attached at once. One of them **holds input** at a
+time (the newest to attach); the others are live viewers of the same screen. The
+bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) and who is holding input,
+and `/clients` lists every attached terminal with its size. Chords, typed in the
+attached terminal rather than sent to the session:
+
+| Chord | Does |
+| --- | --- |
+| `Ctrl+] d` | detach this terminal; the session keeps running |
+| `Ctrl+] Ctrl+]` | the same detach, without reaching for `d` |
+| `Ctrl+] t` | take input back from whoever is holding it |
+| `Ctrl+]` then anything else | sends the literal `Ctrl+]` on to the session (so does `Ctrl+]` on its own, a second later) |
+
+`/detach` does the same as `Ctrl+] d` from inside the session, and `/quit` ends the
+session for everybody: every attached terminal prints the `resume:` line and drops
+back to its shell.
+
+**Everyone runs at the smallest size.** One session renders one screen, so the
+shared size is the *minimum* across attached terminals — attach a phone and your
+desktop view shrinks to the phone's size until the phone detaches. That is the
+deliberate trade-off for a single shared rendering (rather than per-client
+re-rendering). Below 70 columns or 20 rows the TUI switches to its **compact
+layout**: no header, a one-line status, a bare `>` prompt, popups without
+descriptions. `layout: compact`/`full` forces it either way. A phone SSH app is
+therefore a usable second head on a session, not a broken one.
+
+Knobs: `--no-host` (or `host_sessions: false`) keeps the session in the launching
+process the old way — nothing to attach to, and `/clients` says so. Plain mode
+(`--plain`, `ui: plain`), non-TTY runs and headless `be-code run` are never
+hosted. `live_idle_limit` (minutes) exits a served session that has been sitting
+with no attached terminals and no run in progress, so a forgotten host does not
+hold a model resident forever. Starting `be-code` in a workspace that already has
+a live session offers to attach to that instead of starting a second one on the
+same files.
+
+Records live in `~/.be-code/live/<code>.json` (0600, with the socket's auth token)
+next to the host's own socket and its startup log `<code>.log` — the place to look
+if a session never comes up. Attaching is local-only by design: the socket is a
+unix socket in your own dotdir, so remote access means SSH, not a network port.
 
 ## Checkpoints & undo
 
@@ -303,6 +364,7 @@ internal/repomap/    symbol-level workspace outline
 internal/gitctx/     git awareness (+/commit)
 internal/profiles/   model-family tuning table
 internal/mcp/        stdio MCP client (JSON-RPC 2.0)
+internal/live/       live-session host, attach client, records (~/.be-code/live)
 internal/commands/   custom slash commands (.becode/commands)
 internal/bench/      embedded offline eval suite
 internal/store/      session persistence (~/.be-code/sessions)
@@ -333,10 +395,19 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `compat_tool_calls` — `auto` | `always` | `never` (profiles refine `auto` per family)
 - `verify_on_done` (true), `auto_approve_shell` (false), `approve_file_writes` (true)
 - `ui` — `tui` | `plain`; `theme` — `dark` | `light` | `mono`
+- `layout` — `auto` (default) | `compact` | `full`; `auto` switches the TUI to a
+  reduced layout (no header, short prompt, one-line status, popups without
+  descriptions) below 70 columns or 20 rows — the size every attached terminal
+  is clamped to in a served/shared session — `compact`/`full` force it on or off
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
 - `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
+- `live_idle_limit` (0) — minutes a served session may sit with no attached clients
+  and no run in progress before it exits (0 = never)
+- `host_sessions` (true) — run each interactive TUI session in a detached host
+  process this terminal attaches to, so it survives the terminal and other
+  terminals can attach (`--no-host` for one run); see "Live sessions and handoff"
 
 ## Status
 

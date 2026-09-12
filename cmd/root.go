@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -37,6 +38,9 @@ var (
 	flagBenchModels string
 	flagIDE         bool
 	flagNoIDE       bool
+	flagNoHost      bool
+	flagView        bool
+	flagSessionHost string
 )
 
 // ideSession is the live editor bridge connection (nil when none), set by
@@ -54,7 +58,12 @@ that compensates for smaller models. Runs fully offline.`,
 	SilenceUsage: true,
 	Version:      Version,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runInteractive(cmd.Context())
+		if flagSessionHost != "" {
+			// We are the detached host process launchServed spawned, not a
+			// terminal: serve the session instead of attaching to one.
+			return runSessionHost(flagSessionHost)
+		}
+		return runInteractive(cmd)
 	},
 }
 
@@ -67,11 +76,15 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagResume, "resume", "", "resume a saved session by code, id, or 'last'")
 	rootCmd.PersistentFlags().BoolVar(&flagIDE, "ide", false, "connect to the editor bridge even outside an editor terminal")
 	rootCmd.PersistentFlags().BoolVar(&flagNoIDE, "no-ide", false, "never connect to the editor bridge")
+	rootCmd.PersistentFlags().BoolVar(&flagNoHost, "no-host", false, "run the session in this process instead of a detachable host")
+	rootCmd.PersistentFlags().StringVar(&flagSessionHost, "session-host", "", "internal: serve the live session with this code")
+	_ = rootCmd.PersistentFlags().MarkHidden("session-host")
+	attachCmd.Flags().BoolVar(&flagView, "view", false, "attach read-only: never send input to the session")
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd)
-	sessionsCmd.AddCommand(sessionsDeleteCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd)
+	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
 }
 
@@ -314,7 +327,7 @@ func applyBackendWindow(cfg *config.Config, p provider.Provider, ag *agent.Agent
 // finishSession runs on every exit path: writes the handoff briefing so the
 // next session can pick up without loss of fidelity, saves, and prints the
 // resume code. withModel=false keeps headless runs fast.
-func finishSession(ag *agent.Agent, withModel bool, out *os.File) {
+func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	s := ag.Session
 	if s == nil || len(ag.History.Messages) == 0 {
 		return
@@ -370,10 +383,24 @@ func loadProjectNotes(root string) string {
 	return ""
 }
 
-func runInteractive(ctx context.Context) error {
+// runInteractive drives an interactive session. It takes the cobra command
+// rather than a bare context so the served path can forward the root's
+// persistent flags to the host it spawns (see hostArgs) without cmd/live.go
+// having to reach back to rootCmd, which would be an initialization cycle.
+func runInteractive(cmd *cobra.Command) error {
+	ctx := cmd.Context()
 	cfg, err := loadOrWizard(ctx)
 	if err != nil {
 		return err
+	}
+	// A TUI session normally lives in its own detached host process that
+	// this terminal attaches to, so it survives the terminal and other
+	// terminals can join it. Decide before building anything: the launcher
+	// must not own a session it does not host (no tool registry, no MCP
+	// servers, no editor bridge, no handoff on exit — those belong to the
+	// host). Plain and non-TTY runs stay in-process.
+	if !usePlainUI(cfg) && !flagNoHost && cfg.HostSessions {
+		return launchServed(ctx, cfg, cmd.Root().PersistentFlags())
 	}
 	p, ag, err := buildAgent(cfg, false)
 	if err != nil {

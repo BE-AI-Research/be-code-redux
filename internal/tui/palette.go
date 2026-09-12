@@ -103,7 +103,8 @@ func (m *Model) paletteBox() string {
 	if len(items) == 0 {
 		b.WriteString(stDim.Render("(no command matches /" + p.filter + ")"))
 	}
-	const maxRows = 8
+	maxRows := m.popupRows(8)
+	omitDesc := m.omitPopupDesc()
 	start := 0
 	if p.cursor >= maxRows {
 		start = p.cursor - maxRows + 1
@@ -111,10 +112,22 @@ func (m *Model) paletteBox() string {
 	for i := start; i < len(items) && i < start+maxRows; i++ {
 		it := items[i]
 		name := fmt.Sprintf("%-11s", it.label)
+		desc := it.desc
+		if omitDesc {
+			desc = ""
+		}
 		if i == p.cursor {
-			b.WriteString(stAccent.Render("> "+name) + " " + it.desc + "\n")
+			line := stAccent.Render("> " + name)
+			if desc != "" {
+				line += " " + desc
+			}
+			b.WriteString(line + "\n")
 		} else {
-			b.WriteString("  " + name + " " + stDim.Render(it.desc) + "\n")
+			line := "  " + name
+			if desc != "" {
+				line += " " + stDim.Render(desc)
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	return stBorder.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
@@ -176,6 +189,8 @@ func (m *Model) menuEntries() []menuEntry {
 		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
+		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},
+		{"Sessions", "Detach this terminal", "session keeps running; be-code attach <code> to return", cmd("/detach")},
 		{"Models", "Switch model", "list models on the backend", func(m *Model) (tea.Model, tea.Cmd) { return m.openModelPicker() }},
 		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *Model) (tea.Model, tea.Cmd) { return m.openProviderPicker() }},
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},
@@ -246,8 +261,12 @@ func (m *Model) viewMenu() string {
 	}
 	var b strings.Builder
 	b.WriteString(stModalTi.Render("BE-Code menu") + "\n\n")
-	b.WriteString(m.menuStatus() + "\n\n")
-	b.WriteString(m.renderPickList(p, m.height-14))
+	if m.compact() {
+		b.WriteString(m.compactMenuStatus() + "\n\n")
+	} else {
+		b.WriteString(m.menuStatus() + "\n\n")
+	}
+	b.WriteString(m.renderPickList(p, m.popupRows(m.height-14), m.compact()))
 	body := stBorder.Width(m.width - 4).Render(b.String())
 	return body + "\n" + stDim.Render(" ↑↓ move · Enter select · Esc back · type to filter")
 }

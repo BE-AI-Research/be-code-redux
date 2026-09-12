@@ -194,8 +194,9 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 }
 
 // renderPickList draws the filtered items with the cursor, scrolled so the
-// cursor stays visible within maxRows.
-func (m *Model) renderPickList(p *picker, maxRows int) string {
+// cursor stays visible within maxRows. omitDesc drops item descriptions
+// entirely (narrow/compact layouts), keeping each row to its label.
+func (m *Model) renderPickList(p *picker, maxRows int, omitDesc bool) string {
 	var b strings.Builder
 	if p.filter != "" {
 		b.WriteString(stDim.Render("filter: "+p.filter) + "\n")
@@ -215,7 +216,9 @@ func (m *Model) renderPickList(p *picker, maxRows int) string {
 	for i := start; i < len(items) && i < start+maxRows; i++ {
 		it := items[i]
 		desc := it.desc
-		if room := m.width - 10 - lipgloss.Width(it.label); desc != "" && room > 8 && lipgloss.Width(desc) > room {
+		if omitDesc {
+			desc = ""
+		} else if room := m.width - 10 - lipgloss.Width(it.label); desc != "" && room > 8 && lipgloss.Width(desc) > room {
 			desc = desc[:room-1] + "…"
 		} else if room <= 8 {
 			desc = ""
@@ -248,7 +251,7 @@ func (m *Model) viewPicker() string {
 		b.WriteString("\n\n" + m.spin.View() + " loading…")
 	} else {
 		b.WriteString(stDim.Render("   type to filter: "+p.filter) + "\n\n")
-		b.WriteString(m.renderPickList(p, m.height-8))
+		b.WriteString(m.renderPickList(p, m.popupRows(m.height-8), m.omitPopupDesc()))
 	}
 	body := stBorder.Width(m.width - 4).Render(b.String())
 	return body + "\n" + stDim.Render(" ↑↓ move · Enter select · Esc cancel · type to filter")

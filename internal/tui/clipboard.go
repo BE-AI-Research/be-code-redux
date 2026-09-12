@@ -42,6 +42,14 @@ func writeClipboard(s string) error {
 	// OSC sequences do not move the cursor, so writing between renderer
 	// frames is harmless.
 	_, _ = os.Stdout.WriteString(osc52(s))
+	return writeClipboardTools(s)
+}
+
+// writeClipboardTools sends text to the system clipboard via the first
+// available tool, without touching the terminal directly. Served mode
+// routes the OSC 52 sequence through the host's output instead (so every
+// attached client sees it) and calls this for the tool half.
+func writeClipboardTools(s string) error {
 	for _, t := range copyTools {
 		if _, err := exec.LookPath(t[0]); err != nil {
 			continue

@@ -92,7 +92,13 @@ func (m *Model) queueBox() string {
 	items := m.ag.Peek()
 	var b strings.Builder
 	b.WriteString(stModalTi.Render("queued messages") + stDim.Render("  ↑↓ pick · Enter edit · d drop · Esc close") + "\n")
-	for i, it := range items {
+	maxRows := m.popupRows(len(items))
+	start := 0
+	if m.queueCursor >= maxRows {
+		start = m.queueCursor - maxRows + 1
+	}
+	for i := start; i < len(items) && i < start+maxRows; i++ {
+		it := items[i]
 		line := fmt.Sprintf("%d  %s", i+1, firstLineOf(it, m.width-14))
 		if i == m.queueCursor {
 			b.WriteString(stAccent.Render("> "+line) + "\n")

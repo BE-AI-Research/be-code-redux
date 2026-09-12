@@ -63,6 +63,12 @@ func (m *Model) ctxPercent() int {
 func (m *Model) wheelView() string {
 	pct := m.ctxPercent()
 	g := wheelGlyph(pct, m.running, m.wheelFrame)
+	if m.ascii {
+		g = wheelGlyphASCII(pct, m.running, m.wheelFrame)
+	}
+	if m.compact() {
+		return stAccent.Render(g) + fmt.Sprintf(" %d%%", pct)
+	}
 	return stAccent.Render(g) + fmt.Sprintf(" %3d%%", pct)
 }
 

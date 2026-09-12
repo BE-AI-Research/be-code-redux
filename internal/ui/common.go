@@ -79,6 +79,8 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/theme", "pick a colour theme, or /theme <name> (dracula, nord, gruvbox, …)", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
+	{"/clients", "list terminals attached to this session", false},
+	{"/detach", "detach the terminal that holds input (the session keeps running)", false},
 	{"/clear", "start a fresh session", false},
 	{"/quit", "exit (writes the resume briefing)", false},
 }
