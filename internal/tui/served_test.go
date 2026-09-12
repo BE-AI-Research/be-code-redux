@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -312,5 +313,42 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the attached client was never told goodbye")
+	}
+}
+
+func TestOverlayPositionsEachRowAndParksTheCursor(t *testing.T) {
+	m := twoClients(t) // 100x30, served, 3 input rows
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("typed")})
+	ov := m.overlayFor(2)
+	first := m.height - m.inputRows() // 1-based row of the first input line
+	for r := 0; r < m.inputRows(); r++ {
+		if !strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", first+r)) {
+			t.Fatalf("overlay lacks a move to row %d:\n%q", first+r, ov)
+		}
+	}
+	if !strings.Contains(ov, "typed") {
+		t.Fatal("overlay lacks the client's text")
+	}
+	if !strings.HasSuffix(ov, fmt.Sprintf("\x1b[%d;%dH", m.height, m.width)) {
+		t.Fatalf("overlay must park the cursor at the bottom-right:\n%q", ov)
+	}
+	if strings.Contains(ov, "\x1b[K") {
+		t.Fatal("overlay must pad rows, not clear to end of line (the wheel lives to the right)")
+	}
+}
+
+func TestOverlayIsPublishedAfterAKeyAndForEveryoneOnResize(t *testing.T) {
+	m := twoClients(t)
+	var pub []int
+	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("a")})
+	if len(pub) != 1 || pub[0] != 1 {
+		t.Fatalf("after a key: %v", pub)
+	}
+	pub = nil
+	m.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
+	sort.Ints(pub)
+	if len(pub) != 2 || pub[0] != 1 || pub[1] != 2 {
+		t.Fatalf("after a resize: %v", pub)
 	}
 }

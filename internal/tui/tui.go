@@ -160,8 +160,13 @@ type Model struct {
 	// dropKeyClient is the key pump's Drop when served: it retires a
 	// departed client's escape-sequence parser.
 	dropKeyClient func(id int)
-	ascii         bool      // some attached client cannot show UTF-8 glyphs
-	idleSince     time.Time // last moment the session had a client or a run
+	// setOverlay is host.SetOverlay when served, nil in-process: it publishes
+	// one client's private input rows to the host so they ride on top of the
+	// next shared frame that client receives. See overlayFor/publishOverlay
+	// in served.go.
+	setOverlay func(id int, s string)
+	ascii      bool      // some attached client cannot show UTF-8 glyphs
+	idleSince  time.Time // last moment the session had a client or a run
 }
 
 // New builds the TUI model.
@@ -286,6 +291,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
 		}
 		m.refreshTranscript()
+		// A resize moves every input row's absolute position; republish for
+		// the whole roster, not just whoever happens to type next.
+		m.publishAllOverlays()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -415,14 +423,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.usage = msg
 	case clientsMsg:
 		m.updateClients(msg)
+		// A roster change can drop or add textareas; republish for whoever
+		// remains (updateClients walks m.clients, so this never resurrects a
+		// dropped client's textarea).
+		m.publishAllOverlays()
 	case idleTickMsg:
 		return m.updateIdleTick(msg)
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
-		return m.handleKey(msg, 0)
+		model, cmd := m.handleKey(msg, 0)
+		m.publishOverlay(0)
+		return model, cmd
 	case live.ClientKeyMsg:
-		return m.handleKey(msg.Key, msg.Client)
+		model, cmd := m.handleKey(msg.Key, msg.Client)
+		m.publishOverlay(msg.Client)
+		return model, cmd
 	case tea.MouseMsg:
 		return m.handleMouse(msg, 0)
 	case live.ClientMouseMsg:
@@ -436,6 +452,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updated, cmd := ta.Update(msg)
 			*ta = updated
 			cmds = append(cmds, cmd)
+		}
+		// A non-key update can still change a textarea's rendered view (e.g.
+		// a paste message that reached here rather than through handleKey);
+		// republish so no client is left showing a stale draft. Cursors are
+		// static in served mode (see newInputArea), so a genuine blink never
+		// changes the view and this is not a per-blink publish. WindowSizeMsg
+		// and clientsMsg already republished above, in their own cases.
+		switch msg.(type) {
+		case tea.WindowSizeMsg, clientsMsg:
+		default:
+			if m.served {
+				m.publishAllOverlays()
+			}
 		}
 	}
 	var cmd tea.Cmd

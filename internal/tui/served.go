@@ -2,11 +2,14 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
 	"github.com/brown-enterprises/be-code/internal/live"
@@ -51,6 +54,7 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	m.idleSince = time.Now()
 	m.seedFromHost(h)
 	m.detachClient = h.Detach
+	m.setOverlay = h.SetOverlay
 	m.termWrite = func(s string) { io.WriteString(h.Output(), s) }
 	m.clipboardWrite = func(s string) error { io.WriteString(h.Output(), osc52(s)); return writeClipboardTools(s) }
 	if m.cfg.ThemeTerminalColors {
@@ -144,6 +148,64 @@ func (m *Model) updateClients(msg clientsMsg) {
 		if m.mode == modeQueue && m.queueOwner == c.ID {
 			m.closeQueue()
 		}
+	}
+}
+
+// overlayFor renders one client's private input rows as absolute-positioned
+// terminal output. Rows are padded to the input width rather than cleared,
+// because the shared wheel column sits to their right; the sequence ends by
+// parking the cursor at the bottom-right corner so this client's own cursor
+// never blinks in the middle of another client's draft.
+func (m *Model) overlayFor(client int) string {
+	ta := m.inputFor(client)
+	lines := strings.Split(ta.View(), "\n")
+	var b strings.Builder
+	first := m.height - m.inputRows()
+	w := m.inputWidth()
+	for r := 0; r < m.inputRows(); r++ {
+		line := ""
+		if r < len(lines) {
+			line = lines[r]
+		}
+		fmt.Fprintf(&b, "\x1b[%d;1H%s", first+r, padToWidth(line, w))
+	}
+	fmt.Fprintf(&b, "\x1b[%d;%dH", m.height, m.width)
+	return b.String()
+}
+
+// padToWidth pads s with spaces to w display columns, or truncates it if it
+// is already wider. Display width (not byte or rune count) matters here:
+// the textarea's rendered line may carry ANSI styling.
+func padToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	cur := lipgloss.Width(s)
+	if cur > w {
+		return ansi.Truncate(s, w, "")
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+// publishOverlay sends one client's current input rows to the host, if this
+// session is served and a publisher is wired up (nil in-process and in
+// tests that don't care).
+func (m *Model) publishOverlay(client int) {
+	if m.served && m.setOverlay != nil {
+		m.setOverlay(client, m.overlayFor(client))
+	}
+}
+
+// publishAllOverlays republishes every attached client's overlay: after a
+// resize (row/column positions moved) or a roster change (a dropped client's
+// textarea must not be resurrected by a stray inputFor, so this walks
+// m.clients, never m.inputs).
+func (m *Model) publishAllOverlays() {
+	if !m.served || m.setOverlay == nil {
+		return
+	}
+	for _, c := range m.clients {
+		m.setOverlay(c.ID, m.overlayFor(c.ID))
 	}
 }
 
