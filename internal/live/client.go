@@ -99,6 +99,13 @@ const (
 // thing that must still be on screen after every terminal has let go.
 const ExitAltScreen = "\x1b[?1049l\x1b[?25h"
 
+// ReasonDetached is the host's bye reason when it detached a client rather
+// than the client detaching itself: `/detach` from inside the session, or a
+// takeover elsewhere. The terminal is going back to its shell with the
+// session still running, so the caller reports it the same way as a local
+// Ctrl+] d rather than as a session that stopped (see cmd.attachLive).
+const ReasonDetached = "detached"
+
 // ReasonEnded is Host.Close's reason when the served program has finished
 // (see cmd/live.go). It is the one bye reason that means the program already
 // left the alt screen and printed its closing lines — the resume code — on

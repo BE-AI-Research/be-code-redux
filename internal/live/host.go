@@ -275,7 +275,7 @@ func (h *Host) handle(conn net.Conn) {
 			h.mu.Unlock()
 			h.recompute()
 		case FDetach:
-			h.detach(c, "detached")
+			h.detach(c, ReasonDetached)
 			return
 		case FQuit:
 			h.RequestQuit()
@@ -459,7 +459,7 @@ func (h *Host) DetachHolder() {
 	c := h.holder
 	h.mu.Unlock()
 	if c != nil {
-		h.detach(c, "detached")
+		h.detach(c, ReasonDetached)
 	}
 }
 

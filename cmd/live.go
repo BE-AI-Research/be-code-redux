@@ -343,7 +343,10 @@ func attachLive(ctx context.Context, rec *live.Record, view bool) error {
 	if err != nil {
 		return err
 	}
-	if reason == "" {
+	// "" is this terminal's own Ctrl+] d; ReasonDetached is the host having
+	// detached it (a `/detach` typed inside the session). Both leave the
+	// session running, so both get the line that says how to come back.
+	if reason == "" || reason == live.ReasonDetached {
 		fmt.Printf("detached from %s (still running); be-code attach %s to return\n", rec.Code, rec.Code)
 	} else {
 		fmt.Printf("%s: %s\n", rec.Code, reason)

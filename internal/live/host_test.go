@@ -399,3 +399,21 @@ func TestHostReplaysQuitRequestedBeforeOnQuit(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// The bye reason for a host-side detach is ReasonDetached, which is what
+// tells the attaching command to print "detached ... still running" (the
+// session is still there) instead of reporting a session that stopped.
+func TestHostDetachHolderSaysDetached(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.DetachHolder()
+	select {
+	case reason := <-a.bye:
+		if reason != ReasonDetached {
+			t.Fatalf("bye reason = %q, want %q", reason, ReasonDetached)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no bye after DetachHolder")
+	}
+}
