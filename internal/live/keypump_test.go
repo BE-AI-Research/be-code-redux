@@ -1,6 +1,9 @@
 package live
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,7 +189,8 @@ func TestKeyPumpBuffersSplitOSCSequence(t *testing.T) {
 // design" from "a regression back to something like round 1's rate" while
 // never itself flaking: at a true rate of 1-in-25000, seeing more than 10
 // occurrences (1% of 1000) in one run essentially never happens by chance,
-// but seeing zero is the common case.
+// but seeing zero is the common case. Under `go test -short` the body drops
+// to 100 iterations: still a race, no longer a rate measurement.
 func TestKeyPumpEscapeRaceStress(t *testing.T) {
 	orig := escapeHoldback
 	escapeHoldback = time.Nanosecond
@@ -196,7 +200,14 @@ func TestKeyPumpEscapeRaceStress(t *testing.T) {
 	kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
 	defer kp.Close()
 
-	const iterations = 1000
+	// 1000 iterations take a few seconds (each one waits out an 8ms
+	// collection window), which is more than `go test -short` is for: the
+	// short body still exercises the race, just without the statistical
+	// power to police the rate.
+	iterations := 1000
+	if testing.Short() {
+		iterations = 100
+	}
 	const maxFlushRate = 0.01 // the legitimate at-deadline flush must stay rare
 
 	atDeadlineFlushes := 0
@@ -319,4 +330,125 @@ func TestKeyPumpCloseRejectsLaterFeed(t *testing.T) {
 		t.Fatalf("message after Close: %+v", m)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// TestKeyPumpBracketedPasteEveryLength is the regression test for the read
+// boundary that used to wedge a terminal for good. x/input's Reader parses
+// exactly one 256-byte read at a time and keeps no leftover, so a
+// `\x1b[201~` end marker split across two reads left its paste buffer open
+// and swallowed every keystroke that client typed afterwards. The lengths
+// that used to hit it are the ones where (6+len(body)) mod 256 lands in
+// [251,255] — 245..249 among these — but the whole 200..320 range is walked
+// so any future chunking change has to keep every boundary safe.
+//
+// Each case asserts the shape the program must see: exactly one paste key
+// message carrying the exact body, and a plain "Z" typed afterwards still
+// arriving as itself.
+func TestKeyPumpBracketedPasteEveryLength(t *testing.T) {
+	for n := 200; n <= 320; n++ {
+		t.Run(fmt.Sprintf("body%d", n), func(t *testing.T) {
+			body := make([]byte, n)
+			for i := range body {
+				body[i] = byte('a' + i%26)
+			}
+			got := make(chan tea.Msg, 8)
+			kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+			defer kp.Close()
+
+			kp.Feed(1, append(append([]byte("\x1b[200~"), body...), []byte("\x1b[201~")...))
+			k := nextKey(t, got)
+			if k.Type != tea.KeyRunes || !k.Paste {
+				t.Fatalf("first message is not a paste: %+v", k)
+			}
+			if string(k.Runes) != string(body) {
+				t.Fatalf("pasted %q, want %q", string(k.Runes), string(body))
+			}
+
+			// The parser must be back in its normal state: the next
+			// keystroke from this client is a keystroke, not more paste.
+			kp.Feed(1, []byte("Z"))
+			k = nextKey(t, got)
+			if k.Type != tea.KeyRunes || k.Paste || string(k.Runes) != "Z" {
+				t.Fatalf("key after the paste: %+v", k)
+			}
+		})
+	}
+}
+
+// TestKeyPumpPasteWithMultibyteRunes covers the other thing a chunk
+// boundary must not cut: a multi-byte rune. The body is all three-byte
+// runes, so a naive 256-byte cut lands inside one on most lengths.
+func TestKeyPumpPasteWithMultibyteRunes(t *testing.T) {
+	for _, runes := range []int{80, 85, 90, 100, 120} {
+		t.Run(fmt.Sprintf("runes%d", runes), func(t *testing.T) {
+			body := strings.Repeat("★", runes)
+			got := make(chan tea.Msg, 8)
+			kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+			defer kp.Close()
+			kp.Feed(1, []byte("\x1b[200~"+body+"\x1b[201~"))
+			k := nextKey(t, got)
+			if k.Type != tea.KeyRunes || !k.Paste || string(k.Runes) != body {
+				t.Fatalf("paste of %d multi-byte runes: %+v", runes, k)
+			}
+		})
+	}
+}
+
+// TestKeyPumpLongRunOfKeysOutsideAPaste is the same boundary problem
+// outside bracketed paste: a burst of arrow keys longer than one parser
+// read must not lose or mangle the sequence that lands on the boundary.
+func TestKeyPumpLongRunOfKeysOutsideAPaste(t *testing.T) {
+	const arrows = 100 // 300 bytes: more than one parser read
+	got := make(chan tea.Msg, 4*arrows)
+	kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+	defer kp.Close()
+	kp.Feed(1, []byte(strings.Repeat("\x1b[A", arrows)))
+	for i := 0; i < arrows; i++ {
+		if k := nextKey(t, got); k.Type != tea.KeyUp {
+			t.Fatalf("arrow %d: %+v", i, k)
+		}
+	}
+}
+
+func TestChunkLen(t *testing.T) {
+	csi := func(pad int) []byte { // pad bytes of filler, then a CSI arrow, then filler
+		b := append(bytes.Repeat([]byte("x"), pad), []byte("\x1b[A")...)
+		return append(b, bytes.Repeat([]byte("y"), 300)...)
+	}
+	cases := []struct {
+		name string
+		in   []byte
+		want int
+	}{
+		{"short input is one chunk", []byte("abc"), 3},
+		{"exactly one chunk", bytes.Repeat([]byte("a"), parserChunk), parserChunk},
+		{"plain bytes cut at the cap", bytes.Repeat([]byte("a"), parserChunk+10), parserChunk},
+		{"cut before a straddling CSI", csi(parserChunk - 2), parserChunk - 2},
+		{"cut after a sequence that fits", csi(parserChunk - 3), parserChunk},
+		{"cut before a straddling rune", append(bytes.Repeat([]byte("a"), parserChunk-1), []byte("★yyyyyyyy")...), parserChunk - 1},
+		{"one endless sequence is forwarded anyway", append([]byte("\x1b]52;"), bytes.Repeat([]byte("Z"), 400)...), parserChunk},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := chunkLen(c.in); got != c.want {
+				t.Fatalf("chunkLen = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// nextKey waits for one ClientKeyMsg from the pump.
+func nextKey(t *testing.T, got <-chan tea.Msg) tea.KeyMsg {
+	t.Helper()
+	select {
+	case m := <-got:
+		ck, ok := m.(ClientKeyMsg)
+		if !ok {
+			t.Fatalf("want a key message, got %T %+v", m, m)
+		}
+		return ck.Key
+	case <-time.After(3 * time.Second):
+		t.Fatal("no key message from the pump")
+	}
+	return tea.KeyMsg{}
 }

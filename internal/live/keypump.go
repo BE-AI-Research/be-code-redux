@@ -1,6 +1,7 @@
 package live
 
 import (
+	"bytes"
 	"io"
 	"sync"
 	"time"
@@ -14,6 +15,23 @@ import (
 // reaches the program). A var, not a const, so tests can shrink it to force
 // the timer-vs-Feed race deterministically.
 var escapeHoldback = 50 * time.Millisecond
+
+// parserChunk is the largest number of bytes ever handed to the parser in
+// one Write. x/input's Reader (v0.3.7) reads its source into a fixed
+// 256-byte buffer and parses exactly what that one read returned: it keeps
+// no leftover, so anything straddling the end of a read is misparsed — and
+// a split `\x1b[201~` leaves its bracketed-paste buffer open, swallowing
+// every later keystroke from that terminal. An io.Pipe never merges two
+// Writes into one Read, so keeping every Write at or below this size (and
+// cutting only where nothing is in flight, see chunkLen) means the parser
+// only ever sees whole sequences.
+const parserChunk = 256
+
+// maxPending caps the incomplete-escape holdback buffer. Anything longer
+// than this is not a real escape sequence (an unterminated OSC/DCS, or
+// binary noise from a confused terminal); it is forwarded rather than
+// buffered without bound, and the parser resynchronises on it.
+const maxPending = 64 << 10
 
 // clientState is the per-client channel a Feed call hands raw bytes to, and
 // the signal that tells its buffer goroutine (see bufferLoop) to stop.
@@ -117,13 +135,16 @@ func (k *KeyPump) bufferLoop(cs *clientState) {
 		pending = nil
 
 		forward, newPending := splitPendingEscape(data)
+		if len(newPending) > maxPending {
+			forward, newPending = data, nil
+		}
 		if len(newPending) > 0 {
 			pending = append([]byte(nil), newPending...)
 			timer = time.NewTimer(escapeHoldback)
 			timerC = timer.C
 		}
 		if len(forward) > 0 {
-			cs.w.Write(forward) //nolint:errcheck // a write error just means the reader side is gone
+			writeChunks(cs.w, forward)
 		}
 	}
 
@@ -152,11 +173,54 @@ func (k *KeyPump) bufferLoop(cs *clientState) {
 				if len(pending) > 0 {
 					data := pending
 					pending = nil
-					cs.w.Write(data) //nolint:errcheck // a write error just means the reader side is gone
+					writeChunks(cs.w, data)
 				}
 			}
 		}
 	}
+}
+
+// writeChunks hands b to the parser in pieces of at most parserChunk bytes
+// (see parserChunk for why that bound exists), cutting each piece only
+// where the parser can survive the cut. A write error just means the reader
+// side is gone, so the rest is dropped.
+func writeChunks(w io.Writer, b []byte) {
+	for len(b) > 0 {
+		n := chunkLen(b)
+		if _, err := w.Write(b[:n]); err != nil {
+			return
+		}
+		b = b[n:]
+	}
+}
+
+// chunkLen returns how many of b's leading bytes may be handed to the
+// parser in one Write: at most parserChunk, and never cutting inside an
+// escape sequence (CSI/SS3/OSC/DCS, the `\x1b[200~`/`\x1b[201~` paste
+// markers included) or inside a multi-byte UTF-8 rune — those are the only
+// things x/input carries no state for between reads. A bracketed-paste
+// *body* may be cut anywhere: the reader accumulates it byte by byte in its
+// own paste buffer across reads and decodes the runes only at the end
+// marker.
+//
+// When nothing safe can be found (a single "sequence" longer than the whole
+// chunk), the full chunk is forwarded anyway: holding it back would stall
+// the terminal for good, and a sequence that long is not one.
+func chunkLen(b []byte) int {
+	if len(b) <= parserChunk {
+		return len(b)
+	}
+	n := parserChunk
+	if fwd, pend := splitPendingEscape(b[:n]); len(pend) > 0 && len(fwd) > 0 {
+		n = len(fwd)
+	}
+	for n > 0 && b[n]&0xc0 == 0x80 { // a continuation byte: back up to the rune's first byte
+		n--
+	}
+	if n == 0 {
+		return parserChunk
+	}
+	return n
 }
 
 // splitPendingEscape splits data into the bytes safe to forward now and any
@@ -205,21 +269,14 @@ func splitPendingEscape(data []byte) (forward, pending []byte) {
 }
 
 // hasStringTerminator reports whether body (the bytes following an OSC or
-// DCS introducer) contains a terminator: BEL (0x07), or an ESC that (once
-// one more byte has arrived to confirm it isn't itself mid-arrival) starts
-// an ST. It doesn't matter whether that next byte is actually '\': x/input's
-// own OSC/DCS parsers resolve or cancel the sequence as soon as any byte
-// follows such an ESC, so it's always safe to forward from that point.
+// DCS introducer) contains a BEL (0x07) terminator. The other terminator,
+// ST (ESC '\'), needs no case of its own: splitPendingEscape scans back to
+// the *last* ESC in the data, so body — everything after it — never
+// contains one. A sequence already closed by an ST is therefore resolved by
+// splitPendingEscape's own switch (the tail starts at the ST's ESC, whose
+// second byte is '\', not an introducer it holds back for).
 func hasStringTerminator(body []byte) bool {
-	for i := 0; i < len(body); i++ {
-		switch body[i] {
-		case 0x07:
-			return true
-		case 0x1b:
-			return i+1 < len(body)
-		}
-	}
-	return false
+	return bytes.IndexByte(body, 0x07) >= 0
 }
 
 func (k *KeyPump) run(client int, r *io.PipeReader) {
