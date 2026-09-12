@@ -276,7 +276,47 @@ func (m *Model) pingCmd() tea.Cmd {
 	}
 }
 
+// Update dispatches msg, then publishes overlays for whatever it changed.
+// A message that restores the input row (a full-screen modal — approval,
+// plan, picker/menu escape, or the load-error path in pickerUpdate — closing
+// back to a mode whose View() renders it; see overlayVisible) republishes
+// the whole roster, not just whoever's key triggered it: every client's
+// draft needs painting back onto the restored frame, and the transition can
+// just as easily be driven by a plain message (pickerUpdate) as by a key.
+// Otherwise, a keystroke republishes only its sender — update's own cases
+// (WindowSizeMsg, clientsMsg, and the modeInput tail loop) already republish
+// everyone for their own triggers.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	wasVisible := m.overlayVisible()
+	model, cmd := m.update(msg)
+	restored := !wasVisible && m.overlayVisible()
+	switch t := msg.(type) {
+	case tea.KeyMsg:
+		m.publishAfterKey(restored, 0)
+	case live.ClientKeyMsg:
+		m.publishAfterKey(restored, t.Client)
+	default:
+		if restored {
+			m.publishAllOverlays()
+		}
+	}
+	return model, cmd
+}
+
+// publishAfterKey publishes the right set of overlays after a keystroke:
+// every roster client if the key just restored the input row (closed a
+// modal), or just the sender otherwise (a no-op if the mode still hides the
+// input row).
+func (m *Model) publishAfterKey(restored bool, client int) {
+	if restored {
+		m.publishAllOverlays()
+		return
+	}
+	m.publishOverlay(client)
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	enteredMode := m.mode
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -432,13 +472,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
-		model, cmd := m.handleKey(msg, 0)
-		m.publishOverlay(0)
-		return model, cmd
+		// Overlay publishing for the sender (or the roster, if this key
+		// closed a modal) happens in Update, the exported wrapper around
+		// this method — see publishAfterKey.
+		return m.handleKey(msg, 0)
 	case live.ClientKeyMsg:
-		model, cmd := m.handleKey(msg.Key, msg.Client)
-		m.publishOverlay(msg.Client)
-		return model, cmd
+		return m.handleKey(msg.Key, msg.Client)
 	case tea.MouseMsg:
 		return m.handleMouse(msg, 0)
 	case live.ClientMouseMsg:
@@ -458,11 +497,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// republish so no client is left showing a stale draft. Cursors are
 		// static in served mode (see newInputArea), so a genuine blink never
 		// changes the view and this is not a per-blink publish. WindowSizeMsg
-		// and clientsMsg already republished above, in their own cases.
+		// and clientsMsg already republished above, in their own cases; a
+		// message that just switched the mode to modeInput from a hidden one
+		// is Update's job (see publishAfterKey / the "restored" check), not
+		// this one, to avoid publishing the whole roster twice.
 		switch msg.(type) {
 		case tea.WindowSizeMsg, clientsMsg:
 		default:
-			if m.served {
+			if m.served && enteredMode == modeInput {
 				m.publishAllOverlays()
 			}
 		}
@@ -624,6 +666,9 @@ func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
 	for _, ta := range m.inputs {
 		ta.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
 	}
+	// The placeholder just changed for every client, not only the one whose
+	// key started this turn.
+	m.publishAllOverlays()
 	root := m.rootCtx
 	if root == nil {
 		root = context.Background()
@@ -803,11 +848,14 @@ func (m *Model) layout() {
 	}
 }
 
-// focusInputs refocuses every client's input line after a modal closes.
+// focusInputs refocuses every client's input line after a modal closes, and
+// republishes every client's overlay since a focus change can alter what a
+// textarea renders.
 func (m *Model) focusInputs() {
 	for _, ta := range m.inputs {
 		ta.Focus()
 	}
+	m.publishAllOverlays()
 }
 
 func (m *Model) modalHeight() int {
@@ -1112,6 +1160,9 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		for _, ta := range m.inputs {
 			ta.Blur()
 		}
+		// Blurring changed every client's textarea rendering, not only the
+		// one that typed /plan.
+		m.publishAllOverlays()
 		go func() {
 			plan, err := m.ag.Plan(m.rootCtx, req)
 			m.send(m.usageSnapshot())

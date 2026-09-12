@@ -352,3 +352,49 @@ func TestOverlayIsPublishedAfterAKeyAndForEveryoneOnResize(t *testing.T) {
 		t.Fatalf("after a resize: %v", pub)
 	}
 }
+
+// A full-screen modal (approval, picker, menu, plan) replaces the whole
+// frame with no reserved input row: overlayFor's absolute positioning would
+// land on the modal's own content, so publishing must stop while one is up,
+// and every roster client's draft must be repainted the moment it closes.
+func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
+	m := twoClients(t)
+	var pub []int
+	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+
+	m.Update(approvalMsg{action: "shell", detail: "echo hi", resp: make(chan bool, 1)})
+	if m.mode != modeApproval {
+		t.Fatalf("mode = %v, want modeApproval", m.mode)
+	}
+	pub = nil
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("x")}) // scrolls the modal viewport, does not close it
+	if len(pub) != 0 {
+		t.Fatalf("a key during the modal published: %v", pub)
+	}
+
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("n")}) // denies and closes the modal
+	if m.mode == modeApproval {
+		t.Fatal("modal did not close")
+	}
+	sort.Ints(pub)
+	if len(pub) != 2 || pub[0] != 1 || pub[1] != 2 {
+		t.Fatalf("closing the modal did not republish every roster client: %v", pub)
+	}
+}
+
+// startTurn mutates every client's textarea (the placeholder flips to the
+// busy hint), not only the one whose Enter started the turn.
+func TestStartTurnRepublishesEveryClientsOverlay(t *testing.T) {
+	m := twoClients(t)
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("hi")})
+	var pub []int
+	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	seen := map[int]bool{}
+	for _, id := range pub {
+		seen[id] = true
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("starting a turn did not republish every client's overlay: %v", pub)
+	}
+}

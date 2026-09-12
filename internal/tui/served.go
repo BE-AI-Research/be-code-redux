@@ -187,21 +187,37 @@ func padToWidth(s string, w int) string {
 	return s + strings.Repeat(" ", w-cur)
 }
 
+// overlayVisible reports whether the current mode's View() renders the
+// input row at all. A full-screen modal (approval, picker, menu, plan)
+// replaces the whole frame with no reserved input row — overlayFor's
+// absolute positioning (always height-inputRows) would land on the modal's
+// own content instead, painting a client's stray draft over it.
+func (m *Model) overlayVisible() bool {
+	switch m.mode {
+	case modeApproval, modePicker, modeMenu, modePlan:
+		return false
+	}
+	return true
+}
+
 // publishOverlay sends one client's current input rows to the host, if this
-// session is served and a publisher is wired up (nil in-process and in
-// tests that don't care).
+// session is served, a publisher is wired up (nil in-process and in tests
+// that don't care), and the current mode actually renders an input row.
 func (m *Model) publishOverlay(client int) {
-	if m.served && m.setOverlay != nil {
+	if m.served && m.setOverlay != nil && m.overlayVisible() {
 		m.setOverlay(client, m.overlayFor(client))
 	}
 }
 
 // publishAllOverlays republishes every attached client's overlay: after a
-// resize (row/column positions moved) or a roster change (a dropped client's
+// resize (row/column positions moved), a roster change (a dropped client's
 // textarea must not be resurrected by a stray inputFor, so this walks
-// m.clients, never m.inputs).
+// m.clients, never m.inputs), or anything else that mutated every client's
+// textarea at once (see startTurn, focusInputs, the /plan command). A no-op
+// while the current mode hides the input row (see overlayVisible); Update's
+// wrapper republishes everyone the moment such a mode gives the row back.
 func (m *Model) publishAllOverlays() {
-	if !m.served || m.setOverlay == nil {
+	if !m.served || m.setOverlay == nil || !m.overlayVisible() {
 		return
 	}
 	for _, c := range m.clients {

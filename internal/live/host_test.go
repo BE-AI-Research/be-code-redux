@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,7 +165,10 @@ func TestHostBuffersEarlyInputAndReplaysOnOnInput(t *testing.T) {
 	a := dial(t, sock, "tok", "a", 100, 40)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
 
-	WriteFrame(a.conn, FInput, []byte("early"))
+	// Send more than the per-client cap in one frame: only the first
+	// maxEarlyInput bytes must be kept, the rest silently dropped.
+	early := strings.Repeat("E", 5*1024)
+	WriteFrame(a.conn, FInput, []byte(early))
 	// Force a round trip on the same connection: handle() reads frames from
 	// one connection strictly in order on a single goroutine, so once this
 	// resize is visible the FInput frame above (sent first, while OnInput
@@ -181,13 +185,27 @@ func TestHostBuffersEarlyInputAndReplaysOnOnInput(t *testing.T) {
 
 	got := make(chan string, 1)
 	h.OnInput(func(id int, b []byte) { got <- string(b) })
+	var replayed string
 	select {
-	case s := <-got:
-		if s != "early" {
-			t.Fatalf("replayed input = %q, want %q", s, "early")
-		}
+	case replayed = <-got:
 	case <-time.After(time.Second):
 		t.Fatal("early input was never replayed")
+	}
+	if len(replayed) != maxEarlyInput {
+		t.Fatalf("replayed %d bytes, want the %d-byte cap", len(replayed), maxEarlyInput)
+	}
+	if replayed != early[:maxEarlyInput] {
+		t.Fatal("replayed bytes are not exactly the first bytes sent")
+	}
+
+	// A second registration must not redeliver what the first already
+	// consumed: pendingIn is cleared the moment it is replayed.
+	redelivered := make(chan string, 1)
+	h.OnInput(func(id int, b []byte) { redelivered <- string(b) })
+	select {
+	case s := <-redelivered:
+		t.Fatalf("second OnInput registration redelivered early input: %q", s)
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 
