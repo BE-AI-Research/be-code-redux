@@ -64,6 +64,11 @@ type Config struct {
 	// or "plain" (inline REPL, best over dumb terminals and logging).
 	UI string `json:"ui"`
 
+	// Layout controls the TUI's reduced small-terminal layout: "auto"
+	// (the default) engages it automatically below the compact size
+	// thresholds, "compact" forces it on, "full" forces it off.
+	Layout string `json:"layout"` // auto | compact | full
+
 	// Theme: "dark" (default), "light", or "mono".
 	Theme string `json:"theme"`
 	// ThemeTerminalColors lets a theme recolour the terminal window itself
@@ -167,6 +172,7 @@ func Default() *Config {
 		VerifyOnDone:        true,
 		ApproveFileWrites:   true,
 		UI:                  "tui",
+		Layout:              "auto",
 		Theme:               "dark",
 		ThemeTerminalColors: true,
 		ShellAllow: []string{

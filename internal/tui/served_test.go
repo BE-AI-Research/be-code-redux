@@ -17,7 +17,11 @@ import (
 // With two clients the bottom line names the holder and the chords.
 func TestClientsMsgRendersHolder(t *testing.T) {
 	m := newTestModel(t)
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)"}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", Holder: true}})
+	// UTF8: true on both — this test is about the holder label and chord
+	// hints, not the ASCII fallback (see TestASCIIFallbacks in compact_test.go);
+	// m.ascii now has a reader (the clients marker glyph), so a fixture that
+	// leaves UTF8 at its zero value would render the ASCII marker instead.
+	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", Holder: true, UTF8: true}})
 	v := m.View()
 	for _, want := range []string{"⧉ 2", "input: ssh from 10.0.0.5", "Ctrl+] d", "Ctrl+] t"} {
 		if !strings.Contains(v, want) {

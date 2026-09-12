@@ -303,8 +303,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolStartMsg:
 		m.flushStreaming()
 		args := msg.args
-		if len(args) > 140 {
-			args = args[:140] + "…"
+		limit := 140
+		if m.compact() {
+			limit = m.width - 12
+			if limit < 10 {
+				limit = 10
+			}
+		}
+		if len(args) > limit {
+			args = args[:limit] + "…"
 		}
 		m.appendLine(stTool.Render("● "+msg.name) + " " + stDim.Render(args))
 		m.statusNote = "running " + msg.name
@@ -698,7 +705,7 @@ const PublicVersion = "v1.0"
 // drawn; below it the rows go to the transcript.
 const headerMinRows = 30
 
-func (m *Model) showHeader() bool { return m.height >= headerMinRows }
+func (m *Model) showHeader() bool { return m.height >= headerMinRows && !m.compact() }
 
 func (m *Model) headerHeight() int {
 	if m.showHeader() {
@@ -716,10 +723,34 @@ func (m *Model) layout() {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	m.input.SetWidth(m.width - wheelWidth - 2)
+	ww := wheelWidth
+	if m.compact() {
+		ww = 5 // glyph + "NN%", no fixed-width padding
+		m.input.SetPromptFunc(2, func(i int) string {
+			if i == 0 {
+				return "> "
+			}
+			return "  "
+		})
+	} else {
+		m.input.SetPromptFunc(5, func(i int) string {
+			if i == 0 {
+				return "(>): "
+			}
+			return "     "
+		})
+	}
+	m.input.SetWidth(m.width - ww - 2)
 }
 
 func (m *Model) modalHeight() int {
+	if m.compact() {
+		h := m.height - 3
+		if h < 3 {
+			h = 3
+		}
+		return h
+	}
 	h := m.height - 8
 	if h < 5 {
 		h = 5
@@ -741,9 +772,13 @@ func (m *Model) View() string {
 	case modeMenu:
 		return m.viewMenu()
 	case modePlan:
+		hint := " y execute · n discard · ↑↓ scroll"
+		if m.compact() {
+			hint = " y/n · ↑↓"
+		}
 		body := stBorder.Width(m.width - 4).Render(
 			stModalTi.Render("Implementation plan — approve to execute") + "\n\n" + m.modalVP.View())
-		return body + "\n" + stDim.Render(" y execute · n discard · ↑↓ scroll")
+		return body + "\n" + stDim.Render(hint)
 	}
 
 	var b strings.Builder
@@ -801,6 +836,9 @@ func (m *Model) headerView() string {
 
 // bottomLine is the single row under the input: menu hint, model, state.
 func (m *Model) bottomLine() string {
+	if m.compact() {
+		return m.compactBottomLine()
+	}
 	state := stOK.Render("ready")
 	if m.running {
 		state = m.spin.View() + " " + m.statusNote + stDim.Render(" · Enter queues · Esc cancels")
@@ -811,7 +849,7 @@ func (m *Model) bottomLine() string {
 	line := " " + stAccent.Render("/menu") + " " + stAccent.Render("/help") +
 		stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
 	if m.ag.IDEName != "" {
-		line += stAccent.Render(" ⌘ ide")
+		line += stAccent.Render(" " + m.ideMarker())
 	}
 	if len(m.clients) > 1 {
 		holder := "?"
@@ -820,7 +858,7 @@ func (m *Model) bottomLine() string {
 				holder = c.Label
 			}
 		}
-		line += stAccent.Render(fmt.Sprintf(" ⧉ %d", len(m.clients))) +
+		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients))) +
 			stDim.Render(" · input: "+holder+" · Ctrl+] d detach · Ctrl+] t take over")
 	}
 	if m.sel != nil {
@@ -847,6 +885,9 @@ func (m *Model) viewApproval() string {
 	if m.approval != nil && m.approval.action == "file_write" {
 		title = "File change"
 		hint = "y approve · n deny · a stop asking for writes · ↑↓ scroll"
+	}
+	if m.compact() {
+		hint = "y/n/a · ↑↓"
 	}
 	body := stBorder.Width(m.width - 4).Render(
 		stModalTi.Render(title+" — approval required") + "\n\n" + m.modalVP.View())

@@ -263,6 +263,6 @@ func (m *Model) contextMenuBox() string {
 	p := m.picker
 	var b strings.Builder
 	b.WriteString(stModalTi.Render(p.title) + stDim.Render("  ↑↓ pick · Enter · Esc close") + "\n")
-	b.WriteString(m.renderPickList(p, 8))
+	b.WriteString(m.renderPickList(p, m.popupRows(8), m.omitPopupDesc()))
 	return stBorder.Width(m.width - 4).Render(b.String())
 }
