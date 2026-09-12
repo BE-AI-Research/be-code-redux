@@ -65,6 +65,11 @@ func TestSplitPendingEscape(t *testing.T) {
 		{"SS3 introducer only", "\x1bO", "", "\x1bO"},
 		{"complete SS3", "\x1bOP", "\x1bOP", ""},
 		{"ESC plus plain rune (alt+x)", "\x1bx", "\x1bx", ""},
+		{"OSC cut before terminator", "\x1b]52;c;", "", "\x1b]52;c;"},
+		{"OSC cut mid payload (contains a letter)", "\x1b]52;c;Zm9v", "", "\x1b]52;c;Zm9v"},
+		{"OSC complete with BEL", "\x1b]52;c;Zm9v\x07", "\x1b]52;c;Zm9v\x07", ""},
+		{"DCS cut before terminator", "\x1bPq", "", "\x1bPq"},
+		{"DCS complete with ST", "\x1bPq\x1b\\", "\x1bPq\x1b\\", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -134,6 +139,125 @@ func TestKeyPumpBuffersSplitMouseSequence(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("split mouse sequence never arrived")
+	}
+}
+
+func TestKeyPumpBuffersSplitOSCSequence(t *testing.T) {
+	got := make(chan tea.Msg, 4)
+	kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+	defer kp.Close()
+
+	kp.Feed(1, []byte("\x1b]52;c;")) // OSC 52 clipboard reply, cut before the payload/terminator
+	kp.Feed(1, []byte("Zm9v\x07"))   // base64 payload ("foo") + BEL terminator arrive later
+
+	// A complete OSC 52 sequence parses as a clipboard event, which
+	// ConvertEvent has no mapping for, so the only correct outcome is no
+	// message at all - not a misparsed KeyEsc/rune fallout from splitting it
+	// at the letter 'Z' or 'm' the way reusing the CSI final-byte range did.
+	select {
+	case m := <-got:
+		t.Fatalf("split OSC 52 sequence produced an event, want none: %+v", m)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestKeyPumpEscapeRaceStress forces the timer-vs-Feed ordering race: with
+// escapeHoldback shrunk to effectively zero, a lone ESC's holdback timer is
+// all but guaranteed to fire before the very next Feed call (carrying the
+// rest of the sequence) has a chance to run, so flushPending and Feed
+// genuinely race for the mutex on (close to) every iteration. Every
+// iteration must still yield exactly one KeyUp, never a stray KeyEsc from a
+// flushPending call that won that race and wrote the bare ESC on its own.
+func TestKeyPumpEscapeRaceStress(t *testing.T) {
+	orig := escapeHoldback
+	escapeHoldback = time.Nanosecond
+	defer func() { escapeHoldback = orig }()
+
+	got := make(chan tea.Msg, 8)
+	kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+	defer kp.Close()
+
+	const iterations = 500
+	for i := 0; i < iterations; i++ {
+		client := i + 1 // client ids are never reused, so a fresh one each time
+		kp.Feed(client, []byte("\x1b"))
+		kp.Feed(client, []byte("[A"))
+
+		var msgs []tea.Msg
+	collect:
+		for {
+			select {
+			case m := <-got:
+				msgs = append(msgs, m)
+			case <-time.After(8 * time.Millisecond):
+				break collect
+			}
+		}
+
+		if len(msgs) != 1 {
+			t.Fatalf("iteration %d (client %d): want exactly 1 message, got %d: %+v", i, client, len(msgs), msgs)
+		}
+		ck, ok := msgs[0].(ClientKeyMsg)
+		if !ok || ck.Key.Type != tea.KeyUp {
+			t.Fatalf("iteration %d (client %d): want a single KeyUp, got %+v", i, client, msgs[0])
+		}
+	}
+}
+
+// TestKeyPumpMarkDroppedOnReadError exercises the parser goroutine's own
+// cleanup path (markDropped), independent of an explicit Drop/Close: the
+// client's underlying pipe is closed out from under it (standing in for
+// some genuine reader failure), which makes rd.ReadEvents error out and
+// return from run() on its own. That must remove the stale client entry and
+// mark the client permanently dropped, not just leave a dead pipe that
+// silently swallows every later Feed.
+func TestKeyPumpMarkDroppedOnReadError(t *testing.T) {
+	got := make(chan tea.Msg, 4)
+	kp := NewKeyPump("xterm-256color", func(m tea.Msg) { got <- m })
+	defer kp.Close()
+
+	kp.Feed(5, []byte("a")) // creates the client's pipe + parser goroutine
+	select {
+	case <-got: // drain the 'a' key: confirms the parser goroutine is up and reading
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial Feed never produced a message")
+	}
+
+	kp.mu.Lock()
+	cs := kp.clients[5]
+	kp.mu.Unlock()
+	if cs == nil {
+		t.Fatal("client state missing after Feed")
+	}
+	cs.w.Close() // simulate the reader side failing on its own, not via Drop/Close
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		kp.mu.Lock()
+		_, present := kp.clients[5]
+		kp.mu.Unlock()
+		if !present {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run() never cleaned up its client entry after a read error")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	kp.Feed(5, []byte("z")) // must now be a permanent no-op
+	select {
+	case m := <-got:
+		t.Fatalf("message after a read-error cleanup: %+v", m)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	kp.mu.Lock()
+	n := len(kp.clients)
+	dropped := kp.dropped[5]
+	kp.mu.Unlock()
+	if n != 0 || !dropped {
+		t.Fatalf("client entry not cleaned up: clients=%d dropped=%v", n, dropped)
 	}
 }
 
