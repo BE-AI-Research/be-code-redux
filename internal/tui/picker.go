@@ -175,14 +175,14 @@ func (p *picker) filtered() []pickItem {
 func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		return m, nil
 	}
 	items := p.filtered()
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.picker = nil
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		m.inputFor(from).Focus()
 		return m, nil
 	case tea.KeyUp:
@@ -199,7 +199,7 @@ func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 		it := items[p.cursor]
 		m.picker = nil
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		// A picker is shared, so the terminal a pick acts for is the one
 		// that confirmed it, not the one that opened the list.
 		m.pickerOwner = from
@@ -225,7 +225,7 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 	if msg.err != nil {
 		m.appendLine(stErr.Render(msg.err.Error()))
 		m.picker = nil
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		return
 	}
 	m.picker.items = msg.items

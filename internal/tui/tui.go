@@ -101,14 +101,19 @@ type Model struct {
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
 
-	vp       viewport.Model
-	inputs   map[int]*textarea.Model // one input line per client; 0 is the local terminal
-	spin     spinner.Model
-	mode     mode
-	width    int
-	height   int
-	ready    bool
-	quitHint bool
+	vp     viewport.Model
+	inputs map[int]*textarea.Model // one input line per client; 0 is the local terminal
+	spin   spinner.Model
+	mode   mode
+	width  int
+	height int
+	ready  bool
+	// quitHint remembers, per terminal, that this client's last key was a
+	// Ctrl+C on an empty input: the second one quits. It is per client
+	// because the confirmation belongs to the person who pressed it —
+	// otherwise A's Ctrl+C plus B's unrelated Ctrl+C would end a session
+	// neither of them asked to end.
+	quitHint map[int]bool
 	// ideAnnounced keeps the editor-bridge line to one appearance.
 	ideAnnounced bool
 
@@ -505,6 +510,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.publishAllOverlays()
 	case idleTickMsg:
 		return m.updateIdleTick(msg)
+	case hostQuitMsg:
+		m.clearAllOverlays() // see the /quit path
+		return m, tea.Quit
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
@@ -535,8 +543,8 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// changes the view and this is not a per-blink publish. WindowSizeMsg
 		// and clientsMsg already republished above, in their own cases; a
 		// message that just switched the mode to modeInput from a hidden one
-		// is Update's job (see publishAfterKey / the "restored" check), not
-		// this one, to avoid publishing the whole roster twice.
+		// is Update's job (see publishAfterKey and publishVisibilityChange),
+		// not this one, to avoid publishing the whole roster twice.
 		switch msg.(type) {
 		case tea.WindowSizeMsg, clientsMsg:
 		default:
@@ -574,8 +582,79 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	case modeBusy:
 		return m.handleBusyKey(k, from)
 	}
+	return m.handleInputKey(k, from)
+}
 
-	// modeInput
+// handleGuestKey routes a key from a client that is *not* the owner of the
+// popup currently on screen (the palette, /menu, the right-click menu, the
+// queue popup — the ones that belong to whoever opened them).
+//
+// Dropping those keys, as this used to, deadens every other terminal's
+// keyboard for as long as someone else browses a menu: not only their Esc
+// and Ctrl+C but every ordinary letter they type. Instead the key goes to
+// that client's own input line exactly as it would in the mode underneath —
+// busy while a run is in progress, otherwise input — so they keep typing
+// into their own draft (their overlay shows it) and their Esc/Ctrl+C acts
+// on their own draft or selection, never on the owner's popup.
+//
+// The owner's popup stays open regardless: there is one m.mode and one
+// m.picker for the whole session, so a guest's key is not allowed to change
+// either. A guest key that would have opened a popup of its own (its own
+// palette, its own queue) is therefore undone here rather than fighting for
+// the screen — everything else it did (editing, submitting, queueing) has
+// already happened. A turn a guest starts this way really does start; only
+// the mode switch that would have hidden the owner's popup is rolled back,
+// and the owner's own Esc lands them in m.idleMode(), which is modeBusy
+// while that turn runs.
+func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	// Everything the popup is made of, put back exactly as it was once the
+	// guest's key has had its effect on the guest's own draft. A guest key
+	// that would have opened a popup of its own (its own palette, its own
+	// queue) is undone this way rather than fighting for the one m.mode,
+	// m.picker and owner the session has; everything else it did —
+	// editing, submitting, queueing, cancelling a run — has already
+	// happened and stands. A turn a guest starts really does start: only
+	// the mode switch that would have hidden the owner's popup is rolled
+	// back, and the owner's own Esc then lands in m.idleMode(), which is
+	// modeBusy while that turn runs.
+	mode, pick, prev := m.mode, m.picker, m.prevMode
+	pal, menu, queue := m.paletteOwner, m.menuOwner, m.queueOwner
+	held := m.ag.Held()
+	var model tea.Model
+	var cmd tea.Cmd
+	if m.running {
+		model, cmd = m.handleBusyKey(k, from)
+	} else {
+		model, cmd = m.handleInputKey(k, from)
+	}
+	m.mode, m.picker, m.prevMode = mode, pick, prev
+	m.paletteOwner, m.menuOwner, m.queueOwner = pal, menu, queue
+	if m.ag.Held() != held {
+		// openQueue/closeQueue ran for a popup that is not going to be
+		// shown: the owner's hold is what counts.
+		m.ag.Hold(held)
+	}
+	return model, cmd
+}
+
+// setQuitHint arms one terminal's "press Ctrl+C again to quit", and
+// clearQuitHint disarms it. Only the sender's own hint moves: a Ctrl+C from
+// another terminal is about that terminal's draft, not this one's.
+func (m *Model) setQuitHint(from int) {
+	if m.quitHint == nil {
+		m.quitHint = map[int]bool{}
+	}
+	m.quitHint[from] = true
+}
+
+func (m *Model) clearQuitHint(from int) {
+	delete(m.quitHint, from)
+}
+
+// handleInputKey is modeInput: the key edits, submits or acts on the
+// sender's own draft. Reached both from handleKey and, for a client that
+// does not own the popup currently on screen, from handleGuestKey.
+func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC:
@@ -586,13 +665,13 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 		if in.Value() != "" {
 			in.Reset()
-			m.quitHint = false
+			m.clearQuitHint(from)
 			return m, nil
 		}
-		if m.quitHint {
+		if m.quitHint[from] {
 			return m, tea.Quit
 		}
-		m.quitHint = true
+		m.setQuitHint(from)
 		m.appendLine(stDim.Render("press Ctrl+C again to quit"))
 		return m, nil
 	case tea.KeyEnter:
@@ -600,7 +679,7 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.quitHint = false
+		m.clearQuitHint(from)
 		m.histFile.add(text, from)
 		in.Reset()
 		if strings.HasPrefix(text, "/") {
@@ -864,21 +943,7 @@ func (m *Model) layout() {
 	m.vp.Width = m.width
 	m.vp.Height = vpH
 	for _, ta := range m.inputs {
-		if m.compact() {
-			ta.SetPromptFunc(2, func(i int) string {
-				if i == 0 {
-					return "> "
-				}
-				return "  "
-			})
-		} else {
-			ta.SetPromptFunc(5, func(i int) string {
-				if i == 0 {
-					return "(>): "
-				}
-				return "     "
-			})
-		}
+		setInputPrompt(ta, m.compact())
 		ta.SetWidth(m.inputWidth())
 		ta.SetHeight(m.inputRows())
 	}
@@ -1088,6 +1153,10 @@ func (m *Model) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
+		// Clear the overlays before the quit, not only after the program
+		// returns: Bubble Tea's own teardown flushes one last frame, and
+		// the host would re-append every client's draft to it.
+		m.clearAllOverlays()
 		return m, tea.Quit
 	case "/menu":
 		return m.openMenu(from)

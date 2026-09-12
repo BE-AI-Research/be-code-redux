@@ -20,12 +20,7 @@ func (m *Model) newInputArea() *textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
 	ta.SetHeight(m.inputRows())
-	ta.SetPromptFunc(5, func(lineIdx int) string {
-		if lineIdx == 0 {
-			return "(>): "
-		}
-		return "     "
-	})
+	setInputPrompt(&ta, m.compact())
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
 	ta.Focus()
@@ -37,6 +32,29 @@ func (m *Model) newInputArea() *textarea.Model {
 		ta.SetWidth(w)
 	}
 	return &ta
+}
+
+// setInputPrompt gives a textarea the prompt of the current layout: the
+// short one in compact, the full one otherwise. layout() applies it to
+// every input line on a resize, and newInputArea applies it once up front —
+// a terminal attaching to a session that is already compact must not have
+// to wait for the next resize to get the right prompt.
+func setInputPrompt(ta *textarea.Model, compact bool) {
+	if compact {
+		ta.SetPromptFunc(2, func(i int) string {
+			if i == 0 {
+				return "> "
+			}
+			return "  "
+		})
+		return
+	}
+	ta.SetPromptFunc(5, func(i int) string {
+		if i == 0 {
+			return "(>): "
+		}
+		return "     "
+	})
 }
 
 // inputFor returns the textarea of one client, creating it on first use.

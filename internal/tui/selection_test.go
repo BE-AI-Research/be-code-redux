@@ -60,7 +60,7 @@ func TestCtrlCCopiesSelection(t *testing.T) {
 	if len(*got) != 1 || (*got)[0] != "copy me" {
 		t.Fatalf("clipboard = %v", *got)
 	}
-	if m.sel != nil || m.quitHint {
+	if m.sel != nil || m.quitHint[0] {
 		t.Fatal("selection not cleared or quit armed")
 	}
 }

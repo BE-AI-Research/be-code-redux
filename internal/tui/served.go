@@ -21,6 +21,12 @@ type clientsMsg []live.ClientInfo
 // idleTickMsg drives the live_idle_limit check in served mode.
 type idleTickMsg time.Time
 
+// hostQuitMsg is the host asking the program to stop (a quit frame from a
+// client, or a signal the host turned into one). It goes through Update
+// rather than being a bare tea.Quit so the same teardown as /quit runs:
+// every client's overlay is cleared before Bubble Tea's own final frame.
+type hostQuitMsg struct{}
+
 // idleTickInterval is the poll period for the live_idle_limit check.
 // A package var (rather than a literal in idleTick) so tests can shrink it
 // instead of genuinely sleeping 30s.
@@ -75,7 +81,10 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	h.OnInput(pump.Feed)
 	h.OnSize(func(cols, rows int) { p.Send(tea.WindowSizeMsg{Width: cols, Height: rows}) })
 	h.OnClients(func(cl []live.ClientInfo) { p.Send(clientsMsg(cl)) })
-	h.OnQuit(func() { p.Send(tea.Quit()) })
+	// Not tea.Quit() directly: Bubble Tea answers a QuitMsg in its event
+	// loop without ever showing it to Update, and this quit has to clear
+	// every client's overlay on its way out (see hostQuitMsg).
+	h.OnQuit(func() { p.Send(hostQuitMsg{}) })
 	if c, r := h.Size(); c > 0 {
 		go p.Send(tea.WindowSizeMsg{Width: c, Height: r})
 	}
@@ -233,9 +242,16 @@ func (m *Model) overlayVisible() bool {
 
 // publishOverlay sends one client's current input rows to the host, if this
 // session is served, a publisher is wired up (nil in-process and in tests
-// that don't care), and the current mode actually renders an input row.
+// that don't care), the model has a size to lay them out against, and the
+// current mode actually renders an input row.
+//
+// The m.ready gate matters: the host replays whatever a client typed before
+// the program registered OnInput, so a key can genuinely arrive before the
+// first WindowSizeMsg. Publishing then would place the rows by a zero-width
+// layout, at row 1 of the terminal, over the frame the program is about to
+// draw. The first WindowSizeMsg republishes the whole roster anyway.
 func (m *Model) publishOverlay(client int) {
-	if m.served && m.setOverlay != nil && m.overlayVisible() {
+	if m.served && m.ready && m.setOverlay != nil && m.overlayVisible() {
 		m.setOverlay(client, m.overlayFor(client))
 	}
 }
@@ -248,7 +264,7 @@ func (m *Model) publishOverlay(client int) {
 // while the current mode hides the input row (see overlayVisible); Update's
 // wrapper republishes everyone the moment such a mode gives the row back.
 func (m *Model) publishAllOverlays() {
-	if !m.served || m.setOverlay == nil || !m.overlayVisible() {
+	if !m.served || !m.ready || m.setOverlay == nil || !m.overlayVisible() {
 		return
 	}
 	for _, c := range m.clients {
@@ -262,7 +278,9 @@ func (m *Model) publishAllOverlays() {
 // draft was last published there with an empty string, and an empty
 // overlay is never re-appended by Host.fanout.Write — unlike
 // publishAllOverlays, this must run unconditionally on the mode that hides
-// the input row, so it does not gate on overlayVisible().
+// the input row (and on the way into a quit), so it gates on neither
+// overlayVisible() nor m.ready: clearing an overlay that was never
+// published is free, and one that was must go.
 func (m *Model) clearAllOverlays() {
 	if !m.served || m.setOverlay == nil {
 		return
@@ -283,6 +301,7 @@ func (m *Model) updateIdleTick(msg idleTickMsg) (tea.Model, tea.Cmd) {
 	if len(m.clients) > 0 || m.running {
 		m.idleSince = time.Time(msg)
 	} else if time.Time(msg).Sub(m.idleSince) >= time.Duration(m.cfg.LiveIdleLimit)*time.Minute {
+		m.clearAllOverlays() // see the /quit path: nothing may ride on the teardown frame
 		return m, tea.Quit
 	}
 	return m, idleTick()

@@ -307,3 +307,117 @@ func TestQueuePopupClosesToIdleWhenOwnerDetaches(t *testing.T) {
 		t.Fatal("delivery still held after the popup closed")
 	}
 }
+
+// A popup belongs to one terminal, but the keyboard of every other terminal
+// must keep working: a guest's keys go to that guest's own input line (in
+// the mode underneath), and never to the owner's popup.
+func TestGuestKeysReachTheirOwnInputWhileAPopupIsOpen(t *testing.T) {
+	m := twoClients(t)
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/")})
+	if m.mode != modePalette || m.paletteOwner != 1 {
+		t.Fatalf("palette owner %d mode %v", m.paletteOwner, m.mode)
+	}
+	for _, r := range []string{"x", "y", "z"} {
+		m.Update(live.ClientKeyMsg{Client: 2, Key: runes(r)})
+	}
+	if got := m.inputFor(2).Value(); got != "xyz" {
+		t.Fatalf("guest's typing landed in %q, want %q in its own input", got, "xyz")
+	}
+	if m.mode != modePalette || m.paletteOwner != 1 {
+		t.Fatalf("guest's typing disturbed the owner's palette: mode %v owner %d", m.mode, m.paletteOwner)
+	}
+	if p := m.picker; p == nil || p.filter != "" {
+		t.Fatalf("guest's runes reached the palette filter: %+v", p)
+	}
+	// The guest's Esc clears its own selection, and does not close the
+	// owner's palette.
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEsc}})
+	if m.mode != modePalette {
+		t.Fatal("guest's Esc closed the owner's palette")
+	}
+	// The guest's Ctrl+C clears only its own draft.
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
+	if got := m.inputFor(2).Value(); got != "" {
+		t.Fatalf("guest's Ctrl+C left %q in its own draft", got)
+	}
+	if m.mode != modePalette {
+		t.Fatal("guest's Ctrl+C closed the owner's palette")
+	}
+	// And the owner's own Esc still closes it.
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEsc}})
+	if m.mode == modePalette {
+		t.Fatal("the owner's Esc must close its own palette")
+	}
+}
+
+// The same for the menu and the queue popup, and with a run in progress —
+// where the mode underneath is modeBusy, so a guest's Enter queues its
+// message instead of starting a turn.
+func TestGuestKeysQueueWhileAnotherClientBrowsesTheMenu(t *testing.T) {
+	m := twoClients(t)
+	m.mode, m.running = modeBusy, true
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyCtrlQ}}) // queue popup, owner 1
+	if m.mode != modeQueue {
+		// No queued messages for client 1: openQueue says so and stays put.
+		m.mode, m.queueOwner = modeQueue, 1
+	}
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("later please")})
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if m.mode != modeQueue || m.queueOwner != 1 {
+		t.Fatalf("guest's keys disturbed the owner's queue popup: mode %v owner %d", m.mode, m.queueOwner)
+	}
+	items := m.ag.Items()
+	if len(items) != 1 || items[0].Text != "later please" || items[0].From != 2 {
+		t.Fatalf("guest's Enter must queue its own text: %+v", items)
+	}
+	// A guest key that would open a popup of its own leaves the owner's
+	// popup exactly where it was, and never leaves delivery held.
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlQ}})
+	if m.mode != modeQueue || m.queueOwner != 1 {
+		t.Fatalf("guest opened a popup of its own: mode %v owner %d", m.mode, m.queueOwner)
+	}
+}
+
+// Ctrl+C twice quits — but only from the same terminal. A Ctrl+C on one
+// terminal and a Ctrl+C on another are two people each clearing their own
+// line, not a session-ending confirmation.
+func TestQuitHintIsPerClient(t *testing.T) {
+	m := twoClients(t)
+	if _, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 1); cmd != nil {
+		t.Fatal("the first Ctrl+C must only arm the hint")
+	}
+	if _, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 2); cmd != nil {
+		t.Fatal("another terminal's Ctrl+C must not quit")
+	}
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 2)
+	if cmd == nil {
+		t.Fatal("the same terminal's second Ctrl+C must quit")
+	}
+	if msg := cmd(); msg != tea.Quit() {
+		t.Fatalf("second Ctrl+C returned %T, want a quit", msg)
+	}
+}
+
+// /resume CODE has to be typeable at the prompt: the space that ends the
+// command name arrives as tea.KeySpace, and must hand the text back to the
+// input line rather than filtering the palette.
+func TestSpaceClosesThePaletteAndKeepsTheCommand(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(runes("/"))
+	if m.mode != modePalette {
+		t.Fatalf("mode %v after /", m.mode)
+	}
+	for _, r := range []string{"r", "e", "s", "u", "m", "e"} {
+		m.Update(runes(r))
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if m.mode == modePalette {
+		t.Fatal("a space must close the palette")
+	}
+	for _, r := range []string{"A", "B", "C", "1", "2", "3"} {
+		m.Update(runes(r))
+	}
+	if got := m.inputFor(0).Value(); got != "/resume ABC123" {
+		t.Fatalf("input = %q, want %q", got, "/resume ABC123")
+	}
+}

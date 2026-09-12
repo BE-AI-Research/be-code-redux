@@ -257,18 +257,18 @@ func (m *Model) idleMode() mode {
 
 func (m *Model) handleContextMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.menuOwner {
-		return m, nil // the popup acts for the terminal that opened it
+		// The popup acts for the terminal that opened it; everyone else
+		// keeps typing into their own input line (see handleGuestKey).
+		return m.handleGuestKey(k, from)
 	}
 	if k.Type == tea.KeyEsc || k.Type == tea.KeyCtrlC {
 		m.picker = nil
 		m.mode = m.idleMode()
 		return m, nil
 	}
-	model, cmd := m.handlePickerKey(k, from)
-	if m.picker == nil && m.mode == modeInput && m.running {
-		m.mode = modeBusy
-	}
-	return model, cmd
+	// handlePickerKey (and this popup's own onPick) leave through
+	// m.idleMode(), so a run still in progress keeps modeBusy on its own.
+	return m.handlePickerKey(k, from)
 }
 
 func (m *Model) contextMenuBox() string {

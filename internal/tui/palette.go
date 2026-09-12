@@ -56,44 +56,46 @@ func (m *Model) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
 
 func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.paletteOwner {
-		return m, nil // another terminal's keys are none of this popup's business
+		// Another terminal's keys are none of this popup's business — but
+		// they are that terminal's own business (see handleGuestKey).
+		return m.handleGuestKey(k, from)
 	}
 	p := m.picker
 	if p == nil {
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		return m, nil
 	}
 	in := m.inputFor(m.paletteOwner)
-	switch k.Type {
-	case tea.KeyEsc, tea.KeyCtrlC:
-		// Leave what was typed in the input so nothing is lost.
-		in.SetValue("/" + p.filter)
+	// handBack gives the typed text back to the owner's input line and
+	// closes the popup, so nothing is lost on the way out.
+	handBack := func(text string) (tea.Model, tea.Cmd) {
+		in.SetValue(text)
 		in.CursorEnd()
 		m.picker = nil
-		m.mode = modeInput
+		m.mode = m.idleMode()
 		return m, nil
+	}
+	switch k.Type {
+	case tea.KeyEsc, tea.KeyCtrlC:
+		return handBack("/" + p.filter)
 	case tea.KeyBackspace:
 		if p.filter == "" {
-			m.picker = nil
-			m.mode = modeInput
-			return m, nil
+			return handBack("")
 		}
+	case tea.KeySpace:
+		// A space ends the command name: hand over to the input, so an
+		// argument (`/resume ABC123`) can be typed at the prompt. Bubble Tea
+		// delivers a space as KeySpace, not as a KeyRunes " ", but a
+		// terminal or a paste can still produce the runes form — both end
+		// the command name.
+		return handBack("/" + p.filter + " ")
 	case tea.KeyRunes:
 		if len(k.Runes) == 1 && k.Runes[0] == ' ' {
-			// A space ends the command name: hand over to the input.
-			in.SetValue("/" + p.filter + " ")
-			in.CursorEnd()
-			m.picker = nil
-			m.mode = modeInput
-			return m, nil
+			return handBack("/" + p.filter + " ")
 		}
 	case tea.KeyTab:
 		if items := p.filtered(); len(items) > 0 {
-			it := items[p.cursor]
-			in.SetValue(it.id + " ")
-			in.CursorEnd()
-			m.picker = nil
-			m.mode = modeInput
+			return handBack(items[p.cursor].id + " ")
 		}
 		return m, nil
 	}
@@ -238,7 +240,9 @@ func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
 
 func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.menuOwner {
-		return m, nil // the menu acts for the terminal that opened it
+		// The menu acts for the terminal that opened it; everyone else
+		// keeps typing into their own input line (see handleGuestKey).
+		return m.handleGuestKey(k, from)
 	}
 	return m.handlePickerKey(k, from)
 }

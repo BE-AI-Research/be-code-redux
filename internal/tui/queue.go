@@ -49,7 +49,9 @@ func (m *Model) closeQueue() {
 
 func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.queueOwner {
-		return m, nil // the popup belongs to the client that opened it
+		// The popup belongs to the client that opened it; everyone else
+		// keeps typing into their own input line (see handleGuestKey).
+		return m.handleGuestKey(k, from)
 	}
 	items, idx := m.ownerQueue()
 	if len(items) == 0 {
