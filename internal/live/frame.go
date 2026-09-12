@@ -17,7 +17,7 @@ const (
 	FInput
 	FResize
 	FDetach
-	FTakeover
+	FOverlay // host→client: one client's private input rows
 	FQuit
 	FOutput
 	FSize

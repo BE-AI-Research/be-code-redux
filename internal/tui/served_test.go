@@ -293,13 +293,16 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 		for range msgs {
 		}
 	}()
+	// DetachHolder is now a no-op shim (there is no holder to detach any
+	// more — Task 4 rewires /detach to act on a specific client id), so
+	// running cmd() must simply return without ever telling the
+	// still-attached client goodbye. The deadlock this test guards against
+	// is already ruled out above: slashCommand("/detach") returned promptly
+	// with cmd instead of blocking on the host.
 	go cmd()
 	select {
 	case reason := <-bye:
-		if reason == "" {
-			t.Fatalf("bye reason = %q", reason)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the attached client was never told goodbye")
+		t.Fatalf("no-op DetachHolder unexpectedly detached the client (reason %q)", reason)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

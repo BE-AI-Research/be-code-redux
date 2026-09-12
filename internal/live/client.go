@@ -241,7 +241,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 				// after Ctrl+] t, and they are only delivered to the
 				// program if this client already holds input.
 				if act == ActionTakeover {
-					writeFrame(FTakeover, nil)
+					writeFrame(FOverlay, nil)
 				}
 				// Forward any plain bytes the same Read delivered ahead of
 				// the chord (e.g. pasted text ending in Ctrl+] d) before

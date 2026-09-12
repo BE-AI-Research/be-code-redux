@@ -51,12 +51,17 @@ func TestAttachRoundTripAndDetach(t *testing.T) {
 	if c, r := h.Size(); c != 90 || r != 30 {
 		t.Fatalf("host size %dx%d", c, r)
 	}
-	// keystrokes reach the program; program output reaches stdout
+	// keystrokes reach the program, tagged with the sending client's id
+	gotInput := make(chan []byte, 8)
+	h.OnInput(func(_ int, b []byte) { gotInput <- append([]byte(nil), b...) })
 	stdinW.Write([]byte("hi"))
-	buf := make([]byte, 4)
-	n, _ := h.InputReader().Read(buf)
-	if string(buf[:n]) != "hi" {
-		t.Fatalf("program got %q", buf[:n])
+	select {
+	case b := <-gotInput:
+		if string(b) != "hi" {
+			t.Fatalf("program got %q", b)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("program did not receive the keystrokes")
 	}
 	h.Output().Write([]byte("FRAME"))
 	within(t, time.Second, func() bool { return strings.Contains(stdout.String(), "FRAME") })
@@ -111,14 +116,19 @@ func TestAttachForwardsBytesBeforeDetachInSameRead(t *testing.T) {
 	}()
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
 
+	gotInput := make(chan []byte, 8)
+	h.OnInput(func(_ int, b []byte) { gotInput <- append([]byte(nil), b...) })
 	// A single Write matched by the client's single 4096-byte Read call
 	// delivers "ab\x1dd" as one Read, exercising Chord.Feed's single-call
 	// path rather than the chord split across two Feed calls.
 	stdinW.Write([]byte("ab\x1dd"))
-	buf := make([]byte, 4)
-	n, _ := h.InputReader().Read(buf)
-	if string(buf[:n]) != "ab" {
-		t.Fatalf("program got %q, want \"ab\"", buf[:n])
+	select {
+	case b := <-gotInput:
+		if string(b) != "ab" {
+			t.Fatalf("program got %q, want \"ab\"", b)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("program did not receive the keystrokes")
 	}
 	select {
 	case reason := <-done:
@@ -275,43 +285,10 @@ func TestAttachKeepsTheResumeLineVisibleAfterAnEndedSession(t *testing.T) {
 	}
 }
 
-// TestAttachTakeoverClaimsInputBeforeForwarding covers the ordering a
-// takeover needs: the bytes that share the read with Ctrl+] t are what the
-// user typed to the session, and the host swallows a viewer's input — so the
-// takeover frame has to go first or those keystrokes are lost.
-func TestAttachTakeoverClaimsInputBeforeForwarding(t *testing.T) {
-	h, sock := startHost(t)
-	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
-	stdinR, stdinW := io.Pipe()
-	done := make(chan string, 1)
-	go func() {
-		reason, _ := Attach(context.Background(), rec, AttachOptions{Label: "viewer", Stdin: stdinR, Stdout: io.Discard,
-			Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true})
-		done <- reason
-	}()
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	// A second client attaches and takes input, leaving Attach's client a viewer.
-	other := dial(t, sock, "tok", "other", 80, 24)
-	within(t, time.Second, func() bool {
-		cl := h.Clients()
-		return len(cl) == 2 && cl[1].Holder
-	})
-	_ = other
-
-	stdinW.Write([]byte{0x1d, 't', 'h', 'i'})
-	within(t, 2*time.Second, func() bool {
-		cl := h.Clients()
-		return len(cl) == 2 && cl[0].Holder && cl[0].Label == "viewer"
-	})
-	buf := make([]byte, 8)
-	n, _ := h.InputReader().Read(buf)
-	if string(buf[:n]) != "hi" {
-		t.Fatalf("program got %q, want \"hi\" after the takeover", buf[:n])
-	}
-	stdinW.Write([]byte{0x1d, 'd'})
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Attach did not return after the detach chord")
-	}
-}
+// The old TestAttachTakeoverClaimsInputBeforeForwarding lived here. It
+// exercised holder election (a second client's takeover moving whose input
+// reached the program), which no longer exists — every client's input now
+// reaches the program tagged with its own id (see host_test.go's
+// TestHostDeliversTaggedInputFromEveryClient). Task 3 owns client.go's new
+// takeover behavior (splicing the overlay locally) and adds its replacement,
+// "Ctrl+] t forwards both bytes".
