@@ -25,6 +25,13 @@ const byeWait = 500 * time.Millisecond
 // (FSize, FClients, FBye) are never dropped.
 const maxQueuedOutput = 8
 
+// maxEarlyInput bounds how many bytes of a client's keystrokes are buffered
+// per client while OnInput has not yet been registered (the served program
+// listens and serves a client before RunServed calls OnInput; see
+// tui.RunServed and TestSeedFromHostClientsAlreadyAttached). Bytes beyond
+// this are dropped rather than grown without bound.
+const maxEarlyInput = 4096
+
 // qframe is one frame pending delivery to a client.
 type qframe struct {
 	typ     FrameType
@@ -43,6 +50,13 @@ type client struct {
 	// qmu: it is read and written alongside the client slice in fanout.Write
 	// and SetOverlay, never on its own).
 	overlay string
+
+	// pendingIn buffers this client's FInput bytes, in arrival order, from
+	// before OnInput was registered (guarded by Host.mu, same convention as
+	// overlay). Replayed and cleared the moment OnInput registers; capped at
+	// maxEarlyInput so an attach with nobody listening yet cannot grow
+	// without bound.
+	pendingIn []byte
 
 	// qmu guards queue. Only writer() ever reads/drains it; enqueue is called
 	// from any goroutine (recompute, detach, fanout, handle) and must never
@@ -157,7 +171,32 @@ func NewHost(token string, log io.Writer) *Host {
 // client's own connection-handling goroutine (see handle), not a dedicated
 // one, so it must not block for long: doing so stalls that same client's
 // resize, detach and quit frames behind it.
-func (h *Host) OnInput(f func(client int, b []byte)) { h.mu.Lock(); h.onInput = f; h.mu.Unlock() }
+//
+// Registering also replays any input that arrived, per client, while no
+// callback was registered yet — otherwise keystrokes typed in the first
+// milliseconds after attaching (the host serves a client before the served
+// program calls OnInput) would simply be lost.
+func (h *Host) OnInput(f func(client int, b []byte)) {
+	type early struct {
+		id int
+		b  []byte
+	}
+	h.mu.Lock()
+	h.onInput = f
+	var buffered []early
+	if f != nil {
+		for _, c := range h.clients {
+			if len(c.pendingIn) > 0 {
+				buffered = append(buffered, early{c.id, c.pendingIn})
+				c.pendingIn = nil
+			}
+		}
+	}
+	h.mu.Unlock()
+	for _, e := range buffered {
+		f(e.id, e.b)
+	}
+}
 
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
@@ -241,6 +280,15 @@ func (h *Host) handle(conn net.Conn) {
 		case FInput:
 			h.mu.Lock()
 			f := h.onInput
+			if f == nil {
+				if room := maxEarlyInput - len(c.pendingIn); room > 0 {
+					add := payload
+					if len(add) > room {
+						add = add[:room]
+					}
+					c.pendingIn = append(c.pendingIn, add...)
+				}
+			}
 			h.mu.Unlock()
 			if f != nil {
 				f(c.id, append([]byte(nil), payload...))

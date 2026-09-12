@@ -156,6 +156,41 @@ func TestHostDeliversTaggedInputFromEveryClient(t *testing.T) {
 	}
 }
 
+// TestHostBuffersEarlyInputAndReplaysOnOnInput covers the window between a
+// client attaching and the served program registering OnInput: keystrokes
+// typed in that window must not be lost.
+func TestHostBuffersEarlyInputAndReplaysOnOnInput(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+
+	WriteFrame(a.conn, FInput, []byte("early"))
+	// Force a round trip on the same connection: handle() reads frames from
+	// one connection strictly in order on a single goroutine, so once this
+	// resize is visible the FInput frame above (sent first, while OnInput
+	// was still nil) is guaranteed to have already been read and buffered.
+	WriteJSON(a.conn, FResize, Size{Cols: 90, Rows: 30})
+	within(t, time.Second, func() bool {
+		for _, c := range h.Clients() {
+			if c.Cols == 90 {
+				return true
+			}
+		}
+		return false
+	})
+
+	got := make(chan string, 1)
+	h.OnInput(func(id int, b []byte) { got <- string(b) })
+	select {
+	case s := <-got:
+		if s != "early" {
+			t.Fatalf("replayed input = %q, want %q", s, "early")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("early input was never replayed")
+	}
+}
+
 func TestHostOverlayGoesToOneClientAndFollowsEveryFrame(t *testing.T) {
 	h, sock := startHost(t)
 	a := dial(t, sock, "tok", "a", 100, 40)
