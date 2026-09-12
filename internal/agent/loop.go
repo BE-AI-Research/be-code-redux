@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/repomap"
@@ -82,8 +84,14 @@ type Agent struct {
 	stallAfter       time.Duration // silence before a "waiting for backend" notice
 	unloadedNotified bool          // one notice per eviction, not per turn
 	repoMap          string
-	knownTools       map[string]bool
-	compat           bool // current session uses embedded tool calls
+	// saveDisabled latches on when another live process is found to own the
+	// session file; saveOwner is its pid and saveWarned keeps the warning to
+	// one line per run (see SaveGuard, autosave).
+	saveDisabled bool
+	saveOwner    int
+	saveWarned   bool
+	knownTools   map[string]bool
+	compat       bool // current session uses embedded tool calls
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -362,11 +370,48 @@ func (a *Agent) specsTokens() int {
 	return a.History.est(string(b))
 }
 
+// SaveGuard reports whether another live process owns this session's file,
+// and which. Two programs owning one session file is what resuming an
+// already-live session used to produce: each is blind to the other's turns
+// and overwrites its saves. Every entry point that loads a session now
+// joins the live one instead (see cmd/live.go:decideStart), so this is the
+// last line of defence and should never fire in practice.
+//
+// The on-disk pid stamp is the authority: a stamp naming a different, live
+// process blocks this program from writing the file for the rest of the run
+// (the answer is latched, so a file that changes hands mid-run cannot
+// un-block it), while a stale stamp — the host is gone — is taken over, or
+// a crashed session could never be written again.
+func (a *Agent) SaveGuard() (blocked bool, owner int) {
+	if a.Session == nil {
+		return false, 0
+	}
+	if a.saveDisabled {
+		return true, a.saveOwner
+	}
+	on, err := store.Load(a.Session.ID)
+	if err != nil || on.HostPID == 0 || on.HostPID == os.Getpid() || !live.Alive(on.HostPID) {
+		return false, 0
+	}
+	a.saveDisabled, a.saveOwner = true, on.HostPID
+	return true, on.HostPID
+}
+
 // autosave persists the conversation; failures are non-fatal by design.
+// A session file another live process owns is never written (see
+// SaveGuard); this program's own pid is stamped on every save it does make.
 func (a *Agent) autosave(userInput string) {
 	if a.Session == nil {
 		return
 	}
+	if blocked, owner := a.SaveGuard(); blocked {
+		if !a.saveWarned {
+			a.saveWarned = true
+			a.notice("session file is owned by live host %d; autosave disabled for this session", owner)
+		}
+		return
+	}
+	a.Session.HostPID = os.Getpid()
 	if a.Session.Title == "" {
 		a.Session.Title = store.TitleFrom(userInput)
 	}
