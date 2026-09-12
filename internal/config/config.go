@@ -79,6 +79,12 @@ type Config struct {
 	// no clients and no run before it exits (0 = never).
 	LiveIdleLimit int `json:"live_idle_limit"`
 
+	// HostSessions runs each interactive TUI session in a detached host
+	// process the terminal attaches to, so the session survives the
+	// terminal and other terminals can attach to it. On by default;
+	// false (or --no-host) keeps the session in the launching process.
+	HostSessions bool `json:"host_sessions"`
+
 	// ShellAllow / ShellDeny are glob patterns ('*' matches anything)
 	// checked against shell commands. Deny wins and never runs; an allow
 	// match runs without an approval prompt.
@@ -175,6 +181,7 @@ func Default() *Config {
 		Layout:              "auto",
 		Theme:               "dark",
 		ThemeTerminalColors: true,
+		HostSessions:        true,
 		ShellAllow: []string{
 			"go build*", "go test*", "go vet*", "gofmt*", "go run*",
 			"npm test*", "npx tsc*", "python3 -m pytest*", "cargo check*",

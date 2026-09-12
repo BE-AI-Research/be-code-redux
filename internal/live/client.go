@@ -69,6 +69,12 @@ func DefaultAttachOptions() AttachOptions {
 
 const clearScreen = "\x1b[2J\x1b[H"
 
+// ReasonEnded is Host.Close's reason when the served program has finished
+// (see cmd/live.go). It is the one bye reason that means the program already
+// left the alt screen and printed its closing lines — the resume code — on
+// the normal screen, so Attach must not clear on its way out.
+const ReasonEnded = "session ended"
+
 // deadlineReader is implemented by *os.File (a real terminal, since Go
 // 1.23) but not by the in-memory pipes the tests use. When available,
 // Attach uses it to interrupt a stdin goroutine parked in Read once the
@@ -281,6 +287,13 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 		d.SetReadDeadline(time.Time{})
 	}
 
-	io.WriteString(opt.Stdout, clearScreen)
+	// The session is still running (a detach) or gone unexpectedly, so this
+	// terminal is left holding a frozen alt-screen rendering: clear it so the
+	// shell prompt lands on a clean screen. A session that ended normally is
+	// the exception — its program restored the normal screen itself and then
+	// printed the resume line, which a clear here would wipe.
+	if reason != ReasonEnded {
+		io.WriteString(opt.Stdout, clearScreen)
+	}
 	return reason, retErr
 }

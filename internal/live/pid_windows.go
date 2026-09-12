@@ -2,7 +2,25 @@
 
 package live
 
-import "os"
+import (
+	"errors"
+	"os"
+)
+
+// Terminate stops the process. Windows has no SIGTERM, so this is the
+// abrupt kill; it is the last resort behind a polite quit frame (see
+// `be-code sessions kill`).
+func Terminate(pid int) error {
+	if pid <= 0 {
+		return errors.New("live: no pid")
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	defer p.Release()
+	return p.Kill()
+}
 
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)
