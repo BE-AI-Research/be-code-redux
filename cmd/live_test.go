@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -534,3 +538,120 @@ func (stubProvider) Chat(context.Context, provider.ChatRequest, provider.StreamF
 }
 func (stubProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (stubProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
+
+// TestJoinMissed is the decision by itself: what counts as "the record we
+// found was a host on its way out, not a session to join".
+func TestJoinMissed(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		joined bool
+		err    error
+		want   bool
+	}{
+		{"socket is gone", "", false, fmt.Errorf("live: %w: %w", live.ErrDial, os.ErrNotExist), true},
+		{"ended before a single frame", live.ReasonEnded, false, nil, true},
+		{"ended after the session rendered", live.ReasonEnded, true, nil, false},
+		{"ordinary detach", "", true, nil, false},
+		{"host detached us", live.ReasonDetached, true, nil, false},
+		{"some other attach error", "", false, errors.New("write: broken pipe"), false},
+		{"connection died mid-session", "connection closed", true, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := joinMissed(c.reason, c.joined, c.err); got != c.want {
+				t.Fatalf("joinMissed(%q, %v, %v) = %v, want %v", c.reason, c.joined, c.err, got, c.want)
+			}
+		})
+	}
+}
+
+// TestJoinLiveFallsThroughWhenTheHostIsShuttingDown: a host in
+// finishSession still advertises its record and still answers on its
+// socket, but every client it accepts there is told "session ended"
+// straight away. Joining must never leave the user at their shell with no
+// session, so the launcher treats that as "no live host after all" and
+// starts a fresh one.
+func TestJoinLiveFallsThroughWhenTheHostIsShuttingDown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// A host past h.Close: it accepts, reads the hello and says goodbye.
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				live.ReadFrame(conn)
+				live.WriteJSON(conn, live.FBye, live.Bye{Reason: live.ReasonEnded})
+				conn.Close()
+			}()
+		}
+	}()
+	rec := &live.Record{Code: "ABC123", PID: os.Getpid(), Socket: sock, Workspace: "/ws", StartedAt: time.Now()}
+
+	var out strings.Builder
+	restore := stubAttachOptions(t, &out)
+	defer restore()
+
+	joined, err := joinLive(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("joinLive: %v", err)
+	}
+	if joined {
+		t.Fatal("joinLive reported a join against a host that had already ended")
+	}
+	// It must also have left the terminal the ordinary way: the host never
+	// sent this client the alt-screen exit that ReasonEnded normally
+	// implies, so the client owes it.
+	if !strings.Contains(out.String(), "\x1b[?1049l") {
+		t.Fatalf("terminal left in the alt screen: %q", out.String())
+	}
+}
+
+// TestJoinLiveFallsThroughWhenTheSocketIsGone: the same window a moment
+// later — the host has closed its socket but not yet retired its record.
+func TestJoinLiveFallsThroughWhenTheSocketIsGone(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+	rec := &live.Record{Code: "ABC123", PID: os.Getpid(),
+		Socket: filepath.Join(dir, "nothing-here.sock"), Workspace: "/ws", StartedAt: time.Now()}
+	var out strings.Builder
+	restore := stubAttachOptions(t, &out)
+	defer restore()
+	joined, err := joinLive(context.Background(), rec)
+	if err != nil {
+		t.Fatalf("joinLive: %v", err)
+	}
+	if joined {
+		t.Fatal("joinLive reported a join against a socket that is not there")
+	}
+}
+
+// stubAttachOptions points attachLive at in-memory pipes: a test has no
+// terminal to put in raw mode.
+func stubAttachOptions(t *testing.T, out *strings.Builder) func() {
+	t.Helper()
+	prev := attachOptions
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	attachOptions = func() live.AttachOptions {
+		return live.AttachOptions{
+			Label:  "test",
+			Stdin:  pr,
+			Stdout: out,
+			Raw:    func() (func(), error) { return func() {}, nil },
+			Size:   func() (int, int) { return 80, 24 },
+		}
+	}
+	return func() { attachOptions = prev }
+}

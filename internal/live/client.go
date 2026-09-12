@@ -3,6 +3,7 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,15 @@ type AttachOptions struct {
 	Raw    func() (restore func(), err error)
 	Size   func() (cols, rows int)
 	UTF8   bool
+	// Joined, when non-nil, is set the moment the host sends this terminal
+	// its first frame of rendered output — the proof that it actually
+	// joined a running session rather than arriving at one already on its
+	// way out. A host in its shutdown window still advertises its record
+	// and still answers on its socket, so a launcher joining at that
+	// instant can be accepted and told "session ended" without ever seeing
+	// the session; cmd's join paths read this to tell that apart from an
+	// ordinary end and start a fresh host instead (see cmd.joinMissed).
+	Joined *atomic.Bool
 }
 
 // ClientLabel describes this terminal for the clients list.
@@ -100,10 +110,11 @@ const (
 const ExitAltScreen = "\x1b[?1049l\x1b[?25h"
 
 // ReasonDetached is the host's bye reason when it detached a client rather
-// than the client detaching itself: `/detach` from inside the session, or a
-// takeover elsewhere. The terminal is going back to its shell with the
-// session still running, so the caller reports it the same way as a local
-// Ctrl+] d rather than as a session that stopped (see cmd.attachLive).
+// than the client detaching itself: `/detach` typed in that terminal, or
+// `Detach` called for it from inside the session. The terminal is going
+// back to its shell with the session still running, so the caller reports
+// it the same way as a local Ctrl+] d rather than as a session that stopped
+// (see cmd.attachLive).
 const ReasonDetached = "detached"
 
 // ReasonEnded is Host.Close's reason when the served program has finished
@@ -112,6 +123,11 @@ const ReasonDetached = "detached"
 // the normal screen, so Attach must not clear (or re-exit the alt screen) on
 // its way out.
 const ReasonEnded = "session ended"
+
+// ErrDial wraps every failure to reach a host's socket at all, so a caller
+// can tell a host that is simply not there from a session that refused,
+// ended or broke mid-attach.
+var ErrDial = errors.New("cannot reach the session host")
 
 // SwitchTarget extracts the session code from a "switch:CODE" bye reason.
 func SwitchTarget(reason string) (string, bool) {
@@ -206,7 +222,10 @@ var stdinPump = NewStdinPump(os.Stdin)
 func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error) {
 	conn, err := net.Dial("unix", rec.Socket)
 	if err != nil {
-		return "", fmt.Errorf("live: %w", err)
+		// ErrDial as well as the underlying error: a caller that is joining
+		// rather than attaching on purpose needs to tell "the host's socket
+		// is gone" from every other failure (see AttachOptions.Joined).
+		return "", fmt.Errorf("live: %w: %w", ErrDial, err)
 	}
 	defer conn.Close()
 
@@ -283,6 +302,9 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			}
 			switch typ {
 			case FOutput, FOverlay:
+				if typ == FOutput && opt.Joined != nil {
+					opt.Joined.Store(true)
+				}
 				opt.Stdout.Write(p)
 			case FSize:
 				io.WriteString(opt.Stdout, clearScreen)
@@ -445,7 +467,12 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	// that ended normally is the exception — the host already took this
 	// terminal back to the normal screen and printed the resume line there,
 	// which a clear (or a second alt-screen exit) would wipe.
-	ended = reason == ReasonEnded
+	// A session that ended without ever rendering a frame here never sent
+	// this terminal the alt-screen exit that makes ReasonEnded special (it
+	// wrote it before this attach existed), so this is an ordinary exit: the
+	// alt screen has to be left the normal way or the shell comes back
+	// inside it.
+	ended = reason == ReasonEnded && (opt.Joined == nil || opt.Joined.Load())
 	if !ended {
 		io.WriteString(opt.Stdout, clearScreen)
 	}
