@@ -63,7 +63,7 @@ that compensates for smaller models. Runs fully offline.`,
 			// terminal: serve the session instead of attaching to one.
 			return runSessionHost(flagSessionHost)
 		}
-		return runInteractive(cmd.Context())
+		return runInteractive(cmd)
 	},
 }
 
@@ -383,7 +383,12 @@ func loadProjectNotes(root string) string {
 	return ""
 }
 
-func runInteractive(ctx context.Context) error {
+// runInteractive drives an interactive session. It takes the cobra command
+// rather than a bare context so the served path can forward the root's
+// persistent flags to the host it spawns (see hostArgs) without cmd/live.go
+// having to reach back to rootCmd, which would be an initialization cycle.
+func runInteractive(cmd *cobra.Command) error {
+	ctx := cmd.Context()
 	cfg, err := loadOrWizard(ctx)
 	if err != nil {
 		return err
@@ -395,7 +400,7 @@ func runInteractive(ctx context.Context) error {
 	// servers, no editor bridge, no handoff on exit — those belong to the
 	// host). Plain and non-TTY runs stay in-process.
 	if !usePlainUI(cfg) && !flagNoHost && cfg.HostSessions {
-		return launchServed(ctx, cfg)
+		return launchServed(ctx, cfg, cmd.Root().PersistentFlags())
 	}
 	p, ag, err := buildAgent(cfg, false)
 	if err != nil {

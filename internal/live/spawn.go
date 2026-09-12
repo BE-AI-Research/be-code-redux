@@ -25,6 +25,11 @@ func WaitForSocket(path string, timeout time.Duration) error {
 	}
 }
 
+// Alive reports whether a pid names a running process. It is how a launcher
+// notices that the host it spawned has died (see cmd/live.go) without
+// reaching for the platform-specific check itself.
+func Alive(pid int) bool { return pid > 0 && processAlive(pid) }
+
 // NewToken returns a fresh 192-bit hex token. Clients must present it in
 // their hello frame, so it is the only thing standing between a live session
 // and any other local process that can reach the socket.

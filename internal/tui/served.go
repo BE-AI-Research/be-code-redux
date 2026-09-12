@@ -6,6 +6,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 )
@@ -41,6 +43,7 @@ func (m *Model) seedFromHost(h *live.Host) {
 // keystrokes come from the host's input pipe, frames go to every attached
 // client, and sizes arrive as WindowSizeMsg from the host.
 func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
+	defer pinColorProfile()()
 	m.rootCtx = ctx
 	m.host = h
 	m.served = true
@@ -68,6 +71,19 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	_, err := p.Run()
 	m.histFile.save()
 	return err
+}
+
+// pinColorProfile forces lipgloss to render ANSI-256 colour and returns a
+// func that restores the previous profile. Served mode needs this: lipgloss
+// detects its profile from the process's own os.Stdout, which in the host is
+// the <code>.log file, not a terminal — so it would pick the Ascii profile
+// and strip every style from output that is in fact bound for real
+// terminals over the socket. ANSI-256 is what the themes are written in
+// (theme.go uses 256-colour codes).
+func pinColorProfile() func() {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	return func() { lipgloss.SetColorProfile(prev) }
 }
 
 // hasClient reports whether id is present in list.

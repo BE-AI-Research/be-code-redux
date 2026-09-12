@@ -10,6 +10,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 )
@@ -166,5 +168,25 @@ func TestSeedFromHostClientsAlreadyAttached(t *testing.T) {
 	}
 	if !m.ascii {
 		t.Fatal("ascii flag not seeded: the attached client is not UTF8-capable")
+	}
+}
+
+// A served program renders for real terminals over a socket, but lipgloss
+// detects its colour profile from the host process's own stdout — a log
+// file — and would strip every style. RunServed pins the profile instead.
+func TestPinColorProfileForcesColourAndRestores(t *testing.T) {
+	before := lipgloss.ColorProfile()
+	restore := pinColorProfile()
+	if got := lipgloss.ColorProfile(); got != termenv.ANSI256 {
+		t.Fatalf("pinned profile is %v, want ANSI256", got)
+	}
+	// A styled string must actually carry an SGR sequence now.
+	out := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Render("x")
+	if !strings.Contains(out, "\x1b[") {
+		t.Fatalf("styled output carries no escape sequence: %q", out)
+	}
+	restore()
+	if got := lipgloss.ColorProfile(); got != before {
+		t.Fatalf("profile not restored: %v, want %v", got, before)
 	}
 }

@@ -2,15 +2,19 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
@@ -87,6 +91,19 @@ func runSessionHost(code string) error {
 		defer ideSession.Close()
 	}
 
+	// A signal must take the same route as a client's /quit, or the process
+	// would die past its defers: no handoff briefing, no tool cleanup, and
+	// MCP server children orphaned. `be-code sessions kill` falls back to
+	// SIGTERM, so this is a normal path, not just a courtesy.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
+	go func() {
+		for range sigs {
+			h.RequestQuit()
+		}
+	}()
+
 	err = tui.New(cfg, ag, p).RunServed(context.Background(), h)
 	// Order matters: the resume line goes to every attached terminal, so it
 	// has to be written before Close says goodbye to them.
@@ -99,7 +116,7 @@ func runSessionHost(code string) error {
 // launchServed starts a detached host for this session and attaches to it.
 // The launcher deliberately builds no agent of its own: the host owns the
 // session, the tools, the MCP servers and the editor bridge.
-func launchServed(ctx context.Context, cfg *config.Config) error {
+func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet) error {
 	dir, err := live.Dir()
 	if err != nil {
 		return err
@@ -151,16 +168,7 @@ func launchServed(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	args := []string{code, "-C", workspace}
-	if flagResume != "" {
-		args = append(args, "--resume", flagResume)
-	}
-	if flagProvider != "" {
-		args = append(args, "--provider", flagProvider)
-	}
-	if flagModel != "" {
-		args = append(args, "--model", flagModel)
-	}
+	args := hostArgs(code, workspace, flags)
 	logPath := filepath.Join(dir, code+".log")
 	if _, err := live.SpawnHost(self, "--session-host", logPath, os.Environ(), args...); err != nil {
 		live.Remove(dir, code)
@@ -168,9 +176,14 @@ func launchServed(ctx context.Context, cfg *config.Config) error {
 	}
 	fmt.Printf("starting session %s (log: %s)\n", code, logPath)
 	stop := make(chan struct{})
-	go tailLog(logPath, stop, os.Stdout)
+	tailDone := make(chan struct{})
+	go func() { defer close(tailDone); tailLog(logPath, stop, os.Stdout) }()
 	err = waitForHost(dir, code, rec.Socket)
+	// Wait for the tail to finish before attaching: once Attach owns the
+	// screen, a late log line written underneath it would corrupt the
+	// rendering.
 	close(stop)
+	<-tailDone
 	if err != nil {
 		return fmt.Errorf("%w (see %s; use --no-host to run in-process)", err, logPath)
 	}
@@ -183,18 +196,59 @@ func launchServed(ctx context.Context, cfg *config.Config) error {
 // whole timeout — which exists only to cover a slow but working start, where
 // buildAgent may be waiting on a model being loaded.
 func waitForHost(dir, code, sock string) error {
-	deadline := time.Now().Add(hostStartTimeout)
+	start := time.Now()
+	deadline := start.Add(hostStartTimeout)
+	nextNote := 10 * time.Second
 	for {
 		if err := live.WaitForSocket(sock, 200*time.Millisecond); err == nil {
 			return nil
 		}
-		if _, err := live.Load(dir, code); err != nil {
+		rec, err := live.Load(dir, code)
+		if err != nil {
 			return fmt.Errorf("the session host exited during startup")
+		}
+		// A host killed outright (SIGKILL, OOM) never retires its record, so
+		// the record alone is not proof of life.
+		if !live.Alive(rec.PID) {
+			return fmt.Errorf("the session host died during startup (pid %d)", rec.PID)
+		}
+		if el := time.Since(start); el >= nextNote {
+			fmt.Printf("still starting (%ds)...\n", int(el.Seconds()))
+			nextNote = el.Truncate(10*time.Second) + 10*time.Second
 		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("the session host did not start within %s", hostStartTimeout)
 		}
 	}
+}
+
+// hostArgs builds the spawned host's argument list: the advertised code, the
+// resolved workspace, and every root persistent flag the user actually
+// changed. It forwards them wholesale rather than naming a few, because the
+// host is the process that runs buildAgent — a flag that reaches the
+// launcher but not the host (-y, --ide, --no-ide) would silently stop
+// working now that hosting is the default, and a flag added later would be
+// dropped in the same way.
+func hostArgs(code, workspace string, flags *pflag.FlagSet) []string {
+	// --dir is passed explicitly as the resolved absolute workspace: the
+	// host has its own working directory, so the launcher's relative -C
+	// would mean something else there (and often nothing at all).
+	args := []string{code, "--dir=" + workspace}
+	flags.VisitAll(func(f *pflag.Flag) {
+		if !f.Changed {
+			return
+		}
+		switch f.Name {
+		case "dir": // already passed, resolved
+			return
+		case "session-host": // this is what marks the host; never forward it
+			return
+		case "no-host": // the launcher would not be here if it were set
+			return
+		}
+		args = append(args, "--"+f.Name+"="+f.Value.String())
+	})
+	return args
 }
 
 // tailLog copies whatever the starting host writes to its log through to w
@@ -281,8 +335,11 @@ var attachCmd = &cobra.Command{
 		// Nothing live under that code: the obvious intent is to pick the
 		// saved session back up, which is what --resume does.
 		fmt.Fprintf(os.Stderr, "no live session %s; resuming the saved one\n", code)
+		if flagView {
+			fmt.Fprintln(os.Stderr, "note: --view only applies to a live session; this is a normal resumed session")
+		}
 		flagResume = code
-		return runInteractive(cmd.Context())
+		return runInteractive(cmd)
 	},
 }
 
@@ -316,6 +373,12 @@ var sessionsKillCmd = &cobra.Command{
 		}
 		if err := live.Terminate(rec.PID); err != nil {
 			fmt.Fprintf(os.Stderr, "warn: terminating pid %d: %v\n", rec.PID, err)
+		}
+		// The host turns a signal into the same shutdown a quit frame asks
+		// for, so give it one more short window to retire its own record.
+		if gone(dir, rec.Code, quitWait) {
+			fmt.Printf("%s ended\n", rec.Code)
+			return nil
 		}
 		if err := live.Remove(dir, rec.Code); err != nil {
 			return err
@@ -355,5 +418,22 @@ func requestQuit(rec *live.Record) error {
 	if err := live.WriteJSON(conn, live.FHello, hello); err != nil {
 		return err
 	}
-	return live.WriteFrame(conn, live.FQuit, nil)
+	if err := live.WriteFrame(conn, live.FQuit, nil); err != nil {
+		return err
+	}
+	// A rejected hello is answered with a bye and nothing else, while an
+	// accepted one is answered with the client roster first — so a bye as the
+	// very first frame means the quit never reached the session, and saying so
+	// now beats waiting out the shutdown windows for a host that never heard it.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, payload, err := live.ReadFrame(conn)
+	if err == nil && typ == live.FBye {
+		var b live.Bye
+		json.Unmarshal(payload, &b)
+		if b.Reason == "" {
+			b.Reason = "rejected"
+		}
+		return fmt.Errorf("host refused the connection: %s", b.Reason)
+	}
+	return nil
 }

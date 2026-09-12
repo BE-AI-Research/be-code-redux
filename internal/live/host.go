@@ -264,12 +264,7 @@ func (h *Host) handle(conn net.Conn) {
 			h.detach(c, "detached")
 			return
 		case FQuit:
-			h.mu.Lock()
-			f := h.onQuit
-			h.mu.Unlock()
-			if f != nil {
-				f()
-			}
+			h.RequestQuit()
 		}
 	}
 	h.detach(c, "connection closed")
@@ -405,6 +400,19 @@ func (h *Host) AnyASCII() bool {
 		}
 	}
 	return false
+}
+
+// RequestQuit asks the served program to end the session, exactly as a
+// client's quit frame does. It is also how the host process routes a signal
+// (SIGTERM from `be-code sessions kill`, SIGINT) to the program, so the
+// program's own shutdown — handoff briefing, tool cleanup — still runs.
+func (h *Host) RequestQuit() {
+	h.mu.Lock()
+	f := h.onQuit
+	h.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 func (h *Host) DetachHolder() {
