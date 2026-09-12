@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -115,7 +115,7 @@ func skipReason(c Check, out string, err error) (string, bool) {
 	if strings.Contains(out, "No module named pytest") {
 		return "pytest is not installed for the interpreter used (" + strings.Fields(c.Command)[0] + "); install it or add a .venv", true
 	}
-	var exitErr *exec.ExitError
+	var exitErr *osexec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && strings.Contains(c.Command, "pytest") {
 		return "no tests collected", true
 	}
