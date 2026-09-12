@@ -142,6 +142,19 @@ type Model struct {
 	queueOwner   int // client whose queue the popup is showing
 	paletteOwner int // client that opened the "/" palette
 	menuOwner    int // client that opened /menu or the right-click menu
+	pickerOwner  int // client a picked row acts for (see handlePickerKey)
+
+	// Joining a live session instead of forking it (see resumeFrom):
+	// liveCodes reports which session codes have a host running somewhere,
+	// loadSession reads a saved session, and switchClient (served only,
+	// host.Switch) hands one terminal over to another session's host. All
+	// three are fields so tests can stand in for the filesystem and host.
+	liveCodes    func() map[string]bool
+	loadSession  func(id string) (*store.Session, error)
+	switchClient func(id int, code string)
+	// switchPending is set between asking the host to switch a terminal and
+	// the roster that shows whether anyone is left (see updateClients).
+	switchPending bool
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
 
@@ -186,6 +199,9 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 		clipboardWrite: writeClipboard,
 		clipboardRead:  readClipboard,
 		termWrite:      writeTerminal,
+
+		liveCodes:   liveSessionCodes,
+		loadSession: store.Load,
 	}
 	ag.Tools.Approve = m.approveFromAgent
 	ag.Events = agent.Events{
@@ -482,7 +498,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usageMsg:
 		m.usage = msg
 	case clientsMsg:
-		m.updateClients(msg)
+		cmds = append(cmds, m.updateClients(msg))
 		// A roster change can drop or add textareas; republish for whoever
 		// remains (updateClients walks m.clients, so this never resurrects a
 		// dropped client's textarea).
@@ -1230,9 +1246,9 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		return m, func() tea.Msg { detach(id); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
-			return m.resumeSession(fields[1])
+			return m.resumeFrom(fields[1], from)
 		}
-		return m.openSessionPicker()
+		return m.openSessionPicker(from)
 	default:
 		if c, ok := m.custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
@@ -1256,10 +1272,31 @@ func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 	return m, m.pingCmd()
 }
 
-func (m *Model) resumeSession(id string) (tea.Model, tea.Cmd) {
-	s, err := store.Load(id)
+// resumeFrom loads a saved session into this program — unless that session
+// already has a host running somewhere, in which case it is joined, never
+// forked: two programs on one session file are blind to each other's turns
+// and overwrite each other's saves. from is the terminal that asked, which
+// is the one handed over to the live host.
+func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
+	s, err := m.loadSession(id)
 	if err != nil {
 		m.appendLine(stErr.Render(err.Error()))
+		return m, nil
+	}
+	code := s.ResumeCode()
+	// This program's own session is live by definition; resuming it is a
+	// no-op, not a switch to itself.
+	own := m.ag.Session != nil && m.ag.Session.ResumeCode() == code
+	if m.liveCodes()[code] && !own {
+		if m.served && m.switchClient != nil {
+			m.switchPending = true
+			// As a command, not a call: the host notifies its callbacks,
+			// which p.Send into the channel this goroutine receives from
+			// (see /detach).
+			sw, c := m.switchClient, from
+			return m, func() tea.Msg { sw(c, code); return nil }
+		}
+		m.appendLine(stDim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
 		return m, nil
 	}
 	m.ag.Resume(s)

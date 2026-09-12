@@ -196,7 +196,7 @@ func (m *Model) menuEntries(owner int) []menuEntry {
 		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
 	}
 	return []menuEntry{
-		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
+		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker(owner) }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
 		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},

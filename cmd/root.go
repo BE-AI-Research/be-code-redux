@@ -39,6 +39,7 @@ var (
 	flagIDE         bool
 	flagNoIDE       bool
 	flagNoHost      bool
+	flagNew         bool
 	flagView        bool
 	flagSessionHost string
 )
@@ -77,6 +78,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&flagIDE, "ide", false, "connect to the editor bridge even outside an editor terminal")
 	rootCmd.PersistentFlags().BoolVar(&flagNoIDE, "no-ide", false, "never connect to the editor bridge")
 	rootCmd.PersistentFlags().BoolVar(&flagNoHost, "no-host", false, "run the session in this process instead of a detachable host")
+	rootCmd.PersistentFlags().BoolVar(&flagNew, "new", false, "start a fresh session even when this workspace has a live one")
 	rootCmd.PersistentFlags().StringVar(&flagSessionHost, "session-host", "", "internal: serve the live session with this code")
 	_ = rootCmd.PersistentFlags().MarkHidden("session-host")
 	attachCmd.Flags().BoolVar(&flagView, "view", false, "attach read-only: never send input to the session")
@@ -340,8 +342,16 @@ func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	if _, err := ag.WriteHandoff(ctx, withModel); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: handoff: %v\n", err)
 	}
+	// The same guard autosave runs: a session file another live process
+	// owns is that program's to write, and the briefing just composed must
+	// not land on top of its transcript.
+	if blocked, owner := ag.SaveGuard(); blocked {
+		fmt.Fprintf(os.Stderr, "warn: session %s not saved: its file is owned by live host %d\n", s.ResumeCode(), owner)
+		return
+	}
 	s.Messages = ag.History.Messages
 	s.Model = ag.Model
+	s.HostPID = os.Getpid()
 	if err := s.Save(); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: session save: %v\n", err)
 		return

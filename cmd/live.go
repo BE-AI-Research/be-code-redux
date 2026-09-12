@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -137,6 +136,14 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	if err != nil {
 		return err
 	}
+	// Join, never fork: a session that is already live anywhere is attached
+	// to, not loaded a second time. No question is asked — a second program
+	// on one session file is never what the user meant, and --new is there
+	// for the one case where they do want a second session.
+	if rec, msg := decideStart(dir, workspace, flagResume, flagNew); rec != nil {
+		fmt.Println(msg)
+		return attachLive(ctx, rec, false)
+	}
 	code := store.CodeFor(live.NewToken()) // fresh; the host stamps it on its session
 	if flagResume != "" {
 		s, err := store.Load(flagResume)
@@ -145,22 +152,12 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 		}
 		code = s.ResumeCode()
 	}
-	// Offer to attach to a live session for this workspace instead of
-	// starting a second one on the same files. It is one question about one
-	// session (the newest), never a walk through every record; and an
-	// explicit --resume has already said which session the user wants, so the
-	// offer only stands when the live one *is* that session.
-	if r := newestLiveIn(dir, workspace); offerAttach(r, flagResume, code) {
-		fmt.Printf("a live session for this workspace is running (%s, since %s). Attach to it? [Y/n] ",
-			r.Code, r.StartedAt.Format("15:04"))
-		var ans string
-		fmt.Scanln(&ans)
-		if ans == "" || strings.HasPrefix(strings.ToLower(ans), "y") {
-			return attachLive(ctx, r, false)
-		}
-	}
-	// findLive, not live.Load: a record left behind by a host that is gone
-	// must not block a new session under the same code.
+	// Unreachable for --resume (decideStart has just attached to any live
+	// host for that code) and vanishingly unlikely for a fresh code, but a
+	// second host on one session file is exactly what this whole path
+	// exists to prevent, so the guard stays. findLive, not live.Load: a
+	// record left behind by a host that is gone must not block a new
+	// session under the same code.
 	if findLive(dir, code) != nil {
 		return fmt.Errorf("session %s is already live; use: be-code attach %s", code, code)
 	}
@@ -201,21 +198,36 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	return attachLive(ctx, &rec, false)
 }
 
-// offerAttach reports whether to offer attaching to the live session r
-// instead of starting a new one. An explicit --resume names the session the
-// user wants, so the offer only stands when the live session is that one —
-// otherwise the answer "yes" would silently attach them to a different
-// session than the one they asked to resume.
-func offerAttach(r *live.Record, resume, code string) bool {
-	if r == nil {
-		return false
+// decideStart picks a live session to join, or nil to start a fresh host,
+// and returns the line to print before joining. An explicit --resume names
+// the session the user wants, so it is looked up by itself and the
+// workspace's other live sessions are left alone; --new is the only way to
+// ask for a second session on a workspace that already has one.
+func decideStart(dir, workspace, resume string, fresh bool) (*live.Record, string) {
+	if resume != "" {
+		s, err := store.Load(resume)
+		if err != nil {
+			// Not a session we can resolve: let the ordinary --resume path
+			// report it.
+			return nil, ""
+		}
+		if rec := live.LiveCode(dir, s.ResumeCode()); rec != nil {
+			return rec, "joining live session " + rec.Code
+		}
+		return nil, ""
 	}
-	return resume == "" || r.Code == code
+	if fresh {
+		return nil, ""
+	}
+	if rec := newestLiveIn(dir, workspace); rec != nil {
+		return rec, fmt.Sprintf("joining live session %s (be-code --new starts a fresh one)", rec.Code)
+	}
+	return nil, ""
 }
 
 // newestLiveIn returns the most recently started live session serving
 // workspace, or nil when there is none. live.List prunes records whose host
-// is gone, so a stale record never produces an offer to attach to nothing.
+// is gone, so a stale record never joins a session that is not there.
 func newestLiveIn(dir, workspace string) *live.Record {
 	lives, _ := live.List(dir)
 	var newest *live.Record
@@ -383,22 +395,17 @@ func nextAttach(dir, code, reason string) (*live.Record, string) {
 // findLive resolves a code (or "last") to a live record, or nil when there
 // is no live host for it.
 func findLive(dir, code string) *live.Record {
+	if code != "last" {
+		return live.LiveCode(dir, code)
+	}
 	lives, _ := live.List(dir)
-	if code == "last" {
-		var newest *live.Record
-		for i := range lives {
-			if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {
-				newest = &lives[i]
-			}
-		}
-		return newest
-	}
+	var newest *live.Record
 	for i := range lives {
-		if lives[i].Code == code {
-			return &lives[i]
+		if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {
+			newest = &lives[i]
 		}
 	}
-	return nil
+	return newest
 }
 
 var attachCmd = &cobra.Command{

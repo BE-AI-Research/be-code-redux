@@ -54,6 +54,7 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	m.idleSince = time.Now()
 	m.seedFromHost(h)
 	m.detachClient = h.Detach
+	m.switchClient = h.Switch
 	m.setOverlay = h.SetOverlay
 	m.termWrite = func(s string) { io.WriteString(h.Output(), s) }
 	m.clipboardWrite = func(s string) error { io.WriteString(h.Output(), osc52(s)); return writeClipboardTools(s) }
@@ -111,8 +112,10 @@ func hasClient(list []live.ClientInfo, id int) bool {
 
 // updateClients handles clientsMsg: it records the new roster, notes
 // whether any attached client cannot render UTF-8 glyphs, and appends
-// attach/detach lines for the difference from the previous roster.
-func (m *Model) updateClients(msg clientsMsg) {
+// attach/detach lines for the difference from the previous roster. It
+// returns tea.Quit when this host has nothing left to do (see the switch
+// below), or nil.
+func (m *Model) updateClients(msg clientsMsg) tea.Cmd {
 	prev := m.clients
 	m.clients = []live.ClientInfo(msg)
 	m.ascii = false
@@ -124,6 +127,9 @@ func (m *Model) updateClients(msg clientsMsg) {
 	for _, c := range m.clients {
 		if !hasClient(prev, c.ID) {
 			m.appendLine(stDim.Render("attached: " + c.Label))
+			// Someone is watching after all: this host stays up whatever a
+			// switch was about to leave behind.
+			m.switchPending = false
 		}
 	}
 	for _, c := range prev {
@@ -149,6 +155,17 @@ func (m *Model) updateClients(msg clientsMsg) {
 			m.closeQueue()
 		}
 	}
+	// A terminal that switched to another session leaves this host behind.
+	// A fresh session nobody ever typed into, with nobody left watching, is
+	// exactly the empty host the switch created — it quits rather than
+	// accumulating. A session with turns in it keeps running: its work is
+	// worth coming back to with be-code attach. So does one with a run in
+	// flight, whose first turn has not reached the session file yet.
+	if m.switchPending && !m.running && len(m.clients) == 0 &&
+		m.ag.Session != nil && len(m.ag.Session.Messages) == 0 {
+		return tea.Quit
+	}
+	return nil
 }
 
 // overlayFor renders one client's private input rows as absolute-positioned

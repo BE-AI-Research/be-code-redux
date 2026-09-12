@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
@@ -81,24 +82,54 @@ func (m *Model) openProviderPicker() (tea.Model, tea.Cmd) {
 	})
 }
 
-func (m *Model) openSessionPicker() (tea.Model, tea.Cmd) {
+// openSessionPicker lists the saved sessions for from's terminal. The
+// owner is remembered because picking a row whose session is already live
+// switches that terminal to its host (see resumeFrom).
+func (m *Model) openSessionPicker(from int) (tea.Model, tea.Cmd) {
+	m.pickerOwner = from
 	return m.openPicker("Resume session", func() ([]pickItem, error) {
 		metas, err := store.List()
 		if err != nil {
 			return nil, err
 		}
-		items := make([]pickItem, 0, len(metas))
-		for _, s := range metas {
-			items = append(items, pickItem{
-				id:    s.ID,
-				label: s.Code + "  " + s.Title,
-				desc:  fmt.Sprintf("%s · %d turns · %s", s.ID, s.Turns, s.UpdatedAt.Format("Jan 2 15:04")),
-			})
-		}
-		return items, nil
+		return m.sessionItems(metas), nil
 	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
-		return m.resumeSession(it.id)
+		return m.resumeFrom(it.id, m.pickerOwner)
 	})
+}
+
+// sessionItems turns saved-session metadata into picker rows, marking the
+// codes that already have a host running somewhere: those rows join the
+// live session instead of loading a second copy of its file.
+func (m *Model) sessionItems(metas []store.Meta) []pickItem {
+	now := m.liveCodes()
+	items := make([]pickItem, 0, len(metas))
+	for _, s := range metas {
+		label := s.Code + "  " + s.Title
+		desc := fmt.Sprintf("%s · %d turns · %s", s.ID, s.Turns, s.UpdatedAt.Format("Jan 2 15:04"))
+		if now[s.Code] {
+			label = s.Code + " " + stAccent.Render("LIVE") + " " + s.Title
+			desc = "live now · joins it · " + desc
+		}
+		items = append(items, pickItem{id: s.ID, label: label, desc: desc})
+	}
+	return items
+}
+
+// liveSessionCodes is the default for Model.liveCodes: the codes advertised
+// in ~/.be-code/live, minus the records whose host is gone (live.List
+// prunes those).
+func liveSessionCodes() map[string]bool {
+	codes := map[string]bool{}
+	dir, err := live.Dir()
+	if err != nil {
+		return codes
+	}
+	recs, _ := live.List(dir)
+	for _, r := range recs {
+		codes[r.Code] = true
+	}
+	return codes
 }
 
 func sortItems(items []pickItem) {
@@ -138,8 +169,9 @@ func (p *picker) filtered() []pickItem {
 }
 
 // handlePickerKey drives the shared list overlays (model, provider and
-// session pickers, and the menu). from is the client that typed the key:
-// only used to refocus that terminal's input line on the way out.
+// session pickers, and the menu). from is the client that typed the key: it
+// refocuses that terminal's input line on the way out, and a confirmed pick
+// acts for it (see pickerOwner).
 func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
@@ -168,6 +200,9 @@ func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		it := items[p.cursor]
 		m.picker = nil
 		m.mode = modeInput
+		// A picker is shared, so the terminal a pick acts for is the one
+		// that confirmed it, not the one that opened the list.
+		m.pickerOwner = from
 		return p.onPick(m, it)
 	case tea.KeyBackspace:
 		if len(p.filter) > 0 {

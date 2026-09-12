@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/store"
 )
 
 // testFlags mirrors the root command's persistent flags, so the argument
@@ -27,6 +28,7 @@ func testFlags() *pflag.FlagSet {
 	fs.Bool("ide", false, "")
 	fs.Bool("no-ide", false, "")
 	fs.Bool("no-host", false, "")
+	fs.Bool("new", false, "")
 	fs.String("session-host", "", "")
 	return fs
 }
@@ -175,32 +177,9 @@ func TestSetResumeBindsTheRootFlagVariable(t *testing.T) {
 	}
 }
 
-// The attach-or-new offer must not override an explicit --resume: answering
-// the default "yes" would attach the user to a different session than the one
-// they named.
-func TestOfferAttachRespectsResume(t *testing.T) {
-	live1 := &live.Record{Code: "AAA111"}
-	cases := []struct {
-		name   string
-		rec    *live.Record
-		resume string
-		code   string
-		want   bool
-	}{
-		{"no live session", nil, "", "AAA111", false},
-		{"live session, no resume flag", live1, "", "BBB222", true},
-		{"resume names another session", live1, "old-one", "BBB222", false},
-		{"resume names the live session", live1, "AAA111", "AAA111", true},
-	}
-	for _, c := range cases {
-		if got := offerAttach(c.rec, c.resume, c.code); got != c.want {
-			t.Errorf("%s: offerAttach = %v, want %v", c.name, got, c.want)
-		}
-	}
-}
-
-// The offer is made once, for the newest live session serving this workspace,
-// and never for a record whose host is gone (live.List prunes those).
+// newestLiveIn is what an unflagged `be-code` joins: the newest live session
+// serving this workspace, never a record whose host is gone (live.List prunes
+// those).
 func TestNewestLiveInPicksTheNewestAndSkipsDeadHosts(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
@@ -317,5 +296,80 @@ func TestSessionsKillEscalatesAndOnlyThenRetiresTheRecord(t *testing.T) {
 	}
 	if _, err := live.Load(dir, "KILL01"); err == nil {
 		t.Fatal("the record is still there after a successful kill")
+	}
+}
+
+// --new must reach the host like any other changed root flag: it is
+// harmless there (the host never runs the join decision), but hostArgs
+// forwards flags wholesale and a silently dropped one is the bug that
+// wholesale forwarding exists to prevent.
+func TestHostArgsForwardsNew(t *testing.T) {
+	fs := testFlags()
+	if err := fs.Set("new", "true"); err != nil {
+		t.Fatal(err)
+	}
+	got := hostArgs("A1B2C3", "/work/space", fs)
+	if !contains(got, "--new=true") {
+		t.Fatalf("hostArgs = %q, want it to include --new=true", got)
+	}
+}
+
+// decideStart is the "join, never fork" decision the launcher makes before
+// it spawns anything: a live session for this workspace is joined with no
+// prompt, an explicit --resume of a live code joins that code, --new skips
+// the join, and anything not live starts a fresh host (nil record).
+func TestDecideStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	dir := t.TempDir()
+
+	// Two saved sessions: one live, one not.
+	liveSess := store.NewSession("ollama", "m", "/ws")
+	if err := liveSess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	coldSess := store.NewSession("ollama", "m", "/ws")
+	// A distinct id: NewSession's ids are millisecond-stamped, so two made
+	// in the same instant would be one session saved twice.
+	coldSess.ID += "-cold"
+	coldSess.Code = store.CodeFor(coldSess.ID)
+	if err := coldSess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{
+		Code: liveSess.ResumeCode(), PID: os.Getpid(),
+		Socket:    filepath.Join(dir, liveSess.ResumeCode()+".sock"),
+		Workspace: "/ws", StartedAt: time.Now(),
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	join := "joining live session " + rec.Code
+
+	if got, msg := decideStart(dir, "/ws", "", false); got == nil || got.Code != rec.Code ||
+		msg != join+" (be-code --new starts a fresh one)" {
+		t.Fatalf("workspace with a live session = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/ws", "", true); got != nil || msg != "" {
+		t.Fatalf("--new must start a fresh session, got %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/elsewhere", "", false); got != nil || msg != "" {
+		t.Fatalf("workspace with no live session = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/elsewhere", liveSess.ResumeCode(), false); got == nil ||
+		got.Code != rec.Code || msg != join {
+		t.Fatalf("--resume of a live code = %+v, %q", got, msg)
+	}
+	// --resume wins over --new: the user named the session they want.
+	if got, _ := decideStart(dir, "/ws", liveSess.ResumeCode(), true); got == nil || got.Code != rec.Code {
+		t.Fatalf("--resume of a live code with --new = %+v", got)
+	}
+	// A saved session that is not live is resumed by a fresh host, even
+	// though this workspace has another live session.
+	if got, msg := decideStart(dir, "/ws", coldSess.ResumeCode(), false); got != nil || msg != "" {
+		t.Fatalf("--resume of a cold code = %+v, %q", got, msg)
+	}
+	if got, msg := decideStart(dir, "/ws", "NOSUCH", false); got != nil || msg != "" {
+		t.Fatalf("--resume of an unknown code = %+v, %q", got, msg)
 	}
 }
