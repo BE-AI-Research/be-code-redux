@@ -13,7 +13,8 @@ type Palette struct {
 	Name, Desc                             string
 	Accent, Dim, Tool, Err, OK, Warn, User string
 	StatusBG, StatusFG, ModalTitle, Border string
-	Light                                  bool // for readers; dark is the default
+	BG, FG                                 string // terminal window colours (OSC 11/10); "" leaves the terminal alone
+	Light                                  bool   // for readers; dark is the default
 	Mono                                   bool
 	SquareBorder                           bool
 }
