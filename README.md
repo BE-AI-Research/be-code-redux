@@ -104,7 +104,13 @@ its next call, after the tool results it was waiting on, tagged as a message tha
 arrived mid-task. Use it to add a requirement, redirect, or ask a question.
 Anything still queued when the run ends starts the next turn. Esc (TUI) or Ctrl-C
 (plain mode) cancels the run and discards the queue. Slash commands wait until the
-agent is idle.
+agent is idle, except `/queue`.
+
+Changed your mind? Press Up on an empty input (or Ctrl+Q) while the agent works to
+open the queue: ↑↓ to pick, Enter to pull a message into the input for editing (it is
+paused until you press Enter again), `d` to drop it, Esc to close. Delivery pauses
+while the popup is open. In plain mode use `/queue`, `/queue edit N` and
+`/queue drop N`.
 
 ## Web search (optional, Google Programmable Search)
 
