@@ -60,10 +60,13 @@ func (a *Agent) Pending() int {
 }
 
 // DrainInbox removes and returns every queued message.
-func (a *Agent) DrainInbox() []string {
+func (a *Agent) DrainInbox() []string { return texts(a.DrainItems()) }
+
+// DrainItems removes and returns every queued message with its sender.
+func (a *Agent) DrainItems() []InboxItem {
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()
-	out := texts(a.inbox.items)
+	out := a.inbox.items
 	a.inbox.items = nil
 	return out
 }

@@ -141,6 +141,7 @@ type Model struct {
 	queueCursor  int // highlighted row in the queue popup
 	queueOwner   int // client whose queue the popup is showing
 	paletteOwner int // client that opened the "/" palette
+	menuOwner    int // client that opened /menu or the right-click menu
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
 
@@ -352,8 +353,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalVP.SetContent(ui.ColorizeDiff(msg.detail, true))
 	case turnDoneMsg:
 		if m.mode == modeQueue {
-			m.ag.Hold(false)
-			m.mode = modeBusy
+			m.closeQueue()
 		}
 		m.flushStreaming()
 		if msg.err != nil {
@@ -388,9 +388,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusNote = ""
 		m.focusInputs()
 		// Anything queued during the run that the model never got to see
-		// becomes the next turn.
-		if left := m.ag.DrainInbox(); len(left) > 0 {
-			return m.startTurnFrom(strings.Join(left, "\n"), 0)
+		// becomes the next turn — as one request, but echoed line by line
+		// under the terminal each message came from.
+		if left := m.ag.DrainItems(); len(left) > 0 {
+			texts := make([]string, 0, len(left))
+			for _, it := range left {
+				m.appendLine(stUser.Render(m.userPrefix(it.From)) + it.Text)
+				texts = append(texts, it.Text)
+			}
+			return m.startTurn(strings.Join(texts, "\n"))
 		}
 	case planReadyMsg:
 		m.flushStreaming()
@@ -488,7 +494,7 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.quitHint = false
-		m.histFile.add(text)
+		m.histFile.add(text, from)
 		in.Reset()
 		if strings.HasPrefix(text, "/") {
 			return m.slashCommand(text, from)
@@ -508,7 +514,7 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyUp:
 		if in.LineCount() <= 1 {
-			if prev, ok := m.histFile.prev(); ok {
+			if prev, ok := m.histFile.prev(from); ok {
 				in.SetValue(prev)
 				in.CursorEnd()
 			}
@@ -516,7 +522,7 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyDown:
 		if in.LineCount() <= 1 {
-			next, _ := m.histFile.next()
+			next, _ := m.histFile.next(from)
 			in.SetValue(next)
 			in.CursorEnd()
 			return m, nil
@@ -573,10 +579,16 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	m.mode = modeBusy
 }
 
-// startTurnFrom launches the agent in a goroutine, attributing the request
-// to the client that typed it.
+// startTurnFrom echoes the request under its sender's prefix and launches
+// the agent.
 func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
 	m.appendLine(stUser.Render(m.userPrefix(from)) + text)
+	return m.startTurn(text)
+}
+
+// startTurn launches the agent in a goroutine. The caller has already
+// echoed the request into the transcript.
+func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
 	m.mode = modeBusy
 	m.running = true
 	m.statusNote = "thinking"
@@ -626,7 +638,7 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			m.appendLine(stDim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
 			return m, nil
 		}
-		m.histFile.add(text)
+		m.histFile.add(text, from)
 		m.ag.EnqueueFrom(text, from)
 		if len(m.clients) > 1 {
 			m.appendLine(stDim.Render("queued> ") + m.userPrefix(from) + text)
@@ -878,8 +890,10 @@ func (m *Model) bottomLine() string {
 		line += stAccent.Render(" " + m.ideMarker())
 	}
 	if n := len(m.clients); n > 1 {
-		head := stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
-		line += head + stDim.Render(" · "+m.clientLabels(m.width-lipgloss.Width(line)-lipgloss.Width(head)-3))
+		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
+		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
+			line += stDim.Render(" · " + labels)
+		}
 	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")

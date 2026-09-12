@@ -44,7 +44,7 @@ func (m *Model) openQueue(from int) (tea.Model, tea.Cmd) {
 
 func (m *Model) closeQueue() {
 	m.ag.Hold(false)
-	m.mode = modeBusy
+	m.mode = m.idleMode()
 }
 
 func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {

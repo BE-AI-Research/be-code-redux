@@ -197,7 +197,11 @@ func (m *Model) copyTarget(target string) {
 
 // ---- right-click context menu ------------------------------------------------
 
+// openContextMenu opens the right-click copy/paste popup for one terminal:
+// like the menu it acts for its opener (a paste lands in that terminal's
+// draft), so it shares menuOwner.
 func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
+	m.menuOwner = from
 	var items []pickItem
 	if m.sel != nil {
 		items = append(items, pickItem{id: "sel", label: "Copy selection", desc: fmt.Sprintf("%d chars", len([]rune(m.selectionText())))})
@@ -252,6 +256,9 @@ func (m *Model) idleMode() mode {
 }
 
 func (m *Model) handleContextMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.menuOwner {
+		return m, nil // the popup acts for the terminal that opened it
+	}
 	if k.Type == tea.KeyEsc || k.Type == tea.KeyCtrlC {
 		m.picker = nil
 		m.mode = m.idleMode()

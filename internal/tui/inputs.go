@@ -53,8 +53,12 @@ func (m *Model) inputFor(client int) *textarea.Model {
 	return ta
 }
 
-// dropInput forgets a departed client's draft.
-func (m *Model) dropInput(client int) { delete(m.inputs, client) }
+// dropInput forgets a departed client's draft and its place in the shared
+// input history.
+func (m *Model) dropInput(client int) {
+	delete(m.inputs, client)
+	m.histFile.drop(client)
+}
 
 // inputRows is the height of the input area: three rows, or one in a
 // served session small enough for the compact layout.
@@ -116,14 +120,19 @@ func (m *Model) userPrefix(client int) string {
 }
 
 // clientLabels joins the attached terminals' labels for the bottom line,
-// truncated with an ellipsis to fit the room left on that row.
+// truncated with an ellipsis to fit room cells. With no usable room it
+// returns "": an untruncated list would overrun the row and wrap the
+// status line on every attached terminal.
 func (m *Model) clientLabels(room int) string {
+	if room <= 1 {
+		return ""
+	}
 	labels := make([]string, 0, len(m.clients))
 	for _, c := range m.clients {
 		labels = append(labels, c.Label)
 	}
 	joined := strings.Join(labels, ", ")
-	if r := []rune(joined); room > 1 && len(r) > room {
+	if r := []rune(joined); len(r) > room {
 		joined = string(r[:room-1]) + "…"
 	}
 	return joined
@@ -131,14 +140,11 @@ func (m *Model) clientLabels(room int) string {
 
 // inputRow is the input area plus the context wheel at its right. In a
 // served session the frame is shared by every terminal, so the input rows
-// are left blank for the host to splice each client's own line into, and
-// the wheel goes on the last of them — keeping the blank region one
-// unbroken rectangle and the wheel directly above the status line.
+// are left blank for the host to splice each client's own line into.
 func (m *Model) inputRow() string {
+	body := m.blankInputRows()
 	if !m.served {
-		return lipgloss.JoinHorizontal(lipgloss.Top, m.inputFor(0).View(), " "+m.wheelView())
+		body = m.inputFor(0).View()
 	}
-	rows := strings.Split(m.blankInputRows(), "\n")
-	rows[len(rows)-1] += " " + m.wheelView()
-	return strings.Join(rows, "\n")
+	return lipgloss.JoinHorizontal(lipgloss.Top, body, " "+m.wheelView())
 }

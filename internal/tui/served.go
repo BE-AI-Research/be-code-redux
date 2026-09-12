@@ -137,6 +137,10 @@ func (m *Model) updateClients(msg clientsMsg) {
 			m.picker = nil
 			m.mode = m.idleMode()
 		}
+		if (m.mode == modeMenu || m.mode == modeContextMenu) && m.menuOwner == c.ID {
+			m.picker = nil
+			m.mode = m.idleMode()
+		}
 		if m.mode == modeQueue && m.queueOwner == c.ID {
 			m.closeQueue()
 		}

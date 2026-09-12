@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 )
@@ -31,8 +33,15 @@ func TestEachClientTypesIntoItsOwnInput(t *testing.T) {
 	if got := m.inputFor(2).Value(); got != "world" {
 		t.Fatalf("client 2 input %q", got)
 	}
-	if !strings.Contains(m.View(), m.blankInputRows()) {
-		t.Fatalf("served view must leave %d blank input rows:\n%s", m.inputRows(), m.View())
+	// The shared frame leaves the input columns blank on every input row:
+	// the host splices each client's own line in there.
+	lines := strings.Split(m.View(), "\n")
+	block := lines[len(lines)-1-m.inputRows() : len(lines)-1]
+	for i, ln := range block {
+		row := []rune(ansi.Strip(ln))
+		if len(row) < m.inputWidth() || strings.TrimSpace(string(row[:m.inputWidth()])) != "" {
+			t.Fatalf("input row %d is not blank for its first %d columns: %q", i, m.inputWidth(), ln)
+		}
 	}
 	if strings.Contains(m.View(), "hello!") || strings.Contains(m.View(), "world") {
 		t.Fatal("shared frame must not render any client's input text")
@@ -144,5 +153,157 @@ func TestBottomLineListsClientLabels(t *testing.T) {
 	}
 	if strings.Contains(v, "input:") || strings.Contains(v, "Ctrl+] t") {
 		t.Fatal("holder text must be gone")
+	}
+}
+
+// Input recall walks one shared store of lines — everything anyone
+// submitted — but each terminal keeps its own place in it, so one client's
+// Up never moves another's.
+func TestInputHistoryCursorIsPerClient(t *testing.T) {
+	m := twoClients(t)
+	// Submit while a run is in progress: Enter records the line in the
+	// shared history exactly as it does in modeInput, but queues it instead
+	// of launching three overlapping agent runs at one Agent.
+	m.mode = modeBusy
+	m.running = true
+	for _, step := range []struct {
+		client int
+		text   string
+	}{{1, "one"}, {1, "two"}, {2, "three"}} {
+		m.Update(live.ClientKeyMsg{Client: step.client, Key: runes(step.text)})
+		m.Update(live.ClientKeyMsg{Client: step.client, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	}
+	m.ag.DrainInbox()
+	m.mode, m.running = modeInput, false
+	// Client 1 last submitted "two", so its cursor sits where the list ended
+	// then: Up walks back from the newest line in the shared store.
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
+	if got := m.inputFor(1).Value(); got != "three" {
+		t.Fatalf("client 1 first Up = %q, want the newest shared line", got)
+	}
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
+	if got := m.inputFor(1).Value(); got != "two" {
+		t.Fatalf("client 1 second Up = %q", got)
+	}
+	// Client 2 has not navigated at all: its own Up starts from the newest.
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyUp}})
+	if got := m.inputFor(2).Value(); got != "three" {
+		t.Fatalf("client 2 Up = %q; client 1's navigation moved its cursor", got)
+	}
+	// ...and client 2's navigation left client 1 where it was.
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
+	if got := m.inputFor(1).Value(); got != "one" {
+		t.Fatalf("client 1 third Up = %q; client 2's navigation moved its cursor", got)
+	}
+}
+
+// The menu acts for the terminal that opened it: another client cannot
+// drive it, its entries run as the owner, and it closes if the owner goes.
+func TestMenuIsOwnedByTheClientThatOpenedIt(t *testing.T) {
+	m := twoClients(t)
+	var detached []int
+	m.detachClient = func(id int) { detached = append(detached, id) }
+
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/menu")})
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if m.mode != modeMenu || m.menuOwner != 1 {
+		t.Fatalf("menu owner %d mode %v", m.menuOwner, m.mode)
+	}
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if m.mode != modeMenu {
+		t.Fatal("another client's Enter must not drive the owner's menu")
+	}
+
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("Detach")})
+	_, cmd := m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if cmd != nil {
+		cmd()
+	}
+	if len(detached) != 1 || detached[0] != 1 {
+		t.Fatalf("menu entry detached %v, want the owner", detached)
+	}
+
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/menu")})
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if m.mode != modeMenu {
+		t.Fatalf("menu did not reopen: %v", m.mode)
+	}
+	m.Update(clientsMsg{{ID: 2, Label: "tablet (pid 2)", UTF8: true}}) // owner detached
+	if m.mode == modeMenu {
+		t.Fatal("menu must close when its owner detaches")
+	}
+}
+
+// The bottom line never overruns the shared width, however long the model
+// name and however many terminals are attached: the label list is
+// truncated, and dropped entirely when there is no room for it.
+func TestBottomLineFitsTheWidth(t *testing.T) {
+	m := newTestModel(t)
+	m.cfg.Layout = "full" // keep the full bottom line at narrow widths too
+	m.ag.SetModel("hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL")
+	m.clients = []live.ClientInfo{
+		{ID: 1, Label: "desk (pid 1111)", UTF8: true},
+		{ID: 2, Label: "ssh from 10.0.0.5 (pid 2222)", UTF8: true},
+		{ID: 3, Label: "phone over tailscale (pid 3333)", UTF8: true},
+	}
+	for _, w := range []int{56, 60, 72, 84, 100, 140} {
+		m.Update(tea.WindowSizeMsg{Width: w, Height: 30})
+		if got := lipgloss.Width(m.bottomLine()); got > w {
+			t.Fatalf("bottom line is %d cells wide at width %d:\n%s", got, w, m.bottomLine())
+		}
+	}
+	// The boundary itself: with no usable room the list is dropped, not
+	// emitted whole (and never sliced with a negative bound).
+	for _, room := range []int{-3, 0, 1} {
+		if got := m.clientLabels(room); got != "" {
+			t.Fatalf("clientLabels(%d) = %q, want the list dropped", room, got)
+		}
+	}
+	if got := m.clientLabels(8); got != "desk (p…" {
+		t.Fatalf("clientLabels(8) = %q", got)
+	}
+}
+
+// Messages left in the queue when a run ends start the next turn as one
+// request, but the transcript still says who wrote each of them.
+func TestLeftoverQueueEchoesEverySender(t *testing.T) {
+	m := twoClients(t)
+	m.mode = modeBusy
+	m.running = true
+	m.ag.EnqueueFrom("from one", 1)
+	m.ag.EnqueueFrom("from two", 2)
+	m.Update(turnDoneMsg{})
+	tr := m.transcript.String()
+	for _, want := range []string{"desk (pid 1)> from one", "tablet (pid 2)> from two"} {
+		if !strings.Contains(tr, want) {
+			t.Fatalf("transcript lacks %q:\n%s", want, tr)
+		}
+	}
+	if m.mode != modeBusy || !m.running {
+		t.Fatalf("leftovers did not start the next turn: mode=%v running=%v", m.mode, m.running)
+	}
+	if m.ag.Pending() != 0 {
+		t.Fatalf("queue not drained: %d", m.ag.Pending())
+	}
+}
+
+// A queue popup whose owner detaches after the run has already finished
+// must not leave the session sitting in the busy mode.
+func TestQueuePopupClosesToIdleWhenOwnerDetaches(t *testing.T) {
+	m := twoClients(t)
+	m.mode = modeBusy
+	m.running = true
+	m.ag.EnqueueFrom("from two", 2)
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyUp}})
+	if m.mode != modeQueue {
+		t.Fatalf("popup not open: %v", m.mode)
+	}
+	m.running = false // the run finished while the popup was open
+	m.Update(clientsMsg{{ID: 1, Label: "desk (pid 1)", UTF8: true}})
+	if m.mode != modeInput {
+		t.Fatalf("mode after the owner detached = %v, want input", m.mode)
+	}
+	if m.ag.Held() {
+		t.Fatal("delivery still held after the popup closed")
 	}
 }

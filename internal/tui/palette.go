@@ -188,9 +188,12 @@ type menuEntry struct {
 	run                func(m *Model) (tea.Model, tea.Cmd)
 }
 
-func (m *Model) menuEntries(from int) []menuEntry {
+// menuEntries builds the grouped menu. Its commands run as the client that
+// opened the menu — "Detach this terminal" has to mean the terminal whose
+// user picked it, not whoever happened to press a key.
+func (m *Model) menuEntries(owner int) []menuEntry {
 	cmd := func(c string) func(*Model) (tea.Model, tea.Cmd) {
-		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, from) }
+		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
 	}
 	return []menuEntry{
 		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
@@ -214,6 +217,7 @@ func (m *Model) menuEntries(from int) []menuEntry {
 }
 
 func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
+	m.menuOwner = from
 	entries := m.menuEntries(from)
 	items := make([]pickItem, 0, len(entries))
 	for i, e := range entries {
@@ -233,6 +237,9 @@ func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.menuOwner {
+		return m, nil // the menu acts for the terminal that opened it
+	}
 	return m.handlePickerKey(k, from)
 }
 
