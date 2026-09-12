@@ -210,6 +210,54 @@ func (r *REPL) turn(ctx context.Context, input string) {
 	}
 }
 
+// queueCommand implements /queue, /queue edit N, /queue drop N — usable
+// while a run is in progress so the user can change their mind about
+// queued messages. edit pulls the message out of the queue into the input
+// line (prefilled via readline) so it is paused until re-sent.
+func (r *REPL) queueCommand(input string) {
+	fields := strings.Fields(input)
+	items := r.Agent.Peek()
+	if len(fields) == 1 {
+		if len(items) == 0 {
+			fmt.Println(dim("no queued messages"))
+			return
+		}
+		for i, it := range items {
+			fmt.Printf("  %d  %s\n", i+1, strings.SplitN(it, "\n", 2)[0])
+		}
+		fmt.Println(dim("  /queue edit N · /queue drop N"))
+		return
+	}
+	if len(fields) < 3 {
+		fmt.Println(dim("usage: /queue | /queue edit N | /queue drop N"))
+		return
+	}
+	var n int
+	if _, err := fmt.Sscan(fields[2], &n); err != nil || n < 1 {
+		fmt.Println(dim("usage: /queue edit N | /queue drop N (N from /queue)"))
+		return
+	}
+	switch fields[1] {
+	case "edit":
+		text, ok := r.Agent.Remove(n - 1)
+		if !ok {
+			fmt.Println(dim("that message was already delivered"))
+			return
+		}
+		fmt.Println(dim("editing queued message (paused): Enter re-queues it"))
+		_, _ = r.rl.WriteStdin([]byte(text))
+	case "drop":
+		text, ok := r.Agent.Remove(n - 1)
+		if !ok {
+			fmt.Println(dim("that message was already delivered"))
+			return
+		}
+		fmt.Println(dim("dropped: " + strings.SplitN(text, "\n", 2)[0]))
+	default:
+		fmt.Println(dim("usage: /queue | /queue edit N | /queue drop N"))
+	}
+}
+
 // runBusy runs fn on its own goroutine while this goroutine keeps servicing
 // typed lines: plain text is queued for the agent, answers go to a waiting
 // prompt(), Ctrl-C cancels fn and discards the queue, and EOF is deferred
@@ -253,8 +301,12 @@ func (r *REPL) runBusy(ctx context.Context, fn func(ctx context.Context)) {
 					ask <- line
 					continue
 				}
+				if strings.HasPrefix(line, "/queue") {
+					r.queueCommand(line)
+					continue
+				}
 				if strings.HasPrefix(line, "/") {
-					fmt.Println(dim("commands wait until the agent is done (Ctrl-C cancels); plain text is queued"))
+					fmt.Println(dim("commands wait until the agent is done (Ctrl-C cancels); plain text is queued; /queue edits the queue"))
 					continue
 				}
 				r.Agent.Enqueue(line)
@@ -338,6 +390,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		if s.Handoff != "" {
 			fmt.Printf("%s\n", dim("handoff briefing loaded into the system prompt; /handoff shows it"))
 		}
+	case "/queue":
+		r.queueCommand(input)
 	case "/handoff":
 		if h := r.Agent.Handoff(); h != "" {
 			fmt.Println(h)

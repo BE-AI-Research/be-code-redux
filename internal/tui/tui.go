@@ -88,6 +88,7 @@ const (
 	modePalette     // "/" command popup above the input
 	modeMenu        // full-screen grouped menu (/menu)
 	modeContextMenu // right-click copy/paste popup
+	modeQueue       // queued-messages popup (edit/drop while a run is in progress)
 )
 
 // Model is the bubbletea model for the whole app.
@@ -135,6 +136,8 @@ type Model struct {
 	prevMode       mode
 	clipboardWrite func(string) error
 	clipboardRead  func() (string, error)
+
+	queueCursor int // highlighted row in the queue popup
 }
 
 // New builds the TUI model.
@@ -326,6 +329,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalVP = viewport.New(m.width-6, m.modalHeight())
 		m.modalVP.SetContent(ui.ColorizeDiff(msg.detail, true))
 	case turnDoneMsg:
+		if m.mode == modeQueue {
+			m.ag.Hold(false)
+			m.mode = modeBusy
+		}
 		m.flushStreaming()
 		if msg.err != nil {
 			if msg.err != context.Canceled && !strings.Contains(msg.err.Error(), "context canceled") {
@@ -411,6 +418,8 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(k)
 	case modeContextMenu:
 		return m.handleContextMenuKey(k)
+	case modeQueue:
+		return m.handleQueueKey(k)
 	case modeBusy:
 		return m.handleBusyKey(k)
 	}
@@ -582,6 +591,12 @@ func (m *Model) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(k)
 		return m, cmd
+	case tea.KeyUp:
+		if strings.TrimSpace(m.input.Value()) == "" {
+			return m.openQueue()
+		}
+	case tea.KeyCtrlQ:
+		return m.openQueue()
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)
@@ -716,12 +731,17 @@ func (m *Model) View() string {
 		b.WriteString("\n")
 	}
 	transcript := m.vp.View()
-	if (m.mode == modePalette || m.mode == modeContextMenu) && m.picker != nil {
+	if ((m.mode == modePalette || m.mode == modeContextMenu) && m.picker != nil) || m.mode == modeQueue {
 		// Popups sit over the bottom of the transcript, right above the
 		// input; the newest lines stay visible above them.
-		box := m.paletteBox()
-		if m.mode == modeContextMenu {
+		var box string
+		switch m.mode {
+		case modeQueue:
+			box = m.queueBox()
+		case modeContextMenu:
 			box = m.contextMenuBox()
+		default:
+			box = m.paletteBox()
 		}
 		boxH := lipgloss.Height(box)
 		lines := strings.Split(transcript, "\n")
@@ -763,6 +783,9 @@ func (m *Model) bottomLine() string {
 	state := stOK.Render("ready")
 	if m.running {
 		state = m.spin.View() + " " + m.statusNote + stDim.Render(" · Enter queues · Esc cancels")
+		if n := m.ag.Pending(); n > 0 {
+			state += stAccent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
+		}
 	}
 	line := " " + stAccent.Render("/menu") + " " + stAccent.Render("/help") +
 		stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state

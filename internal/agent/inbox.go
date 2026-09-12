@@ -17,6 +17,7 @@ import (
 type Inbox struct {
 	mu    sync.Mutex
 	items []string
+	held  bool // the UI has the queue open for editing: delivery pauses
 }
 
 // Enqueue queues a user message for delivery at the next model call.
@@ -46,9 +47,47 @@ func (a *Agent) DrainInbox() []string {
 	return out
 }
 
+// Peek returns a copy of the queued messages in delivery order.
+func (a *Agent) Peek() []string {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	return append([]string(nil), a.inbox.items...)
+}
+
+// Remove takes the i-th queued message out of the queue. ok is false when
+// that message is gone (already delivered or dropped).
+func (a *Agent) Remove(i int) (string, bool) {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	if i < 0 || i >= len(a.inbox.items) {
+		return "", false
+	}
+	text := a.inbox.items[i]
+	a.inbox.items = append(a.inbox.items[:i], a.inbox.items[i+1:]...)
+	return text, true
+}
+
+// Hold pauses (true) or resumes (false) delivery, so a queue the user is
+// editing does not shift under them.
+func (a *Agent) Hold(on bool) {
+	a.inbox.mu.Lock()
+	a.inbox.held = on
+	a.inbox.mu.Unlock()
+}
+
+// Held reports whether delivery is paused.
+func (a *Agent) Held() bool {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	return a.inbox.held
+}
+
 // deliverInbox appends queued messages to the history as user turns,
 // tagged so the model knows they arrived mid-task.
 func (a *Agent) deliverInbox() {
+	if a.Held() {
+		return
+	}
 	msgs := a.DrainInbox()
 	for _, m := range msgs {
 		a.History.Add(provider.Message{Role: provider.RoleUser,

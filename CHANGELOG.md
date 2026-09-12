@@ -1,5 +1,16 @@
 # BE-Code Changelog
 
+## v0.4.4 — 2026-09-11 — editable message queue
+
+- Change your mind about queued messages: while the agent works, press Up on
+  an empty input (or Ctrl+Q) to open the queue popup. Enter pulls the
+  highlighted message into the input for editing (it is paused, out of the
+  queue, until you press Enter again), `d` or Delete drops it, Esc closes.
+  Delivery is held while the popup is open so the list cannot shift; the
+  bottom line shows `N queued · ↑ edit`. Plain mode: `/queue`, `/queue edit N`
+  (prefills the input line), `/queue drop N`, all usable mid-run. A message
+  the agent already took reports "already delivered".
+
 ## v0.4.3 — 2026-09-11 — VS Code editor bridge
 
 - BE-Code now connects to the companion VS Code extension when launched from
