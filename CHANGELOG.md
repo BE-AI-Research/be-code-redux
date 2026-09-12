@@ -7,7 +7,9 @@
   catppuccin (Mocha) and github-light. `/theme` opens a picker (also under
   /menu › Settings › Theme); `/theme <name>` sets one directly. The choice
   applies immediately and is saved to config. Hex palettes render as true
-  colour where supported and degrade to 256 colours otherwise.
+  colour where supported and degrade to 256 colours otherwise. The named
+  themes also recolour the terminal window (OSC 11/10), restored on exit;
+  `theme_terminal_colors: false` disables that.
 
 - Change your mind about queued messages: while the agent works, press Up on
   an empty input (or Ctrl+Q) to open the queue popup. Enter pulls the

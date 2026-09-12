@@ -66,6 +66,9 @@ type Config struct {
 
 	// Theme: "dark" (default), "light", or "mono".
 	Theme string `json:"theme"`
+	// ThemeTerminalColors lets a theme recolour the terminal window itself
+	// (OSC 11/10), restored on exit. Off if your terminal misbehaves.
+	ThemeTerminalColors bool `json:"theme_terminal_colors"`
 
 	// ShellAllow / ShellDeny are glob patterns ('*' matches anything)
 	// checked against shell commands. Deny wins and never runs; an allow
@@ -151,16 +154,17 @@ func Default() *Config {
 				BaseURL: "http://localhost:8000/v1",
 			},
 		},
-		Temperature:       0.2,
-		MaxTokens:         0,
-		ContextTokens:     16384,
-		MaxTurns:          24,
-		MaxRepairs:        3,
-		CompatToolCalls:   "auto",
-		VerifyOnDone:      true,
-		ApproveFileWrites: true,
-		UI:                "tui",
-		Theme:             "dark",
+		Temperature:         0.2,
+		MaxTokens:           0,
+		ContextTokens:       16384,
+		MaxTurns:            24,
+		MaxRepairs:          3,
+		CompatToolCalls:     "auto",
+		VerifyOnDone:        true,
+		ApproveFileWrites:   true,
+		UI:                  "tui",
+		Theme:               "dark",
+		ThemeTerminalColors: true,
 		ShellAllow: []string{
 			"go build*", "go test*", "go vet*", "gofmt*", "go run*",
 			"npm test*", "npx tsc*", "python3 -m pytest*", "cargo check*",
