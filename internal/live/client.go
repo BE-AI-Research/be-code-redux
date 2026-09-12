@@ -47,7 +47,7 @@ func DefaultAttachOptions() AttachOptions {
 	fd := int(os.Stdin.Fd())
 	return AttachOptions{
 		Label:  ClientLabel(),
-		Stdin:  os.Stdin,
+		Stdin:  stdinPump,
 		Stdout: os.Stdout,
 		Raw: func() (func(), error) {
 			st, err := term.MakeRaw(uintptr(fd))
@@ -133,6 +133,73 @@ func SwitchTarget(reason string) (string, bool) {
 type deadlineReader interface {
 	SetReadDeadline(t time.Time) error
 }
+
+// ChunkReader is an input source that hands out whole reads on a channel
+// and can be abandoned without a blocked Read outliving the caller. Attach
+// prefers it over plain Read: a blocking terminal read cannot be
+// interrupted (an inherited os.Stdin is not in Go's poller, so its
+// SetReadDeadline is a no-op), which means the stdin goroutine of a
+// previous Attach — a picker switch reattaches in the same terminal —
+// would otherwise stay parked in Read, swallow the first keystrokes typed
+// after the switch, and die on its already-closed connection.
+type ChunkReader interface {
+	Chunks() <-chan []byte
+}
+
+// StdinPump reads one terminal for the life of the process and serves its
+// bytes to successive Attach calls through Chunks. The channel is closed
+// when the underlying reader ends.
+type StdinPump struct {
+	src     io.Reader
+	ch      chan []byte
+	once    sync.Once
+	mu      sync.Mutex // guards pending (Read path only)
+	pending []byte
+}
+
+func NewStdinPump(r io.Reader) *StdinPump {
+	return &StdinPump{src: r, ch: make(chan []byte, 64)}
+}
+
+func (p *StdinPump) Chunks() <-chan []byte {
+	p.once.Do(func() {
+		go func() {
+			defer close(p.ch)
+			buf := make([]byte, 4096)
+			for {
+				n, err := p.src.Read(buf)
+				if n > 0 {
+					p.ch <- append([]byte(nil), buf[:n]...)
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	})
+	return p.ch
+}
+
+// Read satisfies io.Reader for callers that do not use Chunks: it drains
+// the channel one chunk at a time, keeping any remainder for the next call.
+func (p *StdinPump) Read(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pending) == 0 {
+		chunk, ok := <-p.Chunks()
+		if !ok {
+			return 0, io.EOF
+		}
+		p.pending = chunk
+	}
+	n := copy(b, p.pending)
+	p.pending = p.pending[n:]
+	return n, nil
+}
+
+// stdinPump is the process-wide reader DefaultAttachOptions hands out, so
+// every Attach in this process shares one terminal reader.
+var stdinPump = NewStdinPump(os.Stdin)
 
 // Attach connects to a live session and runs until detach, host exit, or
 // ctx cancel. Returns the host's bye reason ("" on a local detach).
@@ -232,9 +299,62 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	}()
 
 	// stdin → host, with chords
+	stopStdin := make(chan struct{})
 	go func() {
 		defer close(stdinDone)
 		var chord Chord
+		// handle forwards one read's bytes and reports whether the goroutine
+		// must stop (detach chord, or the connection is gone).
+		handle := func(b []byte) bool {
+			fwd, act := chord.Feed(b, time.Now())
+			// Forward any plain bytes the same read delivered ahead of the
+			// chord (e.g. pasted text ending in Ctrl+] d) before acting on
+			// act, so they reach the program instead of being dropped.
+			if len(fwd) > 0 && !opt.View {
+				if werr := writeFrame(FInput, fwd); werr != nil {
+					select {
+					case result <- "connection closed":
+					default:
+					}
+					return true
+				}
+			}
+			if act == ActionDetach {
+				localDetach.Store(true)
+				writeFrame(FDetach, nil)
+				select {
+				case result <- "":
+				default:
+				}
+				return true
+			}
+			return false
+		}
+		eof := func() {
+			select {
+			case result <- "":
+			default:
+			}
+		}
+		if cr, ok := opt.Stdin.(ChunkReader); ok {
+			// A shared reader: consume until told to stop, so no goroutine
+			// from this Attach can outlive it and steal keys from the next.
+			chunks := cr.Chunks()
+			for {
+				select {
+				case <-stopStdin:
+					return
+				case b, ok := <-chunks:
+					if !ok {
+						eof()
+						return
+					}
+					if handle(b) {
+						return
+					}
+				}
+			}
+		}
 		buf := make([]byte, 4096)
 		for {
 			n, err := opt.Stdin.Read(buf)
@@ -242,36 +362,11 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// read of a stream, per the io.Reader contract); process those
 			// bytes before acting on the error so a detach chord or the
 			// final keystrokes right before EOF are never dropped.
-			if n > 0 {
-				fwd, act := chord.Feed(buf[:n], time.Now())
-				// Forward any plain bytes the same Read delivered ahead of
-				// the chord (e.g. pasted text ending in Ctrl+] d) before
-				// acting on act, so they reach the program instead of
-				// being dropped by an early return below.
-				if len(fwd) > 0 && !opt.View {
-					if werr := writeFrame(FInput, fwd); werr != nil {
-						select {
-						case result <- "connection closed":
-						default:
-						}
-						return
-					}
-				}
-				if act == ActionDetach {
-					localDetach.Store(true)
-					writeFrame(FDetach, nil)
-					select {
-					case result <- "":
-					default:
-					}
-					return
-				}
+			if n > 0 && handle(buf[:n]) {
+				return
 			}
 			if err != nil {
-				select {
-				case result <- "":
-				default:
-				}
+				eof()
 				return
 			}
 		}
@@ -324,6 +419,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	// pending write, as in tests) can't be interrupted and is left to exit
 	// on its own later.
 	conn.Close()
+	close(stopStdin)
 	if d, ok := opt.Stdin.(deadlineReader); ok {
 		d.SetReadDeadline(time.Now())
 	}

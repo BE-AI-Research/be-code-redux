@@ -181,7 +181,7 @@ func (m *Model) overlayFor(client int) string {
 	ta := m.inputFor(client)
 	lines := strings.Split(ta.View(), "\n")
 	var b strings.Builder
-	first := m.height - m.inputRows()
+	first := m.inputTop()
 	w := m.inputWidth()
 	for r := 0; r < m.inputRows(); r++ {
 		line := ""
@@ -192,6 +192,15 @@ func (m *Model) overlayFor(client int) string {
 	}
 	fmt.Fprintf(&b, "\x1b[%d;%dH", m.height, m.width)
 	return b.String()
+}
+
+// inputTop is the 1-based terminal row of the first input row, derived from
+// the same layout View composes: header, then the transcript viewport, then
+// the input block. It is not height-inputRows: layout() keeps one slack row
+// under the bottom line, so anchoring to the terminal height lands one row
+// too low and the overlay erases the bottom line.
+func (m *Model) inputTop() int {
+	return m.headerHeight() + m.vp.Height + 1
 }
 
 // padToWidth pads s with spaces to w display columns, or truncates it if it

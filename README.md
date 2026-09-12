@@ -211,7 +211,8 @@ instead — `saved as a new session: be-code --resume <code>`.
 **Every terminal has its own input line.** Any number of terminals can be
 attached at once, and each one types into its own prompt: your half-written
 message stays on your screen and nobody else's, and the palette you opened with
-`/`, your command history and your queued-message popup are yours. Press Enter
+`/`, the `/menu` you opened, the right-click menu, your command history and your
+queued-message popup all belong to the terminal that opened them. Press Enter
 and the message goes into the one shared transcript, prefixed with the terminal
 that sent it (`local (pid 4321)> …`) whenever more than one terminal is
 attached — with a single terminal the prefix is the usual `you> `. Everything

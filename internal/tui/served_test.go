@@ -320,7 +320,7 @@ func TestOverlayPositionsEachRowAndParksTheCursor(t *testing.T) {
 	m := twoClients(t) // 100x30, served, 3 input rows
 	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("typed")})
 	ov := m.overlayFor(2)
-	first := m.height - m.inputRows() // 1-based row of the first input line
+	first := m.headerHeight() + m.vp.Height + 1 // 1-based row of the first input line, as View lays it out
 	for r := 0; r < m.inputRows(); r++ {
 		if !strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", first+r)) {
 			t.Fatalf("overlay lacks a move to row %d:\n%q", first+r, ov)
@@ -331,6 +331,10 @@ func TestOverlayPositionsEachRowAndParksTheCursor(t *testing.T) {
 	}
 	if !strings.HasSuffix(ov, fmt.Sprintf("\x1b[%d;%dH", m.height, m.width)) {
 		t.Fatalf("overlay must park the cursor at the bottom-right:\n%q", ov)
+	}
+	bottom := m.headerHeight() + m.vp.Height + m.inputRows() + 1 // the bottom line's row
+	if strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", bottom)) {
+		t.Fatalf("overlay must not write the bottom line's row %d:\n%q", bottom, ov)
 	}
 	if strings.Contains(ov, "\x1b[K") {
 		t.Fatal("overlay must pad rows, not clear to end of line (the wheel lives to the right)")

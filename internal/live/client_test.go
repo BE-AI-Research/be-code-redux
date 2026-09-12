@@ -335,3 +335,50 @@ func TestAttachReturnsSwitchReason(t *testing.T) {
 // TestHostDeliversTaggedInputFromEveryClient). Task 3 owns client.go's new
 // takeover behavior (splicing the overlay locally) and adds its replacement,
 // "Ctrl+] t forwards both bytes".
+
+// A picker switch reattaches the same terminal, so two Attach calls run
+// back to back over one stdin. With a plain blocking reader the first
+// call's stdin goroutine would still be parked in Read and swallow the
+// first keystrokes typed after the switch; a StdinPump hands them to the
+// second Attach instead.
+func TestAttachSwitchDoesNotLoseKeysOverOneStdin(t *testing.T) {
+	h1, sock1 := startHost(t)
+	h2, sock2 := startHost(t)
+	rec1 := &Record{Code: "ONE", PID: os.Getpid(), Socket: sock1, Token: "tok"}
+	rec2 := &Record{Code: "TWO", PID: os.Getpid(), Socket: sock2, Token: "tok"}
+	pr, pw := io.Pipe()
+	pump := NewStdinPump(pr)
+	opt := func() AttachOptions {
+		return AttachOptions{Label: "t", Stdin: pump, Stdout: io.Discard,
+			Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true}
+	}
+	got2 := make(chan string, 4)
+	h2.OnInput(func(_ int, b []byte) { got2 <- string(b) })
+
+	done1 := make(chan string, 1)
+	go func() { r, _ := Attach(context.Background(), rec1, opt()); done1 <- r }()
+	within(t, time.Second, func() bool { return len(h1.Clients()) == 1 })
+	h1.Switch(h1.Clients()[0].ID, "TWO")
+	select {
+	case r := <-done1:
+		if r != ReasonSwitchPrefix+"TWO" {
+			t.Fatalf("first attach returned %q", r)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Attach did not return on switch")
+	}
+
+	go Attach(context.Background(), rec2, opt())
+	within(t, time.Second, func() bool { return len(h2.Clients()) == 1 })
+	if _, err := pw.Write([]byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case b := <-got2:
+		if b != "k" {
+			t.Fatalf("second host got %q", b)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the key typed after the switch never reached the second host (stolen by the first attach's reader?)")
+	}
+}
