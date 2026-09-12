@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,12 +52,31 @@ func TestClientsAndDetachCommands(t *testing.T) {
 	if !strings.Contains(m.transcript.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
-	detached := false
-	m.detachHolder = func() { detached = true }
-	m.slashCommand("/detach")
-	if !detached {
+	detached := make(chan struct{}, 1)
+	m.detachHolder = func() { detached <- struct{}{} }
+	_, cmd := m.slashCommand("/detach")
+	if cmd == nil {
+		t.Fatal("/detach returned no command")
+	}
+	cmd() // Bubble Tea runs this on its own goroutine
+	select {
+	case <-detached:
+	case <-time.After(time.Second):
 		t.Fatal("/detach did not call the host")
 	}
+}
+
+// tempSockDir is a short-pathed temp dir for unix sockets. t.TempDir() embeds
+// the test name under a long per-run prefix, which on macOS overruns the
+// 104-byte sun_path limit and makes Listen fail with "invalid argument".
+func tempSockDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }
 
 // /clients on an in-process (never served) session says so, rather than
@@ -139,7 +160,7 @@ func waitForClients(t *testing.T, h *live.Host, n int) {
 // seedFromHost is the extracted, directly-testable piece of RunServed that
 // is responsible for this.
 func TestSeedFromHostClientsAlreadyAttached(t *testing.T) {
-	dir := t.TempDir()
+	dir := tempSockDir(t)
 	sock := filepath.Join(dir, "s.sock")
 	h := live.NewHost("tok", io.Discard)
 	if err := h.Listen(sock); err != nil {
@@ -188,5 +209,97 @@ func TestPinColorProfileForcesColourAndRestores(t *testing.T) {
 	restore()
 	if got := lipgloss.ColorProfile(); got != before {
 		t.Fatalf("profile not restored: %v, want %v", got, before)
+	}
+}
+
+// TestDetachDoesNotBlockTheUpdateLoop is the deadlock this wave fixed: the
+// host's callbacks are p.Send on Bubble Tea's unbuffered message channel, and
+// Update runs on the goroutine that receives from it — so calling into the
+// host from inside Update blocks forever, holding the host's notify lock, and
+// every later attach (and `sessions kill`) hangs with it.
+//
+// The fake event loop here reproduces exactly that shape: onClients blocks
+// until something receives, and nothing does while "Update" (slashCommand) is
+// running.
+func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
+	dir := tempSockDir(t)
+	sock := filepath.Join(dir, "s.sock")
+	h := live.NewHost("tok", io.Discard)
+	if err := h.Listen(sock); err != nil {
+		t.Fatal(err)
+	}
+	go h.Serve()
+	t.Cleanup(func() { h.Close("test over") })
+
+	// Stands in for tea.Program.Send: an unbuffered channel whose only
+	// receiver is the update goroutine.
+	msgs := make(chan any)
+	h.OnClients(func(cl []live.ClientInfo) { msgs <- clientsMsg(cl) })
+	h.OnSize(func(c, r int) { msgs <- tea.WindowSizeMsg{Width: c, Height: r} })
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	bye := make(chan string, 1)
+	go func() {
+		for {
+			typ, p, err := live.ReadFrame(conn)
+			if err != nil {
+				return
+			}
+			if typ == live.FBye {
+				var b live.Bye
+				json.Unmarshal(p, &b)
+				bye <- b.Reason
+				return
+			}
+		}
+	}()
+	if err := live.WriteJSON(conn, live.FHello, live.Hello{
+		Token: "tok", Cols: 80, Rows: 24, Label: "holder", UTF8: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForClients(t, h, 1)
+
+	m := newTestModel(t)
+	m.served = true
+	m.detachHolder = h.DetachHolder
+
+	// "Update" runs with nothing draining msgs, exactly as Bubble Tea does.
+	type result struct{ cmd tea.Cmd }
+	res := make(chan result, 1)
+	go func() {
+		_, cmd := m.slashCommand("/detach")
+		res <- result{cmd}
+	}()
+	var cmd tea.Cmd
+	select {
+	case r := <-res:
+		cmd = r.cmd
+	case <-time.After(time.Second):
+		t.Fatal("/detach blocked the update loop (it must not call the host synchronously)")
+	}
+	if cmd == nil {
+		t.Fatal("/detach returned no command")
+	}
+	// Now the event loop is free again, as it would be after Update returns.
+	// This drainer is deliberately never stopped: the host notifies on its own
+	// goroutines (the detach below, and h.Close in the cleanup), and a
+	// callback with no receiver left would block the host for good.
+	go func() {
+		for range msgs {
+		}
+	}()
+	go cmd()
+	select {
+	case reason := <-bye:
+		if reason == "" {
+			t.Fatalf("bye reason = %q", reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the attached client was never told goodbye")
 	}
 }

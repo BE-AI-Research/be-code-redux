@@ -38,9 +38,14 @@ const hostStartTimeout = 5 * time.Minute
 // slower than the first stage — terminating there would throw away exactly
 // the briefing this feature is for — while an unreachable backend must not
 // hold the command forever.
-const (
+// They are vars rather than consts only so the kill test can shrink them
+// instead of genuinely waiting out a minute of grace.
+var (
 	quitWait  = 10 * time.Second
 	quitGrace = 60 * time.Second
+	// killWait is the short window after a SIGKILL. Nothing runs in the host
+	// after that signal, so this only covers the kernel reaping it.
+	killWait = 2 * time.Second
 )
 
 // runSessionHost is the detached process behind a served TUI session: it
@@ -106,9 +111,16 @@ func runSessionHost(code string) error {
 
 	err = tui.New(cfg, ag, p).RunServed(context.Background(), h)
 	// Order matters: the resume line goes to every attached terminal, so it
-	// has to be written before Close says goodbye to them.
-	fmt.Fprintln(h.Output(), "\r\nfinishing session (writing the handoff briefing)...")
-	finishSession(ag, true, h.Output())
+	// has to be written before Close says goodbye to them. Two details make
+	// it actually readable there: every client is in raw mode with its own
+	// alt screen (see live.Attach), so these lines are wrapped in a CRLF
+	// translation — a bare LF would staircase them — and the clients are
+	// taken back to the normal screen first, so the resume line survives
+	// their restore instead of vanishing with the alt buffer.
+	out := live.NewCRLFWriter(h.Output())
+	fmt.Fprint(out, live.ExitAltScreen)
+	fmt.Fprintln(out, "\nfinishing session (writing the handoff briefing)...")
+	finishSession(ag, true, out)
 	h.Close(live.ReasonEnded)
 	return err
 }
@@ -125,23 +137,6 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	if err != nil {
 		return err
 	}
-	// Offer to attach to a live session for this workspace instead of
-	// starting a second one on the same files.
-	if lives, _ := live.List(dir); len(lives) > 0 {
-		for i := range lives {
-			r := lives[i]
-			if r.Workspace != workspace {
-				continue
-			}
-			fmt.Printf("a live session for this workspace is running (%s, since %s). Attach to it? [Y/n] ",
-				r.Code, r.StartedAt.Format("15:04"))
-			var ans string
-			fmt.Scanln(&ans)
-			if ans == "" || strings.HasPrefix(strings.ToLower(ans), "y") {
-				return attachLive(ctx, &r, false)
-			}
-		}
-	}
 	code := store.CodeFor(live.NewToken()) // fresh; the host stamps it on its session
 	if flagResume != "" {
 		s, err := store.Load(flagResume)
@@ -150,7 +145,23 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 		}
 		code = s.ResumeCode()
 	}
-	if _, err := live.Load(dir, code); err == nil {
+	// Offer to attach to a live session for this workspace instead of
+	// starting a second one on the same files. It is one question about one
+	// session (the newest), never a walk through every record; and an
+	// explicit --resume has already said which session the user wants, so the
+	// offer only stands when the live one *is* that session.
+	if r := newestLiveIn(dir, workspace); offerAttach(r, flagResume, code) {
+		fmt.Printf("a live session for this workspace is running (%s, since %s). Attach to it? [Y/n] ",
+			r.Code, r.StartedAt.Format("15:04"))
+		var ans string
+		fmt.Scanln(&ans)
+		if ans == "" || strings.HasPrefix(strings.ToLower(ans), "y") {
+			return attachLive(ctx, r, false)
+		}
+	}
+	// findLive, not live.Load: a record left behind by a host that is gone
+	// must not block a new session under the same code.
+	if findLive(dir, code) != nil {
 		return fmt.Errorf("session %s is already live; use: be-code attach %s", code, code)
 	}
 	model := provider.ResolveModel(cfg, flagProvider, flagModel)
@@ -188,6 +199,35 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 		return fmt.Errorf("%w (see %s; use --no-host to run in-process)", err, logPath)
 	}
 	return attachLive(ctx, &rec, false)
+}
+
+// offerAttach reports whether to offer attaching to the live session r
+// instead of starting a new one. An explicit --resume names the session the
+// user wants, so the offer only stands when the live session is that one —
+// otherwise the answer "yes" would silently attach them to a different
+// session than the one they asked to resume.
+func offerAttach(r *live.Record, resume, code string) bool {
+	if r == nil {
+		return false
+	}
+	return resume == "" || r.Code == code
+}
+
+// newestLiveIn returns the most recently started live session serving
+// workspace, or nil when there is none. live.List prunes records whose host
+// is gone, so a stale record never produces an offer to attach to nothing.
+func newestLiveIn(dir, workspace string) *live.Record {
+	lives, _ := live.List(dir)
+	var newest *live.Record
+	for i := range lives {
+		if lives[i].Workspace != workspace {
+			continue
+		}
+		if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {
+			newest = &lives[i]
+		}
+	}
+	return newest
 }
 
 // waitForHost waits for the spawned host to open its socket. It gives up as
@@ -394,6 +434,20 @@ var sessionsKillCmd = &cobra.Command{
 		if gone(dir, rec.Code, quitWait) {
 			fmt.Printf("%s ended\n", rec.Code)
 			return nil
+		}
+		// Still there: escalate rather than tidy the record away and call it
+		// killed. A record removed under a live host leaves the session
+		// unreachable (no code to attach by) but still holding the workspace,
+		// the MCP children and the socket.
+		if live.Alive(rec.PID) {
+			fmt.Fprintf(os.Stderr, "warn: %s ignored the signal; killing pid %d (no handoff briefing)\n", rec.Code, rec.PID)
+			if err := live.Kill(rec.PID); err != nil {
+				fmt.Fprintf(os.Stderr, "warn: killing pid %d: %v\n", rec.PID, err)
+			}
+			gone(dir, rec.Code, killWait)
+			if live.Alive(rec.PID) {
+				return fmt.Errorf("%s (pid %d) is still running; its record is left in place", rec.Code, rec.PID)
+			}
 		}
 		if err := live.Remove(dir, rec.Code); err != nil {
 			return err

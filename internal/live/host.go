@@ -132,7 +132,14 @@ type Host struct {
 	onSize    func(cols, rows int)
 	onClients func([]ClientInfo)
 	onQuit    func()
-	closing   bool
+	// quitPending records a RequestQuit that arrived before OnQuit was
+	// registered — the host listens and serves before the program is
+	// started (see tui.RunServed), so a SIGTERM from `sessions kill`, or a
+	// quit frame from a client that attached during startup, can genuinely
+	// land in that window. Dropping it would leave the host running with
+	// the caller convinced it had asked it to stop.
+	quitPending bool
+	closing     bool
 }
 
 func NewHost(token string, log io.Writer) *Host {
@@ -165,9 +172,22 @@ func (h *Host) pumpInput() {
 
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
-func (h *Host) OnQuit(f func())                { h.mu.Lock(); h.onQuit = f; h.mu.Unlock() }
 func (h *Host) InputReader() io.Reader         { return h.inR }
 func (h *Host) Output() io.Writer              { return fanout{h} }
+
+// OnQuit registers the program's shutdown hook. A quit requested before this
+// call is replayed into f now (outside h.mu: f is the program's callback and
+// may do anything, including calling back into the host).
+func (h *Host) OnQuit(f func()) {
+	h.mu.Lock()
+	h.onQuit = f
+	replay := h.quitPending && f != nil
+	h.quitPending = false
+	h.mu.Unlock()
+	if replay {
+		f()
+	}
+}
 
 func (h *Host) logf(format string, args ...any) {
 	h.logMu.Lock()
@@ -222,13 +242,7 @@ func (h *Host) handle(conn net.Conn) {
 	h.holder = c // newest attacher holds input
 	h.mu.Unlock()
 	go h.writer(c)
-	h.recompute()
-	// recompute only broadcasts FSize when the shared size changed, so a
-	// client whose own dimensions are not the new minimum would otherwise
-	// never learn the render size at all; tell it directly.
-	if cols, rows := h.Size(); cols > 0 {
-		c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
-	}
+	h.recomputeAttach(c)
 	h.logf("attached %d %s %dx%d\n", c.id, c.label, c.cols, c.rows)
 
 	for {
@@ -333,7 +347,25 @@ func (h *Host) detach(c *client, reason string) {
 // notifyMu, not under h.mu — but they still must return quickly and must not
 // call back into anything that itself calls recompute (including via
 // OnSize/OnClients replacing themselves) or the host will deadlock.
-func (h *Host) recompute() {
+//
+// The same constraint runs the other way, and is easy to miss: the served
+// program must never call into the host from inside its own update loop.
+// tui.RunServed's callbacks are `p.Send(...)` on an unbuffered channel that
+// only the program's update goroutine receives from, so a synchronous
+// DetachHolder/Close/RequestQuit from inside Update would block that
+// goroutine on its own p.Send — with notifyMu held, which then hangs every
+// later attach and detach too. Route such calls through a tea.Cmd (they run
+// on their own goroutine) instead.
+func (h *Host) recompute() { h.recomputeAttach(nil) }
+
+// recomputeAttach is recompute for the attach path: attached is the client
+// that has just joined. It is always sent the current shared size, and the
+// program is always notified of it — even when the shared minimum did not
+// change, because a client that has just cleared its screen (and a Bubble Tea
+// renderer that only repaints in full on a WindowSizeMsg) would otherwise be
+// left with nothing but the next diff lines. A size change still notifies
+// exactly once: the broadcast below already includes the new client.
+func (h *Host) recomputeAttach(attached *client) {
 	h.notifyMu.Lock()
 	defer h.notifyMu.Unlock()
 
@@ -354,9 +386,13 @@ func (h *Host) recompute() {
 	clients := append([]*client(nil), h.clients...)
 	h.mu.Unlock()
 
-	if changed && cols > 0 {
-		for _, c := range clients {
-			c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
+	if cols > 0 && (changed || attached != nil) {
+		if changed {
+			for _, c := range clients {
+				c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
+			}
+		} else {
+			attached.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
 		}
 		if onSize != nil {
 			onSize(cols, rows)
@@ -409,6 +445,9 @@ func (h *Host) AnyASCII() bool {
 func (h *Host) RequestQuit() {
 	h.mu.Lock()
 	f := h.onQuit
+	if f == nil {
+		h.quitPending = true // replayed by OnQuit
+	}
 	h.mu.Unlock()
 	if f != nil {
 		f()

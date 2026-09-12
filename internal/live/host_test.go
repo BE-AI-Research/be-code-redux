@@ -302,3 +302,100 @@ func TestHostStalledClientDoesNotBlockOthersOrClose(t *testing.T) {
 		t.Fatal("Close blocked on a stalled client")
 	}
 }
+
+// TestHostAttachAlwaysNotifiesTheProgramOfTheSize covers the repaint an
+// attacher depends on. A client clears its screen when it attaches, and the
+// Bubble Tea renderer only repaints in full when it is given a
+// WindowSizeMsg — which the host derives from OnSize. A second terminal at
+// the same size (or a larger one, leaving the shared minimum unchanged)
+// would otherwise see nothing but the next diff lines on a blank screen.
+func TestHostAttachAlwaysNotifiesTheProgramOfTheSize(t *testing.T) {
+	h, sock := startHost(t)
+	sizes := make(chan Size, 8)
+	h.OnSize(func(c, r int) { sizes <- Size{c, r} })
+	expect := func(want Size, what string) {
+		t.Helper()
+		select {
+		case got := <-sizes:
+			if got != want {
+				t.Fatalf("%s: OnSize %+v, want %+v", what, got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s: OnSize not called", what)
+		}
+	}
+	dial(t, sock, "tok", "a", 80, 24)
+	expect(Size{80, 24}, "first attach")
+
+	// Same size: the shared minimum does not change, but the program must
+	// still be told so the new terminal gets a full frame.
+	same := dial(t, sock, "tok", "same", 80, 24)
+	expect(Size{80, 24}, "attach at the same size")
+	// Larger: still no change to the minimum, still a notification.
+	bigger := dial(t, sock, "tok", "bigger", 120, 40)
+	expect(Size{80, 24}, "attach at a larger size")
+
+	// Each of those clients learns the render size exactly once: the
+	// unchanged-minimum path must not broadcast to everyone, and the
+	// changed path must not be doubled by a second direct send.
+	for _, fc := range []*fakeClient{same, bigger} {
+		select {
+		case got := <-fc.size:
+			if got != (Size{80, 24}) {
+				t.Fatalf("client FSize %+v, want 80x24", got)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("client never received its attach-time FSize")
+		}
+		select {
+		case got := <-fc.size:
+			t.Fatalf("duplicate FSize %+v", got)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	// And a real change still notifies exactly once.
+	smaller := dial(t, sock, "tok", "smaller", 60, 20)
+	expect(Size{60, 20}, "attach at a smaller size")
+	select {
+	case got := <-sizes:
+		t.Fatalf("second OnSize for one change: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case got := <-smaller.size:
+		if got != (Size{60, 20}) {
+			t.Fatalf("client FSize %+v, want 60x20", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client never received the new shared size")
+	}
+	select {
+	case got := <-smaller.size:
+		t.Fatalf("duplicate FSize after a size change: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestHostReplaysQuitRequestedBeforeOnQuit covers the startup window: the
+// host listens and serves before the program registers OnQuit, so a SIGTERM
+// (`be-code sessions kill`) or a client's quit frame can arrive with no
+// callback in place. It must not be swallowed, or the host keeps running
+// while the caller believes it asked it to stop.
+func TestHostReplaysQuitRequestedBeforeOnQuit(t *testing.T) {
+	h, _ := startHost(t)
+	h.RequestQuit() // no OnQuit yet
+	quit := make(chan struct{}, 2)
+	h.OnQuit(func() { quit <- struct{}{} })
+	select {
+	case <-quit:
+	case <-time.After(time.Second):
+		t.Fatal("a quit requested before OnQuit was registered was dropped")
+	}
+	// Replayed once, not on every later registration.
+	h.OnQuit(func() { quit <- struct{}{} })
+	select {
+	case <-quit:
+		t.Fatal("the pending quit was replayed twice")
+	case <-time.After(100 * time.Millisecond):
+	}
+}

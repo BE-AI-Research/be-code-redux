@@ -22,6 +22,14 @@ func Terminate(pid int) error {
 	return p.Kill()
 }
 
+// Kill stops the process outright. On Windows Terminate is already the
+// abrupt kill, so this is the same call; it exists so callers can escalate
+// without build tags.
+func Kill(pid int) error { return Terminate(pid) }
+
+// processAlive is optimistic on Windows: OpenProcess succeeds for a pid that
+// has exited but whose handle is still around, so a caller escalating on
+// "still alive" may escalate once unnecessarily rather than miss a live host.
 func processAlive(pid int) bool {
 	p, err := os.FindProcess(pid)
 	if err != nil || p == nil {

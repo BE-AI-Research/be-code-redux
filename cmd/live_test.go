@@ -1,10 +1,17 @@
 package cmd
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
+
+	"github.com/brown-enterprises/be-code/internal/live"
 )
 
 // testFlags mirrors the root command's persistent flags, so the argument
@@ -165,5 +172,120 @@ func TestSetResumeBindsTheRootFlagVariable(t *testing.T) {
 	}
 	if !f.Changed {
 		t.Error("root --resume not marked changed")
+	}
+}
+
+// The attach-or-new offer must not override an explicit --resume: answering
+// the default "yes" would attach the user to a different session than the one
+// they named.
+func TestOfferAttachRespectsResume(t *testing.T) {
+	live1 := &live.Record{Code: "AAA111"}
+	cases := []struct {
+		name   string
+		rec    *live.Record
+		resume string
+		code   string
+		want   bool
+	}{
+		{"no live session", nil, "", "AAA111", false},
+		{"live session, no resume flag", live1, "", "BBB222", true},
+		{"resume names another session", live1, "old-one", "BBB222", false},
+		{"resume names the live session", live1, "AAA111", "AAA111", true},
+	}
+	for _, c := range cases {
+		if got := offerAttach(c.rec, c.resume, c.code); got != c.want {
+			t.Errorf("%s: offerAttach = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The offer is made once, for the newest live session serving this workspace,
+// and never for a record whose host is gone (live.List prunes those).
+func TestNewestLiveInPicksTheNewestAndSkipsDeadHosts(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	recs := []live.Record{
+		{Code: "OLD111", PID: os.Getpid(), Socket: filepath.Join(dir, "OLD111.sock"), Workspace: "/ws", StartedAt: now.Add(-time.Hour)},
+		{Code: "NEW222", PID: os.Getpid(), Socket: filepath.Join(dir, "NEW222.sock"), Workspace: "/ws", StartedAt: now},
+		{Code: "OTHER3", PID: os.Getpid(), Socket: filepath.Join(dir, "OTHER3.sock"), Workspace: "/elsewhere", StartedAt: now.Add(time.Hour)},
+		{Code: "DEAD44", PID: deadPID(t), Socket: filepath.Join(dir, "DEAD44.sock"), Workspace: "/ws", StartedAt: now.Add(time.Minute)},
+	}
+	for _, r := range recs {
+		if err := r.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := newestLiveIn(dir, "/ws")
+	if got == nil || got.Code != "NEW222" {
+		t.Fatalf("newestLiveIn = %+v, want NEW222", got)
+	}
+	if r := newestLiveIn(dir, "/nothing-here"); r != nil {
+		t.Fatalf("newestLiveIn for an unknown workspace = %+v, want nil", r)
+	}
+}
+
+// deadPID returns a pid that is certainly not running: a child started and
+// reaped, so its pid is free (and not a zombie, which would still look alive).
+func deadPID(t *testing.T) int {
+	t.Helper()
+	c := exec.Command("sh", "-c", "exit 0")
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Wait()
+	return c.Process.Pid
+}
+
+// TestSessionsKillEscalatesAndOnlyThenRetiresTheRecord covers the report that
+// used to be a lie: a host that ignores SIGTERM was left running while the
+// command removed its record and printed "killed <code>" — the session then
+// held the workspace, the socket and its MCP children with no code left to
+// reach it by.
+func TestSessionsKillEscalatesAndOnlyThenRetiresTheRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no SIGTERM on windows; Terminate is already the abrupt kill")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The real waits are a quiet minute of grace for a handoff briefing.
+	defer func(q, g, k time.Duration) { quitWait, quitGrace, killWait = q, g, k }(quitWait, quitGrace, killWait)
+	quitWait, quitGrace, killWait = 300*time.Millisecond, 300*time.Millisecond, 2*time.Second
+
+	// A "host" that ignores SIGTERM, reaped in the background so that its pid
+	// is genuinely free once it dies (a zombie still answers kill(pid, 0)).
+	child := exec.Command("sh", "-c", "trap '' TERM; while :; do sleep 0.2; done")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan struct{})
+	go func() { defer close(waited); _ = child.Wait() }()
+	t.Cleanup(func() {
+		_ = live.Kill(child.Process.Pid)
+		<-waited
+	})
+	pid := child.Process.Pid
+
+	rec := live.Record{
+		Code: "KILL01", PID: pid, Socket: live.SocketPath(dir, "KILL01"),
+		Workspace: home, Model: "m", StartedAt: time.Now(), Token: "tok",
+	}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	// No socket is listening, so the polite quit frame cannot be delivered:
+	// straight to the signal fallback.
+	if err := sessionsKillCmd.RunE(sessionsKillCmd, []string{"KILL01"}); err != nil {
+		t.Fatalf("sessions kill: %v", err)
+	}
+	<-waited
+	if live.Alive(pid) {
+		t.Fatalf("pid %d survived `sessions kill`", pid)
+	}
+	if _, err := live.Load(dir, "KILL01"); err == nil {
+		t.Fatal("the record is still there after a successful kill")
 	}
 }

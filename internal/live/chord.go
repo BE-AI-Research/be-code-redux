@@ -28,8 +28,18 @@ type Chord struct {
 // starts a chord; the next key decides: 'd' or 0x1d → ActionDetach, 't' →
 // ActionTakeover, anything else → both bytes are forwarded verbatim. The
 // chord expires after 1s (the pending 0x1d is forwarded).
+//
+// A takeover does not end the scan: one Read routinely carries the chord and
+// the keystrokes typed straight after it (and a paste carries everything at
+// once), so the rest of the buffer keeps being processed and comes back in
+// forward — the caller claims input first, then forwards those bytes (see
+// Attach). A detach does end the scan: this client is leaving, so there is
+// nowhere left to deliver anything that followed. A detach later in the same
+// buffer therefore wins over an earlier takeover, which is the intent either
+// way.
 func (c *Chord) Feed(b []byte, now time.Time) (forward []byte, act Action) {
 	var out []byte
+	act = ActionNone
 	for _, k := range b {
 		if c.pending {
 			c.pending = false
@@ -40,7 +50,8 @@ func (c *Chord) Feed(b []byte, now time.Time) (forward []byte, act Action) {
 				case 'd', chordKey:
 					return out, ActionDetach
 				case 't':
-					return out, ActionTakeover
+					act = ActionTakeover
+					continue
 				default:
 					out = append(out, chordKey)
 				}
@@ -52,5 +63,5 @@ func (c *Chord) Feed(b []byte, now time.Time) (forward []byte, act Action) {
 		}
 		out = append(out, k)
 	}
-	return out, ActionNone
+	return out, act
 }

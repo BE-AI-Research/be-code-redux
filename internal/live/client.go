@@ -69,10 +69,41 @@ func DefaultAttachOptions() AttachOptions {
 
 const clearScreen = "\x1b[2J\x1b[H"
 
+// The terminal modes a client owns for the duration of an attach. Bubble Tea
+// emits its own mode sequences once, at program start, into the host's output
+// — before any client exists — so nothing the program does can put *this*
+// terminal into the alt screen, turn mouse reporting on, or enable bracketed
+// paste. The client has to do it, and undo it on the way out, or the session
+// renders into the main buffer with a visible cursor, no mouse selection and
+// no multi-line paste (each pasted line submitting as its own message).
+//
+// enterModes: alt screen (1049h), hide cursor (25l), mouse cell-motion
+// reporting with SGR extended coordinates (1002h/1006h — what the served
+// program is run with, see tui.RunServed), bracketed paste (2004h).
+// exitModes is the exact reverse, innermost last.
+const (
+	enterModes = "\x1b[?1049h\x1b[?25l\x1b[?1002h\x1b[?1006h\x1b[?2004h"
+	exitModes  = "\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?25h\x1b[?1049l"
+	// exitModesEnded is exitModes without the alt-screen exit, for the one
+	// case where the host has already taken this terminal back to the normal
+	// screen and printed the resume line there (see ReasonEnded): a second
+	// 1049l would restore the cursor to its attach-time position and let the
+	// shell prompt overwrite exactly the line the user needs to read.
+	exitModesEnded = "\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?25h"
+)
+
+// ExitAltScreen takes every attached terminal back to the normal screen with
+// a visible cursor. The host writes it to its fan-out output before the
+// session's closing lines (see cmd/live.go), so those land on the normal
+// screen and survive the clients' own restore — the resume code is the one
+// thing that must still be on screen after every terminal has let go.
+const ExitAltScreen = "\x1b[?1049l\x1b[?25h"
+
 // ReasonEnded is Host.Close's reason when the served program has finished
 // (see cmd/live.go). It is the one bye reason that means the program already
 // left the alt screen and printed its closing lines — the resume code — on
-// the normal screen, so Attach must not clear on its way out.
+// the normal screen, so Attach must not clear (or re-exit the alt screen) on
+// its way out.
 const ReasonEnded = "session ended"
 
 // deadlineReader is implemented by *os.File (a real terminal, since Go
@@ -131,7 +162,19 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 		return "", err
 	}
 	defer restore()
-	io.WriteString(opt.Stdout, clearScreen)
+	// Deferred after restore() (so it runs before it, defers being LIFO) and
+	// driven by a variable rather than written inline at the end, so that
+	// every exit path — including one added later — leaves this terminal's
+	// modes as it found them.
+	ended := false
+	defer func() {
+		if ended {
+			io.WriteString(opt.Stdout, exitModesEnded)
+			return
+		}
+		io.WriteString(opt.Stdout, exitModes)
+	}()
+	io.WriteString(opt.Stdout, enterModes+clearScreen)
 
 	result := make(chan string, 2)
 	stdinDone := make(chan struct{})
@@ -186,6 +229,13 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// final keystrokes right before EOF are never dropped.
 			if n > 0 {
 				fwd, act := chord.Feed(buf[:n], time.Now())
+				// A takeover is claimed before the bytes that shared the
+				// read are forwarded: those bytes are what the user typed
+				// after Ctrl+] t, and they are only delivered to the
+				// program if this client already holds input.
+				if act == ActionTakeover {
+					writeFrame(FTakeover, nil)
+				}
 				// Forward any plain bytes the same Read delivered ahead of
 				// the chord (e.g. pasted text ending in Ctrl+] d) before
 				// acting on act, so they reach the program instead of
@@ -199,8 +249,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 						return
 					}
 				}
-				switch act {
-				case ActionDetach:
+				if act == ActionDetach {
 					localDetach.Store(true)
 					writeFrame(FDetach, nil)
 					select {
@@ -208,8 +257,6 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 					default:
 					}
 					return
-				case ActionTakeover:
-					writeFrame(FTakeover, nil)
 				}
 			}
 			if err != nil {
@@ -288,11 +335,14 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	}
 
 	// The session is still running (a detach) or gone unexpectedly, so this
-	// terminal is left holding a frozen alt-screen rendering: clear it so the
-	// shell prompt lands on a clean screen. A session that ended normally is
-	// the exception — its program restored the normal screen itself and then
-	// printed the resume line, which a clear here would wipe.
-	if reason != ReasonEnded {
+	// terminal is left holding a frozen alt-screen rendering: clear it so a
+	// terminal without alt-screen support does not keep it, before the
+	// deferred exitModes leaves the alt screen on one that does. A session
+	// that ended normally is the exception — the host already took this
+	// terminal back to the normal screen and printed the resume line there,
+	// which a clear (or a second alt-screen exit) would wipe.
+	ended = reason == ReasonEnded
+	if !ended {
 		io.WriteString(opt.Stdout, clearScreen)
 	}
 	return reason, retErr

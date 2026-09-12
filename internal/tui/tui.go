@@ -144,10 +144,15 @@ type Model struct {
 
 	// Served mode (see served.go): running over a live.Host instead of the
 	// local terminal.
-	host         *live.Host
-	served       bool
-	clients      []live.ClientInfo
-	detachHolder func()    // host.DetachHolder when served; nil in-process
+	host    *live.Host
+	served  bool
+	clients []live.ClientInfo
+	// detachHolder is host.DetachHolder when served, nil in-process. It must
+	// never be called from inside Update: it notifies the host's callbacks,
+	// which p.Send into the very channel this goroutine is receiving from
+	// (see /detach, and the warning on live.Host.recompute). /detach hands it
+	// to Bubble Tea as a tea.Cmd, which runs on its own goroutine.
+	detachHolder func()
 	ascii        bool      // some attached client cannot show UTF-8 glyphs
 	idleSince    time.Time // last moment the session had a client or a run
 }
@@ -1085,8 +1090,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.appendLine(stDim.Render("nothing to detach: not served"))
 			return m, nil
 		}
-		m.detachHolder()
-		return m, nil
+		// As a command, not a call: detaching makes the host notify its
+		// callbacks, which p.Send messages to this program — and Update runs
+		// on the goroutine that receives them, so calling the host here would
+		// deadlock the session for good (holding the host's notifyMu, so no
+		// later attach or `sessions kill` could recover it).
+		detach := m.detachHolder
+		return m, func() tea.Msg { detach(); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
 			return m.resumeSession(fields[1])

@@ -174,3 +174,144 @@ func TestAttachResetsStdinDeadlineOnReturn(t *testing.T) {
 		t.Fatalf("got %q", buf[:n])
 	}
 }
+
+// TestAttachSetsAndRestoresTerminalModes covers what a client owns: the
+// program's own mode sequences went out once at program start, before this
+// terminal existed, so the alt screen, the hidden cursor, mouse reporting
+// and bracketed paste are the client's to set — and to undo, or the shell it
+// returns to is left reporting mouse clicks into its prompt.
+func TestAttachSetsAndRestoresTerminalModes(t *testing.T) {
+	h, sock := startHost(t)
+	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
+	stdinR, stdinW := io.Pipe()
+	var stdout syncBuffer
+	restored := make(chan struct{})
+	done := make(chan string, 1)
+	go func() {
+		reason, _ := Attach(context.Background(), rec, AttachOptions{
+			Label: "test", Stdin: stdinR, Stdout: &stdout,
+			Raw:  func() (func(), error) { return func() { close(restored) }, nil },
+			Size: func() (int, int) { return 90, 30 }, UTF8: true,
+		})
+		done <- reason
+	}()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	// The modes are set before anything is drawn.
+	if got := stdout.String(); !strings.HasPrefix(got, enterModes) {
+		t.Fatalf("stdout does not begin with the mode-set sequences: %q", got)
+	}
+	stdinW.Write([]byte{0x1d, 'd'})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Attach did not return after the detach chord")
+	}
+	<-restored // raw mode is restored after the modes, not before
+	if got := stdout.String(); !strings.HasSuffix(got, exitModes) {
+		t.Fatalf("stdout does not end with the mode-reset sequences: %q", got)
+	}
+}
+
+// TestAttachKeepsTheResumeLineVisibleAfterAnEndedSession is the ordering the
+// whole ReasonEnded special case exists for. The host takes every client back
+// to the normal screen (live.ExitAltScreen) and then prints the resume line
+// there; the client must not clear the screen or exit the alt screen again on
+// its way out, because a second 1049l restores the cursor to its attach-time
+// position and the shell prompt would then overwrite exactly that line.
+func TestAttachKeepsTheResumeLineVisibleAfterAnEndedSession(t *testing.T) {
+	h, sock := startHost(t)
+	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
+	stdinR, _ := io.Pipe()
+	var stdout syncBuffer
+	done := make(chan string, 1)
+	go func() {
+		reason, _ := Attach(context.Background(), rec, AttachOptions{
+			Label: "t", Stdin: stdinR, Stdout: &stdout,
+			Raw:  func() (func(), error) { return func() {}, nil },
+			Size: func() (int, int) { return 80, 24 }, UTF8: true,
+		})
+		done <- reason
+	}()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+
+	// What cmd/live.go writes on the way out, through the same CRLF writer.
+	out := NewCRLFWriter(h.Output())
+	io.WriteString(out, ExitAltScreen)
+	io.WriteString(out, "\nfinishing session (writing the handoff briefing)...\n")
+	io.WriteString(out, "resume: be-code --resume T   (a title)\n")
+	within(t, 2*time.Second, func() bool { return strings.Contains(stdout.String(), "resume: be-code") })
+	h.Close(ReasonEnded)
+	select {
+	case reason := <-done:
+		if reason != ReasonEnded {
+			t.Fatalf("reason = %q", reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Attach did not return on host close")
+	}
+
+	got := stdout.String()
+	at := strings.Index(got, "resume: be-code --resume T")
+	if at < 0 {
+		t.Fatalf("no resume line in the client's output: %q", got)
+	}
+	tail := got[at:]
+	if strings.Contains(tail, "\x1b[?1049l") {
+		t.Fatalf("the client left the alt screen after the resume line: %q", tail)
+	}
+	if strings.Contains(tail, clearScreen) {
+		t.Fatalf("the client cleared the screen after the resume line: %q", tail)
+	}
+	// The alt screen was left exactly once, by the host, before the line.
+	if n := strings.Count(got, "\x1b[?1049l"); n != 1 {
+		t.Fatalf("alt screen exited %d times, want 1: %q", n, got)
+	}
+	if !strings.HasSuffix(got, exitModesEnded) {
+		t.Fatalf("stdout does not end with the ended-session mode resets: %q", got)
+	}
+	// The lines are CRLF-terminated: a bare LF staircases in raw mode.
+	if !strings.Contains(got, "\r\nresume: be-code --resume T") {
+		t.Fatalf("resume line is not at column 0: %q", got)
+	}
+}
+
+// TestAttachTakeoverClaimsInputBeforeForwarding covers the ordering a
+// takeover needs: the bytes that share the read with Ctrl+] t are what the
+// user typed to the session, and the host swallows a viewer's input — so the
+// takeover frame has to go first or those keystrokes are lost.
+func TestAttachTakeoverClaimsInputBeforeForwarding(t *testing.T) {
+	h, sock := startHost(t)
+	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
+	stdinR, stdinW := io.Pipe()
+	done := make(chan string, 1)
+	go func() {
+		reason, _ := Attach(context.Background(), rec, AttachOptions{Label: "viewer", Stdin: stdinR, Stdout: io.Discard,
+			Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true})
+		done <- reason
+	}()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	// A second client attaches and takes input, leaving Attach's client a viewer.
+	other := dial(t, sock, "tok", "other", 80, 24)
+	within(t, time.Second, func() bool {
+		cl := h.Clients()
+		return len(cl) == 2 && cl[1].Holder
+	})
+	_ = other
+
+	stdinW.Write([]byte{0x1d, 't', 'h', 'i'})
+	within(t, 2*time.Second, func() bool {
+		cl := h.Clients()
+		return len(cl) == 2 && cl[0].Holder && cl[0].Label == "viewer"
+	})
+	buf := make([]byte, 8)
+	n, _ := h.InputReader().Read(buf)
+	if string(buf[:n]) != "hi" {
+		t.Fatalf("program got %q, want \"hi\" after the takeover", buf[:n])
+	}
+	stdinW.Write([]byte{0x1d, 'd'})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Attach did not return after the detach chord")
+	}
+}
