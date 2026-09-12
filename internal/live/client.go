@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/x/term"
@@ -72,7 +73,11 @@ const clearScreen = "\x1b[2J\x1b[H"
 // 1.23) but not by the in-memory pipes the tests use. When available,
 // Attach uses it to interrupt a stdin goroutine parked in Read once the
 // session ends, so that goroutine does not outlive Attach and steal a
-// keystroke from whatever reads stdin next.
+// keystroke from whatever reads stdin next. The deadline is always reset
+// to the zero value before Attach returns: a non-zero deadline persists
+// across calls, so leaving it set would make every subsequent read of the
+// same file (a reattach, a fallback prompt) fail instantly with an i/o
+// timeout.
 type deadlineReader interface {
 	SetReadDeadline(t time.Time) error
 }
@@ -92,6 +97,14 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	// then payload) and an interleaving of those from two goroutines would
 	// corrupt the frame stream. Serialize every write through this mutex.
 	var connMu sync.Mutex
+	// localDetach is set (before FDetach is written) when the user's own
+	// Ctrl+] d/Ctrl+] chord asks to detach. Sending FDetach makes the host
+	// detach this client and reply with its own FBye (reason "detached"),
+	// which can race the stdin goroutine's own "" result: whichever gets
+	// pushed into result first would otherwise decide Attach's return
+	// value. A user-initiated detach must deterministically return "" (the
+	// documented contract), so the flag overrides whatever result carries.
+	var localDetach atomic.Bool
 	writeFrame := func(t FrameType, payload []byte) error {
 		connMu.Lock()
 		defer connMu.Unlock()
@@ -116,6 +129,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 
 	result := make(chan string, 2)
 	stdinDone := make(chan struct{})
+	readerDone := make(chan struct{})
 	// done is closed the moment Attach is about to return, for any reason
 	// (host bye, local detach, or ctx cancel). The size-polling goroutine
 	// below only has a ticker to drive it, so without this it would run
@@ -126,6 +140,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 
 	// host → stdout
 	go func() {
+		defer close(readerDone)
 		for {
 			typ, p, err := ReadFrame(conn)
 			if err != nil {
@@ -165,17 +180,10 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 			// final keystrokes right before EOF are never dropped.
 			if n > 0 {
 				fwd, act := chord.Feed(buf[:n], time.Now())
-				switch act {
-				case ActionDetach:
-					writeFrame(FDetach, nil)
-					select {
-					case result <- "":
-					default:
-					}
-					return
-				case ActionTakeover:
-					writeFrame(FTakeover, nil)
-				}
+				// Forward any plain bytes the same Read delivered ahead of
+				// the chord (e.g. pasted text ending in Ctrl+] d) before
+				// acting on act, so they reach the program instead of
+				// being dropped by an early return below.
 				if len(fwd) > 0 && !opt.View {
 					if werr := writeFrame(FInput, fwd); werr != nil {
 						select {
@@ -184,6 +192,18 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 						}
 						return
 					}
+				}
+				switch act {
+				case ActionDetach:
+					localDetach.Store(true)
+					writeFrame(FDetach, nil)
+					select {
+					case result <- "":
+					default:
+					}
+					return
+				case ActionTakeover:
+					writeFrame(FTakeover, nil)
 				}
 			}
 			if err != nil {
@@ -225,18 +245,40 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 		writeFrame(FDetach, nil)
 		retErr = ctx.Err()
 	}
+	// A user-initiated detach must return "" even if the host's own bye
+	// (sent in reply to our FDetach, reason "detached") won the race into
+	// result ahead of the stdin goroutine's own "" — see localDetach above.
+	if localDetach.Load() {
+		reason = ""
+	}
 
-	// Best-effort: interrupt a stdin goroutine still parked in Read so it
-	// does not outlive this call. Only works when opt.Stdin supports read
-	// deadlines (a real terminal); an io.Reader that doesn't (e.g. an
-	// io.PipeReader with no pending write, as in tests) can't be
-	// interrupted this way and is left to exit on its own next input.
+	// Force both background goroutines off the connection and stdin before
+	// writing the final clear, so neither can still be mid-write when we
+	// do (or race each other): closing conn makes a blocked ReadFrame in
+	// the host→stdout goroutine error out deterministically instead of
+	// possibly still writing to opt.Stdout when we return, and setting a
+	// read deadline interrupts a stdin goroutine parked in Read (real
+	// terminals only - see deadlineReader). Both waits are bounded: an
+	// io.Reader without deadline support (e.g. an io.PipeReader with no
+	// pending write, as in tests) can't be interrupted and is left to exit
+	// on its own later.
+	conn.Close()
 	if d, ok := opt.Stdin.(deadlineReader); ok {
 		d.SetReadDeadline(time.Now())
 	}
-	select {
-	case <-stdinDone:
-	case <-time.After(50 * time.Millisecond):
+	wait := func(ch <-chan struct{}) {
+		select {
+		case <-ch:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	wait(readerDone)
+	wait(stdinDone)
+	// Reset the deadline: leaving it set would make every subsequent read
+	// of this same file (a reattach, a fallback prompt) fail instantly
+	// with an i/o timeout, long after this Attach call has returned.
+	if d, ok := opt.Stdin.(deadlineReader); ok {
+		d.SetReadDeadline(time.Time{})
 	}
 
 	io.WriteString(opt.Stdout, clearScreen)
