@@ -71,7 +71,6 @@ func TestHostArgsForwardsEveryChangedFlag(t *testing.T) {
 }
 
 func TestHostArgsNeverForwardsLauncherOnlyFlags(t *testing.T) {
-	fs := testFlags()
 	for _, name := range []string{"session-host", "no-host", "dir"} {
 		fs2 := testFlags()
 		val := "true"
@@ -87,7 +86,6 @@ func TestHostArgsNeverForwardsLauncherOnlyFlags(t *testing.T) {
 			}
 		}
 	}
-	_ = fs
 }
 
 // TestRootHasTheFlagsHostArgsSkips guards the skip list against a rename:
@@ -114,4 +112,58 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// The attach command's fallback to a saved session must reach the spawned
+// host: assigning flagResume leaves the flag unchanged, and hostArgs forwards
+// only changed flags, so the host would resume nothing while the launcher
+// derived the live record's code from the saved session — two saved sessions
+// then share one resume code.
+func TestSetResumeIsForwardedToTheHost(t *testing.T) {
+	fs := testFlags()
+	if contains(hostArgs("A1B2C3", "/work/space", fs), "--resume=ZZ9QQ9") {
+		t.Fatal("resume forwarded while the flag is unchanged")
+	}
+	for _, arg := range hostArgs("A1B2C3", "/work/space", fs) {
+		if strings.HasPrefix(arg, "--resume") {
+			t.Fatalf("unchanged resume flag forwarded as %q", arg)
+		}
+	}
+	if err := setResume(fs, "ZZ9QQ9"); err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Lookup("resume").Changed {
+		t.Error("setResume did not mark the flag changed")
+	}
+	if got := fs.Lookup("resume").Value.String(); got != "ZZ9QQ9" {
+		t.Errorf("resume value %q, want ZZ9QQ9", got)
+	}
+	if !contains(hostArgs("A1B2C3", "/work/space", fs), "--resume=ZZ9QQ9") {
+		t.Errorf("--resume=ZZ9QQ9 not forwarded: %q", hostArgs("A1B2C3", "/work/space", fs))
+	}
+}
+
+// setResume goes through the real root flag set in production, so the flag it
+// names must exist there and its binding must write flagResume.
+func TestSetResumeBindsTheRootFlagVariable(t *testing.T) {
+	fs := rootCmd.PersistentFlags()
+	f := fs.Lookup("resume")
+	if f == nil {
+		t.Fatal("root has no persistent --resume flag")
+	}
+	prev, prevChanged := flagResume, f.Changed
+	defer func() {
+		f.Value.Set(prev)
+		f.Changed = prevChanged
+		flagResume = prev
+	}()
+	if err := setResume(fs, "QQ2222"); err != nil {
+		t.Fatal(err)
+	}
+	if flagResume != "QQ2222" {
+		t.Errorf("flagResume is %q, want QQ2222 (the flag is not bound to it)", flagResume)
+	}
+	if !f.Changed {
+		t.Error("root --resume not marked changed")
+	}
 }

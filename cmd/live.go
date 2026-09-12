@@ -222,6 +222,19 @@ func waitForHost(dir, code, sock string) error {
 	}
 }
 
+// setResume turns on --resume from inside the program, for the attach
+// command's fallback to a saved session. It has to go through the flag set
+// rather than assign flagResume: the binding updates the variable either
+// way, but only FlagSet.Set marks the flag Changed, and hostArgs forwards
+// exactly the changed flags — so assigning the variable would leave the
+// spawned host resuming nothing while the launcher believed it would.
+func setResume(flags *pflag.FlagSet, code string) error {
+	if err := flags.Set("resume", code); err != nil {
+		return fmt.Errorf("--resume %s: %w", code, err)
+	}
+	return nil
+}
+
 // hostArgs builds the spawned host's argument list: the advertised code, the
 // resolved workspace, and every root persistent flag the user actually
 // changed. It forwards them wholesale rather than naming a few, because the
@@ -338,7 +351,9 @@ var attachCmd = &cobra.Command{
 		if flagView {
 			fmt.Fprintln(os.Stderr, "note: --view only applies to a live session; this is a normal resumed session")
 		}
-		flagResume = code
+		if err := setResume(cmd.Root().PersistentFlags(), code); err != nil {
+			return err
+		}
 		return runInteractive(cmd)
 	},
 }
