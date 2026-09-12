@@ -88,9 +88,10 @@ func (m *Model) popupRows(want int) int {
 }
 
 // omitPopupDesc reports whether a popup should drop item descriptions to
-// save width.
+// save width. Gated on compact() first so "layout: full" overrides it even
+// in a narrow terminal, matching the documented override.
 func (m *Model) omitPopupDesc() bool {
-	return m.width < 60
+	return m.compact() && m.width < 60
 }
 
 // ---- bottom line -------------------------------------------------------------

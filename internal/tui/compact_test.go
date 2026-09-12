@@ -64,6 +64,28 @@ func TestCompactBottomLineAndPopups(t *testing.T) {
 	}
 }
 
+// omitPopupDesc must be gated on compact() first: "layout: full" forces
+// compact() false, so descriptions come back even under 60 columns; the
+// default "auto" still omits them at the same size.
+func TestCompactPopupDescRespectsLayoutOverride(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 56, Height: 18})
+
+	m.cfg.Layout = "full"
+	m.openPalette("")
+	v := m.View()
+	if !strings.Contains(v, "command reference") {
+		t.Fatalf("layout=full must show palette descriptions even under 60 columns:\n%s", v)
+	}
+
+	m.cfg.Layout = "auto"
+	m.openPalette("")
+	v = m.View()
+	if strings.Contains(v, "command reference") {
+		t.Fatalf("layout=auto must omit palette descriptions under 60 columns:\n%s", v)
+	}
+}
+
 func TestASCIIFallbacks(t *testing.T) {
 	m := newTestModel(t)
 	m.ascii = true
