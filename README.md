@@ -91,8 +91,11 @@ session total).
 Thirteen palettes: `dark` (default), `light`, `mono`, `dracula`, `nord`, `gruvbox`,
 `monokai`, `one-dark`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`
 and `github-light`. `/theme` opens a picker, `/theme nord` sets one directly; the choice
-applies at once and is saved as `theme` in the config. Plain mode uses your terminal's
-own colours, so there `/theme` only records the choice for the TUI.
+applies at once and is saved as `theme` in the config. The ten named themes also
+recolour the terminal window itself (background, and foreground for light themes) on
+terminals that support it, restored when BE-Code exits; set `theme_terminal_colors`
+to false to keep your terminal's own background. Plain mode uses your terminal's own
+colours, so there `/theme` only records the choice for the TUI.
 
 ## Select and copy
 

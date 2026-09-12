@@ -149,6 +149,9 @@ func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
 	}
 	m.cfg.Theme = applied
 	m.richText = applied != "mono"
+	if m.cfg.ThemeTerminalColors && m.termWrite != nil {
+		m.termWrite(terminalColorSeq(applied))
+	}
 	if err := m.cfg.Save(); err != nil {
 		m.appendLine(stWarn.Render("theme set to " + applied + " for this session; could not save config: " + err.Error()))
 	} else {

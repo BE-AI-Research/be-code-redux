@@ -138,6 +138,8 @@ type Model struct {
 	clipboardRead  func() (string, error)
 
 	queueCursor int // highlighted row in the queue popup
+
+	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
 }
 
 // New builds the TUI model.
@@ -170,6 +172,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 
 		clipboardWrite: writeClipboard,
 		clipboardRead:  readClipboard,
+		termWrite:      writeTerminal,
 	}
 	ag.Tools.Approve = m.approveFromAgent
 	ag.Events = agent.Events{
@@ -213,6 +216,10 @@ func (m *Model) usageSnapshot() usageMsg {
 // Run starts the program (alt screen) and blocks until exit.
 func (m *Model) Run(ctx context.Context) error {
 	m.rootCtx = ctx
+	if m.cfg.ThemeTerminalColors {
+		m.termWrite(terminalColorSeq(m.cfg.Theme))
+		defer m.termWrite(terminalColorReset())
+	}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	m.program = p
 	_, err := p.Run()
