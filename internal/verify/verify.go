@@ -116,7 +116,7 @@ func skipReason(c Check, out string, err error) (string, bool) {
 		return "pytest is not installed for the interpreter used (" + strings.Fields(c.Command)[0] + "); install it or add a .venv", true
 	}
 	var exitErr *osexec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && strings.Contains(c.Command, "pytest") {
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && (c.Name == "pytest" || strings.Contains(c.Command, "pytest")) {
 		return "no tests collected", true
 	}
 	return "", false
