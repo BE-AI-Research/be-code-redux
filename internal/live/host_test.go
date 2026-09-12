@@ -703,3 +703,57 @@ func TestHostClearOverlaysStopsReappending(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// TestSanitizeLabel: a client's label is text it chose, and it lands in
+// every other terminal's transcript, bottom line and /clients list — so the
+// host, not the renderer, is where it stops being able to move the cursor,
+// recolour the screen or wrap the status row.
+func TestSanitizeLabel(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain label survives", "ssh from 10.0.0.2 (pid 12)", "ssh from 10.0.0.2 (pid 12)"},
+		{"newlines and tabs go", "two\nlines\there", "twolineshere"},
+		{"csi colour goes", "\x1b[31mred\x1b[0m", "red"},
+		{"cursor move goes", "\x1b[2J\x1b[Hwiped", "wiped"},
+		{"osc title goes", "\x1b]0;title\x07after", "after"},
+		{"osc with st goes", "\x1b]0;title\x1b\\after", "after"},
+		{"alt key sequence goes", "\x1bxab", "ab"},
+		{"del byte goes", "a\x7fb", "ab"},
+		{"empty becomes client", "", "client"},
+		{"control-only becomes client", "\x1b[31m\n\t", "client"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeLabel(c.in); got != c.want {
+				t.Fatalf("sanitizeLabel(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	long := sanitizeLabel(strings.Repeat("x", 100))
+	if r := []rune(long); len(r) != maxLabelRunes || r[len(r)-1] != '…' {
+		t.Fatalf("100-rune label = %q (%d runes), want %d ending in an ellipsis", long, len(r), maxLabelRunes)
+	}
+}
+
+// TestHostSanitizesHelloLabel checks the trust boundary itself: the label
+// is cleaned where the hello frame is accepted, so nothing downstream (the
+// roster, the transcript, the bottom line) ever sees the raw bytes.
+func TestHostSanitizesHelloLabel(t *testing.T) {
+	h, sock := startHost(t)
+	fc := dial(t, sock, "tok", "\x1b[31mevil\nname"+strings.Repeat("x", 100), 80, 24)
+	defer fc.conn.Close()
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 1 })
+	cl := h.Clients()
+	if len(cl) != 1 {
+		t.Fatalf("client never attached (%d in the roster)", len(cl))
+	}
+	label := cl[0].Label
+	if strings.ContainsAny(label, "\x1b\n") {
+		t.Fatalf("roster label still carries control bytes: %q", label)
+	}
+	if len([]rune(label)) > maxLabelRunes {
+		t.Fatalf("roster label is %d runes: %q", len([]rune(label)), label)
+	}
+	if !strings.HasPrefix(label, "evilname") {
+		t.Fatalf("roster label = %q, want it to start with evilname", label)
+	}
+}

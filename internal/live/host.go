@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,9 +72,77 @@ type client struct {
 	once       sync.Once
 }
 
+// maxLabelRunes bounds a client's label. It is shown in the bottom line's
+// clients marker, in every transcript line that client sends, and in
+// /clients, so a label long enough to wrap the row is a nuisance for every
+// other terminal, not just its own.
+const maxLabelRunes = 40
+
+// sanitizeLabel makes a client-supplied label safe to render. The label
+// arrives in that client's hello frame, so it is attacker-controlled text
+// that reaches the shared screen: control bytes, and anything an ESC
+// introduces, would let one terminal repaint or recolour everyone else's
+// session. Everything below 0x20, DEL, and every ESC-introduced sequence is
+// dropped; what is left is clamped to maxLabelRunes (with an ellipsis) and
+// an empty result becomes "client".
+func sanitizeLabel(s string) string {
+	const (
+		plain    = iota
+		afterESC // the byte after an ESC decides what kind of sequence it is
+		inCSI    // ESC [ or ESC O: runs to a final byte (0x40-0x7e)
+		inString // ESC ] or ESC P: runs to BEL or the ESC of an ST
+	)
+	var b strings.Builder
+	state := plain
+	for _, r := range s {
+		switch state {
+		case afterESC:
+			switch r {
+			case '[', 'O':
+				state = inCSI
+			case ']', 'P', '^', '_':
+				state = inString
+			case 0x1b: // ESC ESC: still waiting for an introducer
+			default:
+				state = plain // a two-byte sequence (alt+key); both bytes gone
+			}
+			continue
+		case inCSI:
+			if r >= 0x40 && r <= 0x7e {
+				state = plain
+			}
+			continue
+		case inString:
+			switch r {
+			case 0x07:
+				state = plain
+			case 0x1b:
+				state = afterESC // the ESC of an ST; its '\' goes with it
+			}
+			continue
+		}
+		switch {
+		case r == 0x1b:
+			state = afterESC
+		case r < 0x20 || r == 0x7f:
+			// A bare control byte (newline, carriage return, BEL…).
+		default:
+			b.WriteRune(r)
+		}
+	}
+	label := strings.TrimSpace(b.String())
+	if r := []rune(label); len(r) > maxLabelRunes {
+		label = string(r[:maxLabelRunes-1]) + "…"
+	}
+	if label == "" {
+		return "client"
+	}
+	return label
+}
+
 func newClient(hello Hello, conn net.Conn) *client {
 	return &client{
-		label: hello.Label, cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
+		label: sanitizeLabel(hello.Label), cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
 		wake:       make(chan struct{}, 1),
 		writerDone: make(chan struct{}),
 	}
@@ -512,6 +581,21 @@ func (h *Host) Switch(id int, code string) {
 	}
 }
 
+// ClearOverlays forgets every client's overlay so the fan-out stops
+// re-appending them. The served program calls it on its way into a quit,
+// and the host process again the moment that program returns: the closing
+// lines (leaving the alt screen, the resume line) are ordinary output
+// frames, and an overlay appended after each of them would paint the
+// client's draft onto the main screen and drag the cursor away from
+// column 0.
+func (h *Host) ClearOverlays() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.clients {
+		c.overlay = ""
+	}
+}
+
 // SetOverlay records a client's private input rows and sends them. The
 // same rows are appended to every shared frame that client receives, so a
 // full repaint never erases them. An unchanged overlay is not re-sent.
@@ -524,20 +608,6 @@ func (h *Host) Switch(id int, code string) {
 // this call updates it, then enqueue that stale value after this call's own
 // FOverlay, permanently reverting the client's rendered overlay with no next
 // frame to correct it (a private keystroke need not change the shared view).
-// ClearOverlays forgets every client's overlay so the fan-out stops
-// re-appending them. The host process calls it the moment the served
-// program returns: the closing lines (leaving the alt screen, the resume
-// line) are ordinary output frames, and an overlay appended after each of
-// them would paint the client's draft onto the main screen and drag the
-// cursor away from column 0.
-func (h *Host) ClearOverlays() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, c := range h.clients {
-		c.overlay = ""
-	}
-}
-
 func (h *Host) SetOverlay(id int, s string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

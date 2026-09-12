@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestChordDetachAndTakeover(t *testing.T) {
+func TestChordDetachAndLiterals(t *testing.T) {
 	now := time.Now()
 	var c Chord
 	fwd, act := c.Feed([]byte("ab"), now)
@@ -50,7 +50,7 @@ func TestChordDetachAndTakeover(t *testing.T) {
 // exercised ActionTakeover: Task 3 removes that action entirely (Ctrl+] t no
 // longer forwards to the host's take-input-back logic - see client.go), so
 // there is nothing left for that test to assert beyond ordinary forwarding,
-// already covered by TestChordDetachAndTakeover's "unknown chord key" case
+// already covered by TestChordDetachAndLiterals's "unknown chord key" case
 // and this one's multi-byte read.
 func TestChordForwardsBytesAroundAnUnknownChordKey(t *testing.T) {
 	now := time.Now()
