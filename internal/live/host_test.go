@@ -672,3 +672,34 @@ func TestHostReplaysQuitRequestedBeforeOnQuit(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// Once the served program has returned, the host's closing lines must not
+// be followed by overlays: ClearOverlays makes later frames arrive bare.
+func TestHostClearOverlaysStopsReappending(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.SetOverlay(h.Clients()[0].ID, "DRAFT")
+	select {
+	case <-a.overlay:
+	case <-time.After(time.Second):
+		t.Fatal("overlay never arrived")
+	}
+	h.ClearOverlays()
+	h.Output().Write([]byte("resume line"))
+	select {
+	case p := <-a.out:
+		if string(p) != "resume line" {
+			t.Fatalf("frame %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("frame never arrived")
+	}
+	select {
+	case p := <-a.overlay:
+		if len(p) > 0 {
+			t.Fatalf("overlay %q re-appended after ClearOverlays", p)
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}

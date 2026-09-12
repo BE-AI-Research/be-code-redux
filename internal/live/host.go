@@ -524,6 +524,20 @@ func (h *Host) Switch(id int, code string) {
 // this call updates it, then enqueue that stale value after this call's own
 // FOverlay, permanently reverting the client's rendered overlay with no next
 // frame to correct it (a private keystroke need not change the shared view).
+// ClearOverlays forgets every client's overlay so the fan-out stops
+// re-appending them. The host process calls it the moment the served
+// program returns: the closing lines (leaving the alt screen, the resume
+// line) are ordinary output frames, and an overlay appended after each of
+// them would paint the client's draft onto the main screen and drag the
+// cursor away from column 0.
+func (h *Host) ClearOverlays() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, c := range h.clients {
+		c.overlay = ""
+	}
+}
+
 func (h *Host) SetOverlay(id int, s string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

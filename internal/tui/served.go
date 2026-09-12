@@ -83,6 +83,7 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 		go p.Send(idleTickMsg(time.Now()))
 	}
 	_, err := p.Run()
+	m.clearAllOverlays() // nothing is rendered any more; the host's closing lines follow
 	m.histFile.save()
 	return err
 }
