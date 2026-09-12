@@ -484,6 +484,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		} else {
 			fmt.Println("plan discarded")
 		}
+	case "/clients", "/detach":
+		fmt.Println("only available in the full-screen TUI")
 	default:
 		if c, ok := r.Custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))

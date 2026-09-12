@@ -176,6 +176,8 @@ func (m *Model) menuEntries() []menuEntry {
 		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
+		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},
+		{"Sessions", "Detach this terminal", "session keeps running; be-code attach <code> to return", cmd("/detach")},
 		{"Models", "Switch model", "list models on the backend", func(m *Model) (tea.Model, tea.Cmd) { return m.openModelPicker() }},
 		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *Model) (tea.Model, tea.Cmd) { return m.openProviderPicker() }},
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},

@@ -19,6 +19,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -140,6 +141,15 @@ type Model struct {
 	queueCursor int // highlighted row in the queue popup
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
+
+	// Served mode (see served.go): running over a live.Host instead of the
+	// local terminal.
+	host         *live.Host
+	served       bool
+	clients      []live.ClientInfo
+	detachHolder func()    // host.DetachHolder when served; nil in-process
+	ascii        bool      // some attached client cannot show UTF-8 glyphs
+	idleSince    time.Time // last moment the session had a client or a run
 }
 
 // New builds the TUI model.
@@ -392,6 +402,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modalVP.SetContent(msg.plan)
 	case usageMsg:
 		m.usage = msg
+	case clientsMsg:
+		m.updateClients(msg)
+	case idleTickMsg:
+		return m.updateIdleTick(msg)
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
@@ -799,6 +813,16 @@ func (m *Model) bottomLine() string {
 	if m.ag.IDEName != "" {
 		line += stAccent.Render(" ⌘ ide")
 	}
+	if len(m.clients) > 1 {
+		holder := "?"
+		for _, c := range m.clients {
+			if c.Holder {
+				holder = c.Label
+			}
+		}
+		line += stAccent.Render(fmt.Sprintf(" ⧉ %d", len(m.clients))) +
+			stDim.Render(" · input: "+holder+" · Ctrl+] d detach · Ctrl+] t take over")
+	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
 	}
@@ -998,6 +1022,26 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		} else {
 			m.appendLine(stDim.Render("no handoff briefing in this session"))
 		}
+	case "/clients":
+		if len(m.clients) == 0 {
+			m.appendLine(stDim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
+			return m, nil
+		}
+		for _, c := range m.clients {
+			mark := "  "
+			if c.Holder {
+				mark = "> "
+			}
+			m.appendLine(stDim.Render(fmt.Sprintf("%s%s  %dx%d", mark, c.Label, c.Cols, c.Rows)))
+		}
+		return m, nil
+	case "/detach":
+		if m.detachHolder == nil {
+			m.appendLine(stDim.Render("nothing to detach: not served"))
+			return m, nil
+		}
+		m.detachHolder()
+		return m, nil
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
 			return m.resumeSession(fields[1])

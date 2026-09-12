@@ -337,6 +337,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
 - `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
+- `live_idle_limit` (0) — minutes a served session may sit with no attached clients
+  and no run in progress before it exits (0 = never)
 
 ## Status
 

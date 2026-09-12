@@ -70,6 +70,10 @@ type Config struct {
 	// (OSC 11/10), restored on exit. Off if your terminal misbehaves.
 	ThemeTerminalColors bool `json:"theme_terminal_colors"`
 
+	// LiveIdleLimit is the number of minutes a served session may sit with
+	// no clients and no run before it exits (0 = never).
+	LiveIdleLimit int `json:"live_idle_limit"`
+
 	// ShellAllow / ShellDeny are glob patterns ('*' matches anything)
 	// checked against shell commands. Deny wins and never runs; an allow
 	// match runs without an approval prompt.
