@@ -8,8 +8,10 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -36,10 +38,12 @@ type Project struct {
 
 // CheckResult is the outcome of one check.
 type CheckResult struct {
-	Check  Check
-	Passed bool
-	Output string
-	Err    error
+	Check   Check
+	Passed  bool
+	Skipped bool   // the check could not run meaningfully (tool missing, nothing to test); counts as passed
+	Note    string // why it was skipped
+	Output  string
+	Err     error
 }
 
 // Report aggregates a verification run.
@@ -72,11 +76,12 @@ func Detect(root string) Project {
 		checks = append(checks, Check{Name: "npm test", Command: "npm test --silent -- --watch=false", Fallback: "npm test --silent", Timeout: 10 * time.Minute})
 		return Project{Kind: "node", Checks: checks}
 	case exists(root, "pyproject.toml") || exists(root, "setup.py") || exists(root, "requirements.txt"):
+		py := pythonCmd(root)
 		checks := []Check{
-			{Name: "py compile", Command: `python3 -m compileall -q .`, Timeout: 3 * time.Minute},
+			{Name: "py compile", Command: py + " -m compileall -q .", Timeout: 3 * time.Minute},
 		}
 		if exists(root, "pyproject.toml") || exists(root, "pytest.ini") || exists(root, "tests") || exists(root, "test") {
-			checks = append(checks, Check{Name: "pytest", Command: "python3 -m pytest -x -q", Timeout: 10 * time.Minute})
+			checks = append(checks, Check{Name: "pytest", Command: py + " -m pytest -x -q", Timeout: 10 * time.Minute})
 		}
 		return Project{Kind: "python", Checks: checks}
 	case exists(root, "Cargo.toml"):
@@ -92,6 +97,31 @@ func Detect(root string) Project {
 	return Project{Kind: "none"}
 }
 
+// pythonCmd prefers a workspace virtualenv's interpreter (where the
+// project's pytest and dependencies live) over the system python.
+func pythonCmd(root string) string {
+	for _, cand := range []string{".venv/bin/python", "venv/bin/python", ".venv/Scripts/python.exe", "venv/Scripts/python.exe"} {
+		if exists(root, cand) {
+			return cand
+		}
+	}
+	return "python3"
+}
+
+// skipReason recognizes failures that are not the code's fault and that
+// the model cannot repair: a missing test runner, or a runner that found
+// nothing to run. Such checks are reported as skipped.
+func skipReason(c Check, out string, err error) (string, bool) {
+	if strings.Contains(out, "No module named pytest") {
+		return "pytest is not installed for the interpreter used (" + strings.Fields(c.Command)[0] + "); install it or add a .venv", true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && strings.Contains(c.Command, "pytest") {
+		return "no tests collected", true
+	}
+	return "", false
+}
+
 // RunChecks executes the project's checks in order, stopping at the first
 // failure (later checks usually cascade from the same root cause, and the
 // model repairs best with one failure at a time).
@@ -103,6 +133,11 @@ func RunChecks(ctx context.Context, root string, proj Project) *Report {
 			out, err = tools.RunShell(ctx, root, c.Fallback, c.Timeout)
 		}
 		res := CheckResult{Check: c, Passed: err == nil, Output: out, Err: err}
+		if err != nil {
+			if note, skip := skipReason(c, out, err); skip {
+				res.Passed, res.Skipped, res.Note, res.Err = true, true, note, nil
+			}
+		}
 		rep.Results = append(rep.Results, res)
 		if !res.Passed {
 			break
@@ -175,10 +210,17 @@ func (r *Report) Human() string {
 	fmt.Fprintf(&b, "verification (%s project):\n", r.Project.Kind)
 	for _, res := range r.Results {
 		mark := "PASS"
-		if !res.Passed {
+		switch {
+		case res.Skipped:
+			mark = "SKIP"
+		case !res.Passed:
 			mark = "FAIL"
 		}
-		fmt.Fprintf(&b, "  [%s] %s\n", mark, res.Check.Name)
+		fmt.Fprintf(&b, "  [%s] %s", mark, res.Check.Name)
+		if res.Skipped && res.Note != "" {
+			fmt.Fprintf(&b, " (%s)", res.Note)
+		}
+		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
