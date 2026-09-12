@@ -52,7 +52,7 @@ session is running. Every path that loads a session consults it first.
 | Session picker in a served TUI (`/menu → Resume a saved session`, `/resume CODE`) | row is marked `LIVE`; selecting it *switches* the selecting terminal (below) | unchanged: loads the file into the current program |
 | Session picker / `/resume` in an in-process TUI (`--no-host`, `host_sessions: false`) | prints `CODE is live elsewhere; join it with: be-code attach CODE`; nothing loaded | unchanged |
 | Plain mode `/resume` | same message as the in-process TUI | unchanged |
-| Startup offer for a workspace with a live session | unchanged (offer once, newest record, respects `--resume`) | n/a |
+| `be-code` started in a workspace that has a live session (no `--resume`) | joins the newest live session for that workspace with no prompt, printing `joining live session CODE (be-code --new starts a fresh one)`; `--new` skips the join and starts a fresh hosted session | unchanged: starts a fresh hosted session |
 
 **Switching.** When a served TUI's picker selects a live code, the program
 asks the host to switch the selecting client: the host sends that client
@@ -74,6 +74,12 @@ transcript shows one dimmed warning: `session file is owned by live host
 <pid>; autosave disabled for this session`. This is the last line of defence,
 not the primary mechanism. In-process runs stamp their own pid too; a stale
 stamp (dead pid) is ignored.
+
+**Seamless reconnection.** Joining a live session must never prompt, refuse,
+or fork, whichever way the user arrives: a new SSH window on the host
+machine, the desktop terminal, `be-code`, `be-code --resume CODE`,
+`be-code attach CODE`, or the session manager picker. The only way to get a
+second session for a workspace that already has a live one is `--new`.
 
 ## Section 2: Client-tagged input
 
@@ -173,7 +179,7 @@ replaces it (the served TUI wires it to the parser). `DetachHolder()` becomes
 **Commands.** `attach` and `sessions` unchanged. `/clients`, `/detach`,
 `/resume` and the picker as in Sections 1 and 2.
 
-**Config.** No new keys.
+**Config.** No new keys. New flag `--new` (start a fresh hosted session even when the workspace has a live one).
 
 **Docs.** README "Live sessions and handoff" rewritten around shared sessions
 (everyone has an input line, `<label>:` prefixes, switching from the picker,
