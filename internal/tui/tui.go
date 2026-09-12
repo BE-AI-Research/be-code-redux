@@ -277,42 +277,62 @@ func (m *Model) pingCmd() tea.Cmd {
 }
 
 // Update dispatches msg, then publishes overlays for whatever it changed.
-// A message that restores the input row (a full-screen modal — approval,
-// plan, picker/menu escape, or the load-error path in pickerUpdate — closing
-// back to a mode whose View() renders it; see overlayVisible) republishes
-// the whole roster, not just whoever's key triggered it: every client's
-// draft needs painting back onto the restored frame, and the transition can
-// just as easily be driven by a plain message (pickerUpdate) as by a key.
-// Otherwise, a keystroke republishes only its sender — update's own cases
-// (WindowSizeMsg, clientsMsg, and the modeInput tail loop) already republish
-// everyone for their own triggers.
+// A mode transition that hides the input row (a full-screen modal —
+// approval, plan, picker/menu — taking over the frame; see overlayVisible)
+// clears every roster client's cached overlay at the host, not just
+// whoever's key triggered it: Host.fanout.Write unconditionally re-appends
+// a client's last overlay after every frame it writes (so an ordinary full
+// repaint never erases a draft), and without clearing it first that stale
+// draft would keep getting stamped, at its old input-row coordinates, over
+// every render of the modal for as long as it stays open. The reverse
+// transition (the modal closing back to a mode that renders the row)
+// republishes the real rows for the whole roster the same way. Either
+// transition can be driven by a key (approval y/n, plan y/n, picker/menu
+// escape) or by a plain message (approvalMsg opens it; pickerUpdate's
+// load-error path closes it), so this lives here rather than at each
+// individual call site. Otherwise, a keystroke republishes only its
+// sender — update's own cases (WindowSizeMsg, clientsMsg, and the
+// modeInput tail loop) already republish everyone for their own triggers.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	wasVisible := m.overlayVisible()
 	model, cmd := m.update(msg)
-	restored := !wasVisible && m.overlayVisible()
+	nowVisible := m.overlayVisible()
 	switch t := msg.(type) {
 	case tea.KeyMsg:
-		m.publishAfterKey(restored, 0)
+		m.publishAfterKey(wasVisible, nowVisible, 0)
 	case live.ClientKeyMsg:
-		m.publishAfterKey(restored, t.Client)
+		m.publishAfterKey(wasVisible, nowVisible, t.Client)
 	default:
-		if restored {
-			m.publishAllOverlays()
-		}
+		m.publishVisibilityChange(wasVisible, nowVisible)
 	}
 	return model, cmd
 }
 
 // publishAfterKey publishes the right set of overlays after a keystroke:
-// every roster client if the key just restored the input row (closed a
-// modal), or just the sender otherwise (a no-op if the mode still hides the
-// input row).
-func (m *Model) publishAfterKey(restored bool, client int) {
-	if restored {
-		m.publishAllOverlays()
+// clear/republish the whole roster if the key just flipped overlayVisible
+// (see publishVisibilityChange), or just the sender otherwise.
+func (m *Model) publishAfterKey(wasVisible, nowVisible bool, client int) {
+	if m.publishVisibilityChange(wasVisible, nowVisible) {
 		return
 	}
 	m.publishOverlay(client)
+}
+
+// publishVisibilityChange clears every roster client's overlay if
+// overlayVisible just went true→false (a modal opened), or republishes the
+// real rows if it just went false→true (a modal closed). Reports whether
+// either happened, so callers know not to do anything more granular of
+// their own for this message.
+func (m *Model) publishVisibilityChange(wasVisible, nowVisible bool) bool {
+	switch {
+	case wasVisible && !nowVisible:
+		m.clearAllOverlays()
+		return true
+	case !wasVisible && nowVisible:
+		m.publishAllOverlays()
+		return true
+	}
+	return false
 }
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {

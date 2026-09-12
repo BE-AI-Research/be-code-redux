@@ -225,6 +225,22 @@ func (m *Model) publishAllOverlays() {
 	}
 }
 
+// clearAllOverlays clears every roster client's cached overlay at the host.
+// Called the instant overlayVisible flips to false (see
+// publishVisibilityChange in tui.go): Host.SetOverlay("") replaces whatever
+// draft was last published there with an empty string, and an empty
+// overlay is never re-appended by Host.fanout.Write — unlike
+// publishAllOverlays, this must run unconditionally on the mode that hides
+// the input row, so it does not gate on overlayVisible().
+func (m *Model) clearAllOverlays() {
+	if !m.served || m.setOverlay == nil {
+		return
+	}
+	for _, c := range m.clients {
+		m.setOverlay(c.ID, "")
+	}
+}
+
 // updateIdleTick handles idleTickMsg: in served mode with a configured
 // live_idle_limit, a session with no attached clients and no run in
 // progress quits once the limit has passed; a client or a run resets the

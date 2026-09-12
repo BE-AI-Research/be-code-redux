@@ -253,6 +253,57 @@ func TestHostOverlayGoesToOneClientAndFollowsEveryFrame(t *testing.T) {
 	}
 }
 
+// TestHostClearedOverlaySendsNoTrailingFrame covers the served TUI's need to
+// stop a stale overlay from being stamped onto a full-screen modal:
+// SetOverlay(id, "") must clear the cached value so fanout.Write's
+// "re-append the client's overlay after every frame" behaviour (see
+// TestHostOverlayGoesToOneClientAndFollowsEveryFrame) has nothing left to
+// re-append.
+func TestHostClearedOverlaySendsNoTrailingFrame(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	idA := idByLabel(t, h, "a")
+
+	h.SetOverlay(idA, "x")
+	select {
+	case p := <-a.overlay:
+		if string(p) != "x" {
+			t.Fatalf("overlay payload %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a did not get its overlay")
+	}
+
+	h.SetOverlay(idA, "")
+	select {
+	case p := <-a.overlay:
+		// An empty overlay frame is harmless (the client writes zero bytes
+		// to its terminal), so either nothing at all or an empty payload is
+		// acceptable here — what matters is what happens after the next
+		// frame, checked below.
+		if len(p) != 0 {
+			t.Fatalf("clearing sent a non-empty overlay: %q", p)
+		}
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	h.Output().Write([]byte("FRAME"))
+	select {
+	case p := <-a.out:
+		if string(p) != "FRAME" {
+			t.Fatalf("frame payload %q", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a did not get the frame")
+	}
+	select {
+	case p := <-a.overlay:
+		t.Fatalf("cleared overlay was re-sent after a frame: %q", p)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 // TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate is a regression
 // test for a lost-update race between fanout.Write and SetOverlay: both used
 // to read/enqueue a client's overlay outside a shared critical section, so a

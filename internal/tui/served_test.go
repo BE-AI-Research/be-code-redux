@@ -357,28 +357,57 @@ func TestOverlayIsPublishedAfterAKeyAndForEveryoneOnResize(t *testing.T) {
 // frame with no reserved input row: overlayFor's absolute positioning would
 // land on the modal's own content, so publishing must stop while one is up,
 // and every roster client's draft must be repainted the moment it closes.
+// A stale overlay must not be re-stamped onto an open modal: Host.fanout.Write
+// unconditionally re-appends a client's last-published overlay after every
+// frame it writes (so an ordinary full repaint never erases a draft), so the
+// TUI must actively clear it — publish "" — the instant a full-screen modal
+// takes over the frame, not just stop publishing new content.
 func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
 	m := twoClients(t)
-	var pub []int
-	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("draft1")})
+	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("draft2")})
+
+	type call struct {
+		id int
+		s  string
+	}
+	var calls []call
+	m.setOverlay = func(id int, s string) { calls = append(calls, call{id, s}) }
 
 	m.Update(approvalMsg{action: "shell", detail: "echo hi", resp: make(chan bool, 1)})
 	if m.mode != modeApproval {
 		t.Fatalf("mode = %v, want modeApproval", m.mode)
 	}
-	pub = nil
+	cleared := map[int]bool{}
+	for _, c := range calls {
+		if c.s != "" {
+			t.Fatalf("opening the modal published a non-empty overlay for %d: %q", c.id, c.s)
+		}
+		cleared[c.id] = true
+	}
+	if !cleared[1] || !cleared[2] {
+		t.Fatalf("opening the modal did not clear every roster client's overlay: %+v", calls)
+	}
+
+	calls = nil
 	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("x")}) // scrolls the modal viewport, does not close it
-	if len(pub) != 0 {
-		t.Fatalf("a key during the modal published: %v", pub)
+	if len(calls) != 0 {
+		t.Fatalf("a key during the modal published: %+v", calls)
 	}
 
 	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("n")}) // denies and closes the modal
 	if m.mode == modeApproval {
 		t.Fatal("modal did not close")
 	}
-	sort.Ints(pub)
-	if len(pub) != 2 || pub[0] != 1 || pub[1] != 2 {
-		t.Fatalf("closing the modal did not republish every roster client: %v", pub)
+	got := map[int]string{}
+	for _, c := range calls {
+		got[c.id] = c.s
+	}
+	if len(got) != 2 {
+		t.Fatalf("closing the modal did not republish every roster client: %+v", calls)
+	}
+	if !strings.Contains(got[1], "draft1") || !strings.Contains(got[2], "draft2") {
+		t.Fatalf("closing the modal did not republish the real drafts: %+v", got)
 	}
 }
 
