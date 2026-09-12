@@ -7,39 +7,103 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
+// byeWait bounds how long detach waits for a client's writer goroutine to
+// drain its queue (ideally including the FBye it just enqueued) before the
+// connection is forced closed regardless. A stalled client (suspended
+// terminal, dead link) must never be able to delay detach or Close beyond
+// this.
+const byeWait = 500 * time.Millisecond
+
+// maxQueuedOutput caps how many FOutput frames a client's queue may hold
+// before the oldest is evicted. Only FOutput entries are ever evicted (each
+// is a full repaint, so only the newest matters); control frames (FSize,
+// FClients, FBye) are never dropped.
+const maxQueuedOutput = 8
+
+// qframe is one frame pending delivery to a client.
+type qframe struct {
+	typ     FrameType
+	payload []byte
+}
+
 type client struct {
-	id     int
-	label  string
-	cols   int
-	rows   int
-	utf8   bool
-	conn   net.Conn
-	queue  chan []byte
-	closed chan struct{}
-	once   sync.Once
+	id    int
+	label string
+	cols  int
+	rows  int
+	utf8  bool
+	conn  net.Conn
 
-	// writeMu serializes frames onto conn. WriteFrame/WriteJSON each issue two
-	// separate Write calls (header, then payload); this client's own writer
-	// goroutine (fanout output) and Host.recompute/detach (broadcasting size,
-	// client-list and bye frames to every connection from whichever goroutine
-	// triggered the change) can call into the same conn concurrently, and
-	// without this lock their header/payload writes can interleave and
-	// corrupt the frame stream.
-	writeMu sync.Mutex
+	// qmu guards queue. Only writer() ever reads/drains it; enqueue is called
+	// from any goroutine (recompute, detach, fanout, handle) and must never
+	// block its caller — that is the whole point of routing every frame
+	// through this queue and a single per-client writer goroutine instead of
+	// writing to conn directly.
+	qmu   sync.Mutex
+	queue []qframe
+
+	wake       chan struct{} // size 1: signals writer() there is new work
+	writerDone chan struct{} // closed when writer() returns
+	once       sync.Once
 }
 
-func (c *client) writeFrame(t FrameType, payload []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return WriteFrame(c.conn, t, payload)
+func newClient(hello Hello, conn net.Conn) *client {
+	return &client{
+		label: hello.Label, cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
+		wake:       make(chan struct{}, 1),
+		writerDone: make(chan struct{}),
+	}
 }
 
-func (c *client) writeJSON(t FrameType, v any) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return WriteJSON(c.conn, t, v)
+// enqueue appends a frame for the client's writer goroutine to send. It never
+// blocks: a full queue of FOutput frames evicts its oldest FOutput entry to
+// make room (control frames are never evicted, so this queue can grow beyond
+// maxQueuedOutput only through control traffic, which is bounded by real
+// events — attach/detach/resize/takeover — not by output volume).
+func (c *client) enqueue(t FrameType, payload []byte) {
+	c.qmu.Lock()
+	if t == FOutput {
+		n := 0
+		for _, f := range c.queue {
+			if f.typ == FOutput {
+				n++
+			}
+		}
+		if n >= maxQueuedOutput {
+			for i, f := range c.queue {
+				if f.typ == FOutput {
+					c.queue = append(c.queue[:i], c.queue[i+1:]...)
+					break
+				}
+			}
+		}
+	}
+	c.queue = append(c.queue, qframe{t, payload})
+	c.qmu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *client) enqueueJSON(t FrameType, v any) {
+	b, _ := json.Marshal(v)
+	c.enqueue(t, b)
+}
+
+// drain removes and returns every frame currently queued.
+func (c *client) drain() []qframe {
+	c.qmu.Lock()
+	defer c.qmu.Unlock()
+	if len(c.queue) == 0 {
+		return nil
+	}
+	out := c.queue
+	c.queue = nil
+	return out
 }
 
 // Host serves one TUI session to any number of attached terminals.
@@ -55,6 +119,10 @@ type Host struct {
 	nextID  int
 	cols    int
 	rows    int
+
+	// notifyMu orders recompute's compute-and-notify as a whole (see
+	// recompute for why h.mu alone is not enough).
+	notifyMu sync.Mutex
 
 	inR       *io.PipeReader
 	inW       *io.PipeWriter
@@ -137,9 +205,17 @@ func (h *Host) handle(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	c := &client{label: hello.Label, cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
-		queue: make(chan []byte, 8), closed: make(chan struct{})}
+
 	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		// Close raced this attach: never registered, so nothing to detach or
+		// drain — say goodbye and close directly.
+		WriteJSON(conn, FBye, Bye{Reason: "session closed"})
+		conn.Close()
+		return
+	}
+	c := newClient(hello, conn)
 	h.nextID++
 	c.id = h.nextID
 	h.clients = append(h.clients, c)
@@ -147,6 +223,12 @@ func (h *Host) handle(conn net.Conn) {
 	h.mu.Unlock()
 	go h.writer(c)
 	h.recompute()
+	// recompute only broadcasts FSize when the shared size changed, so a
+	// client whose own dimensions are not the new minimum would otherwise
+	// never learn the render size at all; tell it directly.
+	if cols, rows := h.Size(); cols > 0 {
+		c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
+	}
 	h.logf("attached %d %s %dx%d\n", c.id, c.label, c.cols, c.rows)
 
 	for {
@@ -193,33 +275,23 @@ func (h *Host) handle(conn net.Conn) {
 	h.detach(c, "connection closed")
 }
 
-// writer drains a client's queue; a client that cannot keep up loses its
-// oldest frames (each frame is a full repaint) instead of stalling others.
+// writer is the sole goroutine that writes to c.conn, draining c's queue as
+// frames arrive. A client that cannot keep up only ever blocks this
+// goroutine (on the network Write itself, if the client's socket buffer is
+// full) — never a caller of enqueue, and never another client's writer.
+// It exits after successfully writing an FBye frame (nothing follows it) or
+// on a write error (the connection is done either way).
 func (h *Host) writer(c *client) {
-	for {
-		select {
-		case <-c.closed:
-			return
-		case p := <-c.queue:
-			if err := c.writeFrame(FOutput, p); err != nil {
-				h.detach(c, "write failed")
+	defer close(c.writerDone)
+	for range c.wake {
+		for _, f := range c.drain() {
+			if err := WriteFrame(c.conn, f.typ, f.payload); err != nil {
+				go h.detach(c, "write failed")
 				return
 			}
-		}
-	}
-}
-
-func (c *client) enqueue(p []byte) {
-	select {
-	case c.queue <- p:
-	default:
-		select { // drop the oldest, keep the newest
-		case <-c.queue:
-		default:
-		}
-		select {
-		case c.queue <- p:
-		default:
+			if f.typ == FBye {
+				return
+			}
 		}
 	}
 }
@@ -240,16 +312,36 @@ func (h *Host) detach(c *client, reason string) {
 			}
 		}
 		h.mu.Unlock()
-		close(c.closed)
-		c.writeJSON(FBye, Bye{Reason: reason})
-		c.conn.Close()
+
+		c.enqueueJSON(FBye, Bye{Reason: reason})
+		select {
+		case <-c.writerDone:
+		case <-time.After(byeWait):
+		}
+		c.conn.Close() // idempotent; unblocks writer() if it's still stuck mid-write
 		h.logf("detached %d %s (%s)\n", c.id, c.label, reason)
 		h.recompute()
 	})
 }
 
 // recompute derives the shared size, notifies clients and the program.
+//
+// It is wrapped in notifyMu — a lock distinct from h.mu — for the whole
+// compute-and-notify sequence. h.mu alone is not enough: it only protects the
+// commit of h.cols/h.rows, and notifications go out after it is released, so
+// two overlapping recompute calls could commit in one order but notify in
+// the other, leaving clients (and the program, via onSize/onClients) with a
+// stale view that never resolves until the next change. Serializing the
+// whole function makes "last to commit" and "last to notify" the same call.
+//
+// onSize/onClients are the caller's callbacks; they run here, under
+// notifyMu, not under h.mu — but they still must return quickly and must not
+// call back into anything that itself calls recompute (including via
+// OnSize/OnClients replacing themselves) or the host will deadlock.
 func (h *Host) recompute() {
+	h.notifyMu.Lock()
+	defer h.notifyMu.Unlock()
+
 	h.mu.Lock()
 	cols, rows := 0, 0
 	for _, c := range h.clients {
@@ -269,7 +361,7 @@ func (h *Host) recompute() {
 
 	if changed && cols > 0 {
 		for _, c := range clients {
-			c.writeJSON(FSize, Size{Cols: cols, Rows: rows})
+			c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
 		}
 		if onSize != nil {
 			onSize(cols, rows)
@@ -277,7 +369,7 @@ func (h *Host) recompute() {
 	}
 	b, _ := json.Marshal(infos)
 	for _, c := range clients {
-		c.writeFrame(FClients, b)
+		c.enqueue(FClients, b)
 	}
 	if onClients != nil {
 		onClients(infos)
@@ -332,13 +424,17 @@ func (h *Host) Close(reason string) {
 		return
 	}
 	h.closing = true
+	// Close the listener before detaching: this stops Serve's Accept loop
+	// and, combined with handle's closing check, guarantees a connection
+	// accepted concurrently with this Close is told goodbye directly instead
+	// of being registered (and its writer leaked) after the snapshot below.
+	if h.ln != nil {
+		h.ln.Close()
+	}
 	clients := append([]*client(nil), h.clients...)
 	h.mu.Unlock()
 	for _, c := range clients {
-		h.detach(c, reason)
-	}
-	if h.ln != nil {
-		h.ln.Close()
+		h.detach(c, reason) // each bounded by byeWait; a stalled client cannot delay this loop
 	}
 	close(h.stopInput)
 	h.inW.Close()
@@ -353,7 +449,7 @@ func (f fanout) Write(p []byte) (int, error) {
 	clients := append([]*client(nil), f.h.clients...)
 	f.h.mu.Unlock()
 	for _, c := range clients {
-		c.enqueue(cp)
+		c.enqueue(FOutput, cp)
 	}
 	return len(p), nil
 }

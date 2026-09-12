@@ -175,3 +175,130 @@ func TestHostSizeCallbackAndSlowClient(t *testing.T) {
 	}
 	_ = slow
 }
+
+func TestHostListenSocketPermissions(t *testing.T) {
+	_, sock := startHost(t)
+	info, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("socket perm = %o, want no group/other bits (0700 or tighter)", perm)
+	}
+}
+
+func TestHostDetachHolderPassesToMostRecentRemaining(t *testing.T) {
+	h, sock := startHost(t)
+	dial(t, sock, "tok", "a", 100, 40)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	dial(t, sock, "tok", "b", 90, 30)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
+	dial(t, sock, "tok", "c", 80, 24)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 3 })
+	cl := h.Clients()
+	if !cl[2].Holder || cl[2].Label != "c" {
+		t.Fatalf("expected newest attacher c to hold: %+v", cl)
+	}
+	h.DetachHolder()
+	within(t, time.Second, func() bool {
+		c := h.Clients()
+		return len(c) == 2 && c[1].Holder && c[1].Label == "b"
+	})
+	// DetachHolder with a single remaining client, then with none: neither panics.
+	h.DetachHolder()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.DetachHolder()
+	within(t, time.Second, func() bool { return len(h.Clients()) == 0 })
+	h.DetachHolder() // no holder left; must be a no-op
+}
+
+func TestHostOnQuitViaFQuitFrame(t *testing.T) {
+	h, sock := startHost(t)
+	quit := make(chan struct{}, 1)
+	h.OnQuit(func() { quit <- struct{}{} })
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	WriteFrame(a.conn, FQuit, nil)
+	select {
+	case <-quit:
+	case <-time.After(time.Second):
+		t.Fatal("OnQuit not called for an FQuit frame")
+	}
+}
+
+func TestHostCloseTwiceIsSafe(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "bl")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := NewHost("tok", io.Discard)
+	sock := filepath.Join(dir, "s.sock")
+	if err := h.Listen(sock); err != nil {
+		t.Fatal(err)
+	}
+	go h.Serve()
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.Close("bye once")
+	h.Close("bye twice") // must not panic or hang
+	select {
+	case r := <-a.bye:
+		if r != "bye once" {
+			t.Fatalf("bye reason = %q", r)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no bye received")
+	}
+}
+
+// TestHostStalledClientDoesNotBlockOthersOrClose is the concrete failure mode
+// behind routing every frame through a client's own writer goroutine: a
+// client that attaches and then never reads again must not be able to block
+// another client's attach/resize, or delay Close.
+func TestHostStalledClientDoesNotBlockOthersOrClose(t *testing.T) {
+	dir, _ := os.MkdirTemp("", "bl")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	h := NewHost("tok", io.Discard)
+	sock := filepath.Join(dir, "s.sock")
+	if err := h.Listen(sock); err != nil {
+		t.Fatal(err)
+	}
+	go h.Serve()
+
+	// Attach a client but never read from it again (no reader goroutine, and
+	// we never touch the conn ourselves): its socket receive buffer will
+	// fill and stay full for the rest of the test.
+	stalled, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stalled.Close() })
+	WriteJSON(stalled, FHello, Hello{Token: "tok", Cols: 80, Rows: 24, Label: "stalled", UTF8: true})
+	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
+
+	// Flood output well past any reasonable socket buffer while the stalled
+	// client never drains it.
+	go func() {
+		big := make([]byte, 1<<16)
+		for i := 0; i < 64; i++ {
+			h.Output().Write(big)
+		}
+	}()
+
+	// A second, well-behaved client must still be able to attach and have
+	// its resize take effect promptly.
+	b := dial(t, sock, "tok", "b", 100, 30)
+	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
+	resize, _ := json.Marshal(Size{Cols: 90, Rows: 20})
+	WriteFrame(b.conn, FResize, resize)
+	// shared size is the minimum across both clients (stalled is 80x24)
+	within(t, time.Second, func() bool { c, r := h.Size(); return c == 80 && r == 20 })
+
+	// Close must return promptly even though the stalled client can never be
+	// told goodbye in any normal sense.
+	done := make(chan struct{})
+	go func() { h.Close("shutdown"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked on a stalled client")
+	}
+}
