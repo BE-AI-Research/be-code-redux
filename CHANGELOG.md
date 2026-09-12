@@ -11,8 +11,9 @@
   VS Code terminal, or over SSH from a phone — to a running session;
   `--view` attaches read-only. Any number of terminals can watch one session;
   the newest to attach holds input, the others are live viewers.
-- Chords in an attached terminal: `Ctrl+] d` detach, `Ctrl+] t` take input
-  back, `Ctrl+] Ctrl+]` send a literal `Ctrl+]`. From inside the session,
+- Chords in an attached terminal: `Ctrl+] d` or `Ctrl+] Ctrl+]` detach,
+  `Ctrl+] t` take input back; `Ctrl+]` followed by any other key (or left
+  alone for a second) sends a literal `Ctrl+]`. From inside the session,
   `/detach` detaches this terminal and `/clients` lists every attached
   terminal with its size; the bottom line shows `⧉ <n>` and who holds input.
 - `be-code sessions` gained a `LIVE` column (and lists a live session that has

@@ -181,15 +181,16 @@ be-code sessions kill A1B2C3  # end a live session from outside it
 
 Any number of terminals can be attached at once. One of them **holds input** at a
 time (the newest to attach); the others are live viewers of the same screen. The
-bottom line shows `⧉ 2` (`[2]` on non-UTF-8 terminals) and who is holding input,
+bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) and who is holding input,
 and `/clients` lists every attached terminal with its size. Chords, typed in the
 attached terminal rather than sent to the session:
 
 | Chord | Does |
 | --- | --- |
 | `Ctrl+] d` | detach this terminal; the session keeps running |
+| `Ctrl+] Ctrl+]` | the same detach, without reaching for `d` |
 | `Ctrl+] t` | take input back from whoever is holding it |
-| `Ctrl+] Ctrl+]` | send a literal `Ctrl+]` to the session |
+| `Ctrl+]` then anything else | sends the literal `Ctrl+]` on to the session (so does `Ctrl+]` on its own, a second later) |
 
 `/detach` does the same as `Ctrl+] d` from inside the session, and `/quit` ends the
 session for everybody: every attached terminal prints the `resume:` line and drops

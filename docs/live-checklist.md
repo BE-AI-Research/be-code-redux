@@ -11,6 +11,8 @@ this once per release, or after touching `internal/live`, `internal/tui/served.g
 3. Type in the second terminal: it drives the session; the first is a viewer.
    `Ctrl+] t` in the first takes input back.
 4. Resize the smaller terminal: both views relayout to the smaller size.
+   In an attached terminal, drag-select transcript text and paste a multi-line
+   snippet: selection highlights and the paste arrives as one message.
 5. `Ctrl+] d` in the second: "detached … still running". Close the VS Code window
    entirely; from another terminal: `be-code attach <code>` — the session is still there.
 6. `ssh localhost be-code attach <code>` — same as 2 over SSH.

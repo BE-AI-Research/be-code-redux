@@ -21,6 +21,8 @@
 - Headless `run` and `--plain` never host; `--no-host` runs the TUI in-process.
 - **Deviation from the spec (ruled during planning):** Windows uses an AF_UNIX socket at the same `~/.be-code/live/<code>.sock` path (supported by Go's `net` on Windows 10 1803+) instead of a named pipe, so one transport serves every platform.
 - **Deviation from the spec (ruled during planning):** all clients receive identical frames, so the bottom line cannot differ per client. Instead it shows `⧉ N · input: <holder label> · Ctrl+] d detach · Ctrl+] t take over` for everyone.
+- **Resolved during review:** `⧉` is the clients marker (`#` for an ASCII client); the compact queue count is `qN`, not `⧉N` as the spec's compact-layout paragraph has it.
+- **Resolved during review:** clients set alt-screen, mouse reporting, bracketed paste and cursor visibility themselves (restored on detach); the host's own mode sequences at program start are not relied on, because Bubble Tea emits them once, before any client is attached.
 - Commits go on the feature branch, each message ending with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`; every task ends with `make -f build.mk verify`.
 
 ---
