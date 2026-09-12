@@ -390,6 +390,18 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		if s.Handoff != "" {
 			fmt.Printf("%s\n", dim("handoff briefing loaded into the system prompt; /handoff shows it"))
 		}
+	case "/theme":
+		if len(fields) < 2 {
+			fmt.Println("themes: dark, light, mono, dracula, nord, gruvbox, monokai, one-dark, solarized-dark, solarized-light, tokyo-night, catppuccin, github-light")
+			fmt.Println(dim("usage: /theme <name>  (plain mode uses the terminal's own colours; the TUI applies the palette)"))
+			break
+		}
+		r.Cfg.Theme = strings.ToLower(fields[1])
+		if err := r.Cfg.Save(); err != nil {
+			fmt.Printf("%s %v\n", red("error>"), err)
+			break
+		}
+		fmt.Printf("theme set to %s (applies to the TUI on next start)\n", r.Cfg.Theme)
 	case "/queue":
 		r.queueCommand(input)
 	case "/handoff":

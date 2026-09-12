@@ -120,6 +120,44 @@ func (m *Model) paletteBox() string {
 	return stBorder.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
 }
 
+// ---- theme picker ------------------------------------------------------------
+
+func (m *Model) themeItems() []pickItem {
+	items := make([]pickItem, 0, len(themes))
+	for _, n := range ThemeNames() {
+		p := themes[n]
+		desc := p.Desc
+		if n == m.cfg.Theme {
+			desc += "  (current)"
+		}
+		items = append(items, pickItem{id: n, label: n, desc: desc})
+	}
+	return items
+}
+
+func (m *Model) openThemePicker() (tea.Model, tea.Cmd) {
+	return m.openPicker("Theme", func() ([]pickItem, error) { return m.themeItems(), nil },
+		func(m *Model, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id) })
+}
+
+// applyTheme switches the live palette and persists the choice.
+func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
+	applied := SetTheme(name)
+	if applied != name {
+		m.appendLine(stErr.Render("unknown theme " + name + "; try /theme to pick one"))
+		return m, nil
+	}
+	m.cfg.Theme = applied
+	m.richText = applied != "mono"
+	if err := m.cfg.Save(); err != nil {
+		m.appendLine(stWarn.Render("theme set to " + applied + " for this session; could not save config: " + err.Error()))
+	} else {
+		m.appendLine(stOK.Render("theme set to " + applied))
+	}
+	m.refreshTranscript()
+	return m, nil
+}
+
 // ---- menu --------------------------------------------------------------------
 
 type menuEntry struct {
@@ -143,6 +181,7 @@ func (m *Model) menuEntries() []menuEntry {
 		{"Context", "Compact now", "summarize older conversation with the model", cmd("/compact")},
 		{"Context", "Repo map", "symbol outline in the system prompt", cmd("/map")},
 		{"Context", "Usage stats", "requests, tool calls, tokens", cmd("/stats")},
+		{"Settings", "Theme", "pick a colour theme (applies immediately)", cmd("/theme")},
 		{"Settings", "Show config", "effective configuration", cmd("/config")},
 		{"Settings", "Help", "command reference", cmd("/help")},
 		{"Settings", "Quit", "exit BE-Code (writes the resume briefing)", cmd("/quit")},

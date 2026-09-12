@@ -1,6 +1,13 @@
 # BE-Code Changelog
 
-## v0.4.4 — 2026-09-11 — editable message queue
+## v0.4.4 — 2026-09-11 — editable message queue, colour themes
+
+- Ten colour themes join dark, light and mono: dracula, nord, gruvbox,
+  monokai, one-dark, solarized-dark, solarized-light, tokyo-night,
+  catppuccin (Mocha) and github-light. `/theme` opens a picker (also under
+  /menu › Settings › Theme); `/theme <name>` sets one directly. The choice
+  applies immediately and is saved to config. Hex palettes render as true
+  colour where supported and degrade to 256 colours otherwise.
 
 - Change your mind about queued messages: while the agent works, press Up on
   an empty input (or Ctrl+Q) to open the queue popup. Enter pulls the

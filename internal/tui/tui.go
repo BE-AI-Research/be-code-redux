@@ -868,6 +868,11 @@ func (m *Model) slashCommand(text string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/menu":
 		return m.openMenu()
+	case "/theme":
+		if len(fields) > 1 {
+			return m.applyTheme(strings.ToLower(fields[1]))
+		}
+		return m.openThemePicker()
 	case "/copy":
 		m.copyTarget(strings.TrimSpace(strings.TrimPrefix(text, "/copy")))
 		return m, nil
