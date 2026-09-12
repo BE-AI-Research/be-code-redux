@@ -66,7 +66,7 @@ After the switch, if the current host is a fresh session (no turns) with no
 remaining clients, it quits itself so empty hosts do not accumulate. A host
 with turns, or with other clients, keeps running.
 
-**Save guard.** `store.Session` gains `HostPID int` (JSON `hostPid`,
+**Save guard.** `store.Session` gains `HostPID int` (JSON `host_pid`,
 omitempty). A hosted program stamps its pid on every save. Before saving, the
 agent reloads the on-disk stamp; if it names a different, live process, the
 save is skipped, autosave stays off for the rest of the run, and the
@@ -168,7 +168,7 @@ dropped.
 **Frames.** Removed: `takeover`. Added host→client: `overlay` (payload: bytes
 to write). `bye` reasons gain `switch:CODE`. `clients` drops the `holder`
 field. Everything else (hello, input, resize, detach, quit, output, size, bye)
-is unchanged. Records, sockets and the session file (bar `hostPid`) are
+is unchanged. Records, sockets and the session file (bar `host_pid`) are
 unchanged.
 
 **Host API.** `InputReader()` is removed; `OnInput(func(client int, b []byte))`

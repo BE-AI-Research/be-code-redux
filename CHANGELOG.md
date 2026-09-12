@@ -1,5 +1,50 @@
 # BE-Code Changelog
 
+## v0.6.0 — 2026-09-12 — shared sessions
+
+- **Every attached terminal now has its own input line.** A live session used to
+  hand input to the newest terminal and leave the rest watching; now each
+  terminal types into its own prompt. Your half-written message stays on your
+  screen alone, and so do your slash palette, your command history and your
+  queued-message popup. The transcript, header, context wheel, bottom line and
+  every modal are still one shared rendering.
+- Messages are **tagged with the terminal that sent them**: once more than one
+  terminal is attached, every user line in the transcript is prefixed
+  `<label>> ` (a single terminal keeps the plain `you> `). Queued messages
+  remember their sender, so the queue popup and `Up` to edit show you only your
+  own.
+- **Joining, never forking.** A session that is live somewhere is never loaded
+  into a second program:
+  - `be-code` in a workspace that already has a live session joins the newest
+    one — `joining live session <code> (be-code --new starts a fresh one)`;
+  - `be-code --resume <code>` (by code, id or `last`) attaches instead of
+    spawning a host — `joining live session <code>`;
+  - the session picker marks a running session `LIVE` and picking it *switches*
+    the terminal that picked it into that session, leaving the other terminals
+    where they were; an empty session whose last terminal switches away exits;
+  - in-process (`--no-host`) and plain mode, `/resume` of a running code says
+    `<code> is live elsewhere; join it with: be-code attach <code>`.
+  New flag `--new` starts a fresh session even when the workspace has a live one.
+- **Save guard.** The session file records the pid of the host that owns it
+  (`host_pid`). A program that finds a *live* owner stops autosaving rather than
+  overwrite that host's turns (`session file is owned by live host <pid>;
+  autosave disabled for this session`) and writes its own transcript out under a
+  fresh code on exit (`saved as a new session: be-code --resume <code>`). A
+  stale stamp from a dead process is ignored.
+- **The takeover chord is gone.** With everybody holding input there is nothing
+  to take over: v0.5.0's `Ctrl+] t` no longer exists. `Ctrl+] d` (or
+  `Ctrl+] Ctrl+]`) still detaches this terminal, `Ctrl+]` followed by anything
+  else still sends a literal `Ctrl+]`, and `/detach` now detaches the terminal
+  that typed it. The bottom line's clients marker became `⧉ <n> · <label>,
+  <label>` instead of naming an input holder.
+- Protocol (host ↔ attached terminal): the host parses each terminal's bytes
+  itself and delivers keys and mouse events tagged with their sender, so the
+  `takeover` frame is gone, the `clients` frame dropped its `holder` field, a
+  new host→client `overlay` frame carries one terminal's private input rows, and
+  `bye` gained a `switch:<code>` reason. Records, sockets and the session file
+  (bar `host_pid`) are otherwise unchanged.
+
+
 ## v0.5.0 — 2026-09-11 — live sessions & handoff
 
 - **Sessions now outlive their terminal.** Starting `be-code` on a terminal
@@ -10,12 +55,14 @@
 - `be-code attach <code|last>` attaches another terminal — locally, from the
   VS Code terminal, or over SSH from a phone — to a running session;
   `--view` attaches read-only. Any number of terminals can watch one session;
-  the newest to attach holds input, the others are live viewers.
+  the newest to attach holds input, the others are live viewers. (From v0.6.0
+  every attached terminal has its own input line; `--view` still sends nothing.)
 - Chords in an attached terminal: `Ctrl+] d` or `Ctrl+] Ctrl+]` detach,
   `Ctrl+] t` take input back; `Ctrl+]` followed by any other key (or left
   alone for a second) sends a literal `Ctrl+]`. From inside the session,
   `/detach` detaches this terminal and `/clients` lists every attached
   terminal with its size; the bottom line shows `⧉ <n>` and who holds input.
+  (Input holding and `Ctrl+] t` were removed in v0.6.0 — every terminal types.)
 - `be-code sessions` gained a `LIVE` column (and lists a live session that has
   no saved turns yet); `be-code sessions kill <code>` ends one from outside —
   it asks the host to quit, waits, and only then terminates it.
