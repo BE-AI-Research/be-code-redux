@@ -18,24 +18,30 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 )
 
-// With two clients the bottom line names the holder and the chords.
-func TestClientsMsgRendersHolder(t *testing.T) {
+// With two clients the bottom line counts them and names them all: there
+// is no holder any more, so nobody is singled out.
+func TestClientsMsgRendersRoster(t *testing.T) {
 	m := newTestModel(t)
-	// UTF8: true on both — this test is about the holder label and chord
-	// hints, not the ASCII fallback (see TestASCIIFallbacks in compact_test.go);
-	// m.ascii now has a reader (the clients marker glyph), so a fixture that
-	// leaves UTF8 at its zero value would render the ASCII marker instead.
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", Holder: true, UTF8: true}})
+	// UTF8: true on both — this test is about the labels, not the ASCII
+	// fallback (see TestASCIIFallbacks in compact_test.go); m.ascii has a
+	// reader (the clients marker glyph), so a fixture that leaves UTF8 at its
+	// zero value would render the ASCII marker instead.
+	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true}})
 	v := m.View()
-	for _, want := range []string{"⧉ 2", "input: ssh from 10.0.0.5", "Ctrl+] d", "Ctrl+] t"} {
+	for _, want := range []string{"⧉ 2", "vscode (pid 1), ssh from 10.0.0.5 (pid 2)"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("bottom line lacks %q:\n%s", want, v)
 		}
 	}
-	if !strings.Contains(m.transcript.String(), "attached: ssh from 10.0.0.5 (pid 2), now holding input") {
+	for _, gone := range []string{"input:", "Ctrl+] d", "Ctrl+] t"} {
+		if strings.Contains(v, gone) {
+			t.Fatalf("holder text %q survives:\n%s", gone, v)
+		}
+	}
+	if !strings.Contains(m.transcript.String(), "attached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatalf("no attach line:\n%s", m.transcript.String())
 	}
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", Holder: true}})
+	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)"}})
 	if !strings.Contains(m.transcript.String(), "detached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatal("no detach line")
 	}
@@ -44,23 +50,27 @@ func TestClientsMsgRendersHolder(t *testing.T) {
 	}
 }
 
-// /clients lists clients; /detach asks the host to drop the holder.
+// /clients lists clients; /detach asks the host to drop the terminal the
+// command was typed on.
 func TestClientsAndDetachCommands(t *testing.T) {
 	m := newTestModel(t)
-	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)", Holder: true}})
-	m.slashCommand("/clients")
+	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)"}})
+	m.slashCommand("/clients", 1)
 	if !strings.Contains(m.transcript.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
-	detached := make(chan struct{}, 1)
-	m.detachHolder = func() { detached <- struct{}{} }
-	_, cmd := m.slashCommand("/detach")
+	detached := make(chan int, 1)
+	m.detachClient = func(id int) { detached <- id }
+	_, cmd := m.slashCommand("/detach", 1)
 	if cmd == nil {
 		t.Fatal("/detach returned no command")
 	}
 	cmd() // Bubble Tea runs this on its own goroutine
 	select {
-	case <-detached:
+	case id := <-detached:
+		if id != 1 {
+			t.Fatalf("detached client %d, want the one that typed /detach", id)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("/detach did not call the host")
 	}
@@ -86,7 +96,7 @@ func TestClientsNotServedMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = false
 	m.clients = nil
-	m.slashCommand("/clients")
+	m.slashCommand("/clients", 0)
 	if !strings.Contains(m.transcript.String(), "not served") {
 		t.Fatalf("expected a not-served note:\n%s", m.transcript.String())
 	}
@@ -98,7 +108,7 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = true
 	m.clients = nil
-	m.slashCommand("/clients")
+	m.slashCommand("/clients", 0)
 	if !strings.Contains(m.transcript.String(), "no terminals attached") {
 		t.Fatalf("expected a no-terminals-attached note:\n%s", m.transcript.String())
 	}
@@ -258,7 +268,7 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 		}
 	}()
 	if err := live.WriteJSON(conn, live.FHello, live.Hello{
-		Token: "tok", Cols: 80, Rows: 24, Label: "holder", UTF8: true,
+		Token: "tok", Cols: 80, Rows: 24, Label: "phone", UTF8: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -267,18 +277,13 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 
 	m := newTestModel(t)
 	m.served = true
-	// DetachHolder is now a no-op shim (there is no holder any more — Task 4
-	// rewires /detach to act on a specific client id); stand in with the
-	// id-based Detach so this still proves the property it always has: a
-	// call into the host from inside Update must not block, and the call
-	// still actually detaches the client.
-	m.detachHolder = func() { h.Detach(id) }
+	m.detachClient = h.Detach
 
 	// "Update" runs with nothing draining msgs, exactly as Bubble Tea does.
 	type result struct{ cmd tea.Cmd }
 	res := make(chan result, 1)
 	go func() {
-		_, cmd := m.slashCommand("/detach")
+		_, cmd := m.slashCommand("/detach", id)
 		res <- result{cmd}
 	}()
 	var cmd tea.Cmd

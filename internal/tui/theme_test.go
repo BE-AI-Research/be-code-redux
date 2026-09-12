@@ -49,7 +49,7 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	m := newTestModel(t)
 	SetTheme("dark")
 	before := stAccent.GetForeground()
-	m.slashCommand("/theme nord")
+	m.slashCommand("/theme nord", 0)
 	after := stAccent.GetForeground()
 	if before == after {
 		t.Fatal("accent did not change")
@@ -67,7 +67,7 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 // /theme with no argument opens a picker with every theme.
 func TestThemePickerListsAll(t *testing.T) {
 	m := newTestModel(t)
-	m.slashCommand("/theme")
+	m.slashCommand("/theme", 0)
 	if m.mode != modePicker || m.picker == nil {
 		t.Fatalf("picker not opened: mode=%v", m.mode)
 	}

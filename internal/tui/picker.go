@@ -137,7 +137,10 @@ func (p *picker) filtered() []pickItem {
 	return out
 }
 
-func (m *Model) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handlePickerKey drives the shared list overlays (model, provider and
+// session pickers, and the menu). from is the client that typed the key:
+// only used to refocus that terminal's input line on the way out.
+func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
 		m.mode = modeInput
@@ -148,7 +151,7 @@ func (m *Model) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.picker = nil
 		m.mode = modeInput
-		m.input.Focus()
+		m.inputFor(from).Focus()
 		return m, nil
 	case tea.KeyUp:
 		if p.cursor > 0 {

@@ -132,13 +132,6 @@ type Host struct {
 	// recompute for why h.mu alone is not enough).
 	notifyMu sync.Mutex
 
-	// inR/inW back InputReader(), a compatibility shim for tui/cmd until Task
-	// 4 removes it: nothing writes to inW any more (input now reaches the
-	// program tagged by client id through onInput), so InputReader() returns
-	// a reader that never yields anything. Close still closes inW.
-	inR *io.PipeReader
-	inW *io.PipeWriter
-
 	onInput   func(client int, b []byte)
 	onSize    func(cols, rows int)
 	onClients func([]ClientInfo)
@@ -154,8 +147,7 @@ type Host struct {
 }
 
 func NewHost(token string, log io.Writer) *Host {
-	r, w := io.Pipe()
-	return &Host{token: token, log: log, inR: r, inW: w}
+	return &Host{token: token, log: log}
 }
 
 // OnInput registers the program's tagged-keystroke callback: f is called
@@ -169,7 +161,6 @@ func (h *Host) OnInput(f func(client int, b []byte)) { h.mu.Lock(); h.onInput = 
 
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
-func (h *Host) InputReader() io.Reader         { return h.inR }
 func (h *Host) Output() io.Writer              { return fanout{h} }
 
 // OnQuit registers the program's shutdown hook. A quit requested before this
@@ -334,7 +325,7 @@ func (h *Host) detach(c *client, reason string) {
 // program must never call into the host from inside its own update loop.
 // tui.RunServed's callbacks are `p.Send(...)` on an unbuffered channel that
 // only the program's update goroutine receives from, so a synchronous
-// DetachHolder/Close/RequestQuit from inside Update would block that
+// Detach/Close/RequestQuit from inside Update would block that
 // goroutine on its own p.Send — with notifyMu held, which then hangs every
 // later attach and detach too. Route such calls through a tea.Cmd (they run
 // on their own goroutine) instead.
@@ -389,9 +380,9 @@ func (h *Host) recomputeAttach(attached *client) {
 	}
 }
 
-// infosLocked never sets Holder: there is no holder any more. The field
-// stays on ClientInfo only as a compatibility shim for tui/cmd until Task 4
-// removes it.
+// infosLocked snapshots the attached clients. There is no holder: every
+// client's input is tagged with its id and the served program decides what
+// each one means.
 func (h *Host) infosLocked() []ClientInfo {
 	out := make([]ClientInfo, 0, len(h.clients))
 	for _, c := range h.clients {
@@ -438,11 +429,6 @@ func (h *Host) RequestQuit() {
 		f()
 	}
 }
-
-// DetachHolder is a no-op: there is no holder any more.
-//
-// Deprecated: removed in Task 4, along with tui/cmd's uses of it.
-func (h *Host) DetachHolder() {}
 
 // ReasonSwitchPrefix prefixes a bye that tells the client to reattach to
 // another live session in the same terminal.
@@ -521,7 +507,6 @@ func (h *Host) Close(reason string) {
 	for _, c := range clients {
 		h.detach(c, reason) // each bounded by byeWait; a stalled client cannot delay this loop
 	}
-	h.inW.Close()
 }
 
 // fanout copies program output to every attached client, followed by that

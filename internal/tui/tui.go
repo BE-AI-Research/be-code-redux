@@ -102,7 +102,7 @@ type Model struct {
 	cancelFn context.CancelFunc
 
 	vp       viewport.Model
-	input    textarea.Model
+	inputs   map[int]*textarea.Model // one input line per client; 0 is the local terminal
 	spin     spinner.Model
 	mode     mode
 	width    int
@@ -138,7 +138,9 @@ type Model struct {
 	clipboardWrite func(string) error
 	clipboardRead  func() (string, error)
 
-	queueCursor int // highlighted row in the queue popup
+	queueCursor  int // highlighted row in the queue popup
+	queueOwner   int // client whose queue the popup is showing
+	paletteOwner int // client that opened the "/" palette
 
 	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
 
@@ -147,32 +149,22 @@ type Model struct {
 	host    *live.Host
 	served  bool
 	clients []live.ClientInfo
-	// detachHolder is host.DetachHolder when served, nil in-process. It must
-	// never be called from inside Update: it notifies the host's callbacks,
-	// which p.Send into the very channel this goroutine is receiving from
-	// (see /detach, and the warning on live.Host.recompute). /detach hands it
-	// to Bubble Tea as a tea.Cmd, which runs on its own goroutine.
-	detachHolder func()
-	ascii        bool      // some attached client cannot show UTF-8 glyphs
-	idleSince    time.Time // last moment the session had a client or a run
+	// detachClient is host.Detach when served, nil in-process: it drops one
+	// attached terminal. It must never be called from inside Update: it
+	// notifies the host's callbacks, which p.Send into the very channel this
+	// goroutine is receiving from (see /detach, and the warning on
+	// live.Host.recompute). /detach hands it to Bubble Tea as a tea.Cmd,
+	// which runs on its own goroutine.
+	detachClient func(id int)
+	// dropKeyClient is the key pump's Drop when served: it retires a
+	// departed client's escape-sequence parser.
+	dropKeyClient func(id int)
+	ascii         bool      // some attached client cannot show UTF-8 glyphs
+	idleSince     time.Time // last moment the session had a client or a run
 }
 
 // New builds the TUI model.
 func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
-	ta := textarea.New()
-	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
-	ta.SetHeight(3)
-	ta.SetPromptFunc(5, func(lineIdx int) string {
-		if lineIdx == 0 {
-			return "(>): "
-		}
-		return "     "
-	})
-	ta.CharLimit = 0
-	ta.ShowLineNumbers = false
-	ta.Focus()
-	ta.KeyMap.InsertNewline.SetKeys("ctrl+j")
-
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 	sp.Style = stAccent
@@ -180,7 +172,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 	SetTheme(cfg.Theme)
 	m := &Model{
 		cfg: cfg, ag: ag, prov: prov,
-		input: ta, spin: sp,
+		spin:     sp,
 		histFile: loadInputHistory(ui.HistoryFile()),
 		custom:   commands.Load(ag.Tools.Root),
 		richText: cfg.Theme != "mono",
@@ -213,6 +205,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 		}(),
 	}
 	ag.Tools.OnStatus = func(s string) { m.send(statusMsg(s)) }
+	m.inputFor(0)               // the local terminal's input line; sized by the first layout()
 	m.usage = m.usageSnapshot() // pre-run, single-threaded: safe
 	return m
 }
@@ -393,18 +386,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = modeInput
 		}
 		m.statusNote = ""
-		m.input.Focus()
+		m.focusInputs()
 		// Anything queued during the run that the model never got to see
 		// becomes the next turn.
 		if left := m.ag.DrainInbox(); len(left) > 0 {
-			return m.startTurn(strings.Join(left, "\n"))
+			return m.startTurnFrom(strings.Join(left, "\n"), 0)
 		}
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
 			m.appendLine(stErr.Render("plan failed: ") + msg.err.Error())
 			m.mode = modeInput
-			m.input.Focus()
+			m.focusInputs()
 			break
 		}
 		msgCopy := msg
@@ -421,15 +414,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		return m.handleKey(msg, 0)
+	case live.ClientKeyMsg:
+		return m.handleKey(msg.Key, msg.Client)
 	case tea.MouseMsg:
-		return m.handleMouse(msg)
+		return m.handleMouse(msg, 0)
+	case live.ClientMouseMsg:
+		return m.handleMouse(msg.Mouse, msg.Client)
 	}
 
 	if m.mode == modeInput {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		cmds = append(cmds, cmd)
+		// Cursor blinks and the like are not tagged with a sender: every
+		// client's input line gets them.
+		for _, ta := range m.inputs {
+			updated, cmd := ta.Update(msg)
+			*ta = updated
+			cmds = append(cmds, cmd)
+		}
 	}
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
@@ -437,27 +438,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+// handleKey routes one keystroke, tagged with the client that typed it (0
+// is the local terminal). Drafts, the palette and the queue popup belong to
+// their sender; modals that speak for the whole session (approvals, plans,
+// pickers) stay shared.
+func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeApproval:
 		return m.handleApprovalKey(k)
 	case modePicker:
-		return m.handlePickerKey(k)
+		return m.handlePickerKey(k, from)
 	case modePlan:
 		return m.handlePlanKey(k)
 	case modePalette:
-		return m.handlePaletteKey(k)
+		return m.handlePaletteKey(k, from)
 	case modeMenu:
-		return m.handleMenuKey(k)
+		return m.handleMenuKey(k, from)
 	case modeContextMenu:
-		return m.handleContextMenuKey(k)
+		return m.handleContextMenuKey(k, from)
 	case modeQueue:
-		return m.handleQueueKey(k)
+		return m.handleQueueKey(k, from)
 	case modeBusy:
-		return m.handleBusyKey(k)
+		return m.handleBusyKey(k, from)
 	}
 
 	// modeInput
+	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC:
 		if m.sel != nil {
@@ -465,8 +471,8 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.clearSelection()
 			return m, nil
 		}
-		if m.input.Value() != "" {
-			m.input.Reset()
+		if in.Value() != "" {
+			in.Reset()
 			m.quitHint = false
 			return m, nil
 		}
@@ -477,19 +483,19 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.appendLine(stDim.Render("press Ctrl+C again to quit"))
 		return m, nil
 	case tea.KeyEnter:
-		text := strings.TrimSpace(m.input.Value())
+		text := strings.TrimSpace(in.Value())
 		if text == "" {
 			return m, nil
 		}
 		m.quitHint = false
 		m.histFile.add(text)
-		m.input.Reset()
+		in.Reset()
 		if strings.HasPrefix(text, "/") {
-			return m.slashCommand(text)
+			return m.slashCommand(text, from)
 		}
-		return m.startTurn(text)
+		return m.startTurnFrom(text, from)
 	case tea.KeyTab:
-		m.completeSlash()
+		m.completeSlash(from)
 		return m, nil
 	case tea.KeyEsc:
 		if m.sel != nil {
@@ -497,22 +503,22 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.KeyRunes:
-		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(m.input.Value()) == "" {
-			return m.openPalette("")
+		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(in.Value()) == "" {
+			return m.openPalette("", from)
 		}
 	case tea.KeyUp:
-		if m.input.LineCount() <= 1 {
+		if in.LineCount() <= 1 {
 			if prev, ok := m.histFile.prev(); ok {
-				m.input.SetValue(prev)
-				m.input.CursorEnd()
+				in.SetValue(prev)
+				in.CursorEnd()
 			}
 			return m, nil
 		}
 	case tea.KeyDown:
-		if m.input.LineCount() <= 1 {
+		if in.LineCount() <= 1 {
 			next, _ := m.histFile.next()
-			m.input.SetValue(next)
-			m.input.CursorEnd()
+			in.SetValue(next)
+			in.CursorEnd()
 			return m, nil
 		}
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -520,8 +526,8 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.vp, cmd = m.vp.Update(k)
 		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(k)
+	updated, cmd := in.Update(k)
+	*in = updated
 	return m, cmd
 }
 
@@ -567,13 +573,16 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	m.mode = modeBusy
 }
 
-// startTurn launches the agent in a goroutine.
-func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
-	m.appendLine(stUser.Render("you> ") + text)
+// startTurnFrom launches the agent in a goroutine, attributing the request
+// to the client that typed it.
+func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
+	m.appendLine(stUser.Render(m.userPrefix(from)) + text)
 	m.mode = modeBusy
 	m.running = true
 	m.statusNote = "thinking"
-	m.input.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+	for _, ta := range m.inputs {
+		ta.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+	}
 	root := m.rootCtx
 	if root == nil {
 		root = context.Background()
@@ -591,7 +600,8 @@ func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
 // handleBusyKey: while the agent works the input stays live. Enter queues
 // the text for delivery at the model's next call; Esc/Ctrl-C cancels the
 // run and discards the queue; PgUp/PgDn scroll; everything else edits.
-func (m *Model) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
 		if k.Type == tea.KeyCtrlC && m.sel != nil {
@@ -607,32 +617,36 @@ func (m *Model) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyEnter:
-		text := strings.TrimSpace(m.input.Value())
+		text := strings.TrimSpace(in.Value())
 		if text == "" {
 			return m, nil
 		}
-		m.input.Reset()
+		in.Reset()
 		if strings.HasPrefix(text, "/") {
 			m.appendLine(stDim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
 			return m, nil
 		}
 		m.histFile.add(text)
-		m.ag.Enqueue(text)
-		m.appendLine(stDim.Render("queued (delivered at the next step)> ") + text)
+		m.ag.EnqueueFrom(text, from)
+		if len(m.clients) > 1 {
+			m.appendLine(stDim.Render("queued> ") + m.userPrefix(from) + text)
+		} else {
+			m.appendLine(stDim.Render("queued (delivered at the next step)> ") + text)
+		}
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(k)
 		return m, cmd
 	case tea.KeyUp:
-		if strings.TrimSpace(m.input.Value()) == "" {
-			return m.openQueue()
+		if strings.TrimSpace(in.Value()) == "" {
+			return m.openQueue(from)
 		}
 	case tea.KeyCtrlQ:
-		return m.openQueue()
+		return m.openQueue(from)
 	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(k)
+	updated, cmd := in.Update(k)
+	*in = updated
 	return m, cmd
 }
 
@@ -660,7 +674,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pending = nil
 		m.appendLine(stWarn.Render("plan discarded"))
 		m.mode = modeInput
-		m.input.Focus()
+		m.focusInputs()
 	default:
 		var cmd tea.Cmd
 		m.modalVP, cmd = m.modalVP.Update(k)
@@ -720,32 +734,39 @@ func (m *Model) headerHeight() int {
 }
 
 func (m *Model) layout() {
-	inputH := 3
 	bottomH := 1
-	vpH := m.height - m.headerHeight() - inputH - bottomH - 1
+	vpH := m.height - m.headerHeight() - m.inputRows() - bottomH - 1
 	if vpH < 3 {
 		vpH = 3
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	ww := wheelWidth
-	if m.compact() {
-		ww = 5 // glyph + "NN%", no fixed-width padding
-		m.input.SetPromptFunc(2, func(i int) string {
-			if i == 0 {
-				return "> "
-			}
-			return "  "
-		})
-	} else {
-		m.input.SetPromptFunc(5, func(i int) string {
-			if i == 0 {
-				return "(>): "
-			}
-			return "     "
-		})
+	for _, ta := range m.inputs {
+		if m.compact() {
+			ta.SetPromptFunc(2, func(i int) string {
+				if i == 0 {
+					return "> "
+				}
+				return "  "
+			})
+		} else {
+			ta.SetPromptFunc(5, func(i int) string {
+				if i == 0 {
+					return "(>): "
+				}
+				return "     "
+			})
+		}
+		ta.SetWidth(m.inputWidth())
+		ta.SetHeight(m.inputRows())
 	}
-	m.input.SetWidth(m.width - ww - 2)
+}
+
+// focusInputs refocuses every client's input line after a modal closes.
+func (m *Model) focusInputs() {
+	for _, ta := range m.inputs {
+		ta.Focus()
+	}
 }
 
 func (m *Model) modalHeight() int {
@@ -815,7 +836,7 @@ func (m *Model) View() string {
 	}
 	b.WriteString(transcript)
 	b.WriteString("\n")
-	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView()))
+	b.WriteString(m.inputRow())
 	b.WriteString("\n")
 	b.WriteString(m.bottomLine())
 	return b.String()
@@ -856,15 +877,9 @@ func (m *Model) bottomLine() string {
 	if m.ag.IDEName != "" {
 		line += stAccent.Render(" " + m.ideMarker())
 	}
-	if len(m.clients) > 1 {
-		holder := "?"
-		for _, c := range m.clients {
-			if c.Holder {
-				holder = c.Label
-			}
-		}
-		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients))) +
-			stDim.Render(" · input: "+holder+" · Ctrl+] d detach · Ctrl+] t take over")
+	if n := len(m.clients); n > 1 {
+		head := stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
+		line += head + stDim.Render(" · "+m.clientLabels(m.width-lipgloss.Width(line)-lipgloss.Width(head)-3))
 	}
 	if m.sel != nil {
 		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -901,16 +916,17 @@ func (m *Model) viewApproval() string {
 
 // ---- slash commands --------------------------------------------------------
 
-func (m *Model) completeSlash() {
-	v := m.input.Value()
+func (m *Model) completeSlash(from int) {
+	in := m.inputFor(from)
+	v := in.Value()
 
 	// @path completion on the last token.
 	if i := strings.LastIndex(v, "@"); i >= 0 && !strings.ContainsAny(v[i:], " \n") {
 		prefix := v[i+1:]
 		matches := agent.CompleteMention(m.ag.Tools.Root, prefix)
 		if len(matches) == 1 {
-			m.input.SetValue(v[:i+1] + matches[0])
-			m.input.CursorEnd()
+			in.SetValue(v[:i+1] + matches[0])
+			in.CursorEnd()
 		} else if len(matches) > 1 {
 			m.appendLine(stDim.Render("@" + strings.Join(matches, "  @")))
 		}
@@ -931,20 +947,23 @@ func (m *Model) completeSlash() {
 		}
 	}
 	if len(matches) == 1 {
-		m.input.SetValue(matches[0] + " ")
-		m.input.CursorEnd()
+		in.SetValue(matches[0] + " ")
+		in.CursorEnd()
 	} else if len(matches) > 1 {
 		m.appendLine(stDim.Render(strings.Join(matches, "  ")))
 	}
 }
 
-func (m *Model) slashCommand(text string) (tea.Model, tea.Cmd) {
+// slashCommand runs a command typed by client from (0 is the local
+// terminal): commands that fill an input line or act on a terminal need to
+// know whose.
+func (m *Model) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
 		return m, tea.Quit
 	case "/menu":
-		return m.openMenu()
+		return m.openMenu(from)
 	case "/theme":
 		if len(fields) > 1 {
 			return m.applyTheme(strings.ToLower(fields[1]))
@@ -1014,7 +1033,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.send(turnDoneMsg{})
 		}()
 	case "/init":
-		return m.startTurn(agent.InitPrompt)
+		return m.startTurnFrom(agent.InitPrompt, from)
 	case "/compact":
 		m.mode = modeBusy
 		m.statusNote = "compacting"
@@ -1047,7 +1066,9 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.appendLine(stUser.Render("plan> ") + req)
 		m.mode = modeBusy
 		m.statusNote = "planning (read-only)"
-		m.input.Blur()
+		for _, ta := range m.inputs {
+			ta.Blur()
+		}
 		go func() {
 			plan, err := m.ag.Plan(m.rootCtx, req)
 			m.send(m.usageSnapshot())
@@ -1078,15 +1099,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			return m, nil
 		}
 		for _, c := range m.clients {
-			mark := "  "
-			if c.Holder {
-				mark = "> "
-			}
-			m.appendLine(stDim.Render(fmt.Sprintf("%s%s  %dx%d", mark, c.Label, c.Cols, c.Rows)))
+			m.appendLine(stDim.Render(fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)))
 		}
 		return m, nil
 	case "/detach":
-		if m.detachHolder == nil {
+		if m.detachClient == nil {
 			m.appendLine(stDim.Render("nothing to detach: not served"))
 			return m, nil
 		}
@@ -1095,8 +1112,8 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// on the goroutine that receives them, so calling the host here would
 		// deadlock the session for good (holding the host's notifyMu, so no
 		// later attach or `sessions kill` could recover it).
-		detach := m.detachHolder
-		return m, func() tea.Msg { detach(); return nil }
+		detach, id := m.detachClient, from
+		return m, func() tea.Msg { detach(id); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
 			return m.resumeSession(fields[1])
@@ -1105,7 +1122,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	default:
 		if c, ok := m.custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
-			return m.startTurn(c.Expand(args))
+			return m.startTurnFrom(c.Expand(args), from)
 		}
 		m.appendLine(stErr.Render("unknown command " + fields[0] + " (/help)"))
 	}

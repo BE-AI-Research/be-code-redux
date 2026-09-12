@@ -35,33 +35,40 @@ func (m *Model) slashEntries() []pickItem {
 }
 
 // openPalette shows the command popup with an initial filter (text typed
-// after the slash).
-func (m *Model) openPalette(initial string) (tea.Model, tea.Cmd) {
+// after the slash). The popup belongs to the client that opened it: it
+// fills that client's input line, and only its keys reach it.
+func (m *Model) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
+	m.paletteOwner = from
 	m.picker = &picker{title: "Commands", items: m.slashEntries(), filter: initial, inline: true, prefix: true,
 		onPick: func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
 			if it.args {
-				m.input.SetValue(it.id + " ")
-				m.input.CursorEnd()
+				in := m.inputFor(m.paletteOwner)
+				in.SetValue(it.id + " ")
+				in.CursorEnd()
 				return m, nil
 			}
-			return m.slashCommand(it.id)
+			return m.slashCommand(it.id, m.paletteOwner)
 		}}
 	m.mode = modePalette
-	m.input.SetValue("")
+	m.inputFor(from).SetValue("")
 	return m, nil
 }
 
-func (m *Model) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	if from != m.paletteOwner {
+		return m, nil // another terminal's keys are none of this popup's business
+	}
 	p := m.picker
 	if p == nil {
 		m.mode = modeInput
 		return m, nil
 	}
+	in := m.inputFor(m.paletteOwner)
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		// Leave what was typed in the input so nothing is lost.
-		m.input.SetValue("/" + p.filter)
-		m.input.CursorEnd()
+		in.SetValue("/" + p.filter)
+		in.CursorEnd()
 		m.picker = nil
 		m.mode = modeInput
 		return m, nil
@@ -74,8 +81,8 @@ func (m *Model) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyRunes:
 		if len(k.Runes) == 1 && k.Runes[0] == ' ' {
 			// A space ends the command name: hand over to the input.
-			m.input.SetValue("/" + p.filter + " ")
-			m.input.CursorEnd()
+			in.SetValue("/" + p.filter + " ")
+			in.CursorEnd()
 			m.picker = nil
 			m.mode = modeInput
 			return m, nil
@@ -83,14 +90,14 @@ func (m *Model) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyTab:
 		if items := p.filtered(); len(items) > 0 {
 			it := items[p.cursor]
-			m.input.SetValue(it.id + " ")
-			m.input.CursorEnd()
+			in.SetValue(it.id + " ")
+			in.CursorEnd()
 			m.picker = nil
 			m.mode = modeInput
 		}
 		return m, nil
 	}
-	return m.handlePickerKey(k)
+	return m.handlePickerKey(k, from)
 }
 
 // paletteBox renders the popup: title, up to 8 matching entries.
@@ -181,9 +188,9 @@ type menuEntry struct {
 	run                func(m *Model) (tea.Model, tea.Cmd)
 }
 
-func (m *Model) menuEntries() []menuEntry {
+func (m *Model) menuEntries(from int) []menuEntry {
 	cmd := func(c string) func(*Model) (tea.Model, tea.Cmd) {
-		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c) }
+		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, from) }
 	}
 	return []menuEntry{
 		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker() }},
@@ -206,8 +213,8 @@ func (m *Model) menuEntries() []menuEntry {
 	}
 }
 
-func (m *Model) openMenu() (tea.Model, tea.Cmd) {
-	entries := m.menuEntries()
+func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
+	entries := m.menuEntries(from)
 	items := make([]pickItem, 0, len(entries))
 	for i, e := range entries {
 		items = append(items, pickItem{id: fmt.Sprint(i),
@@ -225,8 +232,8 @@ func (m *Model) openMenu() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	return m.handlePickerKey(k)
+func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+	return m.handlePickerKey(k, from)
 }
 
 // menuStatus is the block above the menu entries: everything the old

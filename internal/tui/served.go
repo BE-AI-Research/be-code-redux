@@ -40,8 +40,9 @@ func (m *Model) seedFromHost(h *live.Host) {
 }
 
 // RunServed runs the program over a session host instead of a terminal:
-// keystrokes come from the host's input pipe, frames go to every attached
-// client, and sizes arrive as WindowSizeMsg from the host.
+// keystrokes arrive tagged with the client that typed them (a key pump per
+// client turns raw bytes into Bubble Tea messages), frames go to every
+// attached client, and sizes arrive as WindowSizeMsg from the host.
 func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	defer pinColorProfile()()
 	m.rootCtx = ctx
@@ -49,16 +50,24 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	m.served = true
 	m.idleSince = time.Now()
 	m.seedFromHost(h)
-	m.detachHolder = h.DetachHolder
+	m.detachClient = h.Detach
 	m.termWrite = func(s string) { io.WriteString(h.Output(), s) }
 	m.clipboardWrite = func(s string) error { io.WriteString(h.Output(), osc52(s)); return writeClipboardTools(s) }
 	if m.cfg.ThemeTerminalColors {
 		m.termWrite(terminalColorSeq(m.cfg.Theme))
 		defer m.termWrite(terminalColorReset())
 	}
-	p := tea.NewProgram(m, tea.WithInput(h.InputReader()), tea.WithOutput(h.Output()),
+	// No terminal input of its own: every keystroke comes in over the socket
+	// tagged with its sender (see OnInput below).
+	p := tea.NewProgram(m, tea.WithInput(nil), tea.WithOutput(h.Output()),
 		tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithoutSignalHandler())
 	m.program = p
+	// The pump's emit runs on its own goroutines (never the update
+	// goroutine), so p.Send from it cannot deadlock the loop.
+	pump := live.NewKeyPump("xterm-256color", func(msg tea.Msg) { p.Send(msg) })
+	defer pump.Close()
+	m.dropKeyClient = pump.Drop
+	h.OnInput(pump.Feed)
 	h.OnSize(func(cols, rows int) { p.Send(tea.WindowSizeMsg{Width: cols, Height: rows}) })
 	h.OnClients(func(cl []live.ClientInfo) { p.Send(clientsMsg(cl)) })
 	h.OnQuit(func() { p.Send(tea.Quit()) })
@@ -110,16 +119,26 @@ func (m *Model) updateClients(msg clientsMsg) {
 	}
 	for _, c := range m.clients {
 		if !hasClient(prev, c.ID) {
-			note := "attached: " + c.Label
-			if c.Holder {
-				note += ", now holding input"
-			}
-			m.appendLine(stDim.Render(note))
+			m.appendLine(stDim.Render("attached: " + c.Label))
 		}
 	}
 	for _, c := range prev {
-		if !hasClient(m.clients, c.ID) {
-			m.appendLine(stDim.Render("detached: " + c.Label))
+		if hasClient(m.clients, c.ID) {
+			continue
+		}
+		m.appendLine(stDim.Render("detached: " + c.Label))
+		// A terminal that has gone leaves no draft, no half-typed escape
+		// sequence and no popup of its own behind it.
+		m.dropInput(c.ID)
+		if m.dropKeyClient != nil {
+			m.dropKeyClient(c.ID)
+		}
+		if m.mode == modePalette && m.paletteOwner == c.ID {
+			m.picker = nil
+			m.mode = m.idleMode()
+		}
+		if m.mode == modeQueue && m.queueOwner == c.ID {
+			m.closeQueue()
 		}
 	}
 }
