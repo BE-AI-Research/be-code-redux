@@ -16,8 +16,25 @@ type clientsMsg []live.ClientInfo
 // idleTickMsg drives the live_idle_limit check in served mode.
 type idleTickMsg time.Time
 
+// idleTickInterval is the poll period for the live_idle_limit check.
+// A package var (rather than a literal in idleTick) so tests can shrink it
+// instead of genuinely sleeping 30s.
+var idleTickInterval = 30 * time.Second
+
 func idleTick() tea.Cmd {
-	return tea.Tick(30*time.Second, func(t time.Time) tea.Msg { return idleTickMsg(t) })
+	return tea.Tick(idleTickInterval, func(t time.Time) tea.Msg { return idleTickMsg(t) })
+}
+
+// seedFromHost seeds the client roster and the ascii flag from the host's
+// state at the moment RunServed starts. This is the one place in served
+// mode allowed to call back into the host directly (Clients/AnyASCII):
+// it runs before OnSize/OnClients/OnQuit are registered, so there is no
+// callback-reentrancy risk, and it is the only way to see clients that
+// attached to the host before this program existed (the host is listening
+// and serving before RunServed is called; see internal/live/host.go).
+func (m *Model) seedFromHost(h *live.Host) {
+	m.clients = h.Clients()
+	m.ascii = h.AnyASCII()
 }
 
 // RunServed runs the program over a session host instead of a terminal:
@@ -28,6 +45,7 @@ func (m *Model) RunServed(ctx context.Context, h *live.Host) error {
 	m.host = h
 	m.served = true
 	m.idleSince = time.Now()
+	m.seedFromHost(h)
 	m.detachHolder = h.DetachHolder
 	m.termWrite = func(s string) { io.WriteString(h.Output(), s) }
 	m.clipboardWrite = func(s string) error { io.WriteString(h.Output(), osc52(s)); return writeClipboardTools(s) }

@@ -1023,8 +1023,12 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.appendLine(stDim.Render("no handoff briefing in this session"))
 		}
 	case "/clients":
-		if len(m.clients) == 0 {
+		if !m.served {
 			m.appendLine(stDim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
+			return m, nil
+		}
+		if len(m.clients) == 0 {
+			m.appendLine(stDim.Render("no terminals attached"))
 			return m, nil
 		}
 		for _, c := range m.clients {
