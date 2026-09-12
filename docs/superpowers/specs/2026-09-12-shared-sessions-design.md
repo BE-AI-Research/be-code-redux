@@ -120,7 +120,7 @@ which has exactly one client and is otherwise unchanged).
   opener's messages; editing pulls the message into the opener's textarea.
 - **Palette:** `/` typed by a client opens the palette filtered by that
   client's text; it is drawn in the shared frame and driven by the client that
-  opened it (other clients' keys are ignored while it is open; Esc from the
+  opened it (other clients keep typing into their own input lines while it is open, but cannot submit slash commands until it closes; Esc from the
   owner closes it; it also closes if the owner detaches).
 - **Modal modes** (approval, picker, plan, menu, context menu): shared, driven
   by whichever client presses keys; Esc from anyone closes them.

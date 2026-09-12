@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -419,5 +420,51 @@ func TestSpaceClosesThePaletteAndKeepsTheCommand(t *testing.T) {
 	}
 	if got := m.inputFor(0).Value(); got != "/resume ABC123" {
 		t.Fatalf("input = %q, want %q", got, "/resume ABC123")
+	}
+}
+
+// A guest's slash command would come back later as a message that rewrites
+// or closes whatever popup is open — the owner's — so it is refused while a
+// popup is owned; plain text still goes through.
+func TestGuestSlashCommandIsRefusedWhileAPopupIsOwned(t *testing.T) {
+	m := twoClients(t)
+	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/")}) // A opens the palette
+	if m.mode != modePalette || m.paletteOwner != 1 {
+		t.Fatalf("setup: mode %v owner %d", m.mode, m.paletteOwner)
+	}
+	owner := m.picker
+	m.inputFor(2).SetValue("/model")
+	_, cmd := m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	if cmd != nil {
+		t.Fatal("a guest slash command must not produce a command")
+	}
+	if m.mode != modePalette || m.picker != owner {
+		t.Fatal("the owner's palette was disturbed")
+	}
+	if !strings.Contains(m.transcript.String(), "commands wait until the open popup closes") {
+		t.Fatalf("no refusal note:\n%s", m.transcript.String())
+	}
+	if got := m.inputFor(2).Value(); got != "/model" {
+		t.Fatalf("guest draft %q must be kept", got)
+	}
+}
+
+// The double-Ctrl+C quit is reachable from any client and must clear the
+// overlays like every other quit path.
+func TestDoubleCtrlCQuitClearsOverlays(t *testing.T) {
+	m := twoClients(t)
+	var cleared []int
+	m.setOverlay = func(id int, s string) {
+		if s == "" {
+			cleared = append(cleared, id)
+		}
+	}
+	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
+	_, cmd := m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
+	if cmd == nil || fmt.Sprint(cmd()) != fmt.Sprint(tea.Quit()) {
+		t.Fatal("second Ctrl+C must quit")
+	}
+	if len(cleared) != 2 {
+		t.Fatalf("overlays cleared for %v, want both clients", cleared)
 	}
 }

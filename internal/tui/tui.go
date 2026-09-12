@@ -617,8 +617,17 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	// the mode switch that would have hidden the owner's popup is rolled
 	// back, and the owner's own Esc then lands in m.idleMode(), which is
 	// modeBusy while that turn runs.
+	// A slash command, though, is refused outright while the popup is up:
+	// its work arrives later as a message (pickerItemsMsg, planReadyMsg,
+	// turnDoneMsg) that would rewrite or close whatever popup is open by
+	// then — the owner's. Busy mode already refuses commands.
+	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
+		m.appendLine(stDim.Render("commands wait until the open popup closes; plain text still sends"))
+		return m, nil
+	}
 	mode, pick, prev := m.mode, m.picker, m.prevMode
 	pal, menu, queue := m.paletteOwner, m.menuOwner, m.queueOwner
+	cursor := m.queueCursor
 	held := m.ag.Held()
 	var model tea.Model
 	var cmd tea.Cmd
@@ -629,6 +638,7 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	}
 	m.mode, m.picker, m.prevMode = mode, pick, prev
 	m.paletteOwner, m.menuOwner, m.queueOwner = pal, menu, queue
+	m.queueCursor = cursor
 	if m.ag.Held() != held {
 		// openQueue/closeQueue ran for a popup that is not going to be
 		// shown: the owner's hold is what counts.
@@ -669,6 +679,7 @@ func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.quitHint[from] {
+			m.clearAllOverlays() // see the /quit path: no draft may follow the teardown frame
 			return m, tea.Quit
 		}
 		m.setQuitHint(from)
