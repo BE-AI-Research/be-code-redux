@@ -142,6 +142,11 @@ type Config struct {
 type IDEConfig struct {
 	Enabled     bool `json:"enabled"`
 	AutoContext bool `json:"auto_context"`
+	// Review is where a proposed file change is reviewed (see
+	// internal/review): auto | editor | tui | both. auto resolves per
+	// write — the editor alone while VS Code's terminal is the only one
+	// attached, both places once another terminal joins.
+	Review string `json:"review"`
 }
 
 // Default returns the out-of-the-box configuration: Ollama on localhost,
@@ -204,7 +209,7 @@ func Default() *Config {
 		CompactWithModel: true,
 		RepoMap:          true,
 		RepoMapBudget:    6144,
-		IDE:              IDEConfig{Enabled: true, AutoContext: true},
+		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 	}
 }
 

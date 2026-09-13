@@ -20,6 +20,9 @@ type fakeOpts struct {
 	// hangOnCall accepts tools/call but never answers it, so the caller's
 	// own deadline has to bound the wait.
 	hangOnCall bool
+	// onCall, when set, records every tools/call the client makes. It runs
+	// on the server goroutine, so it must be safe for concurrent use.
+	onCall func(name string, args json.RawMessage)
 }
 
 // fakeIDEServer stands in for the editor extension's embedded MCP server:
@@ -75,6 +78,14 @@ func fakeIDEServer(t *testing.T, o fakeOpts) (port int, gotToken *string) {
 				}
 				res = map[string]any{"tools": list}
 			case "tools/call":
+				if o.onCall != nil {
+					var p struct {
+						Name string          `json:"name"`
+						Args json.RawMessage `json:"arguments"`
+					}
+					json.Unmarshal(req.Params, &p)
+					o.onCall(p.Name, p.Args)
+				}
 				if o.hangOnCall {
 					continue // never reply; the caller's context must bound the wait
 				}

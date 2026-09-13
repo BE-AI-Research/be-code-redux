@@ -24,6 +24,11 @@ import (
 // block a new request, independent of the MCP client's own call timeout.
 const contextNoteTimeout = 3 * time.Second
 
+// cancelReviewTimeout bounds withdrawing a diff from the editor: it happens
+// after the change was already decided elsewhere, so it must never hold the
+// tool call up.
+const cancelReviewTimeout = 3 * time.Second
+
 type Lock struct {
 	PID              int      `json:"pid"`
 	Port             int      `json:"port"`
@@ -182,7 +187,11 @@ func (s *Session) ContextNote(ctx context.Context) string {
 // prompt takes over. The 10-minute review window hangs off the caller's
 // ctx, so cancelling the run (Esc) abandons a diff left sitting in the
 // editor instead of blocking the tool call for the full window.
-func (s *Session) ReviewWrite(ctx context.Context, rel, oldContent, newContent string) tools.ReviewDecision {
+//
+// shared says the same change is also open as a terminal prompt, so this
+// diff may be withdrawn by CancelReview; the extension then resolves it
+// as "cancelled" (ReviewCancelled), which the coordinator ignores.
+func (s *Session) ReviewWrite(ctx context.Context, rel, oldContent, newContent string, shared bool) tools.ReviewDecision {
 	if s == nil || s.Client == nil {
 		return tools.ReviewUnavailable
 	}
@@ -192,8 +201,8 @@ func (s *Session) ReviewWrite(ctx context.Context, rel, oldContent, newContent s
 	if ctx.Err() != nil {
 		return tools.ReviewUnavailable
 	}
-	args, _ := json.Marshal(map[string]string{"path": rel, "original": oldContent, "proposed": newContent,
-		"summary": fmt.Sprintf("BE-Code wants to change %s", rel)})
+	args, _ := json.Marshal(map[string]any{"path": rel, "original": oldContent, "proposed": newContent,
+		"summary": fmt.Sprintf("BE-Code wants to change %s", rel), "shared": shared})
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	out, isErr, err := s.Client.CallTool(ctx, "review_diff", args)
@@ -213,6 +222,38 @@ func (s *Session) ReviewWrite(ctx context.Context, rel, oldContent, newContent s
 		return tools.ReviewAcceptAll
 	case "reject":
 		return tools.ReviewReject
+	case "cancelled":
+		return tools.ReviewCancelled
 	}
 	return tools.ReviewUnavailable
 }
+
+// CancelReview withdraws a pending diff for rel because the change was
+// answered elsewhere (a terminal prompt). It is best effort on purpose: it
+// runs on its own short deadline — the caller's context is usually already
+// cancelled by then — and ignores every error, since an extension without
+// review_cancel simply leaves the diff open and its late decision is
+// discarded by the coordinator.
+func (s *Session) CancelReview(rel string) {
+	if s == nil || s.Client == nil {
+		return
+	}
+	args, _ := json.Marshal(map[string]string{"path": rel})
+	ctx, cancel := context.WithTimeout(context.Background(), cancelReviewTimeout)
+	defer cancel()
+	_, _, _ = s.Client.CallTool(ctx, "review_cancel", args)
+}
+
+// ReviewEditor is the session as the review coordinator's editor-side
+// reviewer (review.Editor, satisfied structurally so this package does not
+// import the coordinator).
+type ReviewEditor struct{ s *Session }
+
+// ReviewEditor adapts the session for the review coordinator.
+func (s *Session) ReviewEditor() ReviewEditor { return ReviewEditor{s} }
+
+func (e ReviewEditor) Review(ctx context.Context, rel, oldContent, newContent string, shared bool) tools.ReviewDecision {
+	return e.s.ReviewWrite(ctx, rel, oldContent, newContent, shared)
+}
+
+func (e ReviewEditor) Cancel(rel string) { e.s.CancelReview(rel) }

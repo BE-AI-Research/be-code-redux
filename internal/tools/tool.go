@@ -43,6 +43,9 @@ const (
 	ReviewAccept
 	ReviewReject
 	ReviewAcceptAll // accept and stop asking for the rest of the session
+	// ReviewCancelled: this reviewer was withdrawn because the other place
+	// answered first (see internal/review). Never returned to fs.go.
+	ReviewCancelled
 )
 
 // Registry holds the active tool set, rooted at a workspace directory.
