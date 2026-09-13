@@ -7,6 +7,8 @@ package gitctx
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -80,4 +82,88 @@ func DiffStat(ctx context.Context, root string) string {
 		diff = diff[:capBytes] + "\n... [diff truncated]"
 	}
 	return stat + "\n\n" + diff
+}
+
+// SnapshotPrefix is the branch namespace Snapshot creates under.
+const SnapshotPrefix = "be-code/pre-init/"
+
+// gitEnv runs git directly (not through a shell) with extra environment, for
+// the few operations that need a private index.
+func gitEnv(ctx context.Context, root string, env []string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	s := strings.TrimSpace(string(out))
+	if err != nil {
+		if s != "" {
+			return s, fmt.Errorf("git %s: %s", args[0], s)
+		}
+		return s, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return s, nil
+}
+
+// Snapshot records the whole working tree — tracked and untracked files alike,
+// honouring .gitignore — as one commit on a new branch under SnapshotPrefix
+// (stamped with the current time), and returns the branch name. The user's
+// checkout is left exactly as it was: the work is done in a private index
+// (GIT_INDEX_FILE), the commit is written with commit-tree, and only the new
+// ref is created — HEAD, the real index and the working tree never move. In a
+// repository with no commits yet the snapshot simply has no parent. Every call
+// makes a fresh branch, so the earliest one stays as the initial restore point.
+func Snapshot(ctx context.Context, root, message string) (string, error) {
+	if !IsRepo(ctx, root) {
+		return "", fmt.Errorf("not a git repository")
+	}
+	tmp, err := os.CreateTemp("", "be-code-index-*")
+	if err != nil {
+		return "", err
+	}
+	tmp.Close()
+	os.Remove(tmp.Name()) // git wants to create it itself
+	defer os.Remove(tmp.Name())
+	env := []string{"GIT_INDEX_FILE=" + tmp.Name()}
+
+	head, headErr := gitEnv(ctx, root, nil, "rev-parse", "--verify", "-q", "HEAD")
+	if headErr == nil && head != "" {
+		if _, err := gitEnv(ctx, root, env, "read-tree", "HEAD"); err != nil {
+			return "", err
+		}
+	}
+	if _, err := gitEnv(ctx, root, env, "add", "-A", "--", "."); err != nil {
+		return "", err
+	}
+	tree, err := gitEnv(ctx, root, env, "write-tree")
+	if err != nil {
+		return "", err
+	}
+	args := []string{"commit-tree", tree, "-m", message}
+	if headErr == nil && head != "" {
+		args = append(args, "-p", head)
+	}
+	// A restore point must not depend on a configured identity (a fresh
+	// machine, a scratch repo): fall back to a fixed one only when none is set.
+	var ident []string
+	if _, err := gitEnv(ctx, root, nil, "config", "user.email"); err != nil {
+		ident = []string{
+			"GIT_AUTHOR_NAME=be-code", "GIT_AUTHOR_EMAIL=be-code@localhost",
+			"GIT_COMMITTER_NAME=be-code", "GIT_COMMITTER_EMAIL=be-code@localhost",
+		}
+	}
+	commit, err := gitEnv(ctx, root, ident, args...)
+	if err != nil {
+		return "", err
+	}
+	branch := SnapshotPrefix + time.Now().Format("20060102-150405")
+	for i := 2; ; i++ {
+		if _, err := gitEnv(ctx, root, nil, "rev-parse", "--verify", "-q", "refs/heads/"+branch); err != nil {
+			break // free
+		}
+		branch = fmt.Sprintf("%s%s-%d", SnapshotPrefix, time.Now().Format("20060102-150405"), i)
+	}
+	if _, err := gitEnv(ctx, root, nil, "update-ref", "refs/heads/"+branch, commit); err != nil {
+		return "", err
+	}
+	return branch, nil
 }

@@ -415,9 +415,22 @@ verification checks: every `make` target in `Makefile`/`build.mk` (as `make <tar
 fails too, the measured fact sheet itself is written, headed by a comment saying the
 model's overview was rejected and why.
 
-Then it is a normal write: you see the diff preview and approve it, any previous
-`BECODE.md` is kept as `BECODE.md.bak`, and the new notes go into the system prompt at
-once. That approval is always the terminal's own prompt — `/init` asks here even when
+Then it is a normal write: you see the diff preview and approve it, a restore point is
+recorded, the file is written, and the new notes go into the system prompt at once. In a
+git repository the restore point is a branch `be-code/pre-init/<yyyymmdd-hhmmss>` holding
+the whole working tree as it was — tracked and untracked files alike, honouring
+`.gitignore` — created without touching your HEAD, index or checkout. The lines after the
+write name it and the command that rolls everything back:
+
+```
+restore point: be-code/pre-init/20260913-141200
+  roll back with: git restore --source=be-code/pre-init/20260913-141200 --staged --worktree -- .
+```
+
+Every init adds a new branch and none is ever moved, so the earliest one is the permanent
+initial restore point (prune them with `git branch -D` when you no longer need them). If
+the snapshot cannot be taken, init stops before writing rather than writing without one.
+Outside a git repository any previous `BECODE.md` is kept as `BECODE.md.bak` instead. That approval is always the terminal's own prompt — `/init` asks here even when
 `ide.review` is `editor`, because the document it wrote is what you are being shown. Re-run `/init` whenever the project has moved on. A session started in a recognized
 project that has no notes file says so once — `no BECODE.md; /init maps this project` —
 and does nothing else. `be-code init` on a non-interactive stdin without `-y` denies the

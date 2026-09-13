@@ -1,5 +1,20 @@
 # BE-Code Changelog
 
+## v0.7.1 — git restore point before init
+
+- **`/init` and `be-code init` record a git restore point.** Inside a git
+  repository the whole working tree — tracked and untracked files alike,
+  honouring `.gitignore` — is committed to a new branch
+  `be-code/pre-init/<yyyymmdd-hhmmss>` before `BECODE.md` is written, using a
+  private index so HEAD, the real index and the checkout are untouched. The log
+  names the branch and the one-line rollback
+  (`git restore --source=<branch> --staged --worktree -- .`), so a bad document
+  and anything a later run does because of it can be undone together. Every init
+  adds a branch and none is ever moved, so the earliest is the permanent initial
+  restore point. A failed snapshot aborts the init instead of writing without
+  one. Outside a repository the previous `BECODE.md.bak` behaviour stays.
+  (`gitctx.Snapshot`, `gitctx.SnapshotPrefix`.)
+
 ## v0.7.0 — 2026-09-12 — mapped init, shared review prompt
 
 - **`/init` now maps the repository instead of guessing at it.** BE-Code measures
