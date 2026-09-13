@@ -96,3 +96,19 @@ var SlashCommands = func() []string {
 
 // SetMono disables ANSI color output (theme "mono" or --plain piping).
 func SetMono() { useColor = false }
+
+// busySafe lists the slash commands that never touch the running agent and
+// so may run in the middle of a turn: settings, information, copying,
+// queue editing, and leaving (quit cancels the run first).
+var busySafe = map[string]bool{
+	"/menu": true, "/help": true, "/theme": true, "/config": true, "/stats": true, "/tools": true,
+	"/map": true, "/handoff": true, "/copy": true, "/queue": true, "/clients": true, "/detach": true,
+	"/quit": true, "/exit": true, "/q": true,
+}
+
+// BusySafeCommand reports whether a slash command line may run while the
+// agent is busy. Everything else waits until the turn ends.
+func BusySafeCommand(line string) bool {
+	f := strings.Fields(line)
+	return len(f) > 0 && busySafe[f[0]]
+}

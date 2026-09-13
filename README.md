@@ -442,6 +442,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
+- `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for
+  backend" notice appears above the input line (a second notice follows at four times
+  this); notices of this kind show for 20 s and are not kept in the transcript.
 - `host_sessions` (true) — run each interactive TUI session in a detached host
   process this terminal attaches to, so it survives the terminal and other
   terminals can attach (`--no-host` for one run); see "Shared sessions"

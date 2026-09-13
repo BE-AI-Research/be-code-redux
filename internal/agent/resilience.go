@@ -41,7 +41,7 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 		if delay > 30*time.Second {
 			delay = 30 * time.Second
 		}
-		a.notice("backend error (%v); retrying in %s (attempt %d/%d, task state preserved)",
+		a.transient("backend error (%v); retrying in %s (attempt %d/%d, task state preserved)",
 			compactErr(err), delay.Round(time.Millisecond), attempt+1, maxBackendRetries)
 		select {
 		case <-time.After(delay):
@@ -105,7 +105,7 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	if !loaded {
 		if !a.unloadedNotified {
 			a.unloadedNotified = true
-			a.notice("model %s is not loaded on the backend (evicted by another model or idle expiry); the next reply includes reload and prompt re-processing time", a.Model)
+			a.transient("model %s is not loaded on the backend (evicted by another model or idle expiry); the next reply includes reload and prompt re-processing time", a.Model)
 		}
 	} else {
 		a.unloadedNotified = false
@@ -113,7 +113,7 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	if window > 0 && window != a.Window {
 		old := a.Window
 		a.ApplyWindow(window)
-		a.notice("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, a.History.Budget, a.History.Limit())
+		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, a.History.Budget, a.History.Limit())
 	}
 }
 
@@ -173,10 +173,10 @@ func (a *Agent) watchForStall(onDelta, onReasoning provider.StreamFunc) (provide
 				switch {
 				case stage == 0 && idle >= a.stallAfter:
 					stage = 1
-					a.notice("waiting for backend: no tokens for %s (prompt re-processing after a context change, model loading, or queued behind another client)", idle.Round(time.Second))
-				case stage == 1 && idle >= 3*a.stallAfter:
+					a.transient("waiting for backend: no tokens for %s (prompt re-processing after a context change, model loading, or queued behind another client)", idle.Round(time.Second))
+				case stage == 1 && idle >= stallSecondStage(a.stallAfter):
 					stage = 2
-					a.notice("still waiting for backend after %s; Ctrl-C/Esc cancels, the task state is saved", idle.Round(time.Second))
+					a.transient("still waiting for backend after %s; Ctrl-C/Esc cancels, the task state is saved", idle.Round(time.Second))
 				}
 			}
 		}

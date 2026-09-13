@@ -25,11 +25,12 @@ import (
 // REPL is the plain inline session: readline editing, persistent history,
 // slash autocomplete — works over SSH and BE-CLI web terminals.
 type REPL struct {
-	Cfg      *config.Config
-	Agent    *agent.Agent
-	Provider provider.Provider
-	Custom   map[string]commands.Command
-	rl       *readline.Instance
+	quitAfter bool // set by /quit typed during a run
+	Cfg       *config.Config
+	Agent     *agent.Agent
+	Provider  provider.Provider
+	Custom    map[string]commands.Command
+	rl        *readline.Instance
 
 	// lines is fed by the single readline goroutine; it keeps reading while
 	// a run is in progress so the user can queue messages or cancel.
@@ -164,6 +165,9 @@ func (r *REPL) Run(ctx context.Context) error {
 			continue
 		}
 		r.turn(ctx, input)
+		if r.quitAfter {
+			return nil
+		}
 	}
 }
 
@@ -307,6 +311,13 @@ func (r *REPL) runBusy(ctx context.Context, fn func(ctx context.Context)) {
 					continue
 				}
 				if strings.HasPrefix(line, "/") {
+					if BusySafeCommand(line) {
+						if r.command(ctx, line) {
+							r.quitAfter = true // leaving mid-turn: stop the run, then exit
+							cancel()
+						}
+						continue
+					}
 					fmt.Println(dim("commands wait until the agent is done (Ctrl-C cancels); plain text is queued; /queue edits the queue"))
 					continue
 				}

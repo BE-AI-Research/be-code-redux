@@ -71,6 +71,10 @@ type Config struct {
 
 	// Theme: "dark" (default), "light", or "mono".
 	Theme string `json:"theme"`
+	// StallNoticeSeconds is how long the backend may stay silent before the
+	// "waiting for backend" notice appears (a second notice follows at four
+	// times this). 0 means the default of 45.
+	StallNoticeSeconds int `json:"stall_notice_seconds,omitempty"`
 	// ThemeTerminalColors lets a theme recolour the terminal window itself
 	// (OSC 11/10), restored on exit. Off if your terminal misbehaves.
 	ThemeTerminalColors bool `json:"theme_terminal_colors"`
@@ -144,8 +148,9 @@ type IDEConfig struct {
 // with llama.cpp and the BE AI Engine fabric pre-wired as named endpoints.
 func Default() *Config {
 	return &Config{
-		DefaultProvider: "ollama",
-		Model:           "qwen3:8b",
+		StallNoticeSeconds: 45,
+		DefaultProvider:    "ollama",
+		Model:              "qwen3:8b",
 		Providers: map[string]ProviderConfig{
 			"ollama": {
 				Type:    "ollama",
