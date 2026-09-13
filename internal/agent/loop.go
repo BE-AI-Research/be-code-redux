@@ -164,9 +164,20 @@ func (a *Agent) SetGuidance(g string) {
 	}
 }
 
+// MaxProjectNotes caps the project notes (BECODE.md/CLAUDE.md content) that
+// enter the system prompt, whether loaded at startup (cmd/root.go's
+// loadProjectNotes) or written live by /init (SetProjectNotes) — one
+// definition so a session never carries more than a restart would load.
+const MaxProjectNotes = 8 * 1024
+
 // SetProjectNotes replaces the BECODE.md content and recomposes the system
-// prompt (used after init writes a new file).
+// prompt (used after init writes a new file). Notes are capped at
+// MaxProjectNotes so a long-lined document or fact-sheet fallback can't
+// enter the live prompt any larger than what a restart would load.
 func (a *Agent) SetProjectNotes(notes string) {
+	if len(notes) > MaxProjectNotes {
+		notes = notes[:MaxProjectNotes]
+	}
 	a.projectNotes = notes
 	a.RefreshSystem()
 }

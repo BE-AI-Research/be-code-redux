@@ -19,11 +19,17 @@ var askYesNo = func(prompt string) bool {
 	return strings.HasPrefix(strings.ToLower(ans), "y")
 }
 
-// initApprove is initCmd's Approve func: -y approves without asking,
-// otherwise it prints the diff preview and asks y/N.
+// initApprove is initCmd's Approve func: -y approves without asking; on a
+// non-interactive stdin (no -y) it denies without reading, matching
+// headlessApprover's contract (cmd/commands.go) instead of blocking forever
+// on fmt.Scanln; otherwise it prints the diff preview and asks y/N.
 func initApprove(preview string) bool {
 	if flagYes {
 		return true
+	}
+	if !stdinIsTTY() {
+		fmt.Fprintln(os.Stderr, "denied file_write (non-interactive; use -y to auto-approve)")
+		return false
 	}
 	fmt.Println(preview)
 	return askYesNo("write BECODE.md? [y/N] ")

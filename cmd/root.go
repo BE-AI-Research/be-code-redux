@@ -99,7 +99,9 @@ func Execute() {
 	}
 }
 
-func stdinIsTTY() bool {
+// stdinIsTTY is a var so tests can stub it (e.g. initApprove's non-TTY
+// denial path).
+var stdinIsTTY = func() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
 }
@@ -427,9 +429,8 @@ func loadProjectNotes(root string) string {
 	for _, name := range []string{"BECODE.md", "becode.md", "CLAUDE.md"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err == nil {
-			const limit = 8 * 1024
-			if len(data) > limit {
-				data = data[:limit]
+			if len(data) > agent.MaxProjectNotes {
+				data = data[:agent.MaxProjectNotes]
 			}
 			return string(data)
 		}

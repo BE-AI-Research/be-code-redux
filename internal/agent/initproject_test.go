@@ -108,3 +108,15 @@ func TestSetProjectNotesRefreshesTheSystemPrompt(t *testing.T) {
 		t.Fatalf("system prompt:\n%s", sys)
 	}
 }
+
+func TestSetProjectNotesCapsAt8KiB(t *testing.T) {
+	ag, _ := newTestAgent(t, &funcProvider{}, nil)
+	long := strings.Repeat("x", 20*1024)
+	ag.SetProjectNotes(long)
+	if len(ag.projectNotes) > MaxProjectNotes {
+		t.Fatalf("projectNotes not capped: %d bytes", len(ag.projectNotes))
+	}
+	if strings.Contains(ag.History.System.Content, long) {
+		t.Fatal("system prompt carries the full uncapped notes")
+	}
+}
