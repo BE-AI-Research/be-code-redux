@@ -164,6 +164,13 @@ func (a *Agent) SetGuidance(g string) {
 	}
 }
 
+// SetProjectNotes replaces the BECODE.md content and recomposes the system
+// prompt (used after init writes a new file).
+func (a *Agent) SetProjectNotes(notes string) {
+	a.projectNotes = notes
+	a.RefreshSystem()
+}
+
 // RefreshSystem recomposes the system prompt after tools or guidance
 // changed (used once at startup when the editor bridge attaches).
 func (a *Agent) RefreshSystem() {
