@@ -243,3 +243,135 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// TestScanParsesMakefileTargets pins the shallow makefile parse: every real
+// target from every makefile at the root, and none of the lines that only
+// look like one (.PHONY and friends, a pattern rule, a variable
+// assignment, a recipe line).
+func TestScanParsesMakefileTargets(t *testing.T) {
+	root := goFixture(t)
+	write(t, root, "Makefile", strings.Join([]string{
+		"VERSION := 1.2.3",
+		"CFLAGS ?= -g",
+		"",
+		".PHONY: build test",
+		"# a comment",
+		"build:",
+		"\tgo build ./...",
+		"test: build",
+		"\tgo test ./...",
+		"%.o: %.c",
+		"\tcc -c $<",
+		".DEFAULT_GOAL := build",
+		"$(BINARY):",
+		"\ttouch $@",
+	}, "\n")+"\n")
+	write(t, root, "build.mk", "verify: vet build test\n\t@echo ok\nvet:\n\tgo vet ./...\n")
+
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"build", "test", "verify", "vet"}
+	if len(f.MakeTargets) != len(want) {
+		t.Fatalf("targets %v, want %v", f.MakeTargets, want)
+	}
+	for i, w := range want {
+		if f.MakeTargets[i] != w {
+			t.Fatalf("targets %v, want %v", f.MakeTargets, want)
+		}
+	}
+	for _, bad := range []string{"VERSION", "CFLAGS", ".PHONY", ".DEFAULT_GOAL", "%.o", "$(BINARY)"} {
+		if contains(f.MakeTargets, bad) {
+			t.Errorf("%q must not be a target: %v", bad, f.MakeTargets)
+		}
+	}
+	if !contains(f.MakeFiles, "Makefile") || !contains(f.MakeFiles, "build.mk") {
+		t.Fatalf("make files %v", f.MakeFiles)
+	}
+	if !strings.Contains(f.Markdown(), "## Make targets") || !strings.Contains(f.Markdown(), "`verify`") {
+		t.Fatalf("fact sheet lacks the make targets:\n%s", f.Markdown())
+	}
+	names := f.Names()
+	for _, want := range []string{"make build", "make -f build.mk verify", "make -f Makefile build", "go run .", "go test ./internal/core", "go vet ./..."} {
+		if !contains(names, want) {
+			t.Errorf("names lack %q", want)
+		}
+	}
+}
+
+// TestNamesCoverNodeCommandsAndFiles: the scripts and bins a package.json
+// declares are citable invocations, and every discovered file is a citable
+// name.
+func TestNamesCoverNodeCommandsAndFiles(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "package.json", `{"name":"web","bin":{"web":"cli.js"},"scripts":{"build":"tsc","test":"vitest"}}`)
+	write(t, root, "src/index.ts", "export {}\n")
+	write(t, root, "src/util/fmt.ts", "export {}\n")
+
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(f.NPMScripts, "build") || !contains(f.NPMScripts, "test") || !contains(f.NPMBins, "web") {
+		t.Fatalf("package.json: scripts=%v bins=%v", f.NPMScripts, f.NPMBins)
+	}
+	names := f.Names()
+	for _, want := range []string{"npm run build", "npm run test", "npm test", "npm install", "npx web", "src/index.ts", "src/util/fmt.ts", "package.json"} {
+		if !contains(names, want) {
+			t.Errorf("names lack %q", want)
+		}
+	}
+}
+
+// TestFilePathsAreBounded: FilePaths is every discovered file only up to
+// maxNamedFiles, so a large repo cannot turn the names list into megabytes.
+func TestFilePathsAreBounded(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < maxNamedFiles+50; i++ {
+		write(t, root, fmt.Sprintf("gen/f%03d.go", i), "package gen\n")
+	}
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Files != maxNamedFiles+50 {
+		t.Fatalf("files %d", f.Files)
+	}
+	if len(f.FilePaths) != maxNamedFiles {
+		t.Fatalf("file paths %d, want %d", len(f.FilePaths), maxNamedFiles)
+	}
+}
+
+// TestNotesFallbackFitsTheLimit: the fallback document is also the project
+// notes, so it must fit the caller's cap, end at a line boundary and leave
+// out the repo map — while keeping the part a session actually needs.
+func TestNotesFallbackFitsTheLimit(t *testing.T) {
+	root := goFixture(t)
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.RepoMap = "## huge\n" + strings.Repeat("func Something()\n", 2000)
+	if !strings.Contains(f.Markdown(), "## Symbols") {
+		t.Fatal("the model's fact sheet must still carry the repo map")
+	}
+	const limit = 300
+	out := f.NotesFallback(limit)
+	if len(out) > limit {
+		t.Fatalf("fallback is %d bytes, over the %d limit", len(out), limit)
+	}
+	if !strings.HasSuffix(out, "\n") {
+		t.Fatalf("fallback must end at a line boundary:\n%q", out)
+	}
+	if strings.Contains(out, "## Symbols") || strings.Contains(out, "func Something()") {
+		t.Fatalf("fallback must drop the repo map:\n%s", out)
+	}
+	if !strings.Contains(out, "## Build and test") || !strings.Contains(out, "go test ./...") {
+		t.Fatalf("fallback lost the build/test section:\n%s", out)
+	}
+	// Under the limit it is the whole (symbol-less) sheet, untrimmed.
+	if whole := f.NotesFallback(1 << 20); !strings.Contains(whole, "## Layout") || strings.Contains(whole, "## Symbols") {
+		t.Fatalf("untrimmed fallback:\n%s", whole)
+	}
+}

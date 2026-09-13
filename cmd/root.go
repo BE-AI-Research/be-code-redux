@@ -430,10 +430,9 @@ func loadProjectNotes(root string) string {
 	for _, name := range []string{"BECODE.md", "becode.md", "CLAUDE.md"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err == nil {
-			if len(data) > agent.MaxProjectNotes {
-				data = data[:agent.MaxProjectNotes]
-			}
-			return string(data)
+			// Trimmed at a line boundary (never mid-rune) by the one helper
+			// every notes path shares.
+			return agent.TrimProjectNotes(string(data))
 		}
 	}
 	return ""
@@ -503,11 +502,16 @@ func runInteractive(cmd *cobra.Command) error {
 		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
 		repl.SetReview(coord)
 		ag.Tools.ReviewWrite = coord.Decide
+		// The "reviewing change in VS Code…" note belongs to reviews that
+		// really reach the editor: mode "tui" (or no editor at all) resolves
+		// in the terminal instead.
+		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 		return repl.Run(ctx)
 	}
 	m := tui.New(cfg, ag, p)
 	coord := review.New(mode, editor, m.ReviewTerminal(), nil)
 	m.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
+	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 	return m.Run(ctx)
 }

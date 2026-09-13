@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -35,15 +36,28 @@ type GitState struct {
 }
 
 type Facts struct {
-	Root         string
-	Languages    []LangCount
-	Kind         string
-	Checks       []string
-	KeyFiles     []string
-	Layout       []DirCount
-	EntryPoints  []string
-	TestDirs     []string
-	Tooling      []string
+	Root        string
+	Languages   []LangCount
+	Kind        string
+	Checks      []string
+	KeyFiles    []string
+	Layout      []DirCount
+	EntryPoints []string
+	TestDirs    []string
+	Tooling     []string
+	// MakeTargets are the target names declared by the makefiles in
+	// MakeFiles, so `make build` and `make -f build.mk verify` count as
+	// measured commands (see Commands).
+	MakeTargets []string
+	MakeFiles   []string
+	// NPMScripts and NPMBins come from package.json, for `npm run <script>`
+	// and `npx <bin>`.
+	NPMScripts []string
+	NPMBins    []string
+	// FilePaths are the discovered files, in walk order, bounded to
+	// maxNamedFiles: the spec's "every discovered file" for validation,
+	// without letting a huge repo blow up the names list.
+	FilePaths    []string
 	Git          GitState
 	ReadmeHead   string
 	RepoMap      string
@@ -54,6 +68,7 @@ type Facts struct {
 var (
 	maxFiles  = 20000
 	maxWalk   = 2 * time.Second
+	makeFiles = []string{"Makefile", "makefile", "GNUmakefile", "build.mk"}
 	skipDirs  = map[string]bool{".git": true, "vendor": true, "node_modules": true, "dist": true, "build": true, "target": true, ".venv": true, "__pycache__": true, ".idea": true, ".vscode": true}
 	sourceExt = map[string]bool{".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".py": true, ".rs": true, ".java": true, ".kt": true, ".c": true, ".h": true, ".cpp": true, ".cs": true, ".rb": true, ".sh": true, ".md": true, ".yaml": true, ".yml": true, ".toml": true, ".json": true, ".sql": true, ".html": true, ".css": true}
 	keyFiles  = []string{"README", "LICENSE", "CONTRIBUTING", "Makefile", "build.mk", "go.mod", "package.json", "pyproject.toml", "Cargo.toml", "Dockerfile", "docker-compose"}
@@ -100,6 +115,9 @@ func Scan(root string) (Facts, error) {
 			return filepath.SkipAll
 		}
 		f.Files++
+		if len(f.FilePaths) < maxNamedFiles {
+			f.FilePaths = append(f.FilePaths, filepath.ToSlash(rel))
+		}
 		ext := strings.ToLower(filepath.Ext(p))
 		if ext != "" {
 			langs[ext]++
@@ -164,6 +182,8 @@ func Scan(root string) (Facts, error) {
 		f.Checks = append(f.Checks, c.Command)
 	}
 	f.EntryPoints = entryPoints(root)
+	f.MakeFiles, f.MakeTargets = makeTargets(root)
+	f.NPMScripts, f.NPMBins = nodePackage(root)
 	f.Tooling = append(f.Tooling, tomlTooling(root)...)
 	f.Git = gitState(root)
 	f.ReadmeHead = readmeHead(root)
@@ -174,6 +194,103 @@ func Scan(root string) (Facts, error) {
 // maxLineBytes caps how much of one file countLines will read, so a single
 // giant generated file (a lockfile, a bundled asset) cannot stall the scan.
 const maxLineBytes = 4 << 20
+
+// maxNamedFiles bounds Facts.FilePaths: every discovered file is a citable
+// name, but a 20,000-file repo must not turn the names list into megabytes.
+const maxNamedFiles = 400
+
+// maxReadBytes caps every whole-file read the scan makes (README,
+// package.json, pyproject.toml, main.go, the makefiles): a generated or
+// pathological file in one of those places must not be pulled into memory
+// whole.
+const maxReadBytes = 1 << 20
+
+// readCapped reads at most maxReadBytes of p. A missing or unreadable file
+// is an error, exactly as os.ReadFile would report it, so callers keep the
+// `if b, err := …; err == nil` shape.
+func readCapped(p string) ([]byte, error) {
+	fh, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	b := make([]byte, maxReadBytes)
+	n, err := io.ReadFull(fh, b)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	return b[:n], nil
+}
+
+// makeTargets parses target names out of the makefiles at the root, so the
+// commands a project documents (`make build`, `make -f build.mk verify`)
+// validate as measured. It is a deliberately shallow parse: a line whose
+// first token is a plain name followed by ":" (not ":=", not a special
+// .TARGET, not a `%` pattern rule) declares a target.
+func makeTargets(root string) (files []string, targets []string) {
+	seen := map[string]bool{}
+	for _, name := range makeFiles {
+		b, err := readCapped(filepath.Join(root, name))
+		if err != nil {
+			continue
+		}
+		files = append(files, name)
+		for _, line := range strings.Split(string(b), "\n") {
+			if line == "" || line[0] == '\t' || line[0] == ' ' || line[0] == '#' {
+				continue
+			}
+			i := strings.Index(line, ":")
+			if i <= 0 || strings.Contains(line[:i], "%") {
+				continue
+			}
+			// ":=" / "::=" is a variable assignment, not a target.
+			if rest := line[i+1:]; strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, ":=") {
+				continue
+			}
+			name := strings.TrimSpace(line[:i])
+			if name == "" || strings.ContainsAny(name, " \t$") || strings.HasPrefix(name, ".") {
+				continue // .PHONY and friends, pattern lists, variable refs
+			}
+			if !plainTarget.MatchString(name) || seen[name] {
+				continue
+			}
+			seen[name] = true
+			targets = append(targets, name)
+		}
+	}
+	sort.Strings(targets)
+	return files, targets
+}
+
+var plainTarget = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// nodePackage lists package.json's script and bin names for `npm run …`
+// and `npx …`.
+func nodePackage(root string) (scripts []string, bins []string) {
+	b, err := readCapped(filepath.Join(root, "package.json"))
+	if err != nil {
+		return nil, nil
+	}
+	var pkg struct {
+		Bin     json.RawMessage   `json:"bin"`
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal(b, &pkg) != nil {
+		return nil, nil
+	}
+	for n := range pkg.Scripts {
+		scripts = append(scripts, n)
+	}
+	var binMap map[string]string
+	if json.Unmarshal(pkg.Bin, &binMap) == nil {
+		for n := range binMap {
+			bins = append(bins, n)
+		}
+	}
+	sort.Strings(scripts)
+	sort.Strings(bins)
+	return scripts, bins
+}
 
 func countLines(p string) int {
 	fh, err := os.Open(p)
@@ -249,10 +366,10 @@ func entryPoints(root string) []string {
 			}
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "main.go")); err == nil && strings.Contains(string(b), "package main") {
+	if b, err := readCapped(filepath.Join(root, "main.go")); err == nil && strings.Contains(string(b), "package main") {
 		out = append(out, "main.go")
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "package.json")); err == nil {
+	if b, err := readCapped(filepath.Join(root, "package.json")); err == nil {
 		var pkg struct {
 			Main    string            `json:"main"`
 			Bin     json.RawMessage   `json:"bin"`
@@ -283,7 +400,7 @@ func entryPoints(root string) []string {
 			}
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(root, "pyproject.toml")); err == nil {
+	if b, err := readCapped(filepath.Join(root, "pyproject.toml")); err == nil {
 		in := false
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
@@ -306,7 +423,7 @@ func entryPoints(root string) []string {
 
 func tomlTooling(root string) []string {
 	var out []string
-	if b, err := os.ReadFile(filepath.Join(root, "pyproject.toml")); err == nil {
+	if b, err := readCapped(filepath.Join(root, "pyproject.toml")); err == nil {
 		for _, sec := range []string{"[tool.black]", "[tool.ruff]", "[tool.isort]", "[tool.mypy]"} {
 			if strings.Contains(string(b), sec) {
 				out = append(out, "pyproject "+sec)
@@ -347,7 +464,7 @@ func readmeHead(root string) string {
 	entries, _ := os.ReadDir(root)
 	for _, e := range entries {
 		if !e.IsDir() && readmeNames.MatchString(e.Name()) {
-			b, err := os.ReadFile(filepath.Join(root, e.Name()))
+			b, err := readCapped(filepath.Join(root, e.Name()))
 			if err != nil {
 				return ""
 			}
