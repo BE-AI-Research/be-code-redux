@@ -115,6 +115,8 @@ func runSessionHost(code string) error {
 	})
 	m.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
+	// See root.go: the editor-side status note only for reviews that reach it.
+	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 
 	// A signal must take the same route as a client's /quit, or the process
 	// would die past its defers: no handoff briefing, no tool cleanup, and

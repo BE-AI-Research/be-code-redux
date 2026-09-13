@@ -93,6 +93,16 @@ export function registerReviewTool(reg: ToolRegistry, ctx: vscode.ExtensionConte
           acceptAll.set(conn);
           return JSON.stringify({ decision: "accept_all" });
         }
+        if (choice === undefined && a.shared) {
+          // A shared prompt is non-modal, so `undefined` is the user clearing
+          // the notification away — not a rejection. Answering "reject" here
+          // would be taken as the first real answer and would withdraw the
+          // prompt from every attached terminal, so the change nobody
+          // answered would be refused. "cancelled" instead: BE-Code ignores
+          // it, the terminals keep deciding, and if both sides end up
+          // cancelled Decide returns ReviewUnavailable and fs.go asks.
+          return JSON.stringify({ decision: "cancelled" });
+        }
         return JSON.stringify({ decision: choice === "Accept" ? "accept" : "reject" });
       } finally {
         // Only remove this review's own entry — a same-connection re-review

@@ -128,6 +128,27 @@ func TestEditorUnavailableLeavesTerminalAlone(t *testing.T) {
 	}
 }
 
+// TestDismissedEditorNotificationLeavesTerminalDeciding is the Go half of
+// the extension's dismissed-notification fix: a shared prompt cleared away
+// in VS Code answers ReviewCancelled, which must NOT count as the first
+// answer — the terminals keep deciding and nothing is withdrawn.
+func TestDismissedEditorNotificationLeavesTerminalDeciding(t *testing.T) {
+	c, e, tm := setup("both", nil)
+	e.decide <- tools.ReviewCancelled
+	go func() { time.Sleep(20 * time.Millisecond); tm.answer <- true }()
+	if d := c.Decide(context.Background(), "a.go", "", "x"); d != tools.ReviewAccept {
+		t.Fatalf("decision %v, want accept from the terminal", d)
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if len(tm.withdrawn) != 0 {
+		t.Fatalf("terminal withdrawn by a dismissed notification: %v", tm.withdrawn)
+	}
+	if len(e.cancelled) != 0 {
+		t.Fatal("nothing to cancel: the editor already let go of it")
+	}
+}
+
 func TestModesEditorAndTui(t *testing.T) {
 	c, e, tm := setup("tui", nil)
 	if d := c.Decide(context.Background(), "a.go", "", "x"); d != tools.ReviewUnavailable || e.calls != 0 || tm.calls != 0 {

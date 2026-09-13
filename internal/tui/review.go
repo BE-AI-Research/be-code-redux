@@ -29,7 +29,12 @@ type reviewTerminal struct{ m *Model }
 // which nobody would then be able to answer.
 func (t reviewTerminal) Ask(ctx context.Context, preview string) bool {
 	resp := make(chan bool, 1)
-	t.m.send(approvalMsg{action: "file_write", detail: preview, resp: resp})
+	// Number this prompt so its own withdrawal can be told apart from the
+	// previous write's: both messages cross to the Update goroutine through
+	// p.Send, and an editor that answers the instant the diff opens can get
+	// its cancel there first (see approvalMsg.gen).
+	gen := int(t.m.askGen.Add(1))
+	t.m.send(approvalMsg{action: "file_write", detail: preview, resp: resp, gen: gen})
 	select {
 	case ok := <-resp:
 		return ok
@@ -38,8 +43,12 @@ func (t reviewTerminal) Ask(ctx context.Context, preview string) bool {
 	}
 }
 
-// Withdraw closes a still-open prompt, noting where the answer came from.
-func (t reviewTerminal) Withdraw(note string) { t.m.send(approvalCancelMsg{note: note}) }
+// Withdraw closes a still-open prompt, noting where the answer came from. It
+// carries the generation of the newest Ask — the one the coordinator is
+// withdrawing, since Decide handles one write at a time.
+func (t reviewTerminal) Withdraw(note string) {
+	t.m.send(approvalCancelMsg{note: note, gen: int(t.m.askGen.Load())})
+}
 
 // reviewCommand is /review: with no argument it reports the mode and what
 // auto currently resolves to; with one it sets the mode for the session.

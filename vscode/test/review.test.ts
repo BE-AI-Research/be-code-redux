@@ -142,6 +142,39 @@ describe("review_diff / review_cancel", () => {
     expect(JSON.parse(res.text)).toEqual({ decision: "accept" });
   });
 
+  it("a dismissed shared notification is cancelled, not a rejection", async () => {
+    const reg = new ToolRegistry();
+    registerReviewTool(reg, fakeCtx());
+    // A non-modal notification resolves undefined when the user clears it
+    // away. Mapping that to "reject" would count as the first real answer:
+    // the coordinator would withdraw the prompt from every attached
+    // terminal and refuse a change nobody actually answered.
+    (vscode.window.showInformationMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    const res = await reg.call("review_diff", { path: "c.txt", proposed: "new", shared: true }, {});
+
+    expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
+      expect.any(String),
+      { modal: false },
+      "Accept",
+      "Accept all this session",
+      "Reject",
+    );
+    expect(JSON.parse(res.text)).toEqual({ decision: "cancelled" });
+  });
+
+  it("a dismissed modal review is still a rejection", async () => {
+    const reg = new ToolRegistry();
+    registerReviewTool(reg, fakeCtx());
+    // Not shared: the modal is the only place the change was offered, so
+    // dismissing it is the user saying no.
+    (vscode.window.showInformationMessage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    const res = await reg.call("review_diff", { path: "d.txt", proposed: "new" }, {});
+
+    expect(JSON.parse(res.text)).toEqual({ decision: "reject" });
+  });
+
   it("both hidden tools are omitted from tools/list", () => {
     const reg = new ToolRegistry();
     registerReviewTool(reg, fakeCtx());

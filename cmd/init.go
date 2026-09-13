@@ -48,6 +48,12 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		defer ag.Tools.Close()
+		// Same cleanup every buildAgent caller owes: the checkpoint store it
+		// created, and the editor bridge attachIDE may have connected.
+		defer ag.Checkpoints.Cleanup()
+		if ideSession != nil {
+			defer ideSession.Close()
+		}
 		root := ag.Tools.Root
 		path, err := ui.RunInit(cmd.Context(), ag, ui.InitOptions{
 			Root:    root,

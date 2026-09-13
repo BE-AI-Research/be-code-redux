@@ -5,8 +5,10 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -93,13 +95,27 @@ type planReadyMsg struct {
 type approvalMsg struct {
 	action, detail string
 	resp           chan bool
+	// gen numbers a *shared review* prompt (see review.go) so its
+	// withdrawal can be matched to it. Both messages travel from the agent
+	// goroutine through p.Send, and a review answered the instant it was
+	// raised can deliver the cancel first; without the number, that cancel
+	// closes nothing and the prompt it was meant for then opens as a
+	// phantom modal nobody can answer (or a stale cancel closes the *next*
+	// write's prompt). Tool approvals leave it 0, which matches any cancel,
+	// as before.
+	gen int
 }
 
 // approvalCancelMsg withdraws an open approval modal because the change was
 // answered somewhere else — the VS Code diff — or the run was cancelled.
 // note, when set, is appended dimmed to say which. Nothing is sent on the
-// prompt's reply channel: the coordinator already has its answer.
-type approvalCancelMsg struct{ note string }
+// prompt's reply channel: the coordinator already has its answer. gen is the
+// approvalMsg generation this withdraws (see approvalMsg.gen); 0 withdraws
+// whatever is open.
+type approvalCancelMsg struct {
+	note string
+	gen  int
+}
 
 // mode is the input routing state.
 type mode int
@@ -140,8 +156,20 @@ type Model struct {
 	quitHint map[int]bool
 	// ideAnnounced keeps the editor-bridge line to one appearance.
 	ideAnnounced bool
-	// initHinted keeps the "no BECODE.md" nudge to one appearance per session.
-	initHinted bool
+	// initHinted keeps the "no BECODE.md" nudge to one appearance per session;
+	// initChecked latches the *check* too, since a WindowSizeMsg arrives on
+	// every resize and NeedsInitHint stats the workspace each time.
+	initHinted  bool
+	initChecked bool
+	// askGen numbers shared-review prompts (approvalMsg.gen). Written from
+	// the agent goroutine (reviewTerminal.Ask) and read by Withdraw on the
+	// same goroutine, so it is atomic rather than plain.
+	askGen atomic.Int64
+	// approvalGen is the generation of the prompt currently open, and
+	// cancelledGen the newest generation already withdrawn — both owned by
+	// the Update goroutine.
+	approvalGen  int
+	cancelledGen int
 	// startTurnHook is a test seam consulted at the top of startTurn; nil in
 	// production.
 	startTurnHook func(string)
@@ -420,10 +448,15 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ideAnnounced = true
 			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
 		}
-		// Nudge once toward /init for a project with no notes file yet.
-		if !m.initHinted && ui.NeedsInitHint(m.ag.Tools.Root) {
-			m.initHinted = true
-			m.appendLine(stDim.Render(ui.InitHint))
+		// Nudge once toward /init for a project with no notes file yet. The
+		// check itself is latched, not just the hint: this runs on every
+		// resize, and NeedsInitHint stats four paths in the workspace.
+		if !m.initChecked {
+			m.initChecked = true
+			if ui.NeedsInitHint(m.ag.Tools.Root) {
+				m.initHinted = true
+				m.appendLine(stDim.Render(ui.InitHint))
+			}
 		}
 		m.refreshTranscript()
 		// A resize moves every input row's absolute position; republish for
@@ -498,12 +531,33 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusNote = "thinking"
 		}
 	case approvalMsg:
+		if msg.gen != 0 && msg.gen <= m.cancelledGen {
+			// This prompt's own withdrawal got here first (a review answered
+			// in the editor the instant it was raised): opening it now would
+			// leave a modal whose answer nobody is waiting for. Drop it, and
+			// answer its channel so the asker is never left blocked.
+			if msg.resp != nil {
+				msg.resp <- false
+			}
+			break
+		}
 		msgCopy := msg
 		m.approval = &msgCopy
+		m.approvalGen = msg.gen
 		m.mode = modeApproval
 		m.modalVP = viewport.New(m.width-6, m.modalHeight())
 		m.modalVP.SetContent(ui.ColorizeDiff(msg.detail, true))
 	case approvalCancelMsg:
+		if msg.gen != 0 {
+			if msg.gen > m.cancelledGen {
+				m.cancelledGen = msg.gen
+			}
+			// A cancel for an older review must not close the prompt of a
+			// newer one — that prompt is live and someone has to answer it.
+			if m.approval != nil && m.approvalGen > msg.gen {
+				break
+			}
+		}
 		// The loser of a shared review (see internal/review). A late or
 		// duplicate withdrawal is a no-op: the modal is already gone.
 		if m.mode == modeApproval && m.approval != nil {
@@ -511,6 +565,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLine(stDim.Render(msg.note))
 			}
 			m.approval = nil
+			m.approvalGen = 0
 			m.mode = m.idleMode()
 		}
 	case turnDoneMsg:
@@ -562,8 +617,19 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case initDoneMsg:
 		m.flushStreaming()
+		// The init context is done with; releasing it here keeps a stale
+		// cancel out of the next turn's Esc (turnDoneMsg leaves cancelFn
+		// alone, so /init must clean up its own).
+		if m.cancelFn != nil {
+			m.cancelFn()
+			m.cancelFn = nil
+		}
 		if msg.err != nil {
-			m.appendLine(stErr.Render("init failed: ") + msg.err.Error())
+			if errors.Is(msg.err, context.Canceled) || strings.Contains(msg.err.Error(), "context canceled") {
+				m.appendLine(stWarn.Render("cancelled"))
+			} else {
+				m.appendLine(stErr.Render("init failed: ") + msg.err.Error())
+			}
 		} else {
 			m.appendLine(stOK.Render("wrote " + msg.path))
 		}
@@ -858,6 +924,7 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	}
 	m.approval.resp <- ok
 	m.approval = nil
+	m.approvalGen = 0
 	m.mode = modeBusy
 }
 
@@ -1355,8 +1422,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.mode = modeBusy
 		m.running = true
 		m.statusNote = "mapping the project"
+		// Everything startTurn does on the way in, because /init is a real
+		// model request: a cancellable context in m.cancelFn so Esc reaches
+		// the scan and the model call (handleBusyKey cancels whatever is
+		// there), and the busy placeholder republished for every attached
+		// terminal, not just whoever typed the command.
+		for _, ta := range m.inputs {
+			ta.Placeholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+		}
+		m.publishAllOverlays()
+		root := m.rootCtx
+		if root == nil {
+			root = context.Background()
+		}
+		ctx, cancel := context.WithCancel(root)
+		m.cancelFn = cancel
 		go func() {
-			path, err := ui.RunInit(m.rootCtx, m.ag, ui.InitOptions{
+			path, err := ui.RunInit(ctx, m.ag, ui.InitOptions{
 				Root:    m.ag.Tools.Root,
 				Approve: func(p string) bool { return m.approveFromAgent("file_write", p) },
 				Log:     func(s string) { m.send(noticeMsg(s)) },
