@@ -23,9 +23,12 @@ describe("review_diff / review_cancel", () => {
     (vscode.window.tabGroups as any).all = [];
   });
 
-  it("a shared review is cancelled by review_cancel and closes its diff tab", async () => {
+  it("a shared review is cancelled by review_cancel (same connection) and closes its diff tab", async () => {
     const reg = new ToolRegistry();
     registerReviewTool(reg, fakeCtx());
+    // review_cancel must arrive on the same connection as its review_diff
+    // (as the Go side does, over one mcp.Client) to find it.
+    const conn = {};
 
     // showInformationMessage never resolves on its own for this test — the
     // decision must come from the cancel race, not from a click.
@@ -36,7 +39,7 @@ describe("review_diff / review_cancel", () => {
     const diffPromise = reg.call(
       "review_diff",
       { path: "a.txt", original: "old", proposed: "new", summary: "s", shared: true },
-      {},
+      conn,
     );
     await tick();
 
@@ -55,7 +58,7 @@ describe("review_diff / review_cancel", () => {
       { tabs: [{ input: new vscode.TabInputTextDiff(left, right), label: title }] },
     ];
 
-    const cancelRes = await reg.call("review_cancel", { path: "a.txt" }, {});
+    const cancelRes = await reg.call("review_cancel", { path: "a.txt" }, conn);
     expect(JSON.parse(cancelRes.text)).toEqual({ cancelled: true });
 
     const diffRes = await diffPromise;
@@ -69,6 +72,57 @@ describe("review_diff / review_cancel", () => {
 
     const res = await reg.call("review_cancel", { path: "nope.txt" }, {});
     expect(JSON.parse(res.text)).toEqual({ cancelled: false });
+  });
+
+  it("two connections reviewing the same path are isolated from each other's cancel", async () => {
+    const reg = new ToolRegistry();
+    registerReviewTool(reg, fakeCtx());
+    const connA = {};
+    const connB = {};
+
+    const resolvers: Array<(v: string | undefined) => void> = [];
+    (vscode.window.showInformationMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((res) => { resolvers.push(res); }),
+    );
+
+    // A starts first, B starts second, for the SAME path — with a
+    // path-only pending map, B's pending.set would overwrite A's cancel
+    // handle, so a later "cancel A" would silently cancel B instead (and A
+    // would never be cancellable again). Keying by (connection, path) must
+    // keep them independent regardless of arrival order.
+    const diffA = reg.call("review_diff", { path: "shared.txt", proposed: "new", shared: true }, connA);
+    await tick();
+    const diffB = reg.call("review_diff", { path: "shared.txt", proposed: "new", shared: true }, connB);
+    await tick();
+    expect(resolvers).toHaveLength(2);
+
+    // Cancel A specifically. It must resolve exactly diffA, not diffB.
+    const cancelA = await reg.call("review_cancel", { path: "shared.txt" }, connA);
+    expect(JSON.parse(cancelA.text)).toEqual({ cancelled: true });
+    expect(JSON.parse((await diffA).text)).toEqual({ decision: "cancelled" });
+
+    // A repeat cancel for the same, now-resolved connection+path reports
+    // failure rather than a no-op success.
+    const cancelAAgain = await reg.call("review_cancel", { path: "shared.txt" }, connA);
+    expect(JSON.parse(cancelAAgain.text)).toEqual({ cancelled: false });
+
+    // B was never touched by any of the above — A's cancellation and its
+    // own cleanup (a different connection, same path) must not remove B's
+    // still-pending entry. It resolves normally once its own prompt is
+    // answered.
+    resolvers[1]("Accept");
+    expect(JSON.parse((await diffB).text)).toEqual({ decision: "accept" });
+
+    // B's bookkeeping is intact afterwards: a fresh review on B for the
+    // same path still gets its own, independently cancellable entry.
+    (vscode.window.showInformationMessage as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const diffB2 = reg.call("review_diff", { path: "shared.txt", proposed: "new2", shared: true }, connB);
+    await tick();
+    const cancelB = await reg.call("review_cancel", { path: "shared.txt" }, connB);
+    expect(JSON.parse(cancelB.text)).toEqual({ cancelled: true });
+    expect(JSON.parse((await diffB2).text)).toEqual({ decision: "cancelled" });
   });
 
   it("a non-shared review shows a modal prompt and Accept resolves normally", async () => {
