@@ -46,6 +46,7 @@ make build                # or: make -f build.mk build
 ./be-code                 # full-screen TUI in the current directory
 ./be-code --plain         # inline REPL (best over SSH / BE-CLI web terminals)
 ./be-code doctor          # check configured backends + workspace toolchain
+./be-code init            # measure the workspace and write BECODE.md project notes
 ./be-code run "add unit tests for pkg/utils"   # headless, verifies before exiting
 ```
 
@@ -283,8 +284,8 @@ profiles live; the status bar shows the active family.
 `/plan <task>` runs a read-only planning phase (inspect-only tools), shows the numbered
 plan for approval, then executes it. `/commit` writes a model-generated commit message
 and commits; git branch/status is refreshed into the prompt each turn when the workspace
-is a repo. `/init` has the agent survey the repo and write `BECODE.md`. Custom slash
-commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or
+is a repo. `/init` measures the repository and writes `BECODE.md` (see "Project memory").
+Custom slash commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or
 `~/.be-code/commands/*.md` (global), with `$ARGS` substitution. Hooks
 (`hooks.post_write`, `hooks.pre_shell` in config) run your commands around tool actions
 — e.g. `"post_write": ["gofmt -w $FILE"]`.
@@ -387,8 +388,33 @@ echo "fix the failing test" | ./be-code run -y   # pipeline mode (auto-approve s
 ## Project memory
 
 Drop a `BECODE.md` in the workspace root (falls back to `CLAUDE.md`) — build commands,
-conventions, gotchas. It is injected into the system prompt, exactly like Claude Code's
-project memory.
+conventions, gotchas. It is injected into the system prompt (up to 8 KiB) as *facts about
+your project for orientation*: notes describe the repository, they are never read as
+instructions or tasks.
+
+**`/init` writes it for you, from measured facts.** `/init` (both UIs) and headless
+`be-code init [-y] [-C dir]` first *measure* the workspace — languages by extension, the
+project kind and its exact check commands, key files (README, Makefile, `go.mod`,
+`package.json`, …), top- and second-level directories with file counts, entry points,
+test directories, formatter/linter configs, git branch/remote/recent commits, the README's
+first lines and the repo map — then ask the model, with no tools, to write the overview
+*from those facts only*: what the project is, how to build, test and run it using the
+measured commands exactly, the layout, the conventions and the gotchas. The scan is
+bounded (20,000 files, 2 s; a partial scan says so).
+
+The reply is validated before anything is written: it must not describe BE-Code or its
+tools, it must cite at least two measured files, directories or commands, every command
+it shows in backticks or a fenced block must be one that was actually measured, and it
+must be at most 150 lines. A rejected draft gets one retry with the reasons; if that
+fails too, the measured fact sheet itself is written, headed by a comment saying the
+model's overview was rejected and why.
+
+Then it is a normal write: you see the diff preview and approve it, any previous
+`BECODE.md` is kept as `BECODE.md.bak`, and the new notes go into the system prompt at
+once. Re-run `/init` whenever the project has moved on. A session started in a recognized
+project that has no notes file says so once — `no BECODE.md; /init maps this project` —
+and does nothing else. `be-code init` on a non-interactive stdin without `-y` denies the
+write instead of writing unattended.
 
 ## Safety model
 
@@ -400,7 +426,7 @@ project memory.
 ## Layout
 
 ```
-cmd/                 cobra commands (root, run, bench, models, pull, doctor, verify, config, sessions, setup)
+cmd/                 cobra commands (root, run, init, bench, models, pull, doctor, verify, config, sessions, attach, setup)
 internal/provider/   OpenAI-compatible client (SSE + tool calls), Ollama native mgmt
 internal/agent/      loop, prompts, embedded-call parsing, budgeting/compaction, plan mode,
                      think-filtering, @mentions, stats, reviewer routing, autosave
@@ -413,6 +439,8 @@ internal/gitctx/     git awareness (+/commit)
 internal/profiles/   model-family tuning table
 internal/mcp/        stdio MCP client (JSON-RPC 2.0)
 internal/live/       live-session host, attach client, records (~/.be-code/live)
+internal/discover/   workspace measurement for /init (languages, commands, layout, git)
+internal/review/     where a file change is reviewed (editor, terminal or both)
 internal/commands/   custom slash commands (.becode/commands)
 internal/bench/      embedded offline eval suite
 internal/store/      session persistence (~/.be-code/sessions)

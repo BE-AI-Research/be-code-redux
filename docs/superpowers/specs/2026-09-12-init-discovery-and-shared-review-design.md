@@ -74,13 +74,18 @@ walking; beyond that the sheet says it was truncated.
    > that are not in the facts. At most 150 lines of Markdown, no preamble.
 
 2. Validation (`agent.ValidateProjectNotes(doc string, facts) []string`):
-   - no harness vocabulary: `BE-Code`, `be-code`, `tool_call`, `write_file`,
-     `edit_file`, `read_file`, `verification loop`, `agent loop`, `compat`,
-     `system prompt`, `BECODE.md instructions` (case-insensitive);
+   - no harness vocabulary: `be-code` (which covers `BE-Code`), `tool_call`,
+     `write_file`, `edit_file`, `verification loop`, `agent loop`,
+     `system prompt` (case-insensitive). As shipped, `compat` and `read_file`
+     are deliberately **not** in the list: they false-positive on ordinary
+     project prose ("backward compatibility", a project's own `read_file`
+     helper), so they were dropped during implementation;
    - at least two names from `facts.Names()` cited;
-   - every fenced or backticked command line that starts with a known build
-     tool (`go`, `npm`, `npx`, `python`, `pytest`, `cargo`, `make`) appears in
-     `facts.Checks` or `facts.EntryPoints` scripts;
+   - every command line inside a fenced block, and every inline backtick span,
+     that starts with a known build tool (`go`, `npm`, `npx`, `python`,
+     `pytest`, `cargo`, `make`) appears in the measured names. Bare prose lines
+     are not scanned, as shipped: an ordinary sentence may legitimately start
+     with a runner verb ("make sure the daemon is running");
    - ≤ 150 lines.
 3. On violations: one retry with the violations appended ("The previous
    attempt was rejected because: …"). If it still fails, the fact sheet is
