@@ -95,7 +95,14 @@ says it was truncated.
      `system prompt` (case-insensitive). As shipped, `compat` and `read_file`
      are deliberately **not** in the list: they false-positive on ordinary
      project prose ("backward compatibility", a project's own `read_file`
-     helper), so they were dropped during implementation;
+     helper), so they were dropped during implementation. A blocklisted word
+     that occurs in the *measured facts* themselves (`facts.Markdown()`, so the
+     README head, key files, layout, make targets and the repo map) is the
+     project's own vocabulary and is exempt for that repository: describing
+     what the facts show is grounded, not drift — BE-Code's own checkout, whose
+     module path and symbols carry `be-code`, `tool_call`, `write_file` and
+     `system prompt`, could otherwise only ever produce the fact-sheet
+     fallback. Words the facts never mention stay forbidden;
    - at least two names from `facts.Names()` cited;
    - every command line inside a fenced block, and every inline backtick span,
      that starts with a known build tool (`go`, `npm`, `npx`, `python`,

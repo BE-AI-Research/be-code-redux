@@ -253,3 +253,44 @@ func TestTrimProjectNotesKeepsWholeLinesAndRunes(t *testing.T) {
 		t.Fatal("trim split a rune")
 	}
 }
+
+// TestHarnessWordsMeasuredInTheFactsAreAllowed: a blocklisted word that the
+// measured facts themselves contain is the project's own vocabulary —
+// describing it is grounded, not drift. The extreme case is BE-Code's own
+// checkout, whose module path, file names and symbols carry half the
+// blocklist; before this exemption `/init` on it could only ever produce the
+// fact-sheet fallback.
+func TestHarnessWordsMeasuredInTheFactsAreAllowed(t *testing.T) {
+	doc := "# Widget\n\nThe dispatcher parses a tool_call from the model.\nSee cmd/app and internal.\n"
+
+	// (a) The README head mentions tool_call, so the document may too.
+	mentions := factsFixture()
+	mentions.ReadmeHead = "# Widget\n\nParses a tool_call out of a transcript.\n"
+	if v := ValidateProjectNotes(doc, mentions); len(v) != 0 {
+		t.Errorf("rejected a word the facts measure: %v", v)
+	}
+
+	// (b) The same document against facts that never mention it.
+	silent := factsFixture()
+	if v := ValidateProjectNotes(doc, silent); len(v) == 0 {
+		t.Error("accepted tool_call although nothing measured mentions it")
+	} else if !strings.Contains(strings.Join(v, "; "), `"tool_call"`) {
+		t.Errorf("rejection reasons do not name tool_call: %v", v)
+	}
+
+	// (c) The rest of the list stays enforced: write_file is nowhere in these
+	// facts, so a document using it is still describing the harness.
+	bad := "# Widget\n\nUse write_file to change cmd/app and internal.\n"
+	if v := ValidateProjectNotes(bad, mentions); len(v) == 0 {
+		t.Error("write_file accepted although the facts never mention it")
+	}
+
+	// The exemption set is read from the fact sheet, so the repo map counts as
+	// much as the README — that is how BE-Code's own checkout measures
+	// `write_file` (a symbol in internal/tools) in the first place.
+	byMap := factsFixture()
+	byMap.RepoMap = "internal/tools/fs.go\n  func (t *writeFileTool) Name() string  // \"write_file\"\n"
+	if v := ValidateProjectNotes(bad, byMap); len(v) != 0 {
+		t.Errorf("rejected a word the repo map measures: %v", v)
+	}
+}

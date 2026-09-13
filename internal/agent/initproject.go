@@ -16,6 +16,25 @@ import (
 // own read_file helper).
 var harnessWords = []string{"be-code", "tool_call", "write_file", "edit_file", "verification loop", "agent loop", "system prompt"}
 
+// projectVocabulary returns the harness words a document may use because the
+// *measured facts* already contain them: a repository whose README, file
+// names or symbols talk about `tool_call` (BE-Code's own checkout being the
+// extreme case — its module path is the blocklist's first entry) cannot be
+// described accurately without them. Writing what the facts show is
+// grounded; the rule exists to catch a document that drifted into describing
+// the harness instead, and every word the facts do NOT mention stays
+// forbidden.
+func projectVocabulary(facts discover.Facts) map[string]bool {
+	sheet := strings.ToLower(facts.Markdown())
+	out := map[string]bool{}
+	for _, w := range harnessWords {
+		if strings.Contains(sheet, w) {
+			out[w] = true
+		}
+	}
+	return out
+}
+
 // commandSpan finds backtick-quoted spans anywhere in a line (not just at
 // line start, since generated prose usually leads with prose before the
 // code span, e.g. "Build with `go build ./...`").
@@ -110,7 +129,11 @@ func segmentMeasured(seg string, names []string) bool {
 func ValidateProjectNotes(doc string, facts discover.Facts) []string {
 	var v []string
 	low := strings.ToLower(doc)
+	ownVocabulary := projectVocabulary(facts)
 	for _, w := range harnessWords {
+		if ownVocabulary[w] {
+			continue // the project's own vocabulary, measured in its facts
+		}
 		if strings.Contains(low, w) {
 			v = append(v, fmt.Sprintf("it describes the tool (%q)", w))
 		}
