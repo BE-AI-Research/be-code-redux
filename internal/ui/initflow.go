@@ -10,6 +10,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/diff"
 	"github.com/brown-enterprises/be-code/internal/discover"
+	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
@@ -25,9 +26,14 @@ type InitOptions struct {
 }
 
 // RunInit scans the workspace, asks the model for BECODE.md prose, validates
-// it, and — once the caller approves the diff — writes BECODE.md (backing up
-// any previous copy to BECODE.md.bak) and refreshes the agent's system
-// prompt with the new notes. Returns the path written.
+// it, and — once the caller approves the diff — records a restore point,
+// writes BECODE.md and refreshes the agent's system prompt with the new notes.
+// Inside a git repository the restore point is a branch under
+// gitctx.SnapshotPrefix holding the whole working tree as it was (so a bad
+// document, and anything a later run does because of it, can be rolled back
+// with one git restore); a snapshot failure aborts the init rather than
+// writing without one. Outside a repository any previous copy is kept as
+// BECODE.md.bak. Returns the path written.
 func RunInit(ctx context.Context, ag *agent.Agent, opt InitOptions) (string, error) {
 	log := opt.Log
 	if log == nil {
@@ -51,7 +57,13 @@ func RunInit(ctx context.Context, ag *agent.Agent, opt InitOptions) (string, err
 	if opt.Approve != nil && !opt.Approve(diff.Preview("BECODE.md", string(old), doc, false)) {
 		return "", errors.New("BECODE.md write rejected")
 	}
-	if len(old) > 0 {
+	branch := ""
+	if gitctx.IsRepo(ctx, opt.Root) {
+		branch, err = gitctx.Snapshot(ctx, opt.Root, "be-code: restore point before init")
+		if err != nil {
+			return "", fmt.Errorf("restore point: %w", err)
+		}
+	} else if len(old) > 0 {
 		if err := os.WriteFile(path+".bak", old, 0o644); err != nil {
 			return "", err
 		}
@@ -60,9 +72,14 @@ func RunInit(ctx context.Context, ag *agent.Agent, opt InitOptions) (string, err
 		return "", err
 	}
 	ag.SetProjectNotes(doc)
-	if len(old) > 0 {
+	switch {
+	case branch != "":
+		log("wrote BECODE.md")
+		log("restore point: " + branch)
+		log("  roll back with: git restore --source=" + branch + " --staged --worktree -- .")
+	case len(old) > 0:
 		log("wrote BECODE.md (previous copy in BECODE.md.bak)")
-	} else {
+	default:
 		log("wrote BECODE.md")
 	}
 	return path, nil
