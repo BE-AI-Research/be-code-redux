@@ -224,9 +224,8 @@ func (r *REPL) prompt(q string) string { return r.promptCtx(context.Background()
 // then the answer is no longer wanted. An empty string is the result either
 // way, which reads as "no".
 func (r *REPL) promptCtx(ctx context.Context, q string) string {
-	r.rl.SetPrompt(q)
-	r.rl.Refresh()
-	defer func() { r.rl.SetPrompt(cyan("be-code> ")); r.rl.Refresh() }()
+	r.setPrompt(q)
+	defer r.setPrompt(cyan("be-code> "))
 	r.mu.Lock()
 	busy := r.busy
 	ch := make(chan string, 1)
@@ -250,7 +249,34 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 	case line := <-ch:
 		return strings.TrimSpace(line)
 	case <-ctx.Done():
+		r.abandonAsk(ch)
 		return ""
+	}
+}
+
+// setPrompt changes readline's prompt (nil in tests, which never read a line).
+func (r *REPL) setPrompt(q string) {
+	if r.rl == nil {
+		return
+	}
+	r.rl.SetPrompt(q)
+	r.rl.Refresh()
+}
+
+// abandonAsk retires a question nobody is waiting for any more — a shared
+// file-change review the editor answered first. It stops taking typed lines
+// before the caller returns (not just in the deferred cleanup, which would
+// leave a window for runBusy to forward a second line into a channel nobody
+// reads) and hands back a line already forwarded into it: the user typed it,
+// so it belongs to the agent as an ordinary queued message.
+func (r *REPL) abandonAsk(ch chan string) {
+	r.mu.Lock()
+	r.ask = nil
+	r.mu.Unlock()
+	select {
+	case line := <-ch:
+		go func(l string) { r.lines <- lineEvent{line: l} }(line)
+	default:
 	}
 }
 
@@ -363,8 +389,16 @@ func (r *REPL) runBusy(ctx context.Context, fn func(ctx context.Context)) {
 				ask := r.ask
 				r.mu.Unlock()
 				if ask != nil {
-					ask <- line
-					continue
+					// Never block: the question may have been withdrawn
+					// between that read and this send (see abandonAsk), and
+					// a wedged forward would stop servicing input — Ctrl-C
+					// included — for the rest of the run. An unanswerable
+					// line falls through to the ordinary queue path below.
+					select {
+					case ask <- line:
+						continue
+					default:
+					}
 				}
 				if strings.HasPrefix(line, "/queue") {
 					r.queueCommand(line)

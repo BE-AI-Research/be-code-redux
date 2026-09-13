@@ -328,7 +328,9 @@ approval prompt *as well* once another terminal joins the session, so whoever is
 phone or an SSH session can answer too — the first answer from either place wins and the
 other is withdrawn (the modal closes with `answered in VS Code`, the editor diff closes
 itself). `editor` always reviews in the editor (falling back to the terminal only when the
-bridge cannot), `tui` only ever asks in the terminal, and `both` always does both. `/review`
+bridge cannot), `tui` only ever asks in the terminal, and `both` always does both. Sharing
+needs a live editor on the other side: with no bridge attached, every mode falls back to the
+ordinary write approval, which still honours `-y` and `approve_file_writes`. `/review`
 prints the current mode, `/review <mode>` changes it for the session.
 
 `be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for

@@ -160,3 +160,50 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met")
 }
+
+// With no editor attached there is nothing to race, so mode both must not
+// raise the terminal prompt: only fs.go's own Approve honours the
+// auto-approve switches (-y, approve_file_writes: false), and a hosted
+// session attached from an ordinary terminal resolves to both by default.
+func TestBothWithoutEditorLeavesTheDecisionToApprove(t *testing.T) {
+	tm := &fakeTerm{answer: make(chan bool, 1)}
+	c := New(ModeBoth, nil, tm, nil)
+	if d := c.Decide(context.Background(), "a.go", "", "x"); d != tools.ReviewUnavailable {
+		t.Fatalf("decision %v, want ReviewUnavailable", d)
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.calls != 0 {
+		t.Fatalf("terminal prompt raised %d times with no editor to race", tm.calls)
+	}
+	if len(tm.withdrawn) != 0 {
+		t.Fatalf("withdrew %v with nothing open", tm.withdrawn)
+	}
+}
+
+// Nothing withdraws a diff in editor-only mode, so a "cancelled" answer is
+// simply unanswered: fs.go asks in the terminal instead. Decide never hands
+// ReviewCancelled to fs.go.
+func TestEditorModeMapsCancelledToUnavailable(t *testing.T) {
+	c, e, tm := setup("editor", nil)
+	e.decide <- tools.ReviewCancelled
+	if d := c.Decide(context.Background(), "a.go", "", "x"); d != tools.ReviewUnavailable {
+		t.Fatalf("decision %v, want ReviewUnavailable", d)
+	}
+	if tm.calls != 0 {
+		t.Fatal("editor mode must never raise the terminal prompt")
+	}
+}
+
+func TestNormalize(t *testing.T) {
+	if m, err := Normalize(" BOTH "); err != nil || m != ModeBoth {
+		t.Fatalf("Normalize(%q) = %q, %v", " BOTH ", m, err)
+	}
+	m, err := Normalize("nonsense")
+	if err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+	if m != ModeAuto {
+		t.Fatalf("invalid mode fell back to %q, want auto", m)
+	}
+}

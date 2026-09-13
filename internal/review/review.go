@@ -65,19 +65,30 @@ func New(mode Mode, editor Editor, term Terminal, clients func() []string) *Coor
 	return c
 }
 
-// SetMode validates and applies a mode for the rest of the session. Case
-// and surrounding space are forgiven (it comes from a config file or a
-// typed command); anything else is an error and changes nothing.
-func (c *Coordinator) SetMode(m Mode) error {
+// Normalize maps a configured or typed value to a mode. Case and
+// surrounding space are forgiven (it comes from a config file or a typed
+// command); anything else is an error, with ModeAuto as the safe result so
+// callers that only want to warn can use it.
+func Normalize(m Mode) (Mode, error) {
 	norm := Mode(strings.ToLower(strings.TrimSpace(string(m))))
 	switch norm {
 	case ModeAuto, ModeEditor, ModeTUI, ModeBoth:
-		c.mu.Lock()
-		c.mode = norm
-		c.mu.Unlock()
-		return nil
+		return norm, nil
 	}
-	return fmt.Errorf("review mode %q: use auto, editor, tui or both", m)
+	return ModeAuto, fmt.Errorf("review mode %q: use auto, editor, tui or both", m)
+}
+
+// SetMode validates and applies a mode for the rest of the session.
+// An invalid mode is an error and changes nothing.
+func (c *Coordinator) SetMode(m Mode) error {
+	norm, err := Normalize(m)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.mode = norm
+	c.mu.Unlock()
+	return nil
 }
 
 func (c *Coordinator) Mode() Mode {
@@ -109,6 +120,19 @@ type answer struct {
 	d    tools.ReviewDecision
 }
 
+// editorOnly asks the editor alone, mapping a withdrawn diff (nobody
+// withdrew it here, so it is simply unanswered) and a missing editor to
+// ReviewUnavailable, which sends fs.go to its own approval prompt.
+func (c *Coordinator) editorOnly(ctx context.Context, rel, old, new string) tools.ReviewDecision {
+	if c.editor == nil {
+		return tools.ReviewUnavailable
+	}
+	if d := c.editor.Review(ctx, rel, old, new, false); d != tools.ReviewCancelled {
+		return d
+	}
+	return tools.ReviewUnavailable
+}
+
 // Decide implements tools.Registry.ReviewWrite. It never returns
 // ReviewCancelled: a withdrawn reviewer means the other one decides.
 func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.ReviewDecision {
@@ -120,28 +144,23 @@ func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.Re
 	}
 	switch c.Resolve() {
 	case ModeEditor:
-		if c.editor == nil {
-			return tools.ReviewUnavailable // fs.go falls back to Approve
-		}
-		return c.editor.Review(ctx, rel, old, new, false)
+		return c.editorOnly(ctx, rel, old, new)
 	case ModeTUI:
 		return tools.ReviewUnavailable // fs.go asks the terminal itself
 	}
-	if c.term == nil { // nothing to race with: behave like editor mode
-		if c.editor == nil {
-			return tools.ReviewUnavailable
-		}
-		return c.editor.Review(ctx, rel, old, new, false)
+	if c.editor == nil || c.term == nil {
+		// Nothing to race. With no editor this must NOT raise the terminal
+		// prompt: fs.go's Approve is the only path that honours the
+		// auto-approve switches (-y, approve_file_writes: false), which the
+		// prompt itself cannot see. A shared review exists only when a live
+		// editor is on the other side of it.
+		return c.editorOnly(ctx, rel, old, new)
 	}
 	// both: race the two, first real answer wins, the other is withdrawn.
 	rctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan answer, 2)
 	go func() {
-		if c.editor == nil {
-			results <- answer{"editor", tools.ReviewUnavailable}
-			return
-		}
 		results <- answer{"editor", c.editor.Review(rctx, rel, old, new, true)}
 	}()
 	go func() {
@@ -158,7 +177,7 @@ func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.Re
 	}()
 	// editorOpen tracks whether a diff may still be sitting in the editor:
 	// one that already answered (or could not) has nothing to withdraw.
-	editorOpen := c.editor != nil
+	editorOpen := true
 	pending := 2
 	for pending > 0 {
 		select {
@@ -169,7 +188,10 @@ func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.Re
 			c.term.Withdraw("cancelled")
 			cancel()
 			if editorOpen {
-				c.editor.Cancel(rel)
+				// On its own goroutine: withdrawing a diff costs a round
+				// trip to the editor (up to its 3s deadline) and nothing
+				// here reads the result, so the tool call must not wait.
+				go c.editor.Cancel(rel)
 			}
 			return tools.ReviewReject
 		case a := <-results:
@@ -189,7 +211,7 @@ func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.Re
 			} else {
 				cancel()
 				if editorOpen {
-					c.editor.Cancel(rel)
+					go c.editor.Cancel(rel) // see the ctx.Done case
 				}
 			}
 			return a.d

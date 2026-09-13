@@ -105,7 +105,7 @@ func runSessionHost(code string) error {
 	// soon as anyone else joins. Clients() only takes the host's lock to
 	// copy the roster, and this runs on the agent goroutine (never inside
 	// the program's Update), so it cannot deadlock the host.
-	coord := review.New(review.Mode(cfg.IDE.Review), editor, m.ReviewTerminal(), func() []string {
+	coord := review.New(reviewMode(cfg.IDE.Review), editor, m.ReviewTerminal(), func() []string {
 		infos := h.Clients()
 		labels := make([]string, 0, len(infos))
 		for _, c := range infos {

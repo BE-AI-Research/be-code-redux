@@ -161,3 +161,69 @@ func TestReviewIsBusySafe(t *testing.T) {
 		t.Fatal("/review missing from SlashCommandTable")
 	}
 }
+
+// A withdrawn question (the editor answered the same change first) must not
+// swallow the line the user had just typed into it: it goes back to the line
+// channel, where runBusy queues it for the agent, and the question stops
+// taking further lines at once so a second one cannot wedge runBusy.
+func TestAbandonedQuestionRequeuesTypedLine(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	ch := make(chan string, 1)
+	r.mu.Lock()
+	r.ask = ch
+	r.mu.Unlock()
+	ch <- "y"
+	r.abandonAsk(ch)
+	r.mu.Lock()
+	still := r.ask
+	r.mu.Unlock()
+	if still != nil {
+		t.Fatal("a withdrawn question is still the destination for typed lines")
+	}
+	select {
+	case ev := <-r.lines:
+		if ev.line != "y" {
+			t.Fatalf("requeued %q", ev.line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the typed line was lost with the withdrawn question")
+	}
+}
+
+// promptCtx returns nothing ("no") when the question is cancelled, and
+// leaves nobody registered for typed lines.
+func TestPromptCtxCancelled(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.busy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan string, 1)
+	go func() { done <- r.promptCtx(ctx, "approve? ") }()
+	for i := 0; ; i++ {
+		r.mu.Lock()
+		set := r.ask != nil
+		r.mu.Unlock()
+		if set {
+			break
+		}
+		if i > 200 {
+			t.Fatal("promptCtx never registered the question")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("cancelled question answered %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("promptCtx ignored the cancellation")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ask != nil {
+		t.Fatal("cancelled question still registered")
+	}
+}

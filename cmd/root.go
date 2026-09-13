@@ -439,6 +439,20 @@ func loadProjectNotes(root string) string {
 	return ""
 }
 
+// reviewMode reads ide.review, warning on stderr about a value the
+// coordinator cannot use rather than silently reviewing somewhere the user
+// did not ask for. An unset value is simply the default.
+func reviewMode(v string) review.Mode {
+	if strings.TrimSpace(v) == "" {
+		return review.ModeAuto
+	}
+	m, err := review.Normalize(review.Mode(v))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: ide.review %q is not one of auto|editor|tui|both; using auto\n", v)
+	}
+	return m
+}
+
 // runInteractive drives an interactive session. It takes the cobra command
 // rather than a bare context so the served path can forward the root's
 // persistent flags to the host it spawns (see hostArgs) without cmd/live.go
@@ -469,6 +483,7 @@ func runInteractive(cmd *cobra.Command) error {
 	// The editor is one of the two places a file change can be reviewed; the
 	// UI below is the other. The coordinator picks between them (ide.review,
 	// /review) and owns Registry.ReviewWrite for the whole session.
+	mode := reviewMode(cfg.IDE.Review)
 	var editor review.Editor
 	if ideSession != nil {
 		editor = ideSession.ReviewEditor()
@@ -485,13 +500,13 @@ func runInteractive(cmd *cobra.Command) error {
 			return err
 		}
 		// In-process: no client roster, so auto resolves to the editor.
-		coord := review.New(review.Mode(cfg.IDE.Review), editor, repl.ReviewTerminal(), nil)
+		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
 		repl.SetReview(coord)
 		ag.Tools.ReviewWrite = coord.Decide
 		return repl.Run(ctx)
 	}
 	m := tui.New(cfg, ag, p)
-	coord := review.New(review.Mode(cfg.IDE.Review), editor, m.ReviewTerminal(), nil)
+	coord := review.New(mode, editor, m.ReviewTerminal(), nil)
 	m.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	return m.Run(ctx)
