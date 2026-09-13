@@ -29,9 +29,12 @@ var fencedBlock = regexp.MustCompile("(?s)```[a-zA-Z0-9]*\n(.*?)```")
 // measured command exactly.
 var commandVerb = regexp.MustCompile(`^(go|npm|npx|python3?|pytest|cargo|make)\b`)
 
-// extractCommands collects every runner invocation the doc claims: inline
-// backtick spans, lines inside fenced code blocks, and bare lines whose
-// first token is a runner verb.
+// extractCommands collects every runner invocation the doc claims, from the
+// idiomatic Markdown for a command: lines inside fenced code blocks, and
+// inline backtick spans. Bare prose lines are deliberately NOT scanned —
+// ordinary sentences ("make sure the daemon is running", "go to the
+// settings page") legitimately start with a runner verb without being a
+// command.
 func extractCommands(doc string) []string {
 	var cmds []string
 	for _, m := range fencedBlock.FindAllStringSubmatch(doc, -1) {
@@ -47,12 +50,6 @@ func extractCommands(doc string) []string {
 		cmd := strings.TrimSpace(m[1])
 		if commandVerb.MatchString(cmd) {
 			cmds = append(cmds, cmd)
-		}
-	}
-	for _, line := range strings.Split(rest, "\n") {
-		line = strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "`"))
-		if commandVerb.MatchString(line) {
-			cmds = append(cmds, line)
 		}
 	}
 	return cmds

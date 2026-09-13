@@ -37,8 +37,9 @@ func TestValidateProjectNotes(t *testing.T) {
 	}
 
 	accepted := map[string]string{
-		"fenced measured commands": "# App\ncmd/app internal\n\n```\ngo build ./...\ngo test ./...\n```\n",
-		"benign prose overlap":     "# App\ncmd/app internal\n\nWe maintain backward compatibility and document the read_file helper.\n",
+		"fenced measured commands":     "# App\ncmd/app internal\n\n```\ngo build ./...\ngo test ./...\n```\n",
+		"benign prose overlap":         "# App\ncmd/app internal\n\nWe maintain backward compatibility and document the read_file helper.\n",
+		"bare prose with runner verbs": "# App\ncmd/app internal\n\nmake sure the daemon is running before you start.\ngo to the settings page to configure it.\n",
 	}
 	for name, doc := range accepted {
 		if v := ValidateProjectNotes(doc, f); len(v) != 0 {
