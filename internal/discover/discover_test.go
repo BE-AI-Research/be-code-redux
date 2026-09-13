@@ -1,11 +1,13 @@
 package discover
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func write(t *testing.T, root, rel, content string) {
@@ -133,6 +135,103 @@ func TestScanIsBounded(t *testing.T) {
 	}
 	if !strings.Contains(f.Markdown(), "truncated") {
 		t.Fatal("sheet must say it was truncated")
+	}
+}
+
+func TestScanHonoursRootGitignore(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, ".gitignore", "coverage/\nout\n!keep/\n")
+	write(t, root, "coverage/report.go", "package coverage\n")
+	write(t, root, "out/gen.go", "package out\n")
+	write(t, root, "keep/keep.go", "package keep\n")
+	write(t, root, "main.go", "package main\n")
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Files != 3 { // .gitignore, main.go, keep/keep.go (coverage/ and out/ skipped)
+		t.Fatalf("files: %d (want coverage/ and out/ skipped)", f.Files)
+	}
+	for _, d := range f.Layout {
+		if d.Path == "coverage" || d.Path == "out" {
+			t.Fatalf("layout should not include ignored dir %q: %+v", d.Path, f.Layout)
+		}
+	}
+	found := false
+	for _, d := range f.Layout {
+		if d.Path == "keep" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("negated gitignore line must not suppress keep/: %+v", f.Layout)
+	}
+}
+
+func TestScanTimeBoundHitsDirectories(t *testing.T) {
+	root := t.TempDir()
+	// Purely directories, no files: the old code only checked the time
+	// bound in the file branch, so a directory-only tree never tripped
+	// Truncated no matter how long the walk took. Assert the bound fires
+	// even here.
+	for i := 0; i < 200; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("d%03d", i), "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := maxWalk
+	maxWalk = 0
+	defer func() { maxWalk = old }()
+	done := make(chan struct{})
+	var f Facts
+	go func() {
+		f, _ = Scan(root)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Scan did not return promptly with maxWalk=0")
+	}
+	if !f.Truncated {
+		t.Fatalf("expected Truncated with maxWalk=0: %+v", f)
+	}
+}
+
+func TestCountLinesCapped(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "big.txt")
+	var b strings.Builder
+	for b.Len() < 5<<20 {
+		b.WriteString("line of text\n")
+	}
+	if err := os.WriteFile(p, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int)
+	go func() { done <- countLines(p) }()
+	select {
+	case n := <-done:
+		if n <= 0 {
+			t.Fatalf("expected some lines counted, got %d", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("countLines did not return promptly on a 5 MiB file")
+	}
+}
+
+func TestScanReadmeKeyFileCaseInsensitive(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "readme.md", "# lower\n")
+	f, err := Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(f.KeyFiles, "readme.md") {
+		t.Fatalf("key files lack lowercase readme.md: %v", f.KeyFiles)
+	}
+	if !contains(f.Names(), "readme.md") {
+		t.Fatalf("names lack lowercase readme.md: %v", f.Names())
 	}
 }
 

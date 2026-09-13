@@ -72,14 +72,22 @@ func Scan(root string) (Facts, error) {
 	langs := map[string]int{}
 	dirs := map[string]int{}
 	goTests := map[string]int{}
+	ignoreDirs := gitignoreDirs(root)
 	start := time.Now()
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		if time.Since(start) > maxWalk {
+			f.Truncated = true
+			return filepath.SkipAll
+		}
 		rel, _ := filepath.Rel(root, p)
 		if d.IsDir() {
 			if p != root && skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			if p != root && isTopLevel(rel) && ignoreDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			if p != root && testDirs[d.Name()] {
@@ -87,7 +95,7 @@ func Scan(root string) (Facts, error) {
 			}
 			return nil
 		}
-		if f.Files >= maxFiles || time.Since(start) > maxWalk {
+		if f.Files >= maxFiles {
 			f.Truncated = true
 			return filepath.SkipAll
 		}
@@ -111,7 +119,11 @@ func Scan(root string) (Facts, error) {
 		}
 		if len(parts) == 1 {
 			for _, k := range keyFiles {
-				if strings.HasPrefix(d.Name(), k) {
+				match := strings.HasPrefix(d.Name(), k)
+				if !match && k == "README" {
+					match = strings.HasPrefix(strings.ToLower(d.Name()), "readme")
+				}
+				if match {
 					f.KeyFiles = append(f.KeyFiles, d.Name())
 				}
 			}
@@ -159,6 +171,10 @@ func Scan(root string) (Facts, error) {
 	return f, nil
 }
 
+// maxLineBytes caps how much of one file countLines will read, so a single
+// giant generated file (a lockfile, a bundled asset) cannot stall the scan.
+const maxLineBytes = 4 << 20
+
 func countLines(p string) int {
 	fh, err := os.Open(p)
 	if err != nil {
@@ -166,12 +182,60 @@ func countLines(p string) int {
 	}
 	defer fh.Close()
 	n := 0
+	read := 0
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
 		n++
+		read += len(sc.Bytes()) + 1
+		if read >= maxLineBytes {
+			break
+		}
 	}
 	return n
+}
+
+// isTopLevel reports whether rel (a path relative to the scan root) names a
+// direct child of the root, i.e. it contains no path separator.
+func isTopLevel(rel string) bool {
+	return !strings.Contains(filepath.ToSlash(rel), "/")
+}
+
+// gitignoreDirs parses simple root-scope directory patterns out of
+// <root>/.gitignore: a line naming a directory (trailing "/", or a bare
+// name that exists as a directory at the root) is skipped for this scan.
+// Negated lines and glob patterns are left alone — this is not a full
+// gitignore matcher, only the common top-level "build output" case the
+// spec calls out.
+func gitignoreDirs(root string) map[string]bool {
+	out := map[string]bool{}
+	b, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+			continue
+		}
+		if strings.ContainsAny(line, "*?[") {
+			continue
+		}
+		name := strings.TrimPrefix(line, "/")
+		isDirPattern := strings.HasSuffix(name, "/")
+		name = strings.TrimSuffix(name, "/")
+		if name == "" || strings.Contains(name, "/") {
+			continue // only simple root-level names
+		}
+		if isDirPattern {
+			out[name] = true
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(root, name)); err == nil && fi.IsDir() {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 // entryPoints finds where the project starts: Go main packages under cmd/
