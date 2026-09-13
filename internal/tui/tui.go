@@ -145,6 +145,11 @@ type Model struct {
 	// startTurnHook is a test seam consulted at the top of startTurn; nil in
 	// production.
 	startTurnHook func(string)
+	// sendHook is a test seam consulted by send: with no tea.Program running
+	// there is nothing to deliver a message from another goroutine to, so a
+	// test routes them into a channel it drains into Update itself (see
+	// review_integration_test.go). nil in production.
+	sendHook func(tea.Msg)
 	// toast is the transient notice shown in yellow on the last transcript
 	// row until toastUntil; now is swappable for tests.
 	toast      string
@@ -303,6 +308,10 @@ func (m *Model) Run(ctx context.Context) error {
 }
 
 func (m *Model) send(msg tea.Msg) {
+	if m.sendHook != nil {
+		m.sendHook(msg)
+		return
+	}
 	if m.program != nil {
 		m.program.Send(msg)
 	}
