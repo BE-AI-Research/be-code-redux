@@ -51,6 +51,16 @@ type toolEndMsg struct {
 	res  tools.Result
 }
 type noticeMsg string
+
+// transientMsg is a short-lived status notice (waiting for the backend,
+// context budgeting): shown on the notice row for toastFor, never kept.
+type transientMsg string
+
+// toastTickMsg asks the model to expire the notice row if its time is up.
+type toastTickMsg time.Time
+
+const toastFor = 20 * time.Second
+
 type thinkingMsg int // cumulative hidden-reasoning characters this turn
 // statusMsg sets the bottom-line status note directly, without adding a
 // transcript line (used for editor-side review progress).
@@ -116,6 +126,11 @@ type Model struct {
 	quitHint map[int]bool
 	// ideAnnounced keeps the editor-bridge line to one appearance.
 	ideAnnounced bool
+	// toast is the transient notice shown in yellow on the last transcript
+	// row until toastUntil; now is swappable for tests.
+	toast      string
+	toastUntil time.Time
+	now        func() time.Time
 
 	transcript strings.Builder // finished content
 	streaming  strings.Builder // current assistant text
@@ -197,6 +212,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 	m := &Model{
 		cfg: cfg, ag: ag, prov: prov,
 		spin:     sp,
+		now:      time.Now,
 		histFile: loadInputHistory(ui.HistoryFile()),
 		custom:   commands.Load(ag.Tools.Root),
 		richText: cfg.Theme != "mono",
@@ -219,7 +235,8 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 			m.send(toolEndMsg{n, r})
 			m.send(m.usageSnapshot())
 		},
-		OnNotice: func(s string) { m.send(noticeMsg(s)) },
+		OnNotice:    func(s string) { m.send(noticeMsg(s)) },
+		OnTransient: func(s string) { m.send(transientMsg(s)) },
 		OnReasoning: func() func(string) {
 			n, last := 0, 0
 			return func(t string) {
@@ -420,6 +437,15 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeBusy {
 			m.statusNote = fmt.Sprintf("thinking (%dk chars of reasoning)", int(msg)/1000)
 		}
+	case transientMsg:
+		m.toast = string(msg)
+		m.toastUntil = m.now().Add(toastFor)
+		return m, tea.Tick(toastFor+100*time.Millisecond, func(t time.Time) tea.Msg { return toastTickMsg(t) })
+	case toastTickMsg:
+		if m.toast != "" && !m.now().Before(m.toastUntil) {
+			m.toast = ""
+		}
+		return m, nil
 	case noticeMsg:
 		m.flushStreaming()
 		// The editor context note is ambient information, not a warning:
@@ -835,6 +861,10 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 		in.Reset()
 		if strings.HasPrefix(text, "/") {
+			if ui.BusySafeCommand(text) {
+				m.histFile.add(text, from)
+				return m.slashCommand(text, from)
+			}
 			m.appendLine(stDim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
 			return m, nil
 		}
@@ -856,6 +886,10 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyCtrlQ:
 		return m.openQueue(from)
+	case tea.KeyRunes:
+		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(in.Value()) == "" {
+			return m.openPalette("", from)
+		}
 	}
 	updated, cmd := in.Update(k)
 	*in = updated
@@ -1035,6 +1069,15 @@ func (m *Model) View() string {
 		}
 		transcript = strings.Join(lines, "\n") + "\n" + box
 	}
+	if m.toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
+		// The notice row borrows the last transcript row so the input rows
+		// (and the served overlays anchored to them) never move.
+		lines := strings.Split(transcript, "\n")
+		if len(lines) > 0 {
+			lines[len(lines)-1] = stWarn.Render(padToWidth(" "+m.toast, m.width))
+			transcript = strings.Join(lines, "\n")
+		}
+	}
 	b.WriteString(transcript)
 	b.WriteString("\n")
 	b.WriteString(m.inputRow())
@@ -1048,7 +1091,11 @@ func (m *Model) View() string {
 func (m *Model) headerView() string {
 	box := stBorder.Render("BE-Code Redux")
 	lines := strings.Split(box, "\n")
-	logo := stAccent.Render("⚛")
+	code := "—"
+	if m.ag.Session != nil {
+		code = m.ag.Session.ResumeCode()
+	}
+	logo := stAccent.Render("session " + code)
 	if len(lines) >= 2 {
 		gap := m.width - lipgloss.Width(lines[1]) - lipgloss.Width(logo) - 1
 		if gap < 1 {
@@ -1164,6 +1211,9 @@ func (m *Model) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
+		if m.running && m.cancelFn != nil {
+			m.cancelFn() // leaving mid-turn: stop the run, then write the briefing
+		}
 		// Clear the overlays before the quit, not only after the program
 		// returns: Bubble Tea's own teardown flushes one last frame, and
 		// the host would re-append every client's draft to it.

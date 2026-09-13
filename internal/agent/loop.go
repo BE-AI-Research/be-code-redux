@@ -27,7 +27,11 @@ type Events struct {
 	OnToolStart func(name, args string)             // before a tool runs
 	OnToolEnd   func(name string, res tools.Result) // after a tool runs
 	OnNotice    func(msg string)                    // loop-level notices
-	OnReasoning func(text string)                   // hidden model reasoning deltas (thinking models)
+	// OnTransient receives short-lived status notices (waiting for the
+	// backend, context budgeting) that a UI may show briefly instead of
+	// keeping in the transcript. When nil they arrive through OnNotice.
+	OnTransient func(msg string)
+	OnReasoning func(text string) // hidden model reasoning deltas (thinking models)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -106,7 +110,10 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 		a.repoMap = repomap.Build(reg.Root, cfg.RepoMapBudget)
 	}
 	a.retryBase = 2 * time.Second
-	a.stallAfter = 20 * time.Second
+	a.stallAfter = 45 * time.Second
+	if cfg.StallNoticeSeconds > 0 {
+		a.stallAfter = time.Duration(cfg.StallNoticeSeconds) * time.Second
+	}
 	a.applyModel(model)
 	a.History = NewHistory(a.composeSystem(""), cfg.ContextTokens)
 	a.applyReserve(cfg.ContextTokens) // until a real window is detected
@@ -203,6 +210,19 @@ func (a *Agent) notice(format string, args ...any) {
 		a.Events.OnNotice(fmt.Sprintf(format, args...))
 	}
 }
+
+// transient emits a status notice that need not be kept: it goes to
+// OnTransient when the UI provides one, otherwise to OnNotice.
+func (a *Agent) transient(format string, args ...any) {
+	if a.Events.OnTransient != nil {
+		a.Events.OnTransient(fmt.Sprintf(format, args...))
+		return
+	}
+	a.notice(format, args...)
+}
+
+// stallSecondStage is when the second "still waiting" notice fires.
+func stallSecondStage(first time.Duration) time.Duration { return 4 * first }
 
 // Run processes one user request through the tool loop and returns the
 // final assistant reply.
@@ -552,19 +572,19 @@ func (a *Agent) maybeCompact(ctx context.Context) {
 	// for Target (half the limit) so the run gets real runway. Usually
 	// enough, and it keeps every conversational turn intact.
 	if h.CollapseOldToolResults() {
-		a.notice("context at %d of %d tokens; collapsed old tool traffic (now %d, target %d)", before, h.Limit(), h.Tokens(), h.Target())
+		a.transient("context at %d of %d tokens; collapsed old tool traffic (now %d, target %d)", before, h.Limit(), h.Tokens(), h.Target())
 		return
 	}
 	if !a.Cfg.CompactWithModel {
 		return
 	}
 	// Step 2: still above target — summarize with the model.
-	a.notice("context at %d of %d tokens (%.1f chars/token); compacting with the model", h.Tokens(), h.Limit(), h.CharsPerToken)
+	a.transient("context at %d of %d tokens (%.1f chars/token); compacting with the model", h.Tokens(), h.Limit(), h.CharsPerToken)
 	if err := a.Compact(ctx); err != nil {
 		a.notice("compaction failed (%v); falling back to trimming", err)
 		return
 	}
-	a.notice("compacted to %d tokens (target %d)", h.Tokens(), h.Target())
+	a.transient("compacted to %d tokens (target %d)", h.Tokens(), h.Target())
 }
 
 // Compact replaces all but the newest messages with a model-written summary.

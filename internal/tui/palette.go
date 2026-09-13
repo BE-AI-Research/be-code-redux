@@ -21,7 +21,11 @@ import (
 func (m *Model) slashEntries() []pickItem {
 	items := make([]pickItem, 0, len(ui.SlashCommandTable)+len(m.custom))
 	for _, c := range ui.SlashCommandTable {
-		items = append(items, pickItem{id: c.Name, label: c.Name, desc: c.Desc, args: c.Args})
+		desc := c.Desc
+		if m.running && !ui.BusySafeCommand(c.Name) {
+			desc = "after the run · " + desc
+		}
+		items = append(items, pickItem{id: c.Name, label: c.Name, desc: desc, args: c.Args})
 	}
 	names := make([]string, 0, len(m.custom))
 	for name := range m.custom {
@@ -29,7 +33,11 @@ func (m *Model) slashEntries() []pickItem {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		items = append(items, pickItem{id: "/" + name, label: "/" + name, desc: "custom command (.becode/commands)", args: true})
+		desc := "custom command (.becode/commands)"
+		if m.running {
+			desc = "after the run · " + desc
+		}
+		items = append(items, pickItem{id: "/" + name, label: "/" + name, desc: desc, args: true})
 	}
 	return items
 }
