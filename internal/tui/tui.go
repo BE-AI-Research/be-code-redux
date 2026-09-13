@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/ui"
@@ -94,6 +95,12 @@ type approvalMsg struct {
 	resp           chan bool
 }
 
+// approvalCancelMsg withdraws an open approval modal because the change was
+// answered somewhere else — the VS Code diff — or the run was cancelled.
+// note, when set, is appended dimmed to say which. Nothing is sent on the
+// prompt's reply channel: the coordinator already has its answer.
+type approvalCancelMsg struct{ note string }
+
 // mode is the input routing state.
 type mode int
 
@@ -150,6 +157,10 @@ type Model struct {
 
 	approval *approvalMsg
 	modalVP  viewport.Model
+	// review decides where a file change is reviewed (editor diff, this
+	// terminal, or both with the first answer winning). Set by cmd after
+	// New; nil in tests that do not exercise it.
+	review *review.Coordinator
 
 	picker  *picker
 	pending *planReadyMsg // approved-plan-awaiting-decision
@@ -483,6 +494,16 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeApproval
 		m.modalVP = viewport.New(m.width-6, m.modalHeight())
 		m.modalVP.SetContent(ui.ColorizeDiff(msg.detail, true))
+	case approvalCancelMsg:
+		// The loser of a shared review (see internal/review). A late or
+		// duplicate withdrawal is a no-op: the modal is already gone.
+		if m.mode == modeApproval && m.approval != nil {
+			if msg.note != "" {
+				m.appendLine(stDim.Render(msg.note))
+			}
+			m.approval = nil
+			m.mode = m.idleMode()
+		}
 	case turnDoneMsg:
 		if m.mode == modeQueue {
 			m.closeQueue()
@@ -1392,6 +1413,8 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		} else {
 			m.appendLine(stDim.Render("no handoff briefing in this session"))
 		}
+	case "/review":
+		m.reviewCommand(fields)
 	case "/clients":
 		if !m.served {
 			m.appendLine(stDim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))

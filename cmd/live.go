@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tui"
 )
@@ -93,10 +94,27 @@ func runSessionHost(code string) error {
 	go h.Serve()
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()
+	var editor review.Editor
 	if ideSession != nil {
-		ag.Tools.ReviewWrite = ideSession.ReviewWrite
+		editor = ideSession.ReviewEditor()
 		defer ideSession.Close()
 	}
+	m := tui.New(cfg, ag, p)
+	// Served: auto resolves per write from the roster — the editor alone
+	// while VS Code's own terminal is the only one attached, both places as
+	// soon as anyone else joins. Clients() only takes the host's lock to
+	// copy the roster, and this runs on the agent goroutine (never inside
+	// the program's Update), so it cannot deadlock the host.
+	coord := review.New(review.Mode(cfg.IDE.Review), editor, m.ReviewTerminal(), func() []string {
+		infos := h.Clients()
+		labels := make([]string, 0, len(infos))
+		for _, c := range infos {
+			labels = append(labels, c.Label)
+		}
+		return labels
+	})
+	m.SetReview(coord)
+	ag.Tools.ReviewWrite = coord.Decide
 
 	// A signal must take the same route as a client's /quit, or the process
 	// would die past its defers: no handoff briefing, no tool cleanup, and
@@ -111,7 +129,7 @@ func runSessionHost(code string) error {
 		}
 	}()
 
-	err = tui.New(cfg, ag, p).RunServed(context.Background(), h)
+	err = m.RunServed(context.Background(), h)
 	// Order matters: the resume line goes to every attached terminal, so it
 	// has to be written before Close says goodbye to them. Two details make
 	// it actually readable there: every client is in raw mode with its own

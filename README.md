@@ -322,6 +322,15 @@ false) and `--no-ide` (never connect, which wins over everything else). Headless
 run` never touches the editor unless `--ide` is passed explicitly, so scripted runs stay
 reproducible; even then it only attaches the `ide_*` tools — no editor diff review and no
 per-turn `[editor: …]` context note.
+Where a change is reviewed is `ide.review`: `auto` (the default) shows the diff in the
+editor while VS Code's own terminal is the only one attached, and raises the terminal
+approval prompt *as well* once another terminal joins the session, so whoever is at a
+phone or an SSH session can answer too — the first answer from either place wins and the
+other is withdrawn (the modal closes with `answered in VS Code`, the editor diff closes
+itself). `editor` always reviews in the editor (falling back to the terminal only when the
+bridge cannot), `tui` only ever asks in the terminal, and `both` always does both. `/review`
+prints the current mode, `/review <mode>` changes it for the session.
+
 `be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for
 the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
 end-to-end checklist.
@@ -439,7 +448,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
-- `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
+- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the VS Code
+  editor bridge; see "VS Code"
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for

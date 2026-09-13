@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/setup"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -465,8 +466,12 @@ func runInteractive(cmd *cobra.Command) error {
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()
 	defer finishSession(ag, true, os.Stdout)
+	// The editor is one of the two places a file change can be reviewed; the
+	// UI below is the other. The coordinator picks between them (ide.review,
+	// /review) and owns Registry.ReviewWrite for the whole session.
+	var editor review.Editor
 	if ideSession != nil {
-		ag.Tools.ReviewWrite = ideSession.ReviewWrite
+		editor = ideSession.ReviewEditor()
 		defer ideSession.Close()
 	}
 	usePlain := usePlainUI(cfg)
@@ -479,7 +484,15 @@ func runInteractive(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
+		// In-process: no client roster, so auto resolves to the editor.
+		coord := review.New(review.Mode(cfg.IDE.Review), editor, repl.ReviewTerminal(), nil)
+		repl.SetReview(coord)
+		ag.Tools.ReviewWrite = coord.Decide
 		return repl.Run(ctx)
 	}
-	return tui.New(cfg, ag, p).Run(ctx)
+	m := tui.New(cfg, ag, p)
+	coord := review.New(review.Mode(cfg.IDE.Review), editor, m.ReviewTerminal(), nil)
+	m.SetReview(coord)
+	ag.Tools.ReviewWrite = coord.Decide
+	return m.Run(ctx)
 }

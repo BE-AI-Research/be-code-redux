@@ -13,6 +13,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
@@ -118,5 +119,45 @@ func TestPlainResumeOfAColdCodeStillLoads(t *testing.T) {
 	}
 	if r.Agent.Session == nil || r.Agent.Session.ID != s.ID {
 		t.Fatalf("cold session was not loaded: %+v", r.Agent.Session)
+	}
+}
+
+// /review reports where file changes are reviewed, and sets it.
+func TestREPLReviewCommand(t *testing.T) {
+	r := newTestREPL(t)
+	r.SetReview(review.New(review.ModeAuto, nil, r.ReviewTerminal(), nil))
+	out := capture(t, func() { r.command(context.Background(), "/review") })
+	if !strings.Contains(out, "review: auto (resolves to editor)") {
+		t.Fatalf("mode line missing: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/review both") })
+	if !strings.Contains(out, "review: both (resolves to both)") {
+		t.Fatalf("mode not set: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/review nonsense") })
+	if !strings.Contains(out, "nonsense") {
+		t.Fatalf("invalid mode not reported: %q", out)
+	}
+	if r.Review.Mode() != review.ModeBoth {
+		t.Fatalf("mode = %q", r.Review.Mode())
+	}
+}
+
+// /review is safe to run in the middle of a turn.
+func TestReviewIsBusySafe(t *testing.T) {
+	if !BusySafeCommand("/review both") {
+		t.Fatal("/review must be usable while the agent is busy")
+	}
+	found := false
+	for _, c := range SlashCommandTable {
+		if c.Name == "/review" {
+			found = true
+			if !c.Args {
+				t.Fatal("/review takes an argument")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("/review missing from SlashCommandTable")
 	}
 }

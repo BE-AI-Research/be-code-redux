@@ -77,6 +77,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick a colour theme, or /theme <name> (dracula, nord, gruvbox, …)", true},
+	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
@@ -103,7 +104,7 @@ func SetMono() { useColor = false }
 var busySafe = map[string]bool{
 	"/menu": true, "/help": true, "/theme": true, "/config": true, "/stats": true, "/tools": true,
 	"/map": true, "/handoff": true, "/copy": true, "/queue": true, "/clients": true, "/detach": true,
-	"/quit": true, "/exit": true, "/q": true,
+	"/review": true, "/quit": true, "/exit": true, "/q": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

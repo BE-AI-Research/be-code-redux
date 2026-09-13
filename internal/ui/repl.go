@@ -17,6 +17,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
@@ -38,6 +39,11 @@ type REPL struct {
 	mu    sync.Mutex
 	ask   chan string // set while prompt() waits for an answer during a run
 	busy  bool
+
+	// Review decides where a file change is reviewed (the editor diff, this
+	// terminal, or both with the first answer winning). Set by cmd after
+	// NewREPL; nil when nothing wired it.
+	Review *review.Coordinator
 }
 
 type lineEvent struct {
@@ -119,6 +125,42 @@ func (r *REPL) approve(action, detail string) bool {
 	return false
 }
 
+// SetReview hands the REPL the review coordinator built in cmd, so /review
+// can report and change where file changes are reviewed.
+func (r *REPL) SetReview(c *review.Coordinator) { r.Review = c }
+
+// ReviewTerminal is this UI as the coordinator's terminal-side reviewer.
+func (r *REPL) ReviewTerminal() review.Terminal { return replTerminal{r} }
+
+type replTerminal struct{ r *REPL }
+
+// Ask prints the diff and asks the same y/N/a question as approve, but on a
+// cancellable wait: the editor may answer the same change first, and the
+// coordinator then withdraws this question.
+func (t replTerminal) Ask(ctx context.Context, preview string) bool {
+	fmt.Println(yell("file change:"))
+	fmt.Println(ColorizeDiff(preview, useColor))
+	switch strings.ToLower(t.r.promptCtx(ctx, yell("approve? [y/N/a(lways)] "))) {
+	case "y", "yes":
+		return true
+	case "a", "always":
+		// Both switches, as in the TUI: cfg stops the terminal prompt and
+		// the registry flag stops the editor diff (see Registry.ApproveWrites).
+		t.r.Cfg.ApproveFileWrites = false
+		t.r.Agent.Tools.ApproveWrites = false
+		return true
+	}
+	return false
+}
+
+// Withdraw says why the question on screen no longer needs an answer. The
+// wait itself ends with the coordinator's cancellation.
+func (t replTerminal) Withdraw(note string) {
+	if note != "" {
+		fmt.Printf("\n%s\n", dim(note))
+	}
+}
+
 // Run drives the interactive loop until /quit or EOF.
 func (r *REPL) Run(ctx context.Context) error {
 	defer r.rl.Close()
@@ -175,7 +217,13 @@ func (r *REPL) Run(ctx context.Context) error {
 }
 
 // prompt asks a one-off question through readline with a temporary prompt.
-func (r *REPL) prompt(q string) string {
+func (r *REPL) prompt(q string) string { return r.promptCtx(context.Background(), q) }
+
+// promptCtx is prompt on a cancellable wait: a shared file-change review can
+// be withdrawn (the editor answered it) while the question is on screen, and
+// then the answer is no longer wanted. An empty string is the result either
+// way, which reads as "no".
+func (r *REPL) promptCtx(ctx context.Context, q string) string {
 	r.rl.SetPrompt(q)
 	r.rl.Refresh()
 	defer func() { r.rl.SetPrompt(cyan("be-code> ")); r.rl.Refresh() }()
@@ -187,14 +235,23 @@ func (r *REPL) prompt(q string) string {
 	}
 	r.mu.Unlock()
 	if !busy {
-		ev := <-r.lines
-		if ev.err != nil {
+		select {
+		case ev := <-r.lines:
+			if ev.err != nil {
+				return ""
+			}
+			return strings.TrimSpace(ev.line)
+		case <-ctx.Done():
 			return ""
 		}
-		return strings.TrimSpace(ev.line)
 	}
 	defer func() { r.mu.Lock(); r.ask = nil; r.mu.Unlock() }()
-	return strings.TrimSpace(<-ch)
+	select {
+	case line := <-ch:
+		return strings.TrimSpace(line)
+	case <-ctx.Done():
+		return ""
+	}
 }
 
 // turn runs one agent request. Input typed during the run is queued for
@@ -443,6 +500,18 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		for _, n := range r.Agent.Tools.Names() {
 			fmt.Printf("  %s\n", n)
 		}
+	case "/review":
+		if r.Review == nil {
+			fmt.Println(dim("review: not available in this session"))
+			break
+		}
+		if len(fields) > 1 {
+			if err := r.Review.SetMode(review.Mode(strings.ToLower(fields[1]))); err != nil {
+				fmt.Printf("%s %v\n", red("error>"), err)
+				break
+			}
+		}
+		fmt.Printf("review: %s (resolves to %s)\n", r.Review.Mode(), r.Review.Resolve())
 	case "/config":
 		p, _ := config.Path()
 		fmt.Printf("config: %s\n  provider=%s model=%s ui=%s context_tokens=%d max_turns=%d max_repairs=%d\n  compat_tool_calls=%s approve_file_writes=%v auto_approve_shell=%v\n",
