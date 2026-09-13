@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -104,7 +105,7 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 		Provider:     p,
 		Model:        model,
 		Tools:        reg,
-		projectNotes: projectNotes,
+		projectNotes: TrimProjectNotes(projectNotes),
 	}
 	if cfg.RepoMap {
 		a.repoMap = repomap.Build(reg.Root, cfg.RepoMapBudget)
@@ -162,6 +163,41 @@ func (a *Agent) SetGuidance(g string) {
 	if a.History != nil {
 		a.History.System.Content = a.composeSystem("")
 	}
+}
+
+// MaxProjectNotes caps the project notes (BECODE.md/CLAUDE.md content) that
+// enter the system prompt, whether loaded at startup (cmd/root.go's
+// loadProjectNotes) or written live by /init (SetProjectNotes) — one
+// definition so a session never carries more than a restart would load.
+const MaxProjectNotes = 8 * 1024
+
+// TrimProjectNotes cuts notes down to MaxProjectNotes, at the last line
+// boundary that fits so the prompt never ends mid-sentence — and never
+// mid-rune, which a plain byte slice would risk (an 8 KiB boundary landing
+// inside a multi-byte character leaves the model reading U+FFFD). Every
+// path that feeds project notes into the prompt goes through here:
+// SetProjectNotes, cmd's loadProjectNotes, and agent.New.
+func TrimProjectNotes(s string) string {
+	if len(s) <= MaxProjectNotes {
+		return s
+	}
+	cut := s[:MaxProjectNotes]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		return cut[:i+1]
+	}
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1] // back off to the last whole rune
+	}
+	return cut
+}
+
+// SetProjectNotes replaces the BECODE.md content and recomposes the system
+// prompt (used after init writes a new file). Notes are trimmed to
+// MaxProjectNotes so a long-lined document or fact-sheet fallback can't
+// enter the live prompt any larger than what a restart would load.
+func (a *Agent) SetProjectNotes(notes string) {
+	a.projectNotes = TrimProjectNotes(notes)
+	a.RefreshSystem()
 }
 
 // RefreshSystem recomposes the system prompt after tools or guidance

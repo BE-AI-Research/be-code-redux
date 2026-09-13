@@ -43,6 +43,9 @@ const (
 	ReviewAccept
 	ReviewReject
 	ReviewAcceptAll // accept and stop asking for the rest of the session
+	// ReviewCancelled: this reviewer was withdrawn because the other place
+	// answered first (see internal/review). Never returned to fs.go.
+	ReviewCancelled
 )
 
 // Registry holds the active tool set, rooted at a workspace directory.
@@ -70,6 +73,13 @@ type Registry struct {
 	// tool call's context, so cancelling the run (Esc) also abandons a
 	// review the user has left sitting in the editor.
 	ReviewWrite func(ctx context.Context, rel, oldContent, newContent string) ReviewDecision
+	// ReviewInvolvesEditor, when set, reports whether the next ReviewWrite
+	// will actually put the change in front of the editor. It exists only so
+	// the "reviewing change in VS Code…" status is not shown for a review
+	// that never reaches VS Code (review mode "tui", or no editor attached).
+	// nil means yes, preserving the behaviour for callers that wire
+	// ReviewWrite to an editor and nothing else.
+	ReviewInvolvesEditor func() bool
 	// OnStatus receives short progress notes for the UI's status line.
 	OnStatus func(msg string)
 	// ShellAllow / ShellDeny are glob patterns matched against shell

@@ -38,11 +38,15 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 	rejected := Result{IsError: true,
 		Content: "user rejected this file change; ask what they want instead or take a different approach"}
 	if r.ReviewWrite != nil {
-		if r.OnStatus != nil {
+		// Only say VS Code when VS Code is really being asked: in mode "tui",
+		// or with no editor attached, the review resolves in this terminal
+		// and the note would be a lie the user cannot act on.
+		inEditor := r.ReviewInvolvesEditor == nil || r.ReviewInvolvesEditor()
+		if r.OnStatus != nil && inEditor {
 			r.OnStatus("reviewing change in VS Code…")
 		}
 		d := r.ReviewWrite(ctx, rel, oldContent, newContent)
-		if r.OnStatus != nil {
+		if r.OnStatus != nil && inEditor {
 			r.OnStatus("")
 		}
 		switch d {

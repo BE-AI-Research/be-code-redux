@@ -100,3 +100,32 @@ func TestCancelledReviewRejectsWithoutTerminalPrompt(t *testing.T) {
 		t.Fatal("file written after a cancelled review")
 	}
 }
+
+// The editor-side status note must only appear when the review really
+// involves the editor: in review mode "tui", or with no editor attached, the
+// change is decided in this terminal and "reviewing change in VS Code…"
+// would be a lie.
+func TestReviewStatusOnlyWhenTheEditorIsInvolved(t *testing.T) {
+	dir := t.TempDir()
+	reg, _ := NewRegistry(dir, func(a, d string) bool { return true })
+	reg.ApproveWrites = true
+	var statuses []string
+	reg.OnStatus = func(s string) { statuses = append(statuses, s) }
+	reg.ReviewWrite = func(context.Context, string, string, string) ReviewDecision { return ReviewUnavailable }
+
+	reg.ReviewInvolvesEditor = func() bool { return false }
+	if res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "write_file", Arguments: `{"path":"a.txt","content":"v"}`}); res.IsError {
+		t.Fatal(res.Content)
+	}
+	if len(statuses) != 0 {
+		t.Fatalf("status shown for a terminal-only review: %v", statuses)
+	}
+
+	reg.ReviewInvolvesEditor = func() bool { return true }
+	if res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "write_file", Arguments: `{"path":"b.txt","content":"v"}`}); res.IsError {
+		t.Fatal(res.Content)
+	}
+	if len(statuses) == 0 || statuses[0] != "reviewing change in VS Code…" {
+		t.Fatalf("status not reported when the editor is asked: %v", statuses)
+	}
+}

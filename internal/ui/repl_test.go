@@ -13,6 +13,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
@@ -118,5 +119,111 @@ func TestPlainResumeOfAColdCodeStillLoads(t *testing.T) {
 	}
 	if r.Agent.Session == nil || r.Agent.Session.ID != s.ID {
 		t.Fatalf("cold session was not loaded: %+v", r.Agent.Session)
+	}
+}
+
+// /review reports where file changes are reviewed, and sets it.
+func TestREPLReviewCommand(t *testing.T) {
+	r := newTestREPL(t)
+	r.SetReview(review.New(review.ModeAuto, nil, r.ReviewTerminal(), nil))
+	out := capture(t, func() { r.command(context.Background(), "/review") })
+	if !strings.Contains(out, "review: auto (resolves to editor)") {
+		t.Fatalf("mode line missing: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/review both") })
+	if !strings.Contains(out, "review: both (resolves to both)") {
+		t.Fatalf("mode not set: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/review nonsense") })
+	if !strings.Contains(out, "nonsense") {
+		t.Fatalf("invalid mode not reported: %q", out)
+	}
+	if r.Review.Mode() != review.ModeBoth {
+		t.Fatalf("mode = %q", r.Review.Mode())
+	}
+}
+
+// /review is safe to run in the middle of a turn.
+func TestReviewIsBusySafe(t *testing.T) {
+	if !BusySafeCommand("/review both") {
+		t.Fatal("/review must be usable while the agent is busy")
+	}
+	found := false
+	for _, c := range SlashCommandTable {
+		if c.Name == "/review" {
+			found = true
+			if !c.Args {
+				t.Fatal("/review takes an argument")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("/review missing from SlashCommandTable")
+	}
+}
+
+// A withdrawn question (the editor answered the same change first) must not
+// swallow the line the user had just typed into it: it goes back to the line
+// channel, where runBusy queues it for the agent, and the question stops
+// taking further lines at once so a second one cannot wedge runBusy.
+func TestAbandonedQuestionRequeuesTypedLine(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	ch := make(chan string, 1)
+	r.mu.Lock()
+	r.ask = ch
+	r.mu.Unlock()
+	ch <- "y"
+	r.abandonAsk(ch)
+	r.mu.Lock()
+	still := r.ask
+	r.mu.Unlock()
+	if still != nil {
+		t.Fatal("a withdrawn question is still the destination for typed lines")
+	}
+	select {
+	case ev := <-r.lines:
+		if ev.line != "y" {
+			t.Fatalf("requeued %q", ev.line)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the typed line was lost with the withdrawn question")
+	}
+}
+
+// promptCtx returns nothing ("no") when the question is cancelled, and
+// leaves nobody registered for typed lines.
+func TestPromptCtxCancelled(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.busy = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan string, 1)
+	go func() { done <- r.promptCtx(ctx, "approve? ") }()
+	for i := 0; ; i++ {
+		r.mu.Lock()
+		set := r.ask != nil
+		r.mu.Unlock()
+		if set {
+			break
+		}
+		if i > 200 {
+			t.Fatal("promptCtx never registered the question")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("cancelled question answered %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("promptCtx ignored the cancellation")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ask != nil {
+		t.Fatal("cancelled question still registered")
 	}
 }

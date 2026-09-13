@@ -46,6 +46,7 @@ make build                # or: make -f build.mk build
 ./be-code                 # full-screen TUI in the current directory
 ./be-code --plain         # inline REPL (best over SSH / BE-CLI web terminals)
 ./be-code doctor          # check configured backends + workspace toolchain
+./be-code init            # measure the workspace and write BECODE.md project notes
 ./be-code run "add unit tests for pkg/utils"   # headless, verifies before exiting
 ```
 
@@ -283,8 +284,8 @@ profiles live; the status bar shows the active family.
 `/plan <task>` runs a read-only planning phase (inspect-only tools), shows the numbered
 plan for approval, then executes it. `/commit` writes a model-generated commit message
 and commits; git branch/status is refreshed into the prompt each turn when the workspace
-is a repo. `/init` has the agent survey the repo and write `BECODE.md`. Custom slash
-commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or
+is a repo. `/init` measures the repository and writes `BECODE.md` (see "Project memory").
+Custom slash commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or
 `~/.be-code/commands/*.md` (global), with `$ARGS` substitution. Hooks
 (`hooks.post_write`, `hooks.pre_shell` in config) run your commands around tool actions
 — e.g. `"post_write": ["gofmt -w $FILE"]`.
@@ -322,6 +323,17 @@ false) and `--no-ide` (never connect, which wins over everything else). Headless
 run` never touches the editor unless `--ide` is passed explicitly, so scripted runs stay
 reproducible; even then it only attaches the `ide_*` tools — no editor diff review and no
 per-turn `[editor: …]` context note.
+Where a change is reviewed is `ide.review`: `auto` (the default) shows the diff in the
+editor while VS Code's own terminal is the only one attached, and raises the terminal
+approval prompt *as well* once another terminal joins the session, so whoever is at a
+phone or an SSH session can answer too — the first answer from either place wins and the
+other is withdrawn (the modal closes with `answered in VS Code`, the editor diff closes
+itself). `editor` always reviews in the editor (falling back to the terminal only when the
+bridge cannot), `tui` only ever asks in the terminal, and `both` always does both. Sharing
+needs a live editor on the other side: with no bridge attached, every mode falls back to the
+ordinary write approval, which still honours `-y` and `approve_file_writes`. `/review`
+prints the current mode, `/review <mode>` changes it for the session.
+
 `be-code doctor` reports whether an editor bridge is listening. See `vscode/README.md` for
 the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
 end-to-end checklist.
@@ -376,8 +388,40 @@ echo "fix the failing test" | ./be-code run -y   # pipeline mode (auto-approve s
 ## Project memory
 
 Drop a `BECODE.md` in the workspace root (falls back to `CLAUDE.md`) — build commands,
-conventions, gotchas. It is injected into the system prompt, exactly like Claude Code's
-project memory.
+conventions, gotchas. It is injected into the system prompt (up to 8 KiB) as *facts about
+your project for orientation*: notes describe the repository, they are never read as
+instructions or tasks.
+
+**`/init` writes it for you, from measured facts.** `/init` (both UIs) and headless
+`be-code init [-y] [-C dir]` first *measure* the workspace — languages by extension, the
+project kind and its exact check commands, key files (README, Makefile, `go.mod`,
+`package.json`, …), top- and second-level directories with file counts, entry points,
+test directories, formatter/linter configs, git branch/remote/recent commits, the README's
+first lines and the repo map — then ask the model, with no tools, to write the overview
+*from those facts only*: what the project is, how to build, test and run it using the
+measured commands exactly, the layout, the conventions and the gotchas. The scan is
+bounded (20,000 files, 2 s; a partial scan says so).
+
+The reply is validated before anything is written: it must not describe BE-Code or its
+tools, it must cite at least two measured files, directories or commands, every command
+it shows in backticks or a fenced block must be one that was actually measured, and it
+must be at most 150 lines. "Measured" covers what a project really documents, not just the
+verification checks: every `make` target in `Makefile`/`build.mk` (as `make <target>` and
+`make -f <file> <target>`), every `package.json` script (`npm run <script>`, plus
+`npm test`/`npm install` and `npx <bin>`), `go run .`, `go run ./cmd/<x>`,
+`go test ./<pkg>` and `go vet ./...` in a Go module, `cargo build|test|run|check`, and
+`pytest` in a Python project with tests — each accepted with flags after it
+(`go test ./... -race`) but not with a different target (`go generate ./...`). A rejected draft gets one retry with the reasons; if that
+fails too, the measured fact sheet itself is written, headed by a comment saying the
+model's overview was rejected and why.
+
+Then it is a normal write: you see the diff preview and approve it, any previous
+`BECODE.md` is kept as `BECODE.md.bak`, and the new notes go into the system prompt at
+once. That approval is always the terminal's own prompt — `/init` asks here even when
+`ide.review` is `editor`, because the document it wrote is what you are being shown. Re-run `/init` whenever the project has moved on. A session started in a recognized
+project that has no notes file says so once — `no BECODE.md; /init maps this project` —
+and does nothing else. `be-code init` on a non-interactive stdin without `-y` denies the
+write instead of writing unattended.
 
 ## Safety model
 
@@ -389,7 +433,7 @@ project memory.
 ## Layout
 
 ```
-cmd/                 cobra commands (root, run, bench, models, pull, doctor, verify, config, sessions, setup)
+cmd/                 cobra commands (root, run, init, bench, models, pull, doctor, verify, config, sessions, attach, setup)
 internal/provider/   OpenAI-compatible client (SSE + tool calls), Ollama native mgmt
 internal/agent/      loop, prompts, embedded-call parsing, budgeting/compaction, plan mode,
                      think-filtering, @mentions, stats, reviewer routing, autosave
@@ -402,6 +446,8 @@ internal/gitctx/     git awareness (+/commit)
 internal/profiles/   model-family tuning table
 internal/mcp/        stdio MCP client (JSON-RPC 2.0)
 internal/live/       live-session host, attach client, records (~/.be-code/live)
+internal/discover/   workspace measurement for /init (languages, commands, layout, git)
+internal/review/     where a file change is reviewed (editor, terminal or both)
 internal/commands/   custom slash commands (.becode/commands)
 internal/bench/      embedded offline eval suite
 internal/store/      session persistence (~/.be-code/sessions)
@@ -439,7 +485,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
-- `ide.enabled` (true), `ide.auto_context` (true) — the VS Code editor bridge; see "VS Code"
+- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the VS Code
+  editor bridge; see "VS Code"
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for

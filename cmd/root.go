@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/setup"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -86,7 +87,7 @@ func init() {
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
 }
@@ -99,7 +100,9 @@ func Execute() {
 	}
 }
 
-func stdinIsTTY() bool {
+// stdinIsTTY is a var so tests can stub it (e.g. initApprove's non-TTY
+// denial path).
+var stdinIsTTY = func() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
 }
@@ -427,14 +430,26 @@ func loadProjectNotes(root string) string {
 	for _, name := range []string{"BECODE.md", "becode.md", "CLAUDE.md"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err == nil {
-			const limit = 8 * 1024
-			if len(data) > limit {
-				data = data[:limit]
-			}
-			return string(data)
+			// Trimmed at a line boundary (never mid-rune) by the one helper
+			// every notes path shares.
+			return agent.TrimProjectNotes(string(data))
 		}
 	}
 	return ""
+}
+
+// reviewMode reads ide.review, warning on stderr about a value the
+// coordinator cannot use rather than silently reviewing somewhere the user
+// did not ask for. An unset value is simply the default.
+func reviewMode(v string) review.Mode {
+	if strings.TrimSpace(v) == "" {
+		return review.ModeAuto
+	}
+	m, err := review.Normalize(review.Mode(v))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: ide.review %q is not one of auto|editor|tui|both; using auto\n", v)
+	}
+	return m
 }
 
 // runInteractive drives an interactive session. It takes the cobra command
@@ -464,8 +479,13 @@ func runInteractive(cmd *cobra.Command) error {
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()
 	defer finishSession(ag, true, os.Stdout)
+	// The editor is one of the two places a file change can be reviewed; the
+	// UI below is the other. The coordinator picks between them (ide.review,
+	// /review) and owns Registry.ReviewWrite for the whole session.
+	mode := reviewMode(cfg.IDE.Review)
+	var editor review.Editor
 	if ideSession != nil {
-		ag.Tools.ReviewWrite = ideSession.ReviewWrite
+		editor = ideSession.ReviewEditor()
 		defer ideSession.Close()
 	}
 	usePlain := usePlainUI(cfg)
@@ -478,7 +498,20 @@ func runInteractive(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
+		// In-process: no client roster, so auto resolves to the editor.
+		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
+		repl.SetReview(coord)
+		ag.Tools.ReviewWrite = coord.Decide
+		// The "reviewing change in VS Code…" note belongs to reviews that
+		// really reach the editor: mode "tui" (or no editor at all) resolves
+		// in the terminal instead.
+		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 		return repl.Run(ctx)
 	}
-	return tui.New(cfg, ag, p).Run(ctx)
+	m := tui.New(cfg, ag, p)
+	coord := review.New(mode, editor, m.ReviewTerminal(), nil)
+	m.SetReview(coord)
+	ag.Tools.ReviewWrite = coord.Decide
+	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+	return m.Run(ctx)
 }
