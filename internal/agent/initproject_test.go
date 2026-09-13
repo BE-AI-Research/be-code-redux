@@ -23,15 +23,26 @@ func TestValidateProjectNotes(t *testing.T) {
 		t.Fatalf("good doc rejected: %v", v)
 	}
 	cases := map[string]string{
-		"harness":   "# App\nUse write_file to edit cmd/app and internal.\n",
-		"tool name": "# App\nBE-Code runs go test ./... in cmd/app and internal.\n",
-		"no names":  "# Something\nIt is a program.\n",
-		"command":   "# App\nBuild with `go generate ./...` in cmd/app and internal.\n",
-		"too long":  "# App\ncmd/app internal\n" + strings.Repeat("line\n", 150),
+		"harness":        "# App\nUse write_file to edit cmd/app and internal.\n",
+		"tool name":      "# App\nBE-Code runs go test ./... in cmd/app and internal.\n",
+		"no names":       "# Something\nIt is a program.\n",
+		"command":        "# App\nBuild with `go generate ./...` in cmd/app and internal.\n",
+		"fenced command": "# App\ncmd/app internal\n\n```\ngo build ./... -tags custom\n```\n",
+		"too long":       "# App\ncmd/app internal\n" + strings.Repeat("line\n", 150),
 	}
 	for name, doc := range cases {
 		if v := ValidateProjectNotes(doc, f); len(v) == 0 {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	accepted := map[string]string{
+		"fenced measured commands": "# App\ncmd/app internal\n\n```\ngo build ./...\ngo test ./...\n```\n",
+		"benign prose overlap":     "# App\ncmd/app internal\n\nWe maintain backward compatibility and document the read_file helper.\n",
+	}
+	for name, doc := range accepted {
+		if v := ValidateProjectNotes(doc, f); len(v) != 0 {
+			t.Errorf("%s: rejected: %v", name, v)
 		}
 	}
 }
@@ -43,8 +54,19 @@ func TestInitProjectRetriesThenFallsBack(t *testing.T) {
 		if len(req.Tools) != 0 || !req.NoThink {
 			t.Errorf("init request must be tool-less and NoThink: %+v", req)
 		}
-		if calls == 2 && !strings.Contains(req.Messages[len(req.Messages)-1].Content, "rejected because") {
-			t.Error("retry must carry the violations")
+		if calls == 2 {
+			if !strings.Contains(req.Messages[len(req.Messages)-1].Content, "rejected because") {
+				t.Error("retry must carry the violations")
+			}
+			found := false
+			for _, m := range req.Messages {
+				if m.Role == provider.RoleAssistant && strings.Contains(m.Content, "Use write_file on cmd/app.") {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("retry must include the rejected reply as an assistant message")
+			}
 		}
 		return &provider.ChatResponse{Content: "# App\nUse write_file on cmd/app.\n"}, nil
 	}}
