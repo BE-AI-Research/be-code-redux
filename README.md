@@ -405,13 +405,20 @@ bounded (20,000 files, 2 s; a partial scan says so).
 The reply is validated before anything is written: it must not describe BE-Code or its
 tools, it must cite at least two measured files, directories or commands, every command
 it shows in backticks or a fenced block must be one that was actually measured, and it
-must be at most 150 lines. A rejected draft gets one retry with the reasons; if that
+must be at most 150 lines. "Measured" covers what a project really documents, not just the
+verification checks: every `make` target in `Makefile`/`build.mk` (as `make <target>` and
+`make -f <file> <target>`), every `package.json` script (`npm run <script>`, plus
+`npm test`/`npm install` and `npx <bin>`), `go run .`, `go run ./cmd/<x>`,
+`go test ./<pkg>` and `go vet ./...` in a Go module, `cargo build|test|run|check`, and
+`pytest` in a Python project with tests — each accepted with flags after it
+(`go test ./... -race`) but not with a different target (`go generate ./...`). A rejected draft gets one retry with the reasons; if that
 fails too, the measured fact sheet itself is written, headed by a comment saying the
 model's overview was rejected and why.
 
 Then it is a normal write: you see the diff preview and approve it, any previous
 `BECODE.md` is kept as `BECODE.md.bak`, and the new notes go into the system prompt at
-once. Re-run `/init` whenever the project has moved on. A session started in a recognized
+once. That approval is always the terminal's own prompt — `/init` asks here even when
+`ide.review` is `editor`, because the document it wrote is what you are being shown. Re-run `/init` whenever the project has moved on. A session started in a recognized
 project that has no notes file says so once — `no BECODE.md; /init maps this project` —
 and does nothing else. `be-code init` on a non-interactive stdin without `-y` denies the
 write instead of writing unattended.
