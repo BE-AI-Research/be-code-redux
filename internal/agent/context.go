@@ -99,11 +99,6 @@ func CompleteMention(root, prefix string) []string {
 // from the measured fact sheet and nothing else.
 const InitFrame = `You are writing BECODE.md for the repository described below, so that a future coding session can orient itself. Describe THIS project only: what it is, how to build, test and run it (use the measured commands exactly), the layout of important directories, the conventions you can see, and gotchas. Do not describe BE-Code, its tools, its prompts, or how the assistant works. Do not invent commands, files or directories that are not in the facts. At most 150 lines of Markdown, no preamble.`
 
-// InitPrompt is retained until Task 3 rewires the `/init` command's callers.
-//
-// Deprecated: removed in Task 3.
-const InitPrompt = InitFrame
-
 // planSystemPrompt replaces the normal system prompt during plan mode.
 const planSystemPrompt = `You are BE-Code in PLANNING mode. You may ONLY inspect the project (read_file, list_dir, search) — you cannot modify anything.
 

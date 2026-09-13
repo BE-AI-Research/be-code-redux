@@ -70,6 +70,13 @@ type turnDoneMsg struct {
 	err error
 }
 
+// initDoneMsg reports the outcome of the /init flow (see ui.RunInit),
+// finishing with a turnDoneMsg to return to idle.
+type initDoneMsg struct {
+	path string
+	err  error
+}
+
 // usageMsg carries a usage snapshot taken ON THE AGENT GOROUTINE at a
 // moment the agent is quiescent (inside an event callback, or after a run
 // returns). The UI renders only these cached numbers, so the status bar
@@ -126,6 +133,11 @@ type Model struct {
 	quitHint map[int]bool
 	// ideAnnounced keeps the editor-bridge line to one appearance.
 	ideAnnounced bool
+	// initHinted keeps the "no BECODE.md" nudge to one appearance per session.
+	initHinted bool
+	// startTurnHook is a test seam consulted at the top of startTurn; nil in
+	// production.
+	startTurnHook func(string)
 	// toast is the transient notice shown in yellow on the last transcript
 	// row until toastUntil; now is swappable for tests.
 	toast      string
@@ -388,6 +400,11 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ideAnnounced = true
 			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
 		}
+		// Nudge once toward /init for a project with no notes file yet.
+		if !m.initHinted && ui.NeedsInitHint(m.ag.Tools.Root) {
+			m.initHinted = true
+			m.appendLine(stDim.Render(ui.InitHint))
+		}
 		m.refreshTranscript()
 		// A resize moves every input row's absolute position; republish for
 		// the whole roster, not just whoever happens to type next.
@@ -513,6 +530,18 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.startTurn(strings.Join(texts, "\n"))
 		}
+	case initDoneMsg:
+		m.flushStreaming()
+		if msg.err != nil {
+			m.appendLine(stErr.Render("init failed: ") + msg.err.Error())
+		} else {
+			m.appendLine(stOK.Render("wrote " + msg.path))
+		}
+		// Queued as a Cmd, not sent here directly: m.send is p.Send on the
+		// unbuffered channel this very update goroutine reads from, so a
+		// synchronous call from inside Update would deadlock (see the
+		// /detach case's comment for the same hazard).
+		cmds = append(cmds, func() tea.Msg { return turnDoneMsg{} })
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
@@ -812,6 +841,9 @@ func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
 // startTurn launches the agent in a goroutine. The caller has already
 // echoed the request into the transcript.
 func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
+	if m.startTurnHook != nil {
+		m.startTurnHook(text)
+	}
 	m.mode = modeBusy
 	m.running = true
 	m.statusNote = "thinking"
@@ -1290,7 +1322,18 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.send(turnDoneMsg{})
 		}()
 	case "/init":
-		return m.startTurnFrom(agent.InitPrompt, from)
+		m.mode = modeBusy
+		m.running = true
+		m.statusNote = "mapping the project"
+		go func() {
+			path, err := ui.RunInit(m.rootCtx, m.ag, ui.InitOptions{
+				Root:    m.ag.Tools.Root,
+				Approve: func(p string) bool { return m.approveFromAgent("file_write", p) },
+				Log:     func(s string) { m.send(noticeMsg(s)) },
+			})
+			m.send(initDoneMsg{path: path, err: err})
+		}()
+		return m, m.wheelTick()
 	case "/compact":
 		m.mode = modeBusy
 		m.statusNote = "compacting"

@@ -131,6 +131,9 @@ func (r *REPL) Run(ctx context.Context) error {
 		fmt.Printf("%s %s %s\n", grn("ok>"), r.Provider.Name(), dim(status))
 	}
 	fmt.Printf("%s\n\n", dim("/help for commands · Tab completes · ↑ history · type while it works to queue a message"))
+	if NeedsInitHint(r.Agent.Tools.Root) {
+		fmt.Printf("%s\n", dim(InitHint))
+	}
 
 	r.lines = make(chan lineEvent)
 	go func() {
@@ -464,7 +467,16 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Printf("%s %s\n", grn("committed:"), line)
 	case "/init":
-		r.turn(ctx, agent.InitPrompt)
+		path, err := RunInit(ctx, r.Agent, InitOptions{
+			Root:    r.Agent.Tools.Root,
+			Approve: func(p string) bool { return r.approve("file_write", p) },
+			Log:     func(s string) { fmt.Println(dim(s)) },
+		})
+		if err != nil {
+			fmt.Printf("%s %v\n", red("error>"), err)
+			break
+		}
+		fmt.Printf("%s %s\n", grn("wrote"), path)
 	case "/compact":
 		if err := r.Agent.Compact(ctx); err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)

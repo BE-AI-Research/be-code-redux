@@ -86,7 +86,7 @@ func init() {
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
 }

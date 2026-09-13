@@ -69,7 +69,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/undo", "roll back the last turn's file changes", false},
 	{"/verify", "run the workspace's build/lint/test checks", false},
 	{"/commit", "commit all changes with a model-written message", false},
-	{"/init", "generate BECODE.md project notes", false},
+	{"/init", "map the workspace and write BECODE.md project notes", false},
 	{"/compact", "summarize older conversation now", false},
 	{"/handoff", "show the briefing carried over from a resumed session", false},
 	{"/map", "show the repo map", false},
