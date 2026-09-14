@@ -46,7 +46,7 @@ func TestInitCommandRunsTheFlowNotATurn(t *testing.T) {
 	m := newTestModel(t)
 	var ran string // any model turn this command starts, which must be none
 	m.startTurnHook = func(text string) { ran = text }
-	m.inputFor(0).SetValue("/init")
+	m.input.SetValue("/init")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
 		t.Fatal("/init must return the running session's wheel tick")

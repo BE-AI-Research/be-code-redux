@@ -7,64 +7,159 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 )
 
-func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+// One program per attached terminal: every view has its own input line, its
+// own popups and its own scroll, while the transcript, the run state, the
+// queue and the roster stay one session.
 
-func twoClients(t *testing.T) *View {
-	t.Helper()
-	m := newTestModel(t)
-	m.served = true
-	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true}, live.ClientInfo{ID: 2, Label: "tablet (pid 2)", UTF8: true})
-	return m
-}
-
-func TestEachClientTypesIntoItsOwnInput(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("hello")})
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("world")})
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("!")})
-	if got := m.inputFor(1).Value(); got != "hello!" {
-		t.Fatalf("client 1 input %q", got)
+func TestEachViewTypesIntoItsOwnInput(t *testing.T) {
+	_, a, b := twoViews(t)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+	b.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("world")})
+	if a.input.Value() != "hello" || b.input.Value() != "world" {
+		t.Fatalf("inputs: a=%q b=%q", a.input.Value(), b.input.Value())
 	}
-	if got := m.inputFor(2).Value(); got != "world" {
-		t.Fatalf("client 2 input %q", got)
-	}
-	// The shared frame leaves the input columns blank on every input row:
-	// the host splices each client's own line in there.
-	lines := strings.Split(m.View(), "\n")
-	block := lines[len(lines)-1-m.inputRows() : len(lines)-1]
-	for i, ln := range block {
-		row := []rune(ansi.Strip(ln))
-		if len(row) < m.inputWidth() || strings.TrimSpace(string(row[:m.inputWidth()])) != "" {
-			t.Fatalf("input row %d is not blank for its first %d columns: %q", i, m.inputWidth(), ln)
-		}
-	}
-	if strings.Contains(m.View(), "hello!") || strings.Contains(m.View(), "world") {
-		t.Fatal("shared frame must not render any client's input text")
+	if !strings.Contains(a.View(), "hello") || strings.Contains(a.View(), "world") {
+		t.Fatal("a view must render its own draft and nobody else's")
 	}
 }
 
+func TestEnterSubmitsWithTheSendersLabel(t *testing.T) {
+	s, a, b := twoViews(t)
+	var started []string
+	s.startTurnHook = func(text string) { started = append(started, text) }
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("from desk")})
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	flush(a, b)
+	if len(started) != 1 || started[0] != "from desk" {
+		t.Fatalf("started: %v", started)
+	}
+	if !strings.Contains(b.wrapped, "desk (pid 1)> from desk") {
+		t.Fatalf("the other view did not see the labelled line:\n%s", b.wrapped)
+	}
+	if !b.running || b.mode != modeBusy {
+		t.Fatalf("b running=%v mode=%v", b.running, b.mode)
+	}
+}
+
+func TestPaletteIsLocalToTheViewThatOpenedIt(t *testing.T) {
+	_, a, b := twoViews(t)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if a.mode != modePalette || b.mode == modePalette {
+		t.Fatalf("modes: a=%v b=%v", a.mode, b.mode)
+	}
+	b.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("typing")})
+	if b.input.Value() != "typing" || a.mode != modePalette {
+		t.Fatal("b's keys must reach b's input and leave a's palette alone")
+	}
+}
+
+func TestScrollIsPerView(t *testing.T) {
+	s, a, b := twoViews(t)
+	for i := 0; i < 200; i++ {
+		s.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("line %d", i)})
+	}
+	flush(a, b)
+	a.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if a.vp.AtBottom() || !b.vp.AtBottom() {
+		t.Fatalf("a atBottom=%v b atBottom=%v", a.vp.AtBottom(), b.vp.AtBottom())
+	}
+}
+
+func TestQuitEndsEveryView(t *testing.T) {
+	_, a, b := twoViews(t)
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/quit")})
+	_, cmdA := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = cmdA
+	flush(a, b)
+	// each view returned tea.Quit on its quitMsg: drainInto records the last cmd
+	if !a.quitSeen || !b.quitSeen {
+		t.Fatalf("quit reached a=%v b=%v", a.quitSeen, b.quitSeen)
+	}
+}
+
+func TestDetachedViewStopsReceiving(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "desk (pid 1)", UTF8: true}})
+	s.detachView(2)
+	s.appendEntry(entry{Kind: entryDim, Text: "after"})
+	flush(a, b)
+	if !strings.Contains(a.wrapped, "after") || strings.Contains(b.wrapped, "after") {
+		t.Fatal("a detached view must not receive broadcasts")
+	}
+	if !strings.Contains(a.wrapped, "detached: tablet (pid 2)") {
+		t.Fatalf("no detached line:\n%s", a.wrapped)
+	}
+}
+
+// Ctrl+C twice quits — but only from the same terminal. A Ctrl+C on one
+// terminal and a Ctrl+C on another are two people each clearing their own
+// line, not a session-ending confirmation.
+func TestQuitHintIsPerView(t *testing.T) {
+	_, a, b := twoViews(t)
+	a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	b.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	flush(a, b)
+	if a.quitSeen || b.quitSeen {
+		t.Fatal("one Ctrl+C on each of two terminals must not quit either")
+	}
+	b.Update(tea.KeyMsg{Type: tea.KeyCtrlC}) // the same terminal, twice
+	flush(a, b)
+	if !a.quitSeen || !b.quitSeen {
+		t.Fatalf("the same terminal's second Ctrl+C must end the session: a=%v b=%v", a.quitSeen, b.quitSeen)
+	}
+}
+
+// While the agent works, Enter queues the sender's own text under the
+// sender's label and leaves every other terminal's draft alone.
 func TestEnterQueuesOnlyTheSendersTextWithLabel(t *testing.T) {
-	m := twoClients(t)
-	m.mode = modeBusy
-	m.running = true
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("do it later")})
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("mine")})
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	items := m.ag.Items()
+	s, a, b := twoViews(t)
+	s.running = true
+	a.mode, b.mode = modeBusy, modeBusy
+	b.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("do it later")})
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("mine")})
+	b.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	flush(a, b)
+	items := s.ag.Items()
 	if len(items) != 1 || items[0].Text != "do it later" || items[0].From != 2 {
 		t.Fatalf("queue: %+v", items)
 	}
-	if got := m.inputFor(1).Value(); got != "mine" {
-		t.Fatalf("client 1's draft was disturbed: %q", got)
+	if got := a.input.Value(); got != "mine" {
+		t.Fatalf("view a's draft was disturbed: %q", got)
 	}
-	if !strings.Contains(m.rendered.String(), "tablet (pid 2)> ") {
-		t.Fatalf("queued line lacks the sender label:\n%s", m.rendered.String())
+	if !strings.Contains(a.rendered.String(), "tablet (pid 2)> ") {
+		t.Fatalf("queued line lacks the sender label:\n%s", a.rendered.String())
+	}
+}
+
+// The queue popup lists the messages this terminal queued, and nobody
+// else's — nobody edits another person's draft.
+func TestQueuePopupShowsOnlyThisViewsMessages(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.running = true
+	a.mode, b.mode = modeBusy, modeBusy
+	s.ag.EnqueueFrom("from one", 1)
+	s.ag.EnqueueFrom("from two", 2)
+	b.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if b.mode != modeQueue {
+		t.Fatalf("Up on an empty input opens the queue popup: %v", b.mode)
+	}
+	if a.mode == modeQueue {
+		t.Fatal("the popup belongs to the terminal that opened it")
+	}
+	v := b.View()
+	if !strings.Contains(v, "from two") || strings.Contains(v, "from one") {
+		t.Fatalf("popup must list only this view's messages:\n%s", v)
+	}
+	b.Update(tea.KeyMsg{Type: tea.KeyEnter}) // edit
+	if got := b.input.Value(); got != "from two" {
+		t.Fatalf("edit pulled %q into view b's input", got)
+	}
+	if items := s.ag.Items(); len(items) != 1 || items[0].From != 1 {
+		t.Fatalf("view a's message must remain queued: %+v", items)
 	}
 }
 
@@ -79,70 +174,29 @@ func TestTranscriptPrefixUsesLabelOnlyWithSeveralClients(t *testing.T) {
 	}
 }
 
-func TestQueuePopupShowsOnlyTheOpenersMessages(t *testing.T) {
-	m := twoClients(t)
-	m.mode = modeBusy
-	m.running = true
-	m.ag.EnqueueFrom("from one", 1)
-	m.ag.EnqueueFrom("from two", 2)
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if m.mode != modeQueue {
-		t.Fatal("Up on an empty input opens the queue popup")
-	}
-	v := m.View()
-	if !strings.Contains(v, "from two") || strings.Contains(v, "from one") {
-		t.Fatalf("popup must list only the opener's messages:\n%s", v)
-	}
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}}) // edit
-	if got := m.inputFor(2).Value(); got != "from two" {
-		t.Fatalf("edit pulled %q into client 2's input", got)
-	}
-	if items := m.ag.Items(); len(items) != 1 || items[0].From != 1 {
-		t.Fatalf("client 1's message must remain queued: %+v", items)
-	}
-}
-
-func TestPaletteIsOwnedByTheClientThatOpenedIt(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("/")})
-	if m.mode != modePalette || m.paletteOwner != 2 {
-		t.Fatalf("palette owner %d mode %v", m.paletteOwner, m.mode)
-	}
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEsc}})
-	if m.mode != modePalette {
-		t.Fatal("another client's Esc must not close the owner's palette")
-	}
-	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true}) // owner detached
-	if m.mode == modePalette {
-		t.Fatal("palette must close when its owner detaches")
-	}
-	if m.inputs[2] != nil {
-		t.Fatal("detached client's textarea must be dropped")
-	}
-}
-
 func TestInProcessModelStillUsesClientZero(t *testing.T) {
 	m := newTestModel(t)
-	m.Update(runes("abc"))
-	if got := m.inputFor(0).Value(); got != "abc" {
-		t.Fatalf("plain KeyMsg goes to client 0: %q", got)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("abc")})
+	if got := m.input.Value(); got != "abc" {
+		t.Fatalf("plain KeyMsg goes to the local input: %q", got)
 	}
 	if !strings.Contains(m.View(), "abc") {
-		t.Fatal("in-process view renders the single textarea")
+		t.Fatal("in-process view renders its textarea")
 	}
 }
 
 func TestDetachCommandDetachesTheTypingClient(t *testing.T) {
-	m := twoClients(t)
-	var detached []int
-	m.detachClient = func(id int) { detached = append(detached, id) }
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("/detach")})
-	_, cmd := m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if cmd != nil {
-		cmd()
+	s, _, b := twoViews(t)
+	detached := make(chan int, 1)
+	s.detachClient = func(id int) { detached <- id }
+	b.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/detach")})
+	_, cmd := b.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/detach returned no command")
 	}
-	if len(detached) != 1 || detached[0] != 2 {
-		t.Fatalf("detached %v", detached)
+	cmd()
+	if id := <-detached; id != 2 {
+		t.Fatalf("detached client %d, want the one that typed /detach", id)
 	}
 }
 
@@ -158,85 +212,49 @@ func TestBottomLineListsClientLabels(t *testing.T) {
 }
 
 // Input recall walks one shared store of lines — everything anyone
-// submitted — but each terminal keeps its own place in it, so one client's
+// submitted — but each terminal keeps its own place in it, so one view's
 // Up never moves another's.
-func TestInputHistoryCursorIsPerClient(t *testing.T) {
-	m := twoClients(t)
+func TestInputHistoryCursorIsPerView(t *testing.T) {
+	s, a, b := twoViews(t)
 	// Submit while a run is in progress: Enter records the line in the
 	// shared history exactly as it does in modeInput, but queues it instead
 	// of launching three overlapping agent runs at one Agent.
-	m.mode = modeBusy
-	m.running = true
+	s.running = true
+	a.mode, b.mode = modeBusy, modeBusy
 	for _, step := range []struct {
-		client int
-		text   string
-	}{{1, "one"}, {1, "two"}, {2, "three"}} {
-		m.Update(live.ClientKeyMsg{Client: step.client, Key: runes(step.text)})
-		m.Update(live.ClientKeyMsg{Client: step.client, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+		v    *View
+		text string
+	}{{a, "one"}, {a, "two"}, {b, "three"}} {
+		step.v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(step.text)})
+		step.v.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	}
-	m.ag.DrainInbox()
-	m.mode, m.running = modeInput, false
-	// Client 1 last submitted "two", so its cursor sits where the list ended
+	s.ag.DrainInbox()
+	s.running = false
+	a.mode, b.mode = modeInput, modeInput
+	// View a last submitted "two", so its cursor sits where the list ended
 	// then: Up walks back from the newest line in the shared store.
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if got := m.inputFor(1).Value(); got != "three" {
-		t.Fatalf("client 1 first Up = %q, want the newest shared line", got)
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := a.input.Value(); got != "three" {
+		t.Fatalf("view a first Up = %q, want the newest shared line", got)
 	}
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if got := m.inputFor(1).Value(); got != "two" {
-		t.Fatalf("client 1 second Up = %q", got)
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := a.input.Value(); got != "two" {
+		t.Fatalf("view a second Up = %q", got)
 	}
-	// Client 2 has not navigated at all: its own Up starts from the newest.
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if got := m.inputFor(2).Value(); got != "three" {
-		t.Fatalf("client 2 Up = %q; client 1's navigation moved its cursor", got)
+	// View b has not navigated at all: its own Up starts from the newest.
+	b.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := b.input.Value(); got != "three" {
+		t.Fatalf("view b Up = %q; view a's navigation moved its cursor", got)
 	}
-	// ...and client 2's navigation left client 1 where it was.
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if got := m.inputFor(1).Value(); got != "one" {
-		t.Fatalf("client 1 third Up = %q; client 2's navigation moved its cursor", got)
-	}
-}
-
-// The menu acts for the terminal that opened it: another client cannot
-// drive it, its entries run as the owner, and it closes if the owner goes.
-func TestMenuIsOwnedByTheClientThatOpenedIt(t *testing.T) {
-	m := twoClients(t)
-	var detached []int
-	m.detachClient = func(id int) { detached = append(detached, id) }
-
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/menu")})
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if m.mode != modeMenu || m.menuOwner != 1 {
-		t.Fatalf("menu owner %d mode %v", m.menuOwner, m.mode)
-	}
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if m.mode != modeMenu {
-		t.Fatal("another client's Enter must not drive the owner's menu")
-	}
-
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("Detach")})
-	_, cmd := m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if cmd != nil {
-		cmd()
-	}
-	if len(detached) != 1 || detached[0] != 1 {
-		t.Fatalf("menu entry detached %v, want the owner", detached)
-	}
-
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/menu")})
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if m.mode != modeMenu {
-		t.Fatalf("menu did not reopen: %v", m.mode)
-	}
-	setClients(m, live.ClientInfo{ID: 2, Label: "tablet (pid 2)", UTF8: true}) // owner detached
-	if m.mode == modeMenu {
-		t.Fatal("menu must close when its owner detaches")
+	// ...and view b's navigation left view a where it was.
+	a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := a.input.Value(); got != "one" {
+		t.Fatalf("view a third Up = %q; view b's navigation moved its cursor", got)
 	}
 }
 
-// The bottom line never overruns the shared width, however long the model
-// name and however many terminals are attached: the label list is
+// The bottom line never overruns this terminal's width, however long the
+// model name and however many terminals are attached: the label list is
 // truncated, and dropped entirely when there is no room for it.
 func TestBottomLineFitsTheWidth(t *testing.T) {
 	m := newTestModel(t)
@@ -268,141 +286,30 @@ func TestBottomLineFitsTheWidth(t *testing.T) {
 // Messages left in the queue when a run ends start the next turn as one
 // request, but the transcript still says who wrote each of them.
 func TestLeftoverQueueEchoesEverySender(t *testing.T) {
-	m := twoClients(t)
-	m.mode = modeBusy
-	m.running = true
-	m.ag.EnqueueFrom("from one", 1)
-	m.ag.EnqueueFrom("from two", 2)
+	s, a, b := twoViews(t)
+	s.running = true
+	a.mode, b.mode = modeBusy, modeBusy
+	s.ag.EnqueueFrom("from one", 1)
+	s.ag.EnqueueFrom("from two", 2)
 	var ran string // stands in for the next turn's run, and records it
-	m.startTurnHook = func(text string) { ran = text }
-	m.finishTurn(nil, nil)
-	flush(m)
+	s.startTurnHook = func(text string) { ran = text }
+	s.finishTurn(nil, nil)
+	flush(a, b)
 	// One request, in the order the messages were queued.
 	if ran != "from one\nfrom two" {
 		t.Fatalf("the next turn ran %q, want both queued messages as one request", ran)
 	}
-	tr := m.rendered.String()
+	tr := a.rendered.String()
 	for _, want := range []string{"desk (pid 1)> from one", "tablet (pid 2)> from two"} {
 		if !strings.Contains(tr, want) {
 			t.Fatalf("transcript lacks %q:\n%s", want, tr)
 		}
 	}
-	if m.mode != modeBusy || !m.running {
-		t.Fatalf("leftovers did not start the next turn: mode=%v running=%v", m.mode, m.running)
+	if a.mode != modeBusy || !a.running {
+		t.Fatalf("leftovers did not start the next turn: mode=%v running=%v", a.mode, a.running)
 	}
-	if m.ag.Pending() != 0 {
-		t.Fatalf("queue not drained: %d", m.ag.Pending())
-	}
-}
-
-// A queue popup whose owner detaches after the run has already finished
-// must not leave the session sitting in the busy mode.
-func TestQueuePopupClosesToIdleWhenOwnerDetaches(t *testing.T) {
-	m := twoClients(t)
-	m.mode = modeBusy
-	m.running = true
-	m.ag.EnqueueFrom("from two", 2)
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyUp}})
-	if m.mode != modeQueue {
-		t.Fatalf("popup not open: %v", m.mode)
-	}
-	m.running = false // the run finished while the popup was open
-	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true})
-	if m.mode != modeInput {
-		t.Fatalf("mode after the owner detached = %v, want input", m.mode)
-	}
-	if m.ag.Held() {
-		t.Fatal("delivery still held after the popup closed")
-	}
-}
-
-// A popup belongs to one terminal, but the keyboard of every other terminal
-// must keep working: a guest's keys go to that guest's own input line (in
-// the mode underneath), and never to the owner's popup.
-func TestGuestKeysReachTheirOwnInputWhileAPopupIsOpen(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/")})
-	if m.mode != modePalette || m.paletteOwner != 1 {
-		t.Fatalf("palette owner %d mode %v", m.paletteOwner, m.mode)
-	}
-	for _, r := range []string{"x", "y", "z"} {
-		m.Update(live.ClientKeyMsg{Client: 2, Key: runes(r)})
-	}
-	if got := m.inputFor(2).Value(); got != "xyz" {
-		t.Fatalf("guest's typing landed in %q, want %q in its own input", got, "xyz")
-	}
-	if m.mode != modePalette || m.paletteOwner != 1 {
-		t.Fatalf("guest's typing disturbed the owner's palette: mode %v owner %d", m.mode, m.paletteOwner)
-	}
-	if p := m.picker; p == nil || p.filter != "" {
-		t.Fatalf("guest's runes reached the palette filter: %+v", p)
-	}
-	// The guest's Esc clears its own selection, and does not close the
-	// owner's palette.
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEsc}})
-	if m.mode != modePalette {
-		t.Fatal("guest's Esc closed the owner's palette")
-	}
-	// The guest's Ctrl+C clears only its own draft.
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
-	if got := m.inputFor(2).Value(); got != "" {
-		t.Fatalf("guest's Ctrl+C left %q in its own draft", got)
-	}
-	if m.mode != modePalette {
-		t.Fatal("guest's Ctrl+C closed the owner's palette")
-	}
-	// And the owner's own Esc still closes it.
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEsc}})
-	if m.mode == modePalette {
-		t.Fatal("the owner's Esc must close its own palette")
-	}
-}
-
-// The same for the menu and the queue popup, and with a run in progress —
-// where the mode underneath is modeBusy, so a guest's Enter queues its
-// message instead of starting a turn.
-func TestGuestKeysQueueWhileAnotherClientBrowsesTheMenu(t *testing.T) {
-	m := twoClients(t)
-	m.mode, m.running = modeBusy, true
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyCtrlQ}}) // queue popup, owner 1
-	if m.mode != modeQueue {
-		// No queued messages for client 1: openQueue says so and stays put.
-		m.mode, m.queueOwner = modeQueue, 1
-	}
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("later please")})
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if m.mode != modeQueue || m.queueOwner != 1 {
-		t.Fatalf("guest's keys disturbed the owner's queue popup: mode %v owner %d", m.mode, m.queueOwner)
-	}
-	items := m.ag.Items()
-	if len(items) != 1 || items[0].Text != "later please" || items[0].From != 2 {
-		t.Fatalf("guest's Enter must queue its own text: %+v", items)
-	}
-	// A guest key that would open a popup of its own leaves the owner's
-	// popup exactly where it was, and never leaves delivery held.
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlQ}})
-	if m.mode != modeQueue || m.queueOwner != 1 {
-		t.Fatalf("guest opened a popup of its own: mode %v owner %d", m.mode, m.queueOwner)
-	}
-}
-
-// Ctrl+C twice quits — but only from the same terminal. A Ctrl+C on one
-// terminal and a Ctrl+C on another are two people each clearing their own
-// line, not a session-ending confirmation.
-func TestQuitHintIsPerClient(t *testing.T) {
-	m := twoClients(t)
-	if _, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 1); cmd != nil {
-		t.Fatal("the first Ctrl+C must only arm the hint")
-	}
-	if _, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 2); cmd != nil {
-		t.Fatal("another terminal's Ctrl+C must not quit")
-	}
-	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlC}, 2)
-	if cmd == nil {
-		t.Fatal("the same terminal's second Ctrl+C must quit")
-	}
-	if msg := cmd(); msg != tea.Quit() {
-		t.Fatalf("second Ctrl+C returned %T, want a quit", msg)
+	if s.ag.Pending() != 0 {
+		t.Fatalf("queue not drained: %d", s.ag.Pending())
 	}
 }
 
@@ -425,53 +332,7 @@ func TestSpaceClosesThePaletteAndKeepsTheCommand(t *testing.T) {
 	for _, r := range []string{"A", "B", "C", "1", "2", "3"} {
 		m.Update(runes(r))
 	}
-	if got := m.inputFor(0).Value(); got != "/resume ABC123" {
+	if got := m.input.Value(); got != "/resume ABC123" {
 		t.Fatalf("input = %q, want %q", got, "/resume ABC123")
-	}
-}
-
-// A guest's slash command would come back later as a message that rewrites
-// or closes whatever popup is open — the owner's — so it is refused while a
-// popup is owned; plain text still goes through.
-func TestGuestSlashCommandIsRefusedWhileAPopupIsOwned(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("/")}) // A opens the palette
-	if m.mode != modePalette || m.paletteOwner != 1 {
-		t.Fatalf("setup: mode %v owner %d", m.mode, m.paletteOwner)
-	}
-	owner := m.picker
-	m.inputFor(2).SetValue("/model")
-	_, cmd := m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	if cmd != nil {
-		t.Fatal("a guest slash command must not produce a command")
-	}
-	if m.mode != modePalette || m.picker != owner {
-		t.Fatal("the owner's palette was disturbed")
-	}
-	if !strings.Contains(m.rendered.String(), "commands wait until the open popup closes") {
-		t.Fatalf("no refusal note:\n%s", m.rendered.String())
-	}
-	if got := m.inputFor(2).Value(); got != "/model" {
-		t.Fatalf("guest draft %q must be kept", got)
-	}
-}
-
-// The double-Ctrl+C quit is reachable from any client and must clear the
-// overlays like every other quit path.
-func TestDoubleCtrlCQuitClearsOverlays(t *testing.T) {
-	m := twoClients(t)
-	var cleared []int
-	m.setOverlay = func(id int, s string) {
-		if s == "" {
-			cleared = append(cleared, id)
-		}
-	}
-	m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
-	_, cmd := m.Update(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyCtrlC}})
-	if cmd == nil || fmt.Sprint(cmd()) != fmt.Sprint(tea.Quit()) {
-		t.Fatal("second Ctrl+C must quit")
-	}
-	if len(cleared) != 2 {
-		t.Fatalf("overlays cleared for %v, want both clients", cleared)
 	}
 }

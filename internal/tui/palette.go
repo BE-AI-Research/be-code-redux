@@ -43,37 +43,30 @@ func (m *View) slashEntries() []pickItem {
 }
 
 // openPalette shows the command popup with an initial filter (text typed
-// after the slash). The popup belongs to the client that opened it: it
-// fills that client's input line, and only its keys reach it.
-func (m *View) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
-	m.paletteOwner = from
+// after the slash). Like every popup it is local to this terminal: it fills
+// this terminal's input line, and no other terminal sees it.
+func (m *View) openPalette(initial string) (tea.Model, tea.Cmd) {
 	m.picker = &picker{title: "Commands", items: m.slashEntries(), filter: initial, inline: true, prefix: true,
 		onPick: func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 			if it.args {
-				in := m.inputFor(m.paletteOwner)
-				in.SetValue(it.id + " ")
-				in.CursorEnd()
+				m.input.SetValue(it.id + " ")
+				m.input.CursorEnd()
 				return m, nil
 			}
-			return m.slashCommand(it.id, m.paletteOwner)
+			return m.slashCommand(it.id)
 		}}
 	m.mode = modePalette
-	m.inputFor(from).SetValue("")
+	m.input.SetValue("")
 	return m, nil
 }
 
-func (m *View) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	if from != m.paletteOwner {
-		// Another terminal's keys are none of this popup's business — but
-		// they are that terminal's own business (see handleGuestKey).
-		return m.handleGuestKey(k, from)
-	}
+func (m *View) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
 		m.mode = m.idleMode()
 		return m, nil
 	}
-	in := m.inputFor(m.paletteOwner)
+	in := &m.input
 	// handBack gives the typed text back to the owner's input line and
 	// closes the popup, so nothing is lost on the way out.
 	handBack := func(text string) (tea.Model, tea.Cmd) {
@@ -107,7 +100,7 @@ func (m *View) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	return m.handlePickerKey(k, from)
+	return m.handlePickerKey(k)
 }
 
 // paletteBox renders the popup: title, up to 8 matching entries.
@@ -200,12 +193,11 @@ type menuEntry struct {
 	run                func(m *View) (tea.Model, tea.Cmd)
 }
 
-// menuEntries builds the grouped menu. Its commands run as the client that
-// opened the menu — "Detach this terminal" has to mean the terminal whose
-// user picked it, not whoever happened to press a key.
-func (m *View) menuEntries(owner int) []menuEntry {
+// menuEntries builds the grouped menu. Its commands run on the terminal
+// whose menu this is — "Detach this terminal" means that one.
+func (m *View) menuEntries() []menuEntry {
 	cmd := func(c string) func(*View) (tea.Model, tea.Cmd) {
-		return func(m *View) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
+		return func(m *View) (tea.Model, tea.Cmd) { return m.slashCommand(c) }
 	}
 	return []menuEntry{
 		{"Sessions", "Resume a saved session", "pick from the session list", func(m *View) (tea.Model, tea.Cmd) { return m, m.askSessionPicker() }},
@@ -228,9 +220,8 @@ func (m *View) menuEntries(owner int) []menuEntry {
 	}
 }
 
-func (m *View) openMenu(from int) (tea.Model, tea.Cmd) {
-	m.menuOwner = from
-	entries := m.menuEntries(from)
+func (m *View) openMenu() (tea.Model, tea.Cmd) {
+	entries := m.menuEntries()
 	items := make([]pickItem, 0, len(entries))
 	for i, e := range entries {
 		items = append(items, pickItem{id: fmt.Sprint(i),
@@ -248,13 +239,12 @@ func (m *View) openMenu(from int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *View) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	if from != m.menuOwner {
-		// The menu acts for the terminal that opened it; everyone else
-		// keeps typing into their own input line (see handleGuestKey).
-		return m.handleGuestKey(k, from)
-	}
-	return m.handlePickerKey(k, from)
+// handleMenuKey drives /menu and the right-click popup, which share a mode
+// pair and a picker and differ only in how they are drawn.
+func (m *View) handleMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Both leave through m.idleMode(), so a run still in progress lands back
+	// in modeBusy on its own.
+	return m.handlePickerKey(k)
 }
 
 // menuStatus is the block above the menu entries: everything the old

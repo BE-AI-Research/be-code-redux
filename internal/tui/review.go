@@ -23,7 +23,7 @@ func (m *View) reviewCommand(fields []string) {
 	// Resolve reads the host's client roster from inside Update, which the
 	// "never call into the host from Update" rule allows: that rule is about
 	// the host callbacks that p.Send into the very channel this goroutine
-	// receives from (Detach, SetOverlay — see /detach). Clients() only takes
+	// receives from (Detach, Switch — see /detach). Clients() only takes
 	// h.mu long enough to copy the roster and notifies nobody, and no holder
 	// of h.mu ever blocks on the program, so it cannot deadlock.
 	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("review: %s (resolves to %s)", m.review.Mode(), m.review.Resolve())})

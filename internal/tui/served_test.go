@@ -2,12 +2,10 @@ package tui
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -52,18 +50,20 @@ func TestClientsMsgRendersRoster(t *testing.T) {
 }
 
 // /clients lists clients; /detach asks the host to drop the terminal the
-// command was typed on.
+// command was typed on — which, with one program per terminal, is this
+// view's own client.
 func TestClientsAndDetachCommands(t *testing.T) {
 	m := newTestModel(t)
+	m.id = 1
 	setClients(m, live.ClientInfo{ID: 1, Label: "local (pid 1)"})
-	m.slashCommand("/clients", 1)
+	m.slashCommand("/clients")
 	flush(m)
 	if !strings.Contains(m.rendered.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
 	detached := make(chan int, 1)
 	m.detachClient = func(id int) { detached <- id }
-	_, cmd := m.slashCommand("/detach", 1)
+	_, cmd := m.slashCommand("/detach")
 	if cmd == nil {
 		t.Fatal("/detach returned no command")
 	}
@@ -98,7 +98,7 @@ func TestClientsNotServedMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = false
 	m.clients = nil
-	m.slashCommand("/clients", 0)
+	m.slashCommand("/clients")
 	flush(m)
 	if !strings.Contains(m.rendered.String(), "not served") {
 		t.Fatalf("expected a not-served note:\n%s", m.rendered.String())
@@ -111,7 +111,7 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.served = true
 	m.clients = nil
-	m.slashCommand("/clients", 0)
+	m.slashCommand("/clients")
 	flush(m)
 	if !strings.Contains(m.rendered.String(), "no terminals attached") {
 		t.Fatalf("expected a no-terminals-attached note:\n%s", m.rendered.String())
@@ -121,34 +121,84 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	}
 }
 
-// With live_idle_limit set, a served session with no clients and no run
-// in progress quits once the limit has passed; a client or a run resets it.
+// With live_idle_limit set, a served session with no clients and no run in
+// progress expires once the limit has passed; a client or a run resets it.
+// The runner's idleLoop polls this; the decision itself is the session's.
 func TestIdleLimitQuitsWhenUnattachedAndIdle(t *testing.T) {
-	// idleTick() is a real tea.Cmd (tea.Tick) that only yields after the
-	// configured interval, even when — as here — it's invoked synchronously
-	// outside the Bubble Tea runtime. Shrink the interval for the test so
-	// the assertion below does not block for the production 30s.
-	orig := idleTickInterval
-	idleTickInterval = time.Millisecond
-	t.Cleanup(func() { idleTickInterval = orig })
+	s := newTestSession(t)
+	s.cfg.LiveIdleLimit = 1
+	s.served = true
+	s.clients = nil
+	s.running = false
+	s.idleSince = time.Now().Add(-2 * time.Minute)
+	if !s.idleExpired(time.Now()) {
+		t.Fatal("expected the idle limit to have expired")
+	}
 
-	m := newTestModel(t)
-	m.cfg.LiveIdleLimit = 1
-	m.served = true
-	m.clients = nil
-	m.running = false
-	m.idleSince = time.Now().Add(-2 * time.Minute)
-	_, cmd := m.Update(idleTickMsg(time.Now()))
-	if cmd == nil || fmt.Sprint(cmd()) != fmt.Sprint(tea.Quit()) {
-		t.Fatal("expected tea.Quit after the idle limit")
+	// A run in progress keeps the session alive and resets the clock.
+	s.idleSince = time.Now().Add(-2 * time.Minute)
+	s.running = true
+	now := time.Now()
+	if s.idleExpired(now) {
+		t.Fatal("expired while a run is in progress")
 	}
-	m.idleSince = time.Now().Add(-2 * time.Minute)
-	m.running = true
-	if _, cmd := m.Update(idleTickMsg(time.Now())); cmd != nil && fmt.Sprint(cmd()) == fmt.Sprint(tea.Quit()) {
-		t.Fatal("quit while a run is in progress")
-	}
-	if m.idleSince.Before(time.Now().Add(-time.Minute)) {
+	if s.idleSince.Before(now.Add(-time.Second)) {
 		t.Fatal("running did not reset idleSince")
+	}
+
+	// So does an attached terminal.
+	s.running = false
+	s.clients = []live.ClientInfo{{ID: 1, Label: "desk"}}
+	s.idleSince = time.Now().Add(-2 * time.Minute)
+	if s.idleExpired(time.Now()) {
+		t.Fatal("expired with a terminal attached")
+	}
+
+	// An in-process session, or one with no limit configured, never expires.
+	s.clients = nil
+	s.idleSince = time.Now().Add(-2 * time.Minute)
+	s.served = false
+	if s.idleExpired(time.Now()) {
+		t.Fatal("an in-process session must never expire")
+	}
+	s.served = true
+	s.cfg.LiveIdleLimit = 0
+	if s.idleExpired(time.Now()) {
+		t.Fatal("no live_idle_limit means no expiry")
+	}
+}
+
+// The runner is what turns a roster into programs: one per attached
+// terminal, keys routed to the view of the client that typed them, keys for
+// a client with no program yet buffered until it has one, and a detached
+// client's program taken down.
+func TestRunnerStartsOneProgramPerClientAndStopsOnDetach(t *testing.T) {
+	s := newTestSession(t)
+	s.served = true
+	r := &runner{s: s, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}), noPrograms: true}
+	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}, {ID: 2, Label: "b", Cols: 40, Rows: 15, UTF8: true}})
+	if len(r.programs) != 2 {
+		t.Fatalf("programs: %d", len(r.programs))
+	}
+	r.route(live.ClientKeyMsg{Client: 2, Key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}})
+	r.route(live.ClientKeyMsg{Client: 3, Key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("early")}})
+	pump(r.programs[1], r.programs[2])
+	if r.programs[2].v.input.Value() != "x" || r.programs[1].v.input.Value() != "" {
+		t.Fatal("key routed to the wrong view")
+	}
+	if len(r.early[3]) != 1 {
+		t.Fatal("a key for a client with no program yet must be buffered")
+	}
+	// Each program rendered at its own client's size, not a shared minimum.
+	if w, h := r.programs[1].v.width, r.programs[1].v.height; w != 80 || h != 24 {
+		t.Fatalf("view 1 is %dx%d", w, h)
+	}
+	if r.programs[2].v.compact() == r.programs[1].v.compact() {
+		t.Fatal("a 40x15 terminal must lay out compact while an 80x24 one does not")
+	}
+	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}})
+	if _, ok := r.programs[2]; ok {
+		t.Fatal("detached client's program not removed")
 	}
 }
 
@@ -166,44 +216,6 @@ func waitForClients(t *testing.T, h *live.Host, n int) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("host never reported %d client(s); have %d", n, len(h.Clients()))
-}
-
-// A client already attached to the host before RunServed starts (this is
-// how Task 6 wires it: the host listens and serves first) must be visible
-// immediately, not only after the next attach/detach/resize event.
-// seedFromHost is the extracted, directly-testable piece of RunServed that
-// is responsible for this.
-func TestSeedFromHostClientsAlreadyAttached(t *testing.T) {
-	dir := tempSockDir(t)
-	sock := filepath.Join(dir, "s.sock")
-	h := live.NewHost("tok", io.Discard)
-	if err := h.Listen(sock); err != nil {
-		t.Fatal(err)
-	}
-	go h.Serve()
-	t.Cleanup(func() { h.Close("test over") })
-
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-	if err := live.WriteJSON(conn, live.FHello, live.Hello{
-		Token: "tok", Cols: 80, Rows: 24, Label: "already-there", UTF8: false,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	waitForClients(t, h, 1)
-
-	m := newTestModel(t)
-	m.seedFromHost(h)
-
-	if len(m.clients) != 1 || m.clients[0].Label != "already-there" {
-		t.Fatalf("clients not seeded from host: %+v", m.clients)
-	}
-	if !m.ascii {
-		t.Fatal("ascii flag not seeded: the attached client is not UTF8-capable")
-	}
 }
 
 // A served program renders for real terminals over a socket, but lipgloss
@@ -249,7 +261,7 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 	// receiver is the update goroutine.
 	msgs := make(chan any)
 	h.OnClients(func(cl []live.ClientInfo) { msgs <- clientsMsg(cl) })
-	h.OnSize(func(c, r int) { msgs <- tea.WindowSizeMsg{Width: c, Height: r} })
+	h.OnClientSize(func(id, c, r int) { msgs <- tea.WindowSizeMsg{Width: c, Height: r} })
 
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
@@ -281,13 +293,14 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 
 	m := newTestModel(t)
 	m.served = true
+	m.id = id
 	m.detachClient = h.Detach
 
 	// "Update" runs with nothing draining msgs, exactly as Bubble Tea does.
 	type result struct{ cmd tea.Cmd }
 	res := make(chan result, 1)
 	go func() {
-		_, cmd := m.slashCommand("/detach", id)
+		_, cmd := m.slashCommand("/detach")
 		res <- result{cmd}
 	}()
 	var cmd tea.Cmd
@@ -319,123 +332,83 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 	}
 }
 
-func TestOverlayPositionsEachRowAndParksTheCursor(t *testing.T) {
-	m := twoClients(t) // 100x30, served, 3 input rows
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("typed")})
-	ov := m.overlayFor(2)
-	first := m.headerHeight() + m.vp.Height + 1 // 1-based row of the first input line, as View lays it out
-	for r := 0; r < m.inputRows(); r++ {
-		if !strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", first+r)) {
-			t.Fatalf("overlay lacks a move to row %d:\n%q", first+r, ov)
+// A client attaching, detaching or resizing makes the host send every
+// attached terminal the size it tracks, and a client clears its screen on
+// one. So every program has to be asked to repaint, not only the one that
+// just attached — otherwise the terminals that were already there are left
+// showing nothing but the lines that changed since.
+func TestRunnerRepaintsEveryProgramOnARosterChange(t *testing.T) {
+	s := newTestSession(t)
+	s.served = true
+	r := &runner{s: s, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}), noPrograms: true}
+	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}})
+	pr := r.programs[1]
+	queued(pr.ctrl) // discard the size it was started with
+
+	r.onClients([]live.ClientInfo{
+		{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true},
+		{ID: 2, Label: "b", Cols: 40, Rows: 15, UTF8: true}})
+	var got []tea.WindowSizeMsg
+	for _, msg := range queued(pr.ctrl) {
+		if w, ok := msg.(tea.WindowSizeMsg); ok {
+			got = append(got, w)
 		}
 	}
-	if !strings.Contains(ov, "typed") {
-		t.Fatal("overlay lacks the client's text")
-	}
-	if !strings.HasSuffix(ov, fmt.Sprintf("\x1b[%d;%dH", m.height, m.width)) {
-		t.Fatalf("overlay must park the cursor at the bottom-right:\n%q", ov)
-	}
-	bottom := m.headerHeight() + m.vp.Height + m.inputRows() + 1 // the bottom line's row
-	if strings.Contains(ov, fmt.Sprintf("\x1b[%d;1H", bottom)) {
-		t.Fatalf("overlay must not write the bottom line's row %d:\n%q", bottom, ov)
-	}
-	if strings.Contains(ov, "\x1b[K") {
-		t.Fatal("overlay must pad rows, not clear to end of line (the wheel lives to the right)")
+	if len(got) != 1 || got[0].Width != 80 || got[0].Height != 24 {
+		t.Fatalf("the terminal that was already there was not repainted at its own size: %+v", got)
 	}
 }
 
-func TestOverlayIsPublishedAfterAKeyAndForEveryoneOnResize(t *testing.T) {
-	m := twoClients(t)
-	var pub []int
-	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("a")})
-	if len(pub) != 1 || pub[0] != 1 {
-		t.Fatalf("after a key: %v", pub)
-	}
-	pub = nil
-	m.Update(tea.WindowSizeMsg{Width: 90, Height: 28})
-	sort.Ints(pub)
-	if len(pub) != 2 || pub[0] != 1 || pub[1] != 2 {
-		t.Fatalf("after a resize: %v", pub)
-	}
-}
+// Typing must arrive in the order it was typed, so a terminal's own
+// messages do not go through the session mailbox. That has two consumers —
+// the delivery goroutine, parked inside p.Send with one message already
+// taken, and View.Update's own drain — so whatever the goroutine is holding
+// is applied after everything the drain took, and the second character of a
+// word lands last. The demonstration is below; this is the invariant.
+func TestKeysGoToTheProgramsOwnQueueNotTheSessionMailbox(t *testing.T) {
+	s := newTestSession(t)
+	s.served = true
+	r := &runner{s: s, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}), noPrograms: true}
+	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}})
+	pr := r.programs[1]
+	queued(pr.ctrl) // the size it was started with
+	flush(pr.v)
 
-// A full-screen modal (approval, picker, menu, plan) replaces the whole
-// frame with no reserved input row: overlayFor's absolute positioning would
-// land on the modal's own content, so publishing must stop while one is up,
-// and every roster client's draft must be repainted the moment it closes.
-// A stale overlay must not be re-stamped onto an open modal: Host.fanout.Write
-// unconditionally re-appends a client's last-published overlay after every
-// frame it writes (so an ordinary full repaint never erases a draft), so the
-// TUI must actively clear it — publish "" — the instant a full-screen modal
-// takes over the frame, not just stop publishing new content.
-func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("draft1")})
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("draft2")})
-
-	type call struct {
-		id int
-		s  string
+	for _, ch := range "typing" {
+		r.route(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}})
 	}
-	var calls []call
-	m.setOverlay = func(id int, s string) { calls = append(calls, call{id, s}) }
-
-	answered := make(chan bool, 1)
-	go func() { answered <- m.approveFromAgent("shell", "echo hi") }()
-	// deliver, not flush: the modal opens on a broadcast, and it is Update
-	// (which the mailbox goroutine drives in production) that clears the
-	// overlays when one takes over the frame.
-	waitFor(t, func() bool { deliver(m); return m.mode == modeAsk })
-	cleared := map[int]bool{}
-	for _, c := range calls {
-		if c.s != "" {
-			t.Fatalf("opening the modal published a non-empty overlay for %d: %q", c.id, c.s)
+	if n := len(queued(pr.mb.ch)); n != 0 {
+		t.Fatalf("%d keystroke(s) went onto the session mailbox, where the update drain can overtake them", n)
+	}
+	var keys int
+	for _, msg := range queued(pr.ctrl) {
+		if k, ok := msg.(tea.KeyMsg); ok {
+			keys++
+			pr.v.Update(k) // Update drains the mailbox around each one
 		}
-		cleared[c.id] = true
 	}
-	if !cleared[1] || !cleared[2] {
-		t.Fatalf("opening the modal did not clear every roster client's overlay: %+v", calls)
+	if keys != 6 {
+		t.Fatalf("routed %d keys, want 6", keys)
 	}
-
-	calls = nil
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("x")}) // scrolls the modal viewport, does not close it
-	if len(calls) != 0 {
-		t.Fatalf("a key during the modal published: %+v", calls)
-	}
-
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("n")}) // denies and closes the modal
-	if m.mode == modeAsk {
-		t.Fatal("modal did not close")
-	}
-	if <-answered {
-		t.Fatal("n must deny")
-	}
-	got := map[int]string{}
-	for _, c := range calls {
-		got[c.id] = c.s
-	}
-	if len(got) != 2 {
-		t.Fatalf("closing the modal did not republish every roster client: %+v", calls)
-	}
-	if !strings.Contains(got[1], "draft1") || !strings.Contains(got[2], "draft2") {
-		t.Fatalf("closing the modal did not republish the real drafts: %+v", got)
+	if got := pr.v.input.Value(); got != "typing" {
+		t.Fatalf("input = %q, want %q", got, "typing")
 	}
 }
 
-// startTurn mutates every client's textarea (the placeholder flips to the
-// busy hint), not only the one whose Enter started the turn.
-func TestStartTurnRepublishesEveryClientsOverlay(t *testing.T) {
-	m := twoClients(t)
-	m.Update(live.ClientKeyMsg{Client: 1, Key: runes("hi")})
-	var pub []int
-	m.setOverlay = func(id int, s string) { pub = append(pub, id) }
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
-	seen := map[int]bool{}
-	for _, id := range pub {
-		seen[id] = true
+// The hazard itself, so the reason for that queue stays checkable: a
+// message the delivery goroutine has taken but not yet handed to the
+// program is applied after everything View.Update's own drain took.
+func TestMailboxDeliveryIsOvertakenByTheUpdateDrain(t *testing.T) {
+	m := newTestModel(t)
+	mb := m.mailboxForTest()
+	for _, ch := range "typing" {
+		mb.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 	}
-	if !seen[1] || !seen[2] {
-		t.Fatalf("starting a turn did not republish every client's overlay: %v", pub)
+	held := <-mb.ch  // what the delivery goroutine is blocked in p.Send with
+	next := <-mb.ch  // what Bubble Tea delivers first
+	m.Update(next)   // its Update drains "ping" behind it...
+	m.Update(held)   // ...and the held keystroke only lands now
+	if got := m.input.Value(); got == "typing" {
+		t.Fatal("the mailbox no longer reorders; program.ctrl may be redundant")
 	}
 }

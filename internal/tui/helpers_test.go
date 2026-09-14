@@ -52,24 +52,6 @@ func flush(views ...*View) {
 	}
 }
 
-// deliver hands every queued broadcast to each view through Update, the way
-// the mailbox goroutine's p.Send does in production. flush is the cheaper
-// path and enough for anything that only has to reach update(); deliver is
-// for what Update itself does around it — publishing overlays when a modal
-// takes over the frame, or gives it back.
-func deliver(views ...*View) {
-	for _, v := range views {
-		for drained := true; drained; {
-			select {
-			case msg := <-v.mailboxForTest().ch:
-				v.Update(msg)
-			default:
-				drained = false
-			}
-		}
-	}
-}
-
 // hasQuit reports whether cmd is tea.Quit, or a batch containing it —
 // Update batches whatever its own mailbox drain produced onto its result, so
 // a quit decided by a drained message can arrive either way.
@@ -95,4 +77,46 @@ func hasQuit(cmd tea.Cmd) bool {
 func setClients(v *View, infos ...live.ClientInfo) {
 	v.SetClients(infos)
 	flush(v)
+}
+
+// runes is the KeyMsg for typed text.
+func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+
+// twoClients is one view of a served session with a two-terminal roster: the
+// shape tests need when what they exercise is the roster (labels, prefixes,
+// live-session switching), not per-terminal rendering. Use twoViews when the
+// test is about two terminals each running their own program.
+func twoClients(t *testing.T) *View {
+	t.Helper()
+	m := newTestModel(t)
+	m.served = true
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true}, live.ClientInfo{ID: 2, Label: "tablet (pid 2)", UTF8: true})
+	return m
+}
+
+// queued takes everything waiting on a channel without delivering it, for a
+// test that cares what was sent rather than what the view did with it.
+func queued(ch <-chan tea.Msg) []tea.Msg {
+	var out []tea.Msg
+	for {
+		select {
+		case msg := <-ch:
+			out = append(out, msg)
+		default:
+			return out
+		}
+	}
+}
+
+// pump delivers everything a program has been sent — its own control queue
+// first, then the session broadcasts — the way Bubble Tea and the mailbox
+// goroutine would. Tests use it in place of running a real program.
+func pump(prs ...*program) {
+	for _, pr := range prs {
+		for _, msg := range queued(pr.ctrl) {
+			pr.v.update(msg)
+		}
+		flush(pr.v)
+	}
 }

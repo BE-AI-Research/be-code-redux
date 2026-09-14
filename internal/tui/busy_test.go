@@ -34,12 +34,12 @@ func TestHeaderShowsSessionCode(t *testing.T) {
 
 func TestSafeCommandsRunWhileBusyOthersWait(t *testing.T) {
 	m := busyModel(t)
-	m.inputFor(0).SetValue("/clients")
+	m.input.SetValue("/clients")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !strings.Contains(m.rendered.String(), "not served") {
 		t.Fatalf("/clients did not run during the turn:\n%s", m.rendered.String())
 	}
-	m.inputFor(0).SetValue("/verify")
+	m.input.SetValue("/verify")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !strings.Contains(m.rendered.String(), "commands wait until the agent is done") {
 		t.Fatalf("/verify must wait:\n%s", m.rendered.String())
@@ -67,7 +67,7 @@ func TestPaletteAndMenuOpenWhileBusy(t *testing.T) {
 		t.Fatalf("palette must mark waiting commands while busy: %d wait, %d run", waits, runs)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m.inputFor(0).SetValue("/menu")
+	m.input.SetValue("/menu")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.mode != modeMenu {
 		t.Fatalf("/menu did not open while busy: mode %v", m.mode)
@@ -78,7 +78,7 @@ func TestQuitWhileBusyCancelsTheRun(t *testing.T) {
 	m := busyModel(t)
 	cancelled := false
 	m.cancelFn = func() { cancelled = true }
-	m.inputFor(0).SetValue("/quit")
+	m.input.SetValue("/quit")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !cancelled {
 		t.Fatal("/quit during a run must cancel it first")

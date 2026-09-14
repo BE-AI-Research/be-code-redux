@@ -62,7 +62,7 @@ func TestCtrlCCopiesSelection(t *testing.T) {
 	if len(*got) != 1 || (*got)[0] != "copy me" {
 		t.Fatalf("clipboard = %v", *got)
 	}
-	if m.sel != nil || m.quitHint[0] {
+	if m.sel != nil || m.quitHint {
 		t.Fatal("selection not cleared or quit armed")
 	}
 }
@@ -92,11 +92,16 @@ func TestRightClickOpensContextMenu(t *testing.T) {
 func TestCopyCommandTargets(t *testing.T) {
 	m := newTestModel(t)
 	got := captureClipboard(m)
-	m.Update(deltaMsg("The answer is 42."))
-	m.flushStreamingLocked()
-	m.Update(toolEndMsg{name: "shell", res: toolResult("total 3\nfile a\nfile b")})
-	m.slashCommand("/copy reply", 0)
-	m.slashCommand("/copy tool", 0)
+	// The agent's own path: the session records the reply and the tool
+	// output, and every view renders what it broadcasts.
+	m.onDelta("The answer is 42.")
+	m.mu.Lock()
+	m.flushLocked()
+	m.mu.Unlock()
+	m.onToolEnd("shell", toolResult("total 3\nfile a\nfile b"))
+	flush(m)
+	m.slashCommand("/copy reply")
+	m.slashCommand("/copy tool")
 	flush(m)
 	if len(*got) != 2 || (*got)[0] != "The answer is 42." || (*got)[1] != "total 3\nfile a\nfile b" {
 		t.Fatalf("clipboard = %q", *got)
@@ -116,5 +121,28 @@ func TestOSC52Sequence(t *testing.T) {
 	dec, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil || string(dec) != "hello\nworld" {
 		t.Fatalf("payload = %q err=%v", dec, err)
+	}
+}
+
+// The repaint request is a WindowSizeMsg at the size the view already has
+// (see runner.onClients). It must redraw the frame and nothing else: a
+// selection survives it, because no column has moved. A genuine resize
+// still drops it.
+func TestRepaintAtTheSameSizeKeepsTheSelection(t *testing.T) {
+	m := newTestModel(t)
+	m.appendEntry(entry{Kind: entryPlain, Text: "select me"})
+	flush(m)
+	m.Update(mouse(0, 0, tea.MouseButtonLeft, tea.MouseActionPress))
+	m.Update(mouse(6, 0, tea.MouseButtonLeft, tea.MouseActionRelease))
+	if m.sel == nil {
+		t.Fatal("no selection to begin with")
+	}
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if m.sel == nil {
+		t.Fatal("a repaint at the same size dropped the selection")
+	}
+	m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	if m.sel != nil {
+		t.Fatal("a real resize must drop the selection: the columns have moved")
 	}
 }

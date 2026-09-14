@@ -58,13 +58,13 @@ func TestEnterEditsAndRequeues(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown}) // highlight the second
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mode != modeBusy || m.inputFor(0).Value() != "rename output" {
-		t.Fatalf("mode=%v input=%q", m.mode, m.inputFor(0).Value())
+	if m.mode != modeBusy || m.input.Value() != "rename output" {
+		t.Fatalf("mode=%v input=%q", m.mode, m.input.Value())
 	}
 	if m.ag.Pending() != 1 || m.ag.Held() {
 		t.Fatalf("pending=%d held=%v; the edited message must be out of the queue and the hold released", m.ag.Pending(), m.ag.Held())
 	}
-	m.inputFor(0).SetValue("rename output to result.txt")
+	m.input.SetValue("rename output to result.txt")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if got := m.ag.Peek(); len(got) != 2 || got[1] != "rename output to result.txt" {
 		t.Fatalf("re-queue failed: %v", got)

@@ -75,15 +75,16 @@ func TestStaleAnswerIsIgnored(t *testing.T) {
 	}
 }
 
-// One program can serve a whole roster: RunServed builds a single view for
-// client 0 while the keys arrive tagged with the real client ids. A picked
-// row must still act — deriving the view from the answering client id would
-// find nothing and silently pick nothing at all.
-func TestSharedPickerAnsweredByAClientWithNoViewOfItsOwn(t *testing.T) {
+// A picked row acts through the view that rendered the ask — the terminal
+// whose cursor chose it — not through a view looked up from the answering
+// client id. onPick's effects are view-local (a session switch hands *that*
+// terminal over), so being handed the wrong view, or none, would silently
+// pick nothing at all.
+func TestSharedPickerOnPickGetsTheAnsweringView(t *testing.T) {
 	tempHome(t)
 	s := newTestSession(t)
 	s.served = true
-	m := s.NewView(0, "shared") // the one view, as RunServed makes it
+	m := s.NewView(1, "desk (pid 1)")
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	s.SetClients([]live.ClientInfo{{ID: 1, Label: "desk (pid 1)", UTF8: true}})
 	flush(m)
@@ -92,22 +93,24 @@ func TestSharedPickerAnsweredByAClientWithNoViewOfItsOwn(t *testing.T) {
 	go s.Ask(context.Background(), &ask{Kind: askPicker, Title: "Select model",
 		Items: []pickItem{{id: "one", label: "one"}, {id: "two", label: "two"}},
 		onPick: func(v *View, id string, from int) tea.Cmd {
-			if v == nil {
+			if v != m {
 				t.Error("onPick must be given the view that rendered the ask")
+			}
+			if from != 1 {
+				t.Errorf("onPick got client %d, want the one that answered", from)
 			}
 			picked <- id
 			return nil
 		}})
 	waitFor(t, func() bool { flush(m); return m.mode == modeAsk })
-	// Client 1 has no view of its own; the shared view is client 0's.
-	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	select {
 	case id := <-picked:
 		if id != "one" {
 			t.Fatalf("picked %q", id)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("a client without a view of its own picked nothing")
+		t.Fatal("onPick never ran")
 	}
 	flush(m)
 	if m.mode == modeAsk {

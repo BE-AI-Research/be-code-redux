@@ -140,10 +140,6 @@ func runSessionHost(code string) error {
 	// taken back to the normal screen first, so the resume line survives
 	// their restore instead of vanishing with the alt buffer.
 	out := live.NewCRLFWriter(h.Output())
-	// The program is gone: stop splicing each client's input rows after the
-	// closing lines below, or the draft lands on the main screen and the
-	// resume line starts wherever the overlay parked the cursor.
-	h.ClearOverlays()
 	fmt.Fprint(out, live.ExitAltScreen)
 	fmt.Fprintln(out, "\nfinishing session (writing the handoff briefing)...")
 	finishSession(ag, true, out)

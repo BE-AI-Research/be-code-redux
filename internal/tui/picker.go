@@ -257,10 +257,9 @@ func pickerNav(p *picker, k tea.KeyMsg) bool {
 }
 
 // handlePickerKey drives the view-local list overlays (the theme picker, the
-// palette and the menus). from is the client that typed the key: it
-// refocuses that terminal's input line on the way out. The shared lists go
-// through handleAskPickerKey instead.
-func (m *View) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+// palette and the menus), refocusing this terminal's input line on the way
+// out. The shared lists go through handleAskPickerKey instead.
+func (m *View) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
 		m.mode = m.idleMode()
@@ -270,7 +269,7 @@ func (m *View) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.picker = nil
 		m.mode = m.idleMode()
-		m.inputFor(from).Focus()
+		m.input.Focus()
 		return m, nil
 	case tea.KeyEnter:
 		items := p.filtered()

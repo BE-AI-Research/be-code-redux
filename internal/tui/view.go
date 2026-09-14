@@ -7,21 +7,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
-	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
-	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/ui"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -46,13 +46,23 @@ type entryMsg struct {
 	e entry
 }
 
+// deltaMsg is one fragment of the model's reply. The text accrues on the
+// session too (so a terminal attaching mid-reply is seeded with it), but
+// each view keeps its own copy to render under its transcript — and clears
+// it on streamEndMsg, which the session broadcasts just before the finished
+// reply arrives as an entry.
 type deltaMsg string
-type toolStartMsg struct{ name, args string }
-type toolEndMsg struct {
-	name string
-	res  tools.Result
-}
+type streamEndMsg struct{}
+
+// noticeMsg is a note meant for one terminal only — its own backend ping.
+// Notes from the agent are transcript entries instead (Session.notice), or
+// N terminals would put N copies of each on the shared transcript.
 type noticeMsg string
+
+// quitMsg ends the session on every attached terminal at once: each view
+// answers it with tea.Quit. It is broadcast by Session.Quit, which is also
+// what a client's quit frame, /quit and the idle limit go through.
+type quitMsg struct{}
 
 // transientMsg is a short-lived status notice (waiting for the backend,
 // context budgeting): shown on the notice row for toastFor, never kept.
@@ -63,9 +73,8 @@ type toastTickMsg time.Time
 
 const toastFor = 20 * time.Second
 
-type thinkingMsg int // cumulative hidden-reasoning characters this turn
 // statusMsg sets the bottom-line status note directly, without adding a
-// transcript line (used for editor-side review progress).
+// transcript line (hidden-reasoning progress, editor-side review progress).
 type statusMsg string
 
 // runStateMsg tells every terminal that the session started or finished
@@ -121,7 +130,7 @@ type View struct {
 	vp      viewport.Model
 	modalVP viewport.Model
 	spin    spinner.Model
-	inputs  map[int]*textarea.Model // one input line per client; 0 is the local terminal
+	input   textarea.Model // this terminal's own draft
 
 	mode     mode
 	prevMode mode
@@ -142,6 +151,13 @@ type View struct {
 	width, height int
 	ready         bool
 
+	// streaming is this terminal's copy of the reply as it arrives. It
+	// deliberately shadows Session.streaming (the strings.Builder the agent
+	// goroutine writes): the session accrues the text so a terminal
+	// attaching mid-reply can be seeded from it, and each view renders from
+	// its own copy without reading a field another goroutine is writing.
+	streaming string
+
 	rendered strings.Builder // the session's entries rendered with this view's styles at its width
 	// renderedN is the index of the next Session.entries entry this buffer
 	// expects. It is what lets rebuild() and the entryMsg stream coexist: a
@@ -154,17 +170,14 @@ type View struct {
 	sel        *selection
 	wheelFrame int // rotation frame while busy
 
-	// quitHint remembers, per terminal, that this client's last key was a
-	// Ctrl+C on an empty input: the second one quits. It is per client
-	// because the confirmation belongs to the person who pressed it —
-	// otherwise A's Ctrl+C plus B's unrelated Ctrl+C would end a session
-	// neither of them asked to end.
-	quitHint map[int]bool
+	// quitHint remembers that this terminal's last key was a Ctrl+C on an
+	// empty input: the second one ends the session. It is per view because
+	// the confirmation belongs to the person who pressed it — otherwise A's
+	// Ctrl+C plus B's unrelated Ctrl+C would end a session neither of them
+	// asked to end.
+	quitHint bool
 
-	queueCursor  int // highlighted row in the queue popup
-	queueOwner   int // client whose queue the popup is showing
-	paletteOwner int // client that opened the "/" palette
-	menuOwner    int // client that opened /menu or the right-click menu
+	queueCursor int // highlighted row in the queue popup
 
 	clipboardWrite func(string) error
 	clipboardRead  func() (string, error)
@@ -173,6 +186,10 @@ type View struct {
 	ascii bool // some attached client cannot show UTF-8 glyphs
 
 	mb *mailbox // broadcasts from the session, waiting to be rendered here
+
+	// quitSeen records that this view handled a quitMsg. Test-only: in
+	// production the tea.Quit it returns is the observable effect.
+	quitSeen bool
 }
 
 // mailboxForTest exposes this view's mailbox so a test can deliver what the
@@ -195,37 +212,15 @@ func (m *View) pingCmd() tea.Cmd {
 	}
 }
 
-// Update dispatches msg, then publishes overlays for whatever it changed.
-// A mode transition that hides the input row (a full-screen modal —
-// approval, plan, picker/menu — taking over the frame; see overlayVisible)
-// clears every roster client's cached overlay at the host, not just
-// whoever's key triggered it: Host.fanout.Write unconditionally re-appends
-// a client's last overlay after every frame it writes (so an ordinary full
-// repaint never erases a draft), and without clearing it first that stale
-// draft would keep getting stamped, at its old input-row coordinates, over
-// every render of the modal for as long as it stays open. The reverse
-// transition (the modal closing back to a mode that renders the row)
-// republishes the real rows for the whole roster the same way. Either
-// transition can be driven by a key (approval y/n, plan y/n, picker/menu
-// escape) or by a plain message, so this lives here rather than at each
-// individual call site (askMsg opens one; pickerUpdate's load-error path
-// closes one). Otherwise, a keystroke republishes only its
-// sender — update's own cases (WindowSizeMsg, clientsMsg, and the
-// modeInput tail loop) already republish everyone for their own triggers.
+// Update runs this terminal's program. It holds the session lock for its
+// whole body, so everything it reaches — the transcript, the run state, the
+// queue, the roster — is read and written under the one lock the agent
+// goroutine takes too. Nothing under that lock may block on a program: the
+// broadcasts it raises go into mailboxes, never down a tea.Program channel.
 func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	wasVisible := m.overlayVisible()
 	model, cmd := m.update(msg)
-	nowVisible := m.overlayVisible()
-	switch t := msg.(type) {
-	case tea.KeyMsg:
-		m.publishAfterKey(wasVisible, nowVisible, m.id)
-	case live.ClientKeyMsg:
-		m.publishAfterKey(wasVisible, nowVisible, t.Client)
-	default:
-		m.publishVisibilityChange(wasVisible, nowVisible)
-	}
 	// Render this view's own broadcasts before the frame Bubble Tea draws
 	// from this return: everything update just appended went out as an
 	// entryMsg, and waiting for the mailbox goroutine to bring it back round
@@ -239,41 +234,22 @@ func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
-// publishAfterKey publishes the right set of overlays after a keystroke:
-// clear/republish the whole roster if the key just flipped overlayVisible
-// (see publishVisibilityChange), or just the sender otherwise.
-func (m *View) publishAfterKey(wasVisible, nowVisible bool, client int) {
-	if m.publishVisibilityChange(wasVisible, nowVisible) {
-		return
-	}
-	m.publishOverlay(client)
-}
-
-// publishVisibilityChange clears every roster client's overlay if
-// overlayVisible just went true→false (a modal opened), or republishes the
-// real rows if it just went false→true (a modal closed). Reports whether
-// either happened, so callers know not to do anything more granular of
-// their own for this message.
-func (m *View) publishVisibilityChange(wasVisible, nowVisible bool) bool {
-	switch {
-	case wasVisible && !nowVisible:
-		m.clearAllOverlaysLocked()
-		return true
-	case !wasVisible && nowVisible:
-		m.publishAllOverlays()
-		return true
-	}
-	return false
-}
-
 func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	enteredMode := m.mode
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		// Also the repaint request (see runner.onClients). It reaches the
+		// program through its own queue rather than the session mailbox
+		// (see program.ctrl), so Bubble Tea's renderer sees it and repaints
+		// in full; all that is left for the model is the relayout — which a
+		// size that has not changed does not need, and which must not throw
+		// away this terminal's selection or re-render every entry.
+		resized := msg.Width != m.width || msg.Height != m.height
 		m.width, m.height = msg.Width, msg.Height
-		m.sel = nil // columns no longer line up after a rewrap
-		m.layout()
+		if resized {
+			m.sel = nil // columns no longer line up after a rewrap
+			m.layout()
+		}
 		m.ready = true
 		// Announce the editor bridge here, not on stderr: the alt screen
 		// wipes anything printed before it opened. Once only.
@@ -291,10 +267,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendEntryLocked(entry{Kind: entryDim, Text: ui.InitHint})
 			}
 		}
-		m.rebuild()
-		// A resize moves every input row's absolute position; republish for
-		// the whole roster, not just whoever happens to type next.
-		m.publishAllOverlays()
+		if resized {
+			m.rebuild()
+		}
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -314,30 +289,17 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.renderedN = msg.n + 1
 		}
 	case deltaMsg:
-		m.streaming.WriteString(string(msg))
+		m.streaming += string(msg)
 		m.refreshTranscript()
-	case toolStartMsg:
-		m.flushStreamingLocked()
-		m.appendEntryLocked(entry{Kind: entryTool, Label: msg.name, Text: msg.args})
-		m.statusNote = "running " + msg.name
-	case toolEndMsg:
-		m.lastTool = msg.res.Content
-		if msg.res.IsError {
-			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
-			m.appendEntryLocked(entry{Kind: entryToolErr, Text: first})
-		} else {
-			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
-			if len(first) > 100 {
-				first = first[:100] + "…"
-			}
-			m.appendEntryLocked(entry{Kind: entryToolOK, Text: first})
-		}
-		m.statusNote = "thinking"
-	case thinkingMsg:
-		if m.mode == modeBusy {
-			m.statusNote = fmt.Sprintf("thinking (%dk chars of reasoning)", int(msg)/1000)
-		}
+	case streamEndMsg:
+		// The session has turned the stream into an entry; the entryMsg for
+		// it is right behind this one.
+		m.streaming = ""
+		m.refreshTranscript()
 	case transientMsg:
+		// The session already recorded it (so a terminal attaching now still
+		// sees it); this is the same write, plus the expiry tick that is
+		// each view's own.
 		m.toast = string(msg)
 		m.toastUntil = m.now().Add(toastFor)
 		return m, tea.Tick(toastFor+100*time.Millisecond, func(t time.Time) tea.Msg { return toastTickMsg(t) })
@@ -347,14 +309,11 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case noticeMsg:
-		m.flushStreamingLocked()
-		// The editor context note is ambient information, not a warning:
-		// render it dimmed and unlabelled.
-		if strings.HasPrefix(string(msg), "[editor:") {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: string(msg)})
-		} else {
-			m.appendEntryLocked(entry{Kind: entryNote, Text: string(msg)})
-		}
+		// This terminal's own note (its backend ping): rendered here, not
+		// appended to the shared transcript, where one program per terminal
+		// would put one copy of it per terminal. Notes from the agent come
+		// through Session.notice as real entries instead.
+		m.renderEntryLocal(noticeEntry(string(msg)))
 	case statusMsg:
 		m.statusNote = string(msg)
 		if m.statusNote == "" && m.running {
@@ -373,81 +332,44 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case runStateMsg:
+		// A popup or a shared question this terminal has open keeps the
+		// frame; the mode underneath it changes instead, so closing the
+		// popup lands in whatever the session is doing by then.
 		if msg.running {
-			for _, ta := range m.inputs {
-				ta.Placeholder = busyPlaceholder
-			}
-			if m.mode == modeInput {
-				m.mode = modeBusy
-			}
-			// The placeholder just changed for every client, not only the
-			// one whose key started this turn.
-			m.publishAllOverlays()
+			m.input.Placeholder = busyPlaceholder
+			m.setIdleMode(modeBusy)
 			cmds = append(cmds, m.wheelTick())
 		} else {
 			if m.mode == modeQueue {
 				m.closeQueue()
 			}
-			if m.mode == modeBusy {
-				m.mode = modeInput
-			}
-			m.focusInputs()
+			m.setIdleMode(modeInput)
+			m.input.Focus()
 		}
 	case usageMsg:
 		m.usage = msg
 	case clientsMsg:
-		cmds = append(cmds, m.updateClients(msg))
-		// A roster change can drop or add textareas; republish for whoever
-		// remains (updateClients walks m.clients, so this never resurrects a
-		// dropped client's textarea).
-		m.publishAllOverlays()
-	case idleTickMsg:
-		return m.updateIdleTick(msg)
-	case hostQuitMsg:
-		m.clearAllOverlaysLocked() // see the /quit path
+		// The shared half of a roster change is the session's (SetClients)
+		// and the programs are the runner's; all this view has to do is draw
+		// the new bottom line, which View() reads from m.clients.
+	case quitMsg:
+		m.quitSeen = true
 		return m, tea.Quit
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:
-		// An untagged key is this terminal's own — in-process that is client
-		// 0, and a per-terminal program's is its own client id, which is the
-		// one an answer, a draft or a detach has to be recorded under.
-		// Overlay publishing for the sender (or the roster, if this key
-		// closed a modal) happens in Update, the exported wrapper around
-		// this method — see publishAfterKey.
-		return m.handleKey(msg, m.id)
-	case live.ClientKeyMsg:
-		return m.handleKey(msg.Key, msg.Client)
+		// Every key a program receives is its own terminal's: the runner
+		// routes each client's bytes to that client's program (see
+		// runner.route), so there is no sender to disambiguate here.
+		return m.handleKey(msg)
 	case tea.MouseMsg:
-		return m.handleMouse(msg, m.id)
-	case live.ClientMouseMsg:
-		return m.handleMouse(msg.Mouse, msg.Client)
+		return m.handleMouse(msg)
 	}
 
 	if m.mode == modeInput {
-		// Cursor blinks and the like are not tagged with a sender: every
-		// client's input line gets them.
-		for _, ta := range m.inputs {
-			updated, cmd := ta.Update(msg)
-			*ta = updated
-			cmds = append(cmds, cmd)
-		}
-		// A non-key update can still change a textarea's rendered view (e.g.
-		// a paste message that reached here rather than through handleKey);
-		// republish so no client is left showing a stale draft. Cursors are
-		// static in served mode (see newInputArea), so a genuine blink never
-		// changes the view and this is not a per-blink publish. WindowSizeMsg
-		// and clientsMsg already republished above, in their own cases; a
-		// message that just switched the mode to modeInput from a hidden one
-		// is Update's job (see publishAfterKey and publishVisibilityChange),
-		// not this one, to avoid publishing the whole roster twice.
-		switch msg.(type) {
-		case tea.WindowSizeMsg, clientsMsg:
-		default:
-			if m.served && enteredMode == modeInput {
-				m.publishAllOverlays()
-			}
-		}
+		updated, cmd := m.input.Update(msg)
+		m.input = updated
+		cmds = append(cmds, cmd)
 	}
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
@@ -455,111 +377,43 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// handleKey routes one keystroke, tagged with the client that typed it (0
-// is the local terminal). Drafts, the palette and the queue popup belong to
-// their sender; modals that speak for the whole session (approvals, plans,
-// pickers) stay shared.
-func (m *View) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+// handleKey routes one keystroke. It is always this terminal's own: one
+// program per attached terminal means the runner has already decided whose
+// key this is. Popups (the palette, the menus, the queue) are this view's
+// alone; the shared question — an approval, a plan, a shared picker —
+// belongs to the whole session and any terminal may answer it.
+func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeAsk:
-		return m.handleAskKey(k, from)
+		return m.handleAskKey(k)
 	case modePicker:
-		return m.handlePickerKey(k, from)
+		return m.handlePickerKey(k)
 	case modePalette:
-		return m.handlePaletteKey(k, from)
-	case modeMenu:
-		return m.handleMenuKey(k, from)
-	case modeContextMenu:
-		return m.handleContextMenuKey(k, from)
+		return m.handlePaletteKey(k)
+	case modeMenu, modeContextMenu:
+		return m.handleMenuKey(k)
 	case modeQueue:
-		return m.handleQueueKey(k, from)
+		return m.handleQueueKey(k)
 	case modeBusy:
-		return m.handleBusyKey(k, from)
+		return m.handleBusyKey(k)
 	}
-	return m.handleInputKey(k, from)
+	return m.handleInputKey(k)
 }
 
-// handleGuestKey routes a key from a client that is *not* the owner of the
-// popup currently on screen (the palette, /menu, the right-click menu, the
-// queue popup — the ones that belong to whoever opened them).
-//
-// Dropping those keys, as this used to, deadens every other terminal's
-// keyboard for as long as someone else browses a menu: not only their Esc
-// and Ctrl+C but every ordinary letter they type. Instead the key goes to
-// that client's own input line exactly as it would in the mode underneath —
-// busy while a run is in progress, otherwise input — so they keep typing
-// into their own draft (their overlay shows it) and their Esc/Ctrl+C acts
-// on their own draft or selection, never on the owner's popup.
-//
-// The owner's popup stays open regardless: there is one m.mode and one
-// m.picker for the whole session, so a guest's key is not allowed to change
-// either. A guest key that would have opened a popup of its own (its own
-// palette, its own queue) is therefore undone here rather than fighting for
-// the screen — everything else it did (editing, submitting, queueing) has
-// already happened. A turn a guest starts this way really does start; only
-// the mode switch that would have hidden the owner's popup is rolled back,
-// and the owner's own Esc lands them in m.idleMode(), which is modeBusy
-// while that turn runs.
-func (m *View) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	// Everything the popup is made of, put back exactly as it was once the
-	// guest's key has had its effect on the guest's own draft. A guest key
-	// that would have opened a popup of its own (its own palette, its own
-	// queue) is undone this way rather than fighting for the one m.mode,
-	// m.picker and owner the session has; everything else it did —
-	// editing, submitting, queueing, cancelling a run — has already
-	// happened and stands. A turn a guest starts really does start: only
-	// the mode switch that would have hidden the owner's popup is rolled
-	// back, and the owner's own Esc then lands in m.idleMode(), which is
-	// modeBusy while that turn runs.
-	// A slash command, though, is refused outright while the popup is up:
-	// its work arrives later as a message (pickerItemsMsg, askMsg,
-	// runStateMsg) that would rewrite or close whatever popup is open by
-	// then — the owner's. Busy mode already refuses commands.
-	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "commands wait until the open popup closes; plain text still sends"})
-		return m, nil
+// setIdleMode moves this terminal between input and busy. A popup or a
+// shared question this terminal has open keeps the frame: it closes through
+// idleMode(), which reads the run state as it is by then, so there is
+// nothing to change underneath it.
+func (m *View) setIdleMode(to mode) {
+	if m.mode == modeInput || m.mode == modeBusy {
+		m.mode = to
 	}
-	mode, pick, prev := m.mode, m.picker, m.prevMode
-	pal, menu, queue := m.paletteOwner, m.menuOwner, m.queueOwner
-	cursor := m.queueCursor
-	held := m.ag.Held()
-	var model tea.Model
-	var cmd tea.Cmd
-	if m.running {
-		model, cmd = m.handleBusyKey(k, from)
-	} else {
-		model, cmd = m.handleInputKey(k, from)
-	}
-	m.mode, m.picker, m.prevMode = mode, pick, prev
-	m.paletteOwner, m.menuOwner, m.queueOwner = pal, menu, queue
-	m.queueCursor = cursor
-	if m.ag.Held() != held {
-		// openQueue/closeQueue ran for a popup that is not going to be
-		// shown: the owner's hold is what counts.
-		m.ag.Hold(held)
-	}
-	return model, cmd
 }
 
-// setQuitHint arms one terminal's "press Ctrl+C again to quit", and
-// clearQuitHint disarms it. Only the sender's own hint moves: a Ctrl+C from
-// another terminal is about that terminal's draft, not this one's.
-func (m *View) setQuitHint(from int) {
-	if m.quitHint == nil {
-		m.quitHint = map[int]bool{}
-	}
-	m.quitHint[from] = true
-}
-
-func (m *View) clearQuitHint(from int) {
-	delete(m.quitHint, from)
-}
-
-// handleInputKey is modeInput: the key edits, submits or acts on the
-// sender's own draft. Reached both from handleKey and, for a client that
-// does not own the popup currently on screen, from handleGuestKey.
-func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	in := m.inputFor(from)
+// handleInputKey is modeInput: the key edits, submits or acts on this
+// terminal's own draft.
+func (m *View) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := &m.input
 	switch k.Type {
 	case tea.KeyCtrlC:
 		if m.sel != nil {
@@ -569,14 +423,16 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 		if in.Value() != "" {
 			in.Reset()
-			m.clearQuitHint(from)
+			m.quitHint = false
 			return m, nil
 		}
-		if m.quitHint[from] {
-			m.clearAllOverlaysLocked() // see the /quit path: no draft may follow the teardown frame
-			return m, tea.Quit
+		if m.quitHint {
+			// The whole session ends, not just this terminal: the view exits
+			// when its own quitMsg comes back round.
+			m.QuitLocked()
+			return m, nil
 		}
-		m.setQuitHint(from)
+		m.quitHint = true
 		m.appendEntryLocked(entry{Kind: entryDim, Text: "press Ctrl+C again to quit"})
 		return m, nil
 	case tea.KeyEnter:
@@ -584,15 +440,16 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.clearQuitHint(from)
-		m.histFile.add(text, from)
+		m.quitHint = false
+		m.histFile.add(text, m.id)
 		in.Reset()
 		if strings.HasPrefix(text, "/") {
-			return m.slashCommand(text, from)
+			return m.slashCommand(text)
 		}
-		return m.startTurnFrom(text, from)
+		m.Submit(text, m.id)
+		return m, nil
 	case tea.KeyTab:
-		m.completeSlash(from)
+		m.completeSlash()
 		return m, nil
 	case tea.KeyEsc:
 		if m.sel != nil {
@@ -601,11 +458,11 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyRunes:
 		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(in.Value()) == "" {
-			return m.openPalette("", from)
+			return m.openPalette("")
 		}
 	case tea.KeyUp:
 		if in.LineCount() <= 1 {
-			if prev, ok := m.histFile.prev(from); ok {
+			if prev, ok := m.histFile.prev(m.id); ok {
 				in.SetValue(prev)
 				in.CursorEnd()
 			}
@@ -613,7 +470,7 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		}
 	case tea.KeyDown:
 		if in.LineCount() <= 1 {
-			next, _ := m.histFile.next(from)
+			next, _ := m.histFile.next(m.id)
 			in.SetValue(next)
 			in.CursorEnd()
 			return m, nil
@@ -626,6 +483,30 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	updated, cmd := in.Update(k)
 	*in = updated
 	return m, cmd
+}
+
+// padToWidth pads s with spaces to w display columns, or truncates it if it
+// is already wider. Display width (not byte or rune count) matters here:
+// the line may carry ANSI styling.
+func padToWidth(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	cur := lipgloss.Width(s)
+	if cur > w {
+		return ansi.Truncate(s, w, "")
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+// noticeEntry is the transcript entry one note becomes. The editor context
+// note is ambient information, not a warning: it is rendered dimmed and
+// unlabelled.
+func noticeEntry(text string) entry {
+	if strings.HasPrefix(text, "[editor:") {
+		return entry{Kind: entryDim, Text: text}
+	}
+	return entry{Kind: entryNote, Text: text}
 }
 
 // showAsk puts the session's shared question on this terminal's screen. The
@@ -653,7 +534,7 @@ func (m *View) closeAsk() {
 	m.shownAsk = nil
 	m.picker = nil
 	m.mode = m.idleMode()
-	m.focusInputs()
+	m.input.Focus()
 }
 
 // answeredNote is the dimmed line a terminal that did *not* answer shows in
@@ -677,11 +558,10 @@ func (m *View) renderLocalNote(text string) {
 	m.refreshTranscript()
 }
 
-// handleAskKey answers the shared question, or scrolls its body. from is the
-// terminal that pressed the key: it is who the answer is recorded as, and
-// the only one whose modal this closes directly (the rest close on the
-// askResolvedMsg that Answer broadcasts).
-func (m *View) handleAskKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+// handleAskKey answers the shared question, or scrolls its body. The answer
+// is recorded as this terminal's, and this is the only modal it closes
+// directly — the rest close on the askResolvedMsg that Answer broadcasts.
+func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	a := m.shownAsk
 	if a == nil {
 		m.mode = m.idleMode()
@@ -689,7 +569,7 @@ func (m *View) handleAskKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if a.Kind == askPicker {
-		return m.handleAskPickerKey(k, from)
+		return m.handleAskPickerKey(k)
 	}
 	var ans askAnswer
 	decided := true
@@ -722,16 +602,16 @@ func (m *View) handleAskKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		m.modalVP, cmd = m.modalVP.Update(k)
 		return m, cmd
 	}
-	return m, m.answerAsk(ans, from)
+	return m, m.answerAsk(ans)
 }
 
 // answerAsk puts this terminal's verdict to the session and, if it was the
 // one that counted, closes this terminal's own modal (the others close on
 // the askResolvedMsg it broadcasts). A stale answer leaves the modal alone:
 // the resolution for the generation that did win is already on its way.
-func (m *View) answerAsk(ans askAnswer, from int) tea.Cmd {
+func (m *View) answerAsk(ans askAnswer) tea.Cmd {
 	gen := m.askShown
-	cmd, ok := m.Answer(gen, ans, from, m)
+	cmd, ok := m.Answer(gen, ans, m.id, m)
 	if ok {
 		m.answeredGen = gen
 		m.closeAsk()
@@ -741,7 +621,7 @@ func (m *View) answerAsk(ans askAnswer, from int) tea.Cmd {
 
 // handleAskPickerKey drives a shared picker: the cursor and filter are this
 // terminal's own, the row it confirms decides for the session.
-func (m *View) handleAskPickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleAskPickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
 		p = &picker{title: m.shownAsk.Title, items: m.shownAsk.Items}
@@ -749,42 +629,25 @@ func (m *View) handleAskPickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	}
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
-		cmd := m.answerAsk(askAnswer{}, from)
-		m.inputFor(from).Focus()
+		cmd := m.answerAsk(askAnswer{})
+		m.input.Focus()
 		return m, cmd
 	case tea.KeyEnter:
 		items := p.filtered()
 		if len(items) == 0 {
 			return m, nil
 		}
-		return m, m.answerAsk(askAnswer{OK: true, Note: items[p.cursor].id}, from)
+		return m, m.answerAsk(askAnswer{OK: true, Note: items[p.cursor].id})
 	}
 	pickerNav(p, k)
-	return m, nil
-}
-
-// startTurnFrom echoes the request under its sender's prefix and launches
-// the agent.
-func (m *View) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
-	m.appendEntryLocked(entry{Kind: entryUser, Label: m.userPrefix(from), Text: text})
-	return m.startTurn(text)
-}
-
-// startTurn launches the agent. The caller has already echoed the request
-// into the transcript. Everything about the run itself is the session's
-// (startTurnLocked); what happens to this terminal's screen arrives, like
-// every other terminal's, as the runStateMsg that broadcasts — which this
-// Update drains before it returns, so the frame it draws is already busy.
-func (m *View) startTurn(text string) (tea.Model, tea.Cmd) {
-	m.startTurnLocked(text)
 	return m, nil
 }
 
 // handleBusyKey: while the agent works the input stays live. Enter queues
 // the text for delivery at the model's next call; Esc/Ctrl-C cancels the
 // run and discards the queue; PgUp/PgDn scroll; everything else edits.
-func (m *View) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	in := m.inputFor(from)
+func (m *View) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := &m.input
 	switch k.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
 		if k.Type == tea.KeyCtrlC && m.sel != nil {
@@ -807,16 +670,16 @@ func (m *View) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		in.Reset()
 		if strings.HasPrefix(text, "/") {
 			if ui.BusySafeCommand(text) {
-				m.histFile.add(text, from)
-				return m.slashCommand(text, from)
+				m.histFile.add(text, m.id)
+				return m.slashCommand(text)
 			}
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "commands wait until the agent is done (Esc cancels); plain text is queued"})
 			return m, nil
 		}
-		m.histFile.add(text, from)
-		m.ag.EnqueueFrom(text, from)
+		m.histFile.add(text, m.id)
+		m.ag.EnqueueFrom(text, m.id)
 		if len(m.clients) > 1 {
-			m.appendEntryLocked(entry{Kind: entryQueued, Label: "queued> ", Text: m.userPrefix(from) + text})
+			m.appendEntryLocked(entry{Kind: entryQueued, Label: "queued> ", Text: m.userPrefix(m.id) + text})
 		} else {
 			m.appendEntryLocked(entry{Kind: entryQueued, Label: "queued (delivered at the next step)> ", Text: text})
 		}
@@ -827,13 +690,13 @@ func (m *View) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tea.KeyUp:
 		if strings.TrimSpace(in.Value()) == "" {
-			return m.openQueue(from)
+			return m.openQueue()
 		}
 	case tea.KeyCtrlQ:
-		return m.openQueue(from)
+		return m.openQueue()
 	case tea.KeyRunes:
 		if len(k.Runes) == 1 && k.Runes[0] == '/' && strings.TrimSpace(in.Value()) == "" {
-			return m.openPalette("", from)
+			return m.openPalette("")
 		}
 	}
 	updated, cmd := in.Update(k)
@@ -869,7 +732,7 @@ func (m *View) refreshTranscript() {
 	if !m.ready {
 		return
 	}
-	content := m.rendered.String() + m.streaming.String()
+	content := m.rendered.String() + m.streaming
 	m.wrapped = lipgloss.NewStyle().Width(m.vp.Width).Render(content)
 	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(m.highlighted())
@@ -903,21 +766,9 @@ func (m *View) layout() {
 	}
 	m.vp.Width = m.width
 	m.vp.Height = vpH
-	for _, ta := range m.inputs {
-		setInputPrompt(ta, m.compact())
-		ta.SetWidth(m.inputWidth())
-		ta.SetHeight(m.inputRows())
-	}
-}
-
-// focusInputs refocuses every client's input line after a modal closes, and
-// republishes every client's overlay since a focus change can alter what a
-// textarea renders.
-func (m *View) focusInputs() {
-	for _, ta := range m.inputs {
-		ta.Focus()
-	}
-	m.publishAllOverlays()
+	setInputPrompt(&m.input, m.compact())
+	m.input.SetWidth(m.inputWidth())
+	m.input.SetHeight(m.inputRows())
 }
 
 func (m *View) modalHeight() int {
@@ -985,7 +836,7 @@ func (m *View) View() string {
 	}
 	if m.toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
 		// The notice row borrows the last transcript row so the input rows
-		// (and the served overlays anchored to them) never move.
+		// never move.
 		lines := strings.Split(transcript, "\n")
 		if len(lines) > 0 {
 			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+m.toast, m.width))
@@ -1097,10 +948,93 @@ func (m *View) viewAsk() string {
 	return body + "\n" + m.st.Dim.Render(" "+hint)
 }
 
+// ---- the input line --------------------------------------------------------
+//
+// One textarea per terminal, because a draft belongs to whoever is typing
+// it. The in-process TUI is simply the one view of a session with no host.
+
+// newInputArea builds this terminal's textarea with the prompt, height and
+// key bindings every input line shares.
+func (m *View) newInputArea() textarea.Model {
+	ta := textarea.New()
+	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
+	ta.SetHeight(m.inputRows())
+	setInputPrompt(&ta, m.compact())
+	ta.CharLimit = 0
+	ta.ShowLineNumbers = false
+	ta.Focus()
+	ta.KeyMap.InsertNewline.SetKeys("ctrl+j")
+	if m.served {
+		// A blinking cursor is a frame every 500 ms down the socket, per
+		// terminal, for nothing anyone can see moving.
+		ta.Cursor.SetMode(cursor.CursorStatic)
+	}
+	if w := m.inputWidth(); w > 0 {
+		ta.SetWidth(w)
+	}
+	return ta
+}
+
+// setInputPrompt gives a textarea the prompt of the current layout: the
+// short one in compact, the full one otherwise. layout() applies it on a
+// resize, and newInputArea applies it once up front — a terminal that is
+// compact from its very first frame must not have to wait for a resize to
+// get the right prompt.
+func setInputPrompt(ta *textarea.Model, compact bool) {
+	if compact {
+		ta.SetPromptFunc(2, func(i int) string {
+			if i == 0 {
+				return "> "
+			}
+			return "  "
+		})
+		return
+	}
+	ta.SetPromptFunc(5, func(i int) string {
+		if i == 0 {
+			return "(>): "
+		}
+		return "     "
+	})
+}
+
+// inputRows is the height of the input area: three rows, or one when this
+// terminal is small enough for the compact layout.
+func (m *View) inputRows() int {
+	if m.compact() {
+		return 1
+	}
+	return 3
+}
+
+// wheelWidthNow is the width of the context-wheel column to the right of
+// the input row: the full glyph-plus-percentage field, or the unpadded
+// short form in compact layout.
+func (m *View) wheelWidthNow() int {
+	if m.compact() {
+		return 5 // glyph + "NN%", no fixed-width padding
+	}
+	return wheelWidth
+}
+
+// inputWidth is the width of the input line, leaving room for the wheel.
+func (m *View) inputWidth() int {
+	w := m.width - m.wheelWidthNow() - 2
+	if w < 0 {
+		w = 0
+	}
+	return w
+}
+
+// inputRow is the input area plus the context wheel at its right.
+func (m *View) inputRow() string {
+	return lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView())
+}
+
 // ---- slash commands --------------------------------------------------------
 
-func (m *View) completeSlash(from int) {
-	in := m.inputFor(from)
+func (m *View) completeSlash() {
+	in := &m.input
 	v := in.Value()
 
 	// @path completion on the last token.
@@ -1137,23 +1071,20 @@ func (m *View) completeSlash(from int) {
 	}
 }
 
-// slashCommand runs a command typed by client from (0 is the local
-// terminal): commands that fill an input line or act on a terminal need to
-// know whose.
-func (m *View) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
+// slashCommand runs a command typed at this terminal. Commands that fill an
+// input line or act on a terminal act on this one: m.id is the client that
+// typed it, because one program renders for one terminal.
+func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
-		if m.running && m.cancelFn != nil {
-			m.cancelFn() // leaving mid-turn: stop the run, then write the briefing
-		}
-		// Clear the overlays before the quit, not only after the program
-		// returns: Bubble Tea's own teardown flushes one last frame, and
-		// the host would re-append every client's draft to it.
-		m.clearAllOverlaysLocked()
-		return m, tea.Quit
+		// The whole session ends, not just this terminal: Quit cancels any
+		// run and broadcasts, and this view exits when its own quitMsg comes
+		// back round through the mailbox.
+		m.QuitLocked()
+		return m, nil
 	case "/menu":
-		return m.openMenu(from)
+		return m.openMenu()
 	case "/theme":
 		if len(fields) > 1 {
 			return m.applyTheme(strings.ToLower(fields[1]))
@@ -1213,14 +1144,15 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/commit":
 		m.mode = modeBusy
 		m.statusNote = "committing"
+		sess := m.Session
 		go func() {
-			line, err := m.ag.GenerateCommit(m.rootCtx)
+			line, err := sess.ag.GenerateCommit(sess.rootCtx)
 			if err != nil {
-				m.send(noticeMsg("commit failed: " + err.Error()))
+				sess.notice("commit failed: " + err.Error())
 			} else {
-				m.send(noticeMsg("committed: " + line))
+				sess.notice("committed: " + line)
 			}
-			m.finishTurn(nil, nil)
+			sess.finishTurn(nil, nil)
 		}()
 	case "/init":
 		// Everything a turn does on the way in, because /init is a real
@@ -1235,7 +1167,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			path, err := ui.RunInit(ctx, sess.ag, ui.InitOptions{
 				Root:    sess.ag.Tools.Root,
 				Approve: func(p string) bool { return sess.approveFromAgent("file_write", p) },
-				Log:     func(s string) { sess.send(noticeMsg(s)) },
+				Log:     sess.notice,
 			})
 			sess.finishInit(path, err)
 		}()
@@ -1243,13 +1175,14 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/compact":
 		m.mode = modeBusy
 		m.statusNote = "compacting"
+		sess := m.Session
 		go func() {
-			if err := m.ag.Compact(m.rootCtx); err != nil {
-				m.send(noticeMsg("compaction failed: " + err.Error()))
+			if err := sess.ag.Compact(sess.rootCtx); err != nil {
+				sess.notice("compaction failed: " + err.Error())
 			} else {
-				m.send(noticeMsg(fmt.Sprintf("compacted; context now ~%d tokens", m.ag.History.Tokens())))
+				sess.notice(fmt.Sprintf("compacted; context now ~%d tokens", sess.ag.History.Tokens()))
 			}
-			m.finishTurn(nil, nil)
+			sess.finishTurn(nil, nil)
 		}()
 	case "/stats":
 		s := m.ag.Stats
@@ -1335,17 +1268,18 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// on the goroutine that receives them, so calling the host here would
 		// deadlock the session for good (holding the host's notifyMu, so no
 		// later attach or `sessions kill` could recover it).
-		detach, id := m.detachClient, from
+		detach, id := m.detachClient, m.id
 		return m, func() tea.Msg { detach(id); return nil }
 	case "/sessions", "/resume":
 		if fields[0] == "/resume" && len(fields) > 1 {
-			return m.resumeFrom(fields[1], from)
+			return m.resumeFrom(fields[1], m.id)
 		}
 		return m, m.askSessionPicker()
 	default:
 		if c, ok := m.custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
-			return m.startTurnFrom(c.Expand(args), from)
+			m.Submit(c.Expand(args), m.id)
+			return m, nil
 		}
 		m.appendEntryLocked(entry{Kind: entryErr, Text: "unknown command " + fields[0] + " (/help)"})
 	}

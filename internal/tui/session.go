@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,12 @@ type Session struct {
 	clients []live.ClientInfo
 	served  bool
 	host    *live.Host
+	// quitting latches the end of the session: Quit sets it, broadcasts a
+	// quitMsg every view answers with tea.Quit, and calls onQuit — the
+	// runner's hook, which is what lets RunServed return even when there is
+	// no program left to exit (an idle quit with nobody attached).
+	quitting bool
+	onQuit   func()
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -81,15 +88,14 @@ type Session struct {
 	liveCodes   func() map[string]bool
 	liveRecords func() []live.Record // the advertised hosts, for sessions the store has no file for
 	loadSession func(id string) (*store.Session, error)
-	// switchClient, detachClient, dropKeyClient and setOverlay are the host's
-	// own entry points, nil in-process. None of them may be called from
-	// inside Update: the host notifies its callbacks, which reach the program
-	// through p.Send — the very channel the Update goroutine receives from
-	// (see the /detach command, and live.Host.recompute).
+	// switchClient, detachClient and dropKeyClient are the host's own entry
+	// points, nil in-process. None of them may be called from inside Update:
+	// the host notifies its callbacks, which reach a program through p.Send —
+	// the very channel that program's Update goroutine receives from (see the
+	// /detach command, and live.Host.recompute).
 	switchClient  func(id int, code string)
 	detachClient  func(id int)
 	dropKeyClient func(id int)
-	setOverlay    func(id int, s string)
 
 	// ideAnnounced keeps the editor-bridge line to one appearance;
 	// initHinted keeps the "no BECODE.md" nudge to one per session, and
@@ -132,30 +138,27 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		views: map[int]*View{},
 	}
 	ag.Tools.Approve = s.approveFromAgent
+	// Every callback records what happened on the session and broadcasts;
+	// none of them touches a view, so N terminals never put N copies of one
+	// tool call on the transcript.
 	ag.Events = agent.Events{
-		OnDelta: func(t string) { s.send(deltaMsg(t)) },
-		OnToolStart: func(n, a string) {
-			s.send(toolStartMsg{n, a})
-			s.send(s.usageSnapshot())
-		},
-		OnToolEnd: func(n string, r tools.Result) {
-			s.send(toolEndMsg{n, r})
-			s.send(s.usageSnapshot())
-		},
-		OnNotice:    func(t string) { s.send(noticeMsg(t)) },
-		OnTransient: func(t string) { s.send(transientMsg(t)) },
+		OnDelta:     s.onDelta,
+		OnToolStart: s.onToolStart,
+		OnToolEnd:   s.onToolEnd,
+		OnNotice:    s.notice,
+		OnTransient: s.transient,
 		OnReasoning: func() func(string) {
 			n, last := 0, 0
 			return func(t string) {
 				n += len(t)
 				if n-last >= 200 { // throttle status updates
 					last = n
-					s.send(thinkingMsg(n))
+					s.setStatus(fmt.Sprintf("thinking (%dk chars of reasoning)", n/1000))
 				}
 			}
 		}(),
 	}
-	ag.Tools.OnStatus = func(t string) { s.send(statusMsg(t)) }
+	ag.Tools.OnStatus = s.setStatus
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
 	return s
 }
@@ -164,6 +167,7 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 // id the view renders for (0 is the local terminal), label how that terminal
 // names itself.
 func (s *Session) NewView(id int, label string) *View {
+	s.mu.Lock()
 	st := stylesOr(s.cfg.Theme)
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
@@ -171,7 +175,11 @@ func (s *Session) NewView(id int, label string) *View {
 	v := &View{Session: s, id: id, label: label, st: st, richText: s.cfg.Theme != "mono", spin: sp,
 		clipboardWrite: writeClipboard, clipboardRead: readClipboard, termWrite: writeTerminal,
 		mb: newMailbox()}
-	v.inputFor(0) // the local terminal's input line; sized by the first layout()
+	v.input = v.newInputArea() // this terminal's one input line; sized by the first layout()
+	// A terminal that attaches in the middle of a reply starts from what has
+	// streamed so far, not from the next delta.
+	v.streaming = s.streaming.String()
+	s.mu.Unlock()
 	s.attachView(v)
 	return v
 }
@@ -272,6 +280,25 @@ func (s *Session) userPrefix(client int) string {
 	return "you> "
 }
 
+// clientLabels joins the attached terminals' labels for the bottom line,
+// truncated with an ellipsis to fit room cells. With no usable room it
+// returns "": an untruncated list would overrun the row and wrap the
+// status line on every attached terminal.
+func (s *Session) clientLabels(room int) string {
+	if room <= 1 {
+		return ""
+	}
+	labels := make([]string, 0, len(s.clients))
+	for _, c := range s.clients {
+		labels = append(labels, c.Label)
+	}
+	joined := strings.Join(labels, ", ")
+	if r := []rune(joined); len(r) > room {
+		joined = string(r[:room-1]) + "…"
+	}
+	return joined
+}
+
 // SetClients records a new attached-terminal roster. It is the host's
 // OnClients callback, so it runs on the host's goroutine, not the program's:
 // everything shared happens here under mu — the attach/detach transcript
@@ -316,16 +343,102 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 // busyPlaceholder is what every input line advertises while the agent works.
 const busyPlaceholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
 
-// flushStreamingLocked turns whatever the model has streamed so far into a
+// flushLocked turns whatever the model has streamed so far into a
 // transcript entry. The caller holds mu.
-func (s *Session) flushStreamingLocked() {
+//
+// Order matters: streamEndMsg goes out *before* the entry, so that a view
+// clears its own copy of the streaming text and then renders the finished
+// entry — the other way round would paint the reply twice for as long as it
+// took the second message to arrive.
+func (s *Session) flushLocked() {
 	if s.streaming.Len() == 0 {
 		return
 	}
 	text := strings.TrimRight(s.streaming.String(), "\n")
 	s.lastReply = text
 	s.streaming.Reset()
+	s.broadcast(streamEndMsg{})
 	s.appendEntryLocked(entry{Kind: entryAssistant, Text: text})
+}
+
+// ---- agent events ------------------------------------------------------------
+//
+// Everything below runs on the agent goroutine. Each one records what
+// happened on the shared session and broadcasts; none of them touches a
+// view, because with one program per terminal a per-view append would put
+// one tool call on the transcript once per attached terminal.
+
+// onDelta is Events.OnDelta: the streamed text accrues on the session (so a
+// terminal attaching mid-reply can be seeded with it, see NewView) and the
+// fragment goes out for every view to append to its own copy.
+func (s *Session) onDelta(t string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.streaming.WriteString(t)
+	s.broadcast(deltaMsg(t))
+}
+
+func (s *Session) onToolStart(name, args string) {
+	s.mu.Lock()
+	s.flushLocked()
+	s.appendEntryLocked(entry{Kind: entryTool, Label: name, Text: args})
+	s.statusNote = "running " + name
+	s.broadcast(statusMsg(s.statusNote))
+	s.mu.Unlock()
+	s.broadcast(s.usageSnapshot()) // the loop is quiescent inside a callback
+}
+
+func (s *Session) onToolEnd(name string, res tools.Result) {
+	s.mu.Lock()
+	s.flushLocked()
+	s.lastTool = res.Content
+	first := strings.SplitN(res.Content, "\n", 2)[0]
+	if res.IsError {
+		s.appendEntryLocked(entry{Kind: entryToolErr, Text: first})
+	} else {
+		if len(first) > 100 {
+			first = first[:100] + "…"
+		}
+		s.appendEntryLocked(entry{Kind: entryToolOK, Text: first})
+	}
+	s.statusNote = "thinking"
+	s.broadcast(statusMsg(s.statusNote))
+	s.mu.Unlock()
+	s.broadcast(s.usageSnapshot())
+}
+
+// notice puts one note on the shared transcript. It is Events.OnNotice and
+// the way a command's own goroutine reports its outcome; a noticeMsg that
+// reaches a view instead is that terminal's own (its backend ping), and is
+// rendered locally.
+func (s *Session) notice(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	s.appendEntryLocked(noticeEntry(text))
+}
+
+// transient records a short-lived notice. It is not a transcript entry: it
+// lives on the session until toastUntil, and each view schedules its own
+// expiry tick when the broadcast reaches it.
+func (s *Session) transient(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toast, s.toastUntil = text, s.now().Add(toastFor)
+	s.broadcast(transientMsg(text))
+}
+
+// setStatus changes the bottom-line note without adding a transcript line:
+// hidden-reasoning progress, and the editor's own review progress
+// (Registry.OnStatus).
+func (s *Session) setStatus(note string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if note == "" && s.running {
+		note = "thinking"
+	}
+	s.statusNote = note
+	s.broadcast(statusMsg(note))
 }
 
 // setRunStateLocked records that the session started or finished working and
@@ -357,6 +470,81 @@ func (s *Session) runContextLocked() context.Context {
 	return ctx
 }
 
+// Submit is a request typed at a terminal: it echoes the text under that
+// terminal's label and starts the turn.
+//
+// The caller holds mu — it is a view's Update, the only thing that can have
+// a keystroke to submit. (mu is not reentrant, so there is no unlocked
+// variant to call by mistake.)
+func (s *Session) Submit(text string, from int) {
+	s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(from), Text: text})
+	s.startTurnLocked(text)
+}
+
+// Quit ends the session for every attached terminal at once: a run in
+// flight is cancelled, and each view answers the broadcast quitMsg with
+// tea.Quit. It is called by the host's quit hook, by the runner's idle
+// rules, and by /quit (through QuitLocked).
+func (s *Session) Quit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.QuitLocked()
+}
+
+// QuitLocked is Quit for a caller that already holds mu (a view's Update).
+func (s *Session) QuitLocked() {
+	if !s.quitting {
+		if s.cancelFn != nil {
+			s.cancelFn() // leaving mid-turn: stop the run, then write the briefing
+		}
+		s.quitting = true
+		s.broadcast(quitMsg{})
+	}
+	if s.onQuit != nil {
+		// On a goroutine of its own: the hook reads session state under mu,
+		// which this caller is holding, and it asks each program to stop,
+		// which blocks until that program's update loop takes the message —
+		// and this may be running *on* that loop.
+		go s.onQuit()
+	}
+}
+
+// isQuitting reports whether Quit has run.
+func (s *Session) isQuitting() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.quitting
+}
+
+// emptyAfterSwitch reports the one case where a host with nobody attached
+// should end itself rather than wait to be attached to again: a terminal
+// switched to another session, leaving behind a session nobody ever typed
+// into. A session with turns in it is worth coming back to with `be-code
+// attach`, and so is one with a run in flight whose first turn has not
+// reached the session file yet.
+func (s *Session) emptyAfterSwitch() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.switchPending && !s.running &&
+		s.ag.Session != nil && len(s.ag.Session.Messages) == 0
+}
+
+// idleExpired reports whether a served session has sat with no terminal
+// attached and no run in progress for live_idle_limit minutes. A client or
+// a run resets the clock instead. The runner's idleLoop polls this.
+func (s *Session) idleExpired(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.served || s.cfg.LiveIdleLimit <= 0 {
+		return false
+	}
+	if len(s.clients) > 0 || s.running {
+		s.idleSince = now
+		return false
+	}
+	return now.Sub(s.idleSince) >= time.Duration(s.cfg.LiveIdleLimit)*time.Minute
+}
+
 // startTurnLocked launches the agent on a goroutine. The caller holds mu and
 // has already echoed the request into the transcript.
 func (s *Session) startTurnLocked(text string) {
@@ -386,7 +574,7 @@ func (s *Session) finishTurn(rep *agent.ReviewedReport, err error) {
 
 // finishTurnLocked is finishTurn for a caller that already holds mu.
 func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
-	s.flushStreamingLocked()
+	s.flushLocked()
 	if err != nil {
 		if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
 			s.appendEntryLocked(entry{Kind: entryError, Label: "error ", Text: err.Error()})
@@ -433,7 +621,7 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 func (s *Session) finishInit(path string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.flushStreamingLocked()
+	s.flushLocked()
 	if s.cancelFn != nil {
 		s.cancelFn()
 		s.cancelFn = nil
@@ -448,32 +636,4 @@ func (s *Session) finishInit(path string, err error) {
 		s.appendEntryLocked(entry{Kind: entryOK, Text: "wrote " + path})
 	}
 	s.finishTurnLocked(nil, nil)
-}
-
-// ---- running -----------------------------------------------------------------
-
-// RunLocal runs the session in this process's own terminal (alt screen) and
-// blocks until exit. One view, one program: the in-process TUI is client 0.
-func (s *Session) RunLocal(ctx context.Context) error {
-	s.rootCtx = ctx
-	v := s.NewView(0, "local")
-	if s.cfg.ThemeTerminalColors {
-		v.termWrite(terminalColorSeq(s.cfg.Theme))
-		defer v.termWrite(terminalColorReset())
-	}
-	p := tea.NewProgram(v, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	v.program = p
-	defer s.retireView(v)
-	go v.mb.run(p.Send)
-	_, err := p.Run()
-	s.histFile.save()
-	return err
-}
-
-// retireView takes a view out of the broadcast set and closes its mailbox,
-// in that order: once no broadcast can reach the mailbox, closing it is safe
-// and the delivery goroutine ends.
-func (s *Session) retireView(v *View) {
-	s.detachView(v.id)
-	v.mb.close()
 }

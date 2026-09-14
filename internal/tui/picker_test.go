@@ -111,18 +111,17 @@ func TestResumingTheSessionThisProgramAlreadyRunsIsANoSwitch(t *testing.T) {
 
 // After a switch, a fresh host with no turns and nobody watching quits
 // rather than lingering; one with turns, or with a client left, keeps
-// running.
+// running. The runner asks the session this on every empty roster (see
+// runner.onClients).
 func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	tempHome(t)
-	// The switch emptied the roster: nothing left to render for. End to end,
-	// the way the host does it — SetClients broadcasts the empty roster and
-	// Update drains its own mailbox — so the quit the view decides on has to
-	// survive that drain and come back as the command Update returns.
+	// The switch emptied the roster: nothing left to render for, and no work
+	// worth coming back to.
 	m := twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
 	m.SetClients(nil)
-	if _, cmd := m.Update(toastTickMsg(time.Now())); !hasQuit(cmd) {
+	if !m.emptyAfterSwitch() {
 		t.Fatal("an empty fresh host must quit after a switch")
 	}
 
@@ -132,15 +131,12 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{{ID: 1, Label: "desk", UTF8: true}}); cmd != nil {
-		t.Fatal("a host with a client left must keep running")
-	}
-	// Clearing the pending switch is the session's half of the roster change.
 	setClients(m, live.ClientInfo{ID: 1, Label: "desk", UTF8: true})
 	if m.switchPending {
 		t.Fatal("a non-empty roster must clear the pending switch")
 	}
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("the remaining client detaching later must not quit the session")
 	}
 
@@ -149,7 +145,8 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999",
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}}}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("a session with turns must keep running")
 	}
 
@@ -159,14 +156,16 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
 	m.running = true
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("a host with a run in flight must keep running")
 	}
 
 	// Without a switch, an empty roster is just everyone detaching.
 	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("detaching is not switching; the session keeps running")
 	}
 
