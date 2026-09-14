@@ -102,8 +102,10 @@ func TestBottomLineShowsQueuedCount(t *testing.T) {
 // released, and the leftover queue starts the next turn as usual.
 func TestRunFinishingClosesQueuePopup(t *testing.T) {
 	m := busyWithQueue(t, "next thing")
+	m.startTurnHook = func(string) {} // stand in for the next turn's run
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m.Update(turnDoneMsg{})
+	m.finishTurn(nil, nil)
+	flush(m)
 	if m.mode == modeQueue || m.ag.Held() {
 		t.Fatalf("popup survived the run: mode=%v held=%v", m.mode, m.ag.Held())
 	}

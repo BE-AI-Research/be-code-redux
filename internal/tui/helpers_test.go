@@ -52,6 +52,24 @@ func flush(views ...*View) {
 	}
 }
 
+// deliver hands every queued broadcast to each view through Update, the way
+// the mailbox goroutine's p.Send does in production. flush is the cheaper
+// path and enough for anything that only has to reach update(); deliver is
+// for what Update itself does around it — publishing overlays when a modal
+// takes over the frame, or gives it back.
+func deliver(views ...*View) {
+	for _, v := range views {
+		for drained := true; drained; {
+			select {
+			case msg := <-v.mailboxForTest().ch:
+				v.Update(msg)
+			default:
+				drained = false
+			}
+		}
+	}
+}
+
 // hasQuit reports whether cmd is tea.Quit, or a batch containing it —
 // Update batches whatever its own mailbox drain produced onto its result, so
 // a quit decided by a drained message can arrive either way.

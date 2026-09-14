@@ -381,10 +381,12 @@ func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
 	var calls []call
 	m.setOverlay = func(id int, s string) { calls = append(calls, call{id, s}) }
 
-	m.Update(approvalMsg{action: "shell", detail: "echo hi", resp: make(chan bool, 1)})
-	if m.mode != modeApproval {
-		t.Fatalf("mode = %v, want modeApproval", m.mode)
-	}
+	answered := make(chan bool, 1)
+	go func() { answered <- m.approveFromAgent("shell", "echo hi") }()
+	// deliver, not flush: the modal opens on a broadcast, and it is Update
+	// (which the mailbox goroutine drives in production) that clears the
+	// overlays when one takes over the frame.
+	waitFor(t, func() bool { deliver(m); return m.mode == modeAsk })
 	cleared := map[int]bool{}
 	for _, c := range calls {
 		if c.s != "" {
@@ -403,8 +405,11 @@ func TestOverlayHiddenDuringApprovalAndRepublishedOnClose(t *testing.T) {
 	}
 
 	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("n")}) // denies and closes the modal
-	if m.mode == modeApproval {
+	if m.mode == modeAsk {
 		t.Fatal("modal did not close")
+	}
+	if <-answered {
+		t.Fatal("n must deny")
 	}
 	got := map[int]string{}
 	for _, c := range calls {

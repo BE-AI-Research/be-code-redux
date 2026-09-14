@@ -273,7 +273,9 @@ func TestLeftoverQueueEchoesEverySender(t *testing.T) {
 	m.running = true
 	m.ag.EnqueueFrom("from one", 1)
 	m.ag.EnqueueFrom("from two", 2)
-	m.Update(turnDoneMsg{})
+	m.startTurnHook = func(string) {} // stand in for the next turn's run
+	m.finishTurn(nil, nil)
+	flush(m)
 	tr := m.rendered.String()
 	for _, want := range []string{"desk (pid 1)> from one", "tablet (pid 2)> from two"} {
 		if !strings.Contains(tr, want) {

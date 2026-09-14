@@ -235,13 +235,14 @@ func padToWidth(s string, w int) string {
 }
 
 // overlayVisible reports whether the current mode's View() renders the
-// input row at all. A full-screen modal (approval, picker, menu, plan)
-// replaces the whole frame with no reserved input row — overlayFor's
-// absolute positioning (always height-inputRows) would land on the modal's
-// own content instead, painting a client's stray draft over it.
+// input row at all. A full-screen modal (a shared ask — approval, plan or
+// picker — or a local picker or menu) replaces the whole frame with no
+// reserved input row — overlayFor's absolute positioning (always
+// height-inputRows) would land on the modal's own content instead, painting
+// a client's stray draft over it.
 func (m *View) overlayVisible() bool {
 	switch m.mode {
-	case modeApproval, modePicker, modeMenu, modePlan:
+	case modeAsk, modePicker, modeMenu:
 		return false
 	}
 	return true

@@ -2,9 +2,9 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -97,23 +97,22 @@ type Session struct {
 	// every resize and NeedsInitHint stats the workspace each time.
 	ideAnnounced, initChecked, initHinted bool
 
-	// askGen numbers shared-review prompts (approvalMsg.gen). Written from
-	// the agent goroutine (reviewTerminal.Ask) and read by Withdraw on the
-	// same goroutine, so it is atomic rather than guarded by mu.
-	askGen atomic.Int64
+	// ask is the question every attached terminal is being shown right now
+	// — a tool approval, a plan, a shared picker — and askGen numbers the
+	// asks so an answer or a withdrawal can be matched to the one it means
+	// (see ask.go). Both are guarded by mu like everything else here.
+	ask    *ask
+	askGen int
 
 	viewsMu sync.Mutex
 	views   map[int]*View // each View carries its mailbox (v.mb)
 
-	// startTurnHook is a test seam consulted at the top of startTurn; nil in
-	// production. sendOverride is a test seam that *replaces* the fan-out in
-	// broadcast — hence the name: a test that plays the event loop by hand
-	// wants each message once, in its own channel, to feed back into Update
-	// itself (see review_integration_test.go); also delivering it to the
-	// mailboxes would have every such message handled twice. Both nil in
-	// production, and both set before anything else runs.
+	// startTurnHook is a test seam consulted at the top of startTurnLocked:
+	// when set it *replaces* the agent run, so a test can exercise
+	// everything around a turn without a model goroutine mutating the
+	// session under its assertions. nil in production, set before anything
+	// else runs.
 	startTurnHook func(string)
-	sendOverride  func(tea.Msg)
 }
 
 // NewSession builds the shared core and wires the agent's callbacks to it.
@@ -202,15 +201,10 @@ func (s *Session) viewByID(id int) *View {
 	return s.views[id]
 }
 
-// broadcast hands msg to every attached view, or to sendOverride when a test
-// has taken delivery over. It takes only viewsMu — never mu — and every
-// hand-off is non-blocking, so it is safe to call from the agent goroutine
-// and from inside Update alike.
+// broadcast hands msg to every attached view. It takes only viewsMu — never
+// mu — and every hand-off is non-blocking, so it is safe to call from the
+// agent goroutine and from inside Update alike.
 func (s *Session) broadcast(msg tea.Msg) {
-	if s.sendOverride != nil {
-		s.sendOverride(msg)
-		return
-	}
 	s.viewsMu.Lock()
 	defer s.viewsMu.Unlock()
 	for _, v := range s.views {
@@ -255,19 +249,6 @@ func (s *Session) usageSnapshot() usageMsg {
 		budget:    s.ag.History.Limit(),
 		total:     s.ag.Stats.PromptTokens + s.ag.Stats.CompletionTokens,
 	}
-}
-
-// approveFromAgent bridges the agent goroutine into the UI event loop.
-func (s *Session) approveFromAgent(action, detail string) bool {
-	if action == "shell" && s.cfg.AutoApproveShell {
-		return true
-	}
-	if action == "file_write" && !s.cfg.ApproveFileWrites {
-		return true
-	}
-	resp := make(chan bool, 1)
-	s.send(approvalMsg{action: action, detail: detail, resp: resp})
-	return <-resp
 }
 
 // clientLabel names a client for transcript prefixes and the bottom line.
@@ -330,13 +311,144 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 	s.broadcast(clientsMsg(infos))
 }
 
-// SetReview hands the session the review coordinator built in cmd, so
-// /review can report and change where file changes are reviewed.
-func (s *Session) SetReview(c *review.Coordinator) { s.review = c }
+// ---- turns -------------------------------------------------------------------
 
-// ReviewTerminal is this UI as the coordinator's terminal-side reviewer:
-// the shared approval modal, which any attached terminal can answer.
-func (s *Session) ReviewTerminal() review.Terminal { return reviewTerminal{s} }
+// busyPlaceholder is what every input line advertises while the agent works.
+const busyPlaceholder = "type to queue a message for the agent…  (Enter queues · Esc cancels)"
+
+// flushStreamingLocked turns whatever the model has streamed so far into a
+// transcript entry. The caller holds mu.
+func (s *Session) flushStreamingLocked() {
+	if s.streaming.Len() == 0 {
+		return
+	}
+	text := strings.TrimRight(s.streaming.String(), "\n")
+	s.lastReply = text
+	s.streaming.Reset()
+	s.appendEntryLocked(entry{Kind: entryAssistant, Text: text})
+}
+
+// setRunStateLocked records that the session started or finished working and
+// tells every view, which is what moves each terminal between its input and
+// busy modes. The caller holds mu.
+func (s *Session) setRunStateLocked(running bool, note string) {
+	s.running = running
+	s.statusNote = note
+	s.broadcast(runStateMsg{running: running, note: note})
+}
+
+// setRunState is setRunStateLocked for a caller that does not hold mu (the
+// plan goroutine, once the plan has been approved).
+func (s *Session) setRunState(running bool, note string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setRunStateLocked(running, note)
+}
+
+// runContextLocked makes the cancellable context a turn runs under and parks
+// its cancel in cancelFn, where Esc and /quit find it. The caller holds mu.
+func (s *Session) runContextLocked() context.Context {
+	root := s.rootCtx
+	if root == nil {
+		root = context.Background()
+	}
+	ctx, cancel := context.WithCancel(root)
+	s.cancelFn = cancel
+	return ctx
+}
+
+// startTurnLocked launches the agent on a goroutine. The caller holds mu and
+// has already echoed the request into the transcript.
+func (s *Session) startTurnLocked(text string) {
+	s.setRunStateLocked(true, "thinking")
+	if s.startTurnHook != nil {
+		// A test is standing in for the run: record it and start nothing,
+		// so no model goroutine mutates the session under its assertions.
+		s.startTurnHook(text)
+		return
+	}
+	ctx := s.runContextLocked()
+	go func() {
+		_, rep, err := s.ag.RunFull(ctx, text)
+		s.send(s.usageSnapshot()) // run finished; agent quiescent
+		s.finishTurn(rep, err)
+	}()
+}
+
+// finishTurn ends a run: it is called directly by the goroutine that ran it
+// (never from inside Update), records everything the turn produced on the
+// shared transcript, and returns the session to idle.
+func (s *Session) finishTurn(rep *agent.ReviewedReport, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.finishTurnLocked(rep, err)
+}
+
+// finishTurnLocked is finishTurn for a caller that already holds mu.
+func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
+	s.flushStreamingLocked()
+	if err != nil {
+		if err != context.Canceled && !strings.Contains(err.Error(), "context canceled") {
+			s.appendEntryLocked(entry{Kind: entryError, Label: "error ", Text: err.Error()})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryWarn, Text: "cancelled"})
+		}
+	}
+	if rep != nil && rep.Verify != nil {
+		for _, line := range strings.Split(rep.Verify.Human(), "\n") {
+			s.appendEntryLocked(entry{Kind: entryDim, Text: line})
+		}
+		if rep.Verify.Passed() {
+			s.appendEntryLocked(entry{Kind: entryOK, Text: "✓ verified"})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryErr, Text: "✗ verification failed after repairs"})
+		}
+	}
+	if rep != nil && rep.Reviewed {
+		if rep.ReviewIssues == "" {
+			s.appendEntryLocked(entry{Kind: entryOK, Text: "✓ reviewer approved"})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryWarn, Text: "reviewer raised issues (repair attempted)"})
+		}
+	}
+	s.appendEntryLocked(entry{Kind: entryPlain})
+	s.setRunStateLocked(false, "")
+	// Anything queued during the run that the model never got to see becomes
+	// the next turn — as one request, but echoed line by line under the
+	// terminal each message came from.
+	if left := s.ag.DrainItems(); len(left) > 0 {
+		texts := make([]string, 0, len(left))
+		for _, it := range left {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+			texts = append(texts, it.Text)
+		}
+		s.startTurnLocked(strings.Join(texts, "\n"))
+	}
+}
+
+// finishInit ends the /init flow on its own goroutine, the way finishTurn
+// ends a run: the outcome goes on the shared transcript, the init context is
+// released so a stale cancel cannot reach the next turn's Esc, and the
+// session returns to idle.
+func (s *Session) finishInit(path string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushStreamingLocked()
+	if s.cancelFn != nil {
+		s.cancelFn()
+		s.cancelFn = nil
+	}
+	if err != nil {
+		if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+			s.appendEntryLocked(entry{Kind: entryWarn, Text: "cancelled"})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryError, Label: "init failed: ", Text: err.Error()})
+		}
+	} else {
+		s.appendEntryLocked(entry{Kind: entryOK, Text: "wrote " + path})
+	}
+	s.finishTurnLocked(nil, nil)
+}
 
 // ---- running -----------------------------------------------------------------
 

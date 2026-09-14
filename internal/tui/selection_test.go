@@ -93,7 +93,7 @@ func TestCopyCommandTargets(t *testing.T) {
 	m := newTestModel(t)
 	got := captureClipboard(m)
 	m.Update(deltaMsg("The answer is 42."))
-	m.flushStreaming()
+	m.flushStreamingLocked()
 	m.Update(toolEndMsg{name: "shell", res: toolResult("total 3\nfile a\nfile b")})
 	m.slashCommand("/copy reply", 0)
 	m.slashCommand("/copy tool", 0)

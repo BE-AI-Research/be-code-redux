@@ -208,13 +208,13 @@ func (m *View) menuEntries(owner int) []menuEntry {
 		return func(m *View) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
 	}
 	return []menuEntry{
-		{"Sessions", "Resume a saved session", "pick from the session list", func(m *View) (tea.Model, tea.Cmd) { return m.openSessionPicker(owner) }},
+		{"Sessions", "Resume a saved session", "pick from the session list", func(m *View) (tea.Model, tea.Cmd) { return m, m.askSessionPicker() }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
 		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},
 		{"Sessions", "Detach this terminal", "session keeps running; be-code attach <code> to return", cmd("/detach")},
-		{"Models", "Switch model", "list models on the backend", func(m *View) (tea.Model, tea.Cmd) { return m.openModelPicker() }},
-		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *View) (tea.Model, tea.Cmd) { return m.openProviderPicker() }},
+		{"Models", "Switch model", "list models on the backend", func(m *View) (tea.Model, tea.Cmd) { return m, m.askModelPicker() }},
+		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *View) (tea.Model, tea.Cmd) { return m, m.askProviderPicker() }},
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},
 		{"Tools", "Run verification", "build/lint/test checks for this workspace", cmd("/verify")},
 		{"Tools", "Undo last turn", "roll back the last turn's file changes", cmd("/undo")},

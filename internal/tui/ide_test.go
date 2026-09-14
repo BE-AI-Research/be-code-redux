@@ -56,7 +56,8 @@ func TestApprovalAllDisablesEditorReviewToo(t *testing.T) {
 	m.ag.Tools.ApproveWrites = true
 	m.cfg.ApproveFileWrites = true
 	resp := make(chan bool, 1)
-	m.Update(approvalMsg{action: "file_write", detail: "a.go", resp: resp})
+	go func() { resp <- m.approveFromAgent("file_write", "a.go") }()
+	waitFor(t, func() bool { flush(m); return m.mode == modeAsk })
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if !<-resp {
 		t.Fatal("approval not granted")
