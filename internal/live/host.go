@@ -278,7 +278,10 @@ func (h *Host) Output() io.Writer              { return fanout{h} }
 
 // OnClientSize registers the callback for one client's own size: on attach,
 // on every resize frame it sends, and after output to it was evicted (a
-// repaint request; see enqueue).
+// repaint request; see enqueue). Called from recomputeAttach it runs under
+// notifyMu, same as onSize/onClients: it must return quickly and must not
+// call back into anything that itself calls recompute, or the host
+// deadlocks.
 func (h *Host) OnClientSize(f func(id, cols, rows int)) {
 	h.mu.Lock()
 	h.onClientSize = f
@@ -532,6 +535,10 @@ func (h *Host) recomputeAttach(attached *client) {
 	infos := h.infosLocked()
 	onSize, onClients, onClientSize := h.onSize, h.onClients, h.onClientSize
 	clients := append([]*client(nil), h.clients...)
+	var attachedID, attachedCols, attachedRows int
+	if attached != nil {
+		attachedID, attachedCols, attachedRows = attached.id, attached.cols, attached.rows
+	}
 	h.mu.Unlock()
 
 	if cols > 0 && (changed || attached != nil) {
@@ -547,7 +554,7 @@ func (h *Host) recomputeAttach(attached *client) {
 		}
 	}
 	if attached != nil && onClientSize != nil {
-		onClientSize(attached.id, attached.cols, attached.rows)
+		onClientSize(attachedID, attachedCols, attachedRows)
 	}
 	b, _ := json.Marshal(infos)
 	for _, c := range clients {
