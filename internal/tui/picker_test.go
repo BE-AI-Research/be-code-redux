@@ -80,6 +80,7 @@ func TestInProcessResumeOfALiveCodePrintsInsteadOfLoading(t *testing.T) {
 	}
 	before := m.ag.Session
 	m.resumeFrom("1", 0)
+	flush(m)
 	if m.ag.Session != before {
 		t.Fatal("an in-process resume of a live code must load nothing")
 	}
@@ -130,6 +131,8 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	if cmd := m.updateClients(clientsMsg{{ID: 1, Label: "desk", UTF8: true}}); cmd != nil {
 		t.Fatal("a host with a client left must keep running")
 	}
+	// Clearing the pending switch is the session's half of the roster change.
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk", UTF8: true})
 	if m.switchPending {
 		t.Fatal("a non-empty roster must clear the pending switch")
 	}
@@ -168,7 +171,7 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.clients = nil
 	m.switchPending = true
-	m.updateClients(clientsMsg{{ID: 3, Label: "new", UTF8: true}})
+	setClients(m, live.ClientInfo{ID: 3, Label: "new", UTF8: true})
 	if m.switchPending {
 		t.Fatal("an attach must clear the pending switch")
 	}

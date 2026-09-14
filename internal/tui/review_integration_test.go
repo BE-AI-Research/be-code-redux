@@ -56,7 +56,7 @@ func TestSharedReviewAnsweredFromTheSecondTerminal(t *testing.T) {
 		{ID: 1, Label: "vscode (pid 1)", UTF8: true},
 		{ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true},
 	}
-	m.Update(clientsMsg(roster))
+	setClients(m, roster...)
 
 	// send has no tea.Program to deliver to in a test, so route what the
 	// coordinator's goroutine sends into a channel this goroutine drains.

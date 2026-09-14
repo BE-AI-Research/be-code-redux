@@ -14,12 +14,12 @@ import (
 
 func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 
-func twoClients(t *testing.T) *Model {
+func twoClients(t *testing.T) *View {
 	t.Helper()
 	m := newTestModel(t)
 	m.served = true
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.Update(clientsMsg{{ID: 1, Label: "desk (pid 1)", UTF8: true}, {ID: 2, Label: "tablet (pid 2)", UTF8: true}})
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true}, live.ClientInfo{ID: 2, Label: "tablet (pid 2)", UTF8: true})
 	return m
 }
 
@@ -112,7 +112,7 @@ func TestPaletteIsOwnedByTheClientThatOpenedIt(t *testing.T) {
 	if m.mode != modePalette {
 		t.Fatal("another client's Esc must not close the owner's palette")
 	}
-	m.Update(clientsMsg{{ID: 1, Label: "desk (pid 1)", UTF8: true}}) // owner detached
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true}) // owner detached
 	if m.mode == modePalette {
 		t.Fatal("palette must close when its owner detaches")
 	}
@@ -229,7 +229,7 @@ func TestMenuIsOwnedByTheClientThatOpenedIt(t *testing.T) {
 	if m.mode != modeMenu {
 		t.Fatalf("menu did not reopen: %v", m.mode)
 	}
-	m.Update(clientsMsg{{ID: 2, Label: "tablet (pid 2)", UTF8: true}}) // owner detached
+	setClients(m, live.ClientInfo{ID: 2, Label: "tablet (pid 2)", UTF8: true}) // owner detached
 	if m.mode == modeMenu {
 		t.Fatal("menu must close when its owner detaches")
 	}
@@ -300,7 +300,7 @@ func TestQueuePopupClosesToIdleWhenOwnerDetaches(t *testing.T) {
 		t.Fatalf("popup not open: %v", m.mode)
 	}
 	m.running = false // the run finished while the popup was open
-	m.Update(clientsMsg{{ID: 1, Label: "desk (pid 1)", UTF8: true}})
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk (pid 1)", UTF8: true})
 	if m.mode != modeInput {
 		t.Fatalf("mode after the owner detached = %v, want input", m.mode)
 	}

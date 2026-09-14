@@ -12,7 +12,7 @@ import (
 // (everything anyone submitted, in one file), but the navigation cursor is
 // per client: each terminal walks that shared store at its own pace, so one
 // person pressing Up never moves another's place in the list. Cursors are
-// keyed by client id like Model.inputs, and an absent key means "live"
+// keyed by client id like View.inputs, and an absent key means "live"
 // (not navigating) — the resting state of a terminal that has never
 // pressed Up.
 type inputHistory struct {

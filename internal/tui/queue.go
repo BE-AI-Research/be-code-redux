@@ -19,7 +19,7 @@ import (
 
 // ownerQueue returns the queue owner's messages and their positions in the
 // agent's full queue, so Remove still addresses the right message.
-func (m *Model) ownerQueue() (texts []string, idx []int) {
+func (m *View) ownerQueue() (texts []string, idx []int) {
 	for i, it := range m.ag.Items() {
 		if it.From == m.queueOwner {
 			texts = append(texts, it.Text)
@@ -29,11 +29,11 @@ func (m *Model) ownerQueue() (texts []string, idx []int) {
 	return texts, idx
 }
 
-func (m *Model) openQueue(from int) (tea.Model, tea.Cmd) {
+func (m *View) openQueue(from int) (tea.Model, tea.Cmd) {
 	m.queueOwner = from
 	items, _ := m.ownerQueue()
 	if len(items) == 0 {
-		m.appendEntry(entry{Kind: entryDim, Text: "no queued messages (type while the agent works and press Enter to queue one)"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "no queued messages (type while the agent works and press Enter to queue one)"})
 		return m, nil
 	}
 	m.ag.Hold(true)
@@ -42,12 +42,12 @@ func (m *Model) openQueue(from int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) closeQueue() {
+func (m *View) closeQueue() {
 	m.ag.Hold(false)
 	m.mode = m.idleMode()
 }
 
-func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.queueOwner {
 		// The popup belongs to the client that opened it; everyone else
 		// keeps typing into their own input line (see handleGuestKey).
@@ -80,13 +80,13 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		text, ok := m.ag.Remove(idx[m.queueCursor])
 		m.closeQueue()
 		if !ok {
-			m.appendEntry(entry{Kind: entryDim, Text: "that message was already delivered"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "that message was already delivered"})
 			return m, nil
 		}
 		in := m.inputFor(owner)
 		in.SetValue(text)
 		in.CursorEnd()
-		m.appendEntry(entry{Kind: entryDim, Text: "editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"})
 		return m, nil
 	case tea.KeyDelete, tea.KeyBackspace:
 		return m.dropQueued(idx[m.queueCursor])
@@ -99,12 +99,12 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 }
 
 // dropQueued removes the message at index i of the agent's full queue.
-func (m *Model) dropQueued(i int) (tea.Model, tea.Cmd) {
+func (m *View) dropQueued(i int) (tea.Model, tea.Cmd) {
 	text, ok := m.ag.Remove(i)
 	if !ok {
-		m.appendEntry(entry{Kind: entryDim, Text: "that message was already delivered"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "that message was already delivered"})
 	} else {
-		m.appendEntry(entry{Kind: entryDim, Text: "dropped queued message: " + firstLineOf(text, 80)})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "dropped queued message: " + firstLineOf(text, 80)})
 	}
 	left, _ := m.ownerQueue()
 	if len(left) == 0 {
@@ -115,7 +115,7 @@ func (m *Model) dropQueued(i int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) queueBox() string {
+func (m *View) queueBox() string {
 	items, _ := m.ownerQueue()
 	var b strings.Builder
 	b.WriteString(m.st.ModalTi.Render("queued messages") + m.st.Dim.Render("  ↑↓ pick · Enter edit · d drop · Esc close") + "\n")

@@ -7,10 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/brown-enterprises/be-code/internal/agent"
-	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
-	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 type nullProvider struct{}
@@ -22,27 +19,6 @@ func (nullProvider) Chat(context.Context, provider.ChatRequest, provider.StreamF
 func (nullProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (nullProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
 
-// newTestModel builds a model and gives it its first WindowSizeMsg. Each
-// prep func runs on the agent before the model is created, for state the
-// UI reads at startup (e.g. an attached editor).
-func newTestModel(t *testing.T, prep ...func(*agent.Agent)) *Model {
-	t.Helper()
-	cfg := config.Default()
-	cfg.RepoMap = false
-	reg, err := tools.NewRegistry(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
-	for _, f := range prep {
-		f(ag)
-	}
-	m := New(cfg, ag, nullProvider{})
-	m.rootCtx = context.Background()
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	return m
-}
-
 // The transcript viewport must be a real, initialized viewport: PgUp and the
 // mouse wheel scroll it. A zero-valued viewport.Model has an empty KeyMap
 // and mouse wheel disabled, so every scroll key was silently ignored.
@@ -51,6 +27,7 @@ func TestTranscriptScrollsWithPageUpAndWheel(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		m.appendEntry(entry{Kind: entryPlain, Text: strings.Repeat("x", 10)})
 	}
+	flush(m)
 	if !m.vp.AtBottom() {
 		t.Fatal("expected transcript pinned to bottom after append")
 	}

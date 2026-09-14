@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func busyWithQueue(t *testing.T, msgs ...string) *Model {
+func busyWithQueue(t *testing.T, msgs ...string) *View {
 	t.Helper()
 	m := newTestModel(t)
 	m.mode = modeBusy

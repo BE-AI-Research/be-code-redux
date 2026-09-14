@@ -8,15 +8,9 @@ import (
 	"github.com/brown-enterprises/be-code/internal/review"
 )
 
-// SetReview hands the model the review coordinator built in cmd, so
-// /review can report and change where file changes are reviewed.
-func (m *Model) SetReview(c *review.Coordinator) { m.review = c }
-
-// ReviewTerminal is this UI as the coordinator's terminal-side reviewer:
-// the shared approval modal, which any attached terminal can answer.
-func (m *Model) ReviewTerminal() review.Terminal { return reviewTerminal{m} }
-
-type reviewTerminal struct{ m *Model }
+// reviewTerminal is the session as the coordinator's terminal-side
+// reviewer; SetReview and ReviewTerminal live on Session (see session.go).
+type reviewTerminal struct{ s *Session }
 
 // Ask raises the approval modal and waits. It runs on the agent goroutine
 // (never inside Update), so the bridge is the same one tool approvals use:
@@ -33,8 +27,8 @@ func (t reviewTerminal) Ask(ctx context.Context, preview string) bool {
 	// previous write's: both messages cross to the Update goroutine through
 	// p.Send, and an editor that answers the instant the diff opens can get
 	// its cancel there first (see approvalMsg.gen).
-	gen := int(t.m.askGen.Add(1))
-	t.m.send(approvalMsg{action: "file_write", detail: preview, resp: resp, gen: gen})
+	gen := int(t.s.askGen.Add(1))
+	t.s.send(approvalMsg{action: "file_write", detail: preview, resp: resp, gen: gen})
 	select {
 	case ok := <-resp:
 		return ok
@@ -47,19 +41,19 @@ func (t reviewTerminal) Ask(ctx context.Context, preview string) bool {
 // carries the generation of the newest Ask — the one the coordinator is
 // withdrawing, since Decide handles one write at a time.
 func (t reviewTerminal) Withdraw(note string) {
-	t.m.send(approvalCancelMsg{note: note, gen: int(t.m.askGen.Load())})
+	t.s.send(approvalCancelMsg{note: note, gen: int(t.s.askGen.Load())})
 }
 
 // reviewCommand is /review: with no argument it reports the mode and what
 // auto currently resolves to; with one it sets the mode for the session.
-func (m *Model) reviewCommand(fields []string) {
+func (m *View) reviewCommand(fields []string) {
 	if m.review == nil {
-		m.appendEntry(entry{Kind: entryDim, Text: "review: not available in this session"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "review: not available in this session"})
 		return
 	}
 	if len(fields) > 1 {
 		if err := m.review.SetMode(review.Mode(strings.ToLower(fields[1]))); err != nil {
-			m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
+			m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
 			return
 		}
 	}
@@ -69,5 +63,5 @@ func (m *Model) reviewCommand(fields []string) {
 	// receives from (Detach, SetOverlay — see /detach). Clients() only takes
 	// h.mu long enough to copy the roster and notifies nobody, and no holder
 	// of h.mu ever blocks on the program, so it cannot deadlock.
-	m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("review: %s (resolves to %s)", m.review.Mode(), m.review.Resolve())})
+	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("review: %s (resolves to %s)", m.review.Mode(), m.review.Resolve())})
 }

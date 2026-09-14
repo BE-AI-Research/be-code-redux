@@ -19,7 +19,7 @@ type picker struct {
 	items   []pickItem
 	cursor  int
 	filter  string
-	onPick  func(m *Model, it pickItem) (tea.Model, tea.Cmd)
+	onPick  func(m *View, it pickItem) (tea.Model, tea.Cmd)
 	loading bool
 	inline  bool // rendered as a popup above the input (the "/" palette)
 	prefix  bool // rank label-prefix matches first, shortest first (commands)
@@ -37,8 +37,8 @@ type pickerItemsMsg struct {
 	err   error
 }
 
-func (m *Model) openPicker(title string, load func() ([]pickItem, error),
-	onPick func(*Model, pickItem) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
+func (m *View) openPicker(title string, load func() ([]pickItem, error),
+	onPick func(*View, pickItem) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
 	m.picker = &picker{title: title, onPick: onPick, loading: true}
 	m.mode = modePicker
 	return m, func() tea.Msg {
@@ -47,7 +47,7 @@ func (m *Model) openPicker(title string, load func() ([]pickItem, error),
 	}
 }
 
-func (m *Model) openModelPicker() (tea.Model, tea.Cmd) {
+func (m *View) openModelPicker() (tea.Model, tea.Cmd) {
 	return m.openPicker("Select model", func() ([]pickItem, error) {
 		models, err := m.prov.ListModels(m.rootCtx)
 		if err != nil {
@@ -62,14 +62,14 @@ func (m *Model) openModelPicker() (tea.Model, tea.Cmd) {
 			items = append(items, pickItem{id: mo.ID, label: mo.ID, desc: desc})
 		}
 		return items, nil
-	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+	}, func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 		m.ag.SetModel(it.id)
-		m.appendEntry(entry{Kind: entryOK, Text: "model set to " + it.id})
+		m.appendEntryLocked(entry{Kind: entryOK, Text: "model set to " + it.id})
 		return m, nil
 	})
 }
 
-func (m *Model) openProviderPicker() (tea.Model, tea.Cmd) {
+func (m *View) openProviderPicker() (tea.Model, tea.Cmd) {
 	return m.openPicker("Select provider", func() ([]pickItem, error) {
 		items := make([]pickItem, 0, len(m.cfg.Providers))
 		for name, pc := range m.cfg.Providers {
@@ -77,7 +77,7 @@ func (m *Model) openProviderPicker() (tea.Model, tea.Cmd) {
 		}
 		sortItems(items)
 		return items, nil
-	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+	}, func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 		return m.setProvider(it.id)
 	})
 }
@@ -85,7 +85,7 @@ func (m *Model) openProviderPicker() (tea.Model, tea.Cmd) {
 // openSessionPicker lists the saved sessions for from's terminal. The
 // owner is remembered because picking a row whose session is already live
 // switches that terminal to its host (see resumeFrom).
-func (m *Model) openSessionPicker(from int) (tea.Model, tea.Cmd) {
+func (m *View) openSessionPicker(from int) (tea.Model, tea.Cmd) {
 	m.pickerOwner = from
 	return m.openPicker("Resume session", func() ([]pickItem, error) {
 		metas, err := store.List()
@@ -93,7 +93,7 @@ func (m *Model) openSessionPicker(from int) (tea.Model, tea.Cmd) {
 			return nil, err
 		}
 		return m.sessionItems(metas), nil
-	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+	}, func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 		return m.resumeFrom(it.id, m.pickerOwner)
 	})
 }
@@ -101,7 +101,7 @@ func (m *Model) openSessionPicker(from int) (tea.Model, tea.Cmd) {
 // sessionItems turns saved-session metadata into picker rows, marking the
 // codes that already have a host running somewhere: those rows join the
 // live session instead of loading a second copy of its file.
-func (m *Model) sessionItems(metas []store.Meta) []pickItem {
+func (m *View) sessionItems(metas []store.Meta) []pickItem {
 	now := m.liveCodes()
 	items := make([]pickItem, 0, len(metas))
 	seen := map[string]bool{}
@@ -135,7 +135,7 @@ func (m *Model) sessionItems(metas []store.Meta) []pickItem {
 	return items
 }
 
-// liveSessionRecords is the default for Model.liveRecords: the hosts
+// liveSessionRecords is the default for Session.liveRecords: the hosts
 // advertised in ~/.be-code/live, minus the records whose host is gone
 // (live.List prunes those).
 func liveSessionRecords() []live.Record {
@@ -147,7 +147,7 @@ func liveSessionRecords() []live.Record {
 	return recs
 }
 
-// liveSessionCodes is the default for Model.liveCodes: the codes of
+// liveSessionCodes is the default for Session.liveCodes: the codes of
 // liveSessionRecords.
 func liveSessionCodes() map[string]bool {
 	codes := map[string]bool{}
@@ -197,7 +197,7 @@ func (p *picker) filtered() []pickItem {
 // session pickers, and the menu). from is the client that typed the key: it
 // refocuses that terminal's input line on the way out, and a confirmed pick
 // acts for it (see pickerOwner).
-func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
 		m.mode = m.idleMode()
@@ -241,14 +241,14 @@ func (m *Model) handlePickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// pickerUpdate handles async item loading; called from Model.Update.
-func (m *Model) pickerUpdate(msg pickerItemsMsg) {
+// pickerUpdate handles async item loading; called from View.Update.
+func (m *View) pickerUpdate(msg pickerItemsMsg) {
 	if m.picker == nil {
 		return
 	}
 	m.picker.loading = false
 	if msg.err != nil {
-		m.appendEntry(entry{Kind: entryErr, Text: msg.err.Error()})
+		m.appendEntryLocked(entry{Kind: entryErr, Text: msg.err.Error()})
 		m.picker = nil
 		m.mode = m.idleMode()
 		return
@@ -259,7 +259,7 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 // renderPickList draws the filtered items with the cursor, scrolled so the
 // cursor stays visible within maxRows. omitDesc drops item descriptions
 // entirely (narrow/compact layouts), keeping each row to its label.
-func (m *Model) renderPickList(p *picker, maxRows int, omitDesc bool) string {
+func (m *View) renderPickList(p *picker, maxRows int, omitDesc bool) string {
 	var b strings.Builder
 	if p.filter != "" {
 		b.WriteString(m.st.Dim.Render("filter: "+p.filter) + "\n")
@@ -303,7 +303,7 @@ func (m *Model) renderPickList(p *picker, maxRows int, omitDesc bool) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *Model) viewPicker() string {
+func (m *View) viewPicker() string {
 	p := m.picker
 	if p == nil {
 		return ""

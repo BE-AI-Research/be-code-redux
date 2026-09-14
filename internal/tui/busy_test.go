@@ -10,7 +10,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
-func busyModel(t *testing.T) *Model {
+func busyModel(t *testing.T) *View {
 	t.Helper()
 	m := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})

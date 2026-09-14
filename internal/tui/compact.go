@@ -20,7 +20,7 @@ const (
 
 // compact reports whether the reduced layout is in force: forced by
 // config, or automatic when the (shared) size is small.
-func (m *Model) compact() bool {
+func (m *View) compact() bool {
 	switch strings.ToLower(m.cfg.Layout) {
 	case "compact":
 		return true
@@ -59,7 +59,7 @@ func wheelGlyphASCII(pct int, busy bool, frame int) string {
 
 // ideMarker is the bottom-line editor-bridge marker: "⌘ ide" in full layout,
 // just "⌘" in compact, "IDE" for an ASCII client either way.
-func (m *Model) ideMarker() string {
+func (m *View) ideMarker() string {
 	if m.ascii {
 		return "IDE"
 	}
@@ -70,7 +70,7 @@ func (m *Model) ideMarker() string {
 }
 
 // clientsGlyph is the multi-terminal marker glyph, ASCII-safe when needed.
-func (m *Model) clientsGlyph() string {
+func (m *View) clientsGlyph() string {
 	if m.ascii {
 		return "#"
 	}
@@ -80,7 +80,7 @@ func (m *Model) clientsGlyph() string {
 // ---- popups ------------------------------------------------------------------
 
 // popupRows caps a popup's row count to 6 in compact layout.
-func (m *Model) popupRows(want int) int {
+func (m *View) popupRows(want int) int {
 	if m.compact() && want > 6 {
 		return 6
 	}
@@ -90,7 +90,7 @@ func (m *Model) popupRows(want int) int {
 // omitPopupDesc reports whether a popup should drop item descriptions to
 // save width. Gated on compact() first so "layout: full" overrides it even
 // in a narrow terminal, matching the documented override.
-func (m *Model) omitPopupDesc() bool {
+func (m *View) omitPopupDesc() bool {
 	return m.compact() && m.width < 60
 }
 
@@ -100,7 +100,7 @@ func (m *Model) omitPopupDesc() bool {
 // "/menu · <model> · <state>", the queue count as "qN" (⧉ stays reserved
 // for the clients marker), the IDE marker, and the clients marker — no
 // hint text.
-func (m *Model) compactBottomLine() string {
+func (m *View) compactBottomLine() string {
 	state := m.st.OK.Render("ready")
 	if m.running {
 		word := ""
@@ -126,7 +126,7 @@ func (m *Model) compactBottomLine() string {
 
 // compactMenuStatus is the two-line status block shown above the menu
 // entries in compact layout, in place of menuStatus's full row list.
-func (m *Model) compactMenuStatus() string {
+func (m *View) compactMenuStatus() string {
 	line1 := fmt.Sprintf("%s · %s", m.ag.Model, m.ag.Profile.Family)
 	line2 := fmt.Sprintf("context %d%% · session %dk tokens", m.ctxPercent(), m.usage.total/1000)
 	return m.st.Dim.Render(line1) + "\n" + m.st.Dim.Render(line2)

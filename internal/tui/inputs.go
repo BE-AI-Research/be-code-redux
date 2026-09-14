@@ -16,7 +16,7 @@ import (
 
 // newInputArea builds one textarea with the prompt, height and key
 // bindings every input line shares.
-func (m *Model) newInputArea() *textarea.Model {
+func (m *View) newInputArea() *textarea.Model {
 	ta := textarea.New()
 	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
 	ta.SetHeight(m.inputRows())
@@ -59,7 +59,7 @@ func setInputPrompt(ta *textarea.Model, compact bool) {
 
 // inputFor returns the textarea of one client, creating it on first use.
 // The in-process TUI is client 0.
-func (m *Model) inputFor(client int) *textarea.Model {
+func (m *View) inputFor(client int) *textarea.Model {
 	if m.inputs == nil {
 		m.inputs = map[int]*textarea.Model{}
 	}
@@ -71,16 +71,16 @@ func (m *Model) inputFor(client int) *textarea.Model {
 	return ta
 }
 
-// dropInput forgets a departed client's draft and its place in the shared
-// input history.
-func (m *Model) dropInput(client int) {
+// dropInput forgets a departed client's draft. Its place in the shared input
+// history is dropped by Session.SetClients, which owns everything the
+// terminals share.
+func (m *View) dropInput(client int) {
 	delete(m.inputs, client)
-	m.histFile.drop(client)
 }
 
 // inputRows is the height of the input area: three rows, or one in a
 // served session small enough for the compact layout.
-func (m *Model) inputRows() int {
+func (m *View) inputRows() int {
 	if m.served && m.compact() {
 		return 1
 	}
@@ -90,7 +90,7 @@ func (m *Model) inputRows() int {
 // wheelWidthNow is the width of the context-wheel column to the right of
 // the input row: the full glyph-plus-percentage field, or the unpadded
 // short form in compact layout.
-func (m *Model) wheelWidthNow() int {
+func (m *View) wheelWidthNow() int {
 	if m.compact() {
 		return 5 // glyph + "NN%", no fixed-width padding
 	}
@@ -99,7 +99,7 @@ func (m *Model) wheelWidthNow() int {
 
 // inputWidth is the width of one client's input line, leaving room for the
 // wheel column.
-func (m *Model) inputWidth() int {
+func (m *View) inputWidth() int {
 	w := m.width - m.wheelWidthNow() - 2
 	if w < 0 {
 		w = 0
@@ -109,7 +109,7 @@ func (m *Model) inputWidth() int {
 
 // blankInputRows is what the shared frame shows where each client's private
 // input rows will be spliced in.
-func (m *Model) blankInputRows() string {
+func (m *View) blankInputRows() string {
 	row := strings.Repeat(" ", m.inputWidth())
 	rows := make([]string, m.inputRows())
 	for i := range rows {
@@ -118,30 +118,11 @@ func (m *Model) blankInputRows() string {
 	return strings.Join(rows, "\n")
 }
 
-// clientLabel names a client for transcript prefixes and the bottom line.
-func (m *Model) clientLabel(client int) string {
-	for _, c := range m.clients {
-		if c.ID == client {
-			return c.Label
-		}
-	}
-	return "you"
-}
-
-// userPrefix is the transcript prefix for a user line: "you> " with a
-// single terminal, "<label>> " for every sender once several are attached.
-func (m *Model) userPrefix(client int) string {
-	if len(m.clients) > 1 {
-		return m.clientLabel(client) + "> "
-	}
-	return "you> "
-}
-
 // clientLabels joins the attached terminals' labels for the bottom line,
 // truncated with an ellipsis to fit room cells. With no usable room it
 // returns "": an untruncated list would overrun the row and wrap the
 // status line on every attached terminal.
-func (m *Model) clientLabels(room int) string {
+func (m *View) clientLabels(room int) string {
 	if room <= 1 {
 		return ""
 	}
@@ -159,7 +140,7 @@ func (m *Model) clientLabels(room int) string {
 // inputRow is the input area plus the context wheel at its right. In a
 // served session the frame is shared by every terminal, so the input rows
 // are left blank for the host to splice each client's own line into.
-func (m *Model) inputRow() string {
+func (m *View) inputRow() string {
 	body := m.blankInputRows()
 	if !m.served {
 		body = m.inputFor(0).View()

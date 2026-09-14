@@ -66,10 +66,12 @@ func TestReviewCommand(t *testing.T) {
 	m := newTestModel(t)
 	m.SetReview(review.New(review.ModeBoth, nil, m.ReviewTerminal(), nil))
 	m.slashCommand("/review", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "review: both (resolves to both)") {
 		t.Fatalf("mode line missing:\n%s", m.rendered.String())
 	}
 	m.slashCommand("/review tui", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "review: tui (resolves to tui)") {
 		t.Fatalf("mode not set:\n%s", m.rendered.String())
 	}
@@ -77,6 +79,7 @@ func TestReviewCommand(t *testing.T) {
 		t.Fatalf("coordinator mode = %q", m.review.Mode())
 	}
 	m.slashCommand("/review nonsense", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "nonsense") {
 		t.Fatalf("invalid mode not reported:\n%s", m.rendered.String())
 	}
@@ -85,6 +88,7 @@ func TestReviewCommand(t *testing.T) {
 	}
 	// auto with no roster (in-process) resolves to editor.
 	m.slashCommand("/review auto", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "review: auto (resolves to editor)") {
 		t.Fatalf("auto resolution missing:\n%s", m.rendered.String())
 	}

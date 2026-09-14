@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -23,7 +22,6 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
-	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/ui"
@@ -31,6 +29,12 @@ import (
 )
 
 // ---- messages from the agent goroutine ------------------------------------
+
+// entryMsg is one transcript entry the session has already recorded, on its
+// way to a view that has yet to render it. The entry itself lives on
+// Session.entries; this only says "render this, in your styles, at your
+// width" (see Session.appendEntryLocked and View.renderEntryLocal).
+type entryMsg struct{ e entry }
 
 type deltaMsg string
 type toolStartMsg struct{ name, args string }
@@ -44,7 +48,7 @@ type noticeMsg string
 // context budgeting): shown on the notice row for toastFor, never kept.
 type transientMsg string
 
-// toastTickMsg asks the model to expire the notice row if its time is up.
+// toastTickMsg asks the view to expire the notice row if its time is up.
 type toastTickMsg time.Time
 
 const toastFor = 20 * time.Second
@@ -117,89 +121,57 @@ const (
 	modeQueue       // queued-messages popup (edit/drop while a run is in progress)
 )
 
-// Model is the bubbletea model for the whole app.
-type Model struct {
-	cfg      *config.Config
-	ag       *agent.Agent
-	prov     provider.Provider
-	program  *tea.Program // set after construction for goroutine sends
-	rootCtx  context.Context
-	cancelFn context.CancelFunc
+// View is one terminal's view of a Session: the bubbletea model a single
+// program renders. It embeds the shared core, so every Session field and
+// method is reachable through promotion (m.ag, m.clients, m.appendEntry…)
+// while everything declared here is local to this terminal — its size, its
+// styles, its viewport, its drafts and the popups it has open.
+type View struct {
+	*Session
 
-	vp     viewport.Model
-	inputs map[int]*textarea.Model // one input line per client; 0 is the local terminal
-	spin   spinner.Model
-	mode   mode
-	width  int
-	height int
-	ready  bool
+	id      int    // the live client id this view renders for; 0 is the local terminal
+	label   string // how that terminal names itself
+	program *tea.Program
+
+	st       styles // this terminal's theme; see theme.go
+	richText bool   // markdown/syntax rendering enabled
+
+	vp      viewport.Model
+	modalVP viewport.Model
+	spin    spinner.Model
+	inputs  map[int]*textarea.Model // one input line per client; 0 is the local terminal
+
+	mode     mode
+	prevMode mode
+	picker   *picker
+	pending  *planReadyMsg // approved-plan-awaiting-decision
+	approval *approvalMsg
+	// approvalGen is the generation of the prompt currently open, and
+	// cancelledGen the newest generation already withdrawn — both owned by
+	// the Update goroutine (see approvalMsg.gen).
+	approvalGen  int
+	cancelledGen int
+
+	width, height int
+	ready         bool
+
+	rendered strings.Builder // the session's entries rendered with this view's styles at its width
+	// renderedN is how many of Session.entries are in that buffer. It is
+	// what lets rebuild() and the entryMsg stream coexist: a rebuild renders
+	// every entry recorded so far, so the entryMsgs still queued for those
+	// entries must not be rendered a second time when they arrive.
+	renderedN int
+	wrapped   string // the wrapped transcript the viewport shows
+	// Selection and clipboard (see selection.go, clipboard.go).
+	sel        *selection
+	wheelFrame int // rotation frame while busy
+
 	// quitHint remembers, per terminal, that this client's last key was a
 	// Ctrl+C on an empty input: the second one quits. It is per client
 	// because the confirmation belongs to the person who pressed it —
 	// otherwise A's Ctrl+C plus B's unrelated Ctrl+C would end a session
 	// neither of them asked to end.
 	quitHint map[int]bool
-	// ideAnnounced keeps the editor-bridge line to one appearance.
-	ideAnnounced bool
-	// initHinted keeps the "no BECODE.md" nudge to one appearance per session;
-	// initChecked latches the *check* too, since a WindowSizeMsg arrives on
-	// every resize and NeedsInitHint stats the workspace each time.
-	initHinted  bool
-	initChecked bool
-	// askGen numbers shared-review prompts (approvalMsg.gen). Written from
-	// the agent goroutine (reviewTerminal.Ask) and read by Withdraw on the
-	// same goroutine, so it is atomic rather than plain.
-	askGen atomic.Int64
-	// approvalGen is the generation of the prompt currently open, and
-	// cancelledGen the newest generation already withdrawn — both owned by
-	// the Update goroutine.
-	approvalGen  int
-	cancelledGen int
-	// startTurnHook is a test seam consulted at the top of startTurn; nil in
-	// production.
-	startTurnHook func(string)
-	// sendHook is a test seam consulted by send: with no tea.Program running
-	// there is nothing to deliver a message from another goroutine to, so a
-	// test routes them into a channel it drains into Update itself (see
-	// review_integration_test.go). nil in production.
-	sendHook func(tea.Msg)
-	// toast is the transient notice shown in yellow on the last transcript
-	// row until toastUntil; now is swappable for tests.
-	toast      string
-	toastUntil time.Time
-	now        func() time.Time
-
-	entries    []entry         // transcript, as raw entries; see entry.go
-	rendered   strings.Builder // entries rendered with this model's styles at its width
-	streaming  strings.Builder // current assistant text
-	statusNote string
-
-	approval *approvalMsg
-	modalVP  viewport.Model
-	// review decides where a file change is reviewed (editor diff, this
-	// terminal, or both with the first answer winning). Set by cmd after
-	// New; nil in tests that do not exercise it.
-	review *review.Coordinator
-
-	picker  *picker
-	pending *planReadyMsg // approved-plan-awaiting-decision
-	custom  map[string]commands.Command
-
-	histFile   *inputHistory
-	st         styles   // this terminal's theme; see theme.go
-	richText   bool     // markdown/syntax rendering enabled
-	usage      usageMsg // cached usage for the wheel and menu (see usageMsg)
-	wheelFrame int      // rotation frame while busy
-
-	// Selection and clipboard (see selection.go, clipboard.go).
-	sel            *selection
-	wrapped        string // the wrapped transcript the viewport shows
-	lastReply      string // last assistant answer, plain text
-	lastTool       string // last tool output, full
-	running        bool   // a run is in progress (mode may be a popup)
-	prevMode       mode
-	clipboardWrite func(string) error
-	clipboardRead  func() (string, error)
 
 	queueCursor  int // highlighted row in the queue popup
 	queueOwner   int // client whose queue the popup is showing
@@ -207,154 +179,26 @@ type Model struct {
 	menuOwner    int // client that opened /menu or the right-click menu
 	pickerOwner  int // client a picked row acts for (see handlePickerKey)
 
-	// Joining a live session instead of forking it (see resumeFrom):
-	// liveCodes reports which session codes have a host running somewhere,
-	// loadSession reads a saved session, and switchClient (served only,
-	// host.Switch) hands one terminal over to another session's host. All
-	// three are fields so tests can stand in for the filesystem and host.
-	liveCodes    func() map[string]bool
-	liveRecords  func() []live.Record // the advertised hosts, for sessions the store has no file for
-	loadSession  func(id string) (*store.Session, error)
-	switchClient func(id int, code string)
-	// switchPending is set between asking the host to switch a terminal and
-	// the roster that shows whether anyone is left (see updateClients).
-	switchPending bool
+	clipboardWrite func(string) error
+	clipboardRead  func() (string, error)
+	termWrite      func(string) // raw escape writer (terminal window colours); swappable for tests
 
-	termWrite func(string) // raw escape writer (terminal window colours); swappable for tests
+	ascii bool // some attached client cannot show UTF-8 glyphs
 
-	// Served mode (see served.go): running over a live.Host instead of the
-	// local terminal.
-	host    *live.Host
-	served  bool
-	clients []live.ClientInfo
-	// detachClient is host.Detach when served, nil in-process: it drops one
-	// attached terminal. It must never be called from inside Update: it
-	// notifies the host's callbacks, which p.Send into the very channel this
-	// goroutine is receiving from (see /detach, and the warning on
-	// live.Host.recompute). /detach hands it to Bubble Tea as a tea.Cmd,
-	// which runs on its own goroutine.
-	detachClient func(id int)
-	// dropKeyClient is the key pump's Drop when served: it retires a
-	// departed client's escape-sequence parser.
-	dropKeyClient func(id int)
-	// setOverlay is host.SetOverlay when served, nil in-process: it publishes
-	// one client's private input rows to the host so they ride on top of the
-	// next shared frame that client receives. See overlayFor/publishOverlay
-	// in served.go.
-	setOverlay func(id int, s string)
-	ascii      bool      // some attached client cannot show UTF-8 glyphs
-	idleSince  time.Time // last moment the session had a client or a run
+	mb *mailbox // broadcasts from the session, waiting to be rendered here
 }
 
-// New builds the TUI model.
-func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
-	st := stylesOr(cfg.Theme)
-	sp := spinner.New()
-	sp.Spinner = spinner.MiniDot
-	sp.Style = st.Accent
-
-	m := &Model{
-		cfg: cfg, ag: ag, prov: prov,
-		st:       st,
-		spin:     sp,
-		now:      time.Now,
-		histFile: loadInputHistory(ui.HistoryFile()),
-		custom:   commands.Load(ag.Tools.Root),
-		richText: cfg.Theme != "mono",
-
-		clipboardWrite: writeClipboard,
-		clipboardRead:  readClipboard,
-		termWrite:      writeTerminal,
-
-		liveCodes:   liveSessionCodes,
-		liveRecords: liveSessionRecords,
-		loadSession: store.Load,
-	}
-	ag.Tools.Approve = m.approveFromAgent
-	ag.Events = agent.Events{
-		OnDelta: func(t string) { m.send(deltaMsg(t)) },
-		OnToolStart: func(n, a string) {
-			m.send(toolStartMsg{n, a})
-			m.send(m.usageSnapshot())
-		},
-		OnToolEnd: func(n string, r tools.Result) {
-			m.send(toolEndMsg{n, r})
-			m.send(m.usageSnapshot())
-		},
-		OnNotice:    func(s string) { m.send(noticeMsg(s)) },
-		OnTransient: func(s string) { m.send(transientMsg(s)) },
-		OnReasoning: func() func(string) {
-			n, last := 0, 0
-			return func(t string) {
-				n += len(t)
-				if n-last >= 200 { // throttle status updates
-					last = n
-					m.send(thinkingMsg(n))
-				}
-			}
-		}(),
-	}
-	ag.Tools.OnStatus = func(s string) { m.send(statusMsg(s)) }
-	m.inputFor(0)               // the local terminal's input line; sized by the first layout()
-	m.usage = m.usageSnapshot() // pre-run, single-threaded: safe
-	return m
-}
-
-// usageSnapshot must be called only where the agent loop is quiescent:
-// before the program starts, inside agent event callbacks, or after a run
-// returns on its goroutine.
-func (m *Model) usageSnapshot() usageMsg {
-	return usageMsg{
-		ctxTokens: m.ag.History.Tokens(),
-		budget:    m.ag.History.Limit(),
-		total:     m.ag.Stats.PromptTokens + m.ag.Stats.CompletionTokens,
-	}
-}
-
-// Run starts the program (alt screen) and blocks until exit.
-func (m *Model) Run(ctx context.Context) error {
-	m.rootCtx = ctx
-	if m.cfg.ThemeTerminalColors {
-		m.termWrite(terminalColorSeq(m.cfg.Theme))
-		defer m.termWrite(terminalColorReset())
-	}
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	m.program = p
-	_, err := p.Run()
-	m.histFile.save()
-	return err
-}
-
-func (m *Model) send(msg tea.Msg) {
-	if m.sendHook != nil {
-		m.sendHook(msg)
-		return
-	}
-	if m.program != nil {
-		m.program.Send(msg)
-	}
-}
-
-// approveFromAgent bridges the agent goroutine into the UI event loop.
-func (m *Model) approveFromAgent(action, detail string) bool {
-	if action == "shell" && m.cfg.AutoApproveShell {
-		return true
-	}
-	if action == "file_write" && !m.cfg.ApproveFileWrites {
-		return true
-	}
-	resp := make(chan bool, 1)
-	m.send(approvalMsg{action: action, detail: detail, resp: resp})
-	return <-resp
-}
+// mailboxForTest exposes this view's mailbox so a test can deliver what the
+// session broadcast without running the delivery goroutine (see flush).
+func (m *View) mailboxForTest() *mailbox { return m.mb }
 
 // ---- tea.Model -------------------------------------------------------------
 
-func (m *Model) Init() tea.Cmd {
+func (m *View) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, m.spin.Tick, m.pingCmd())
 }
 
-func (m *Model) pingCmd() tea.Cmd {
+func (m *View) pingCmd() tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.prov.Ping(m.rootCtx)
 		if err != nil {
@@ -381,7 +225,9 @@ func (m *Model) pingCmd() tea.Cmd {
 // individual call site. Otherwise, a keystroke republishes only its
 // sender — update's own cases (WindowSizeMsg, clientsMsg, and the
 // modeInput tail loop) already republish everyone for their own triggers.
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	wasVisible := m.overlayVisible()
 	model, cmd := m.update(msg)
 	nowVisible := m.overlayVisible()
@@ -393,13 +239,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		m.publishVisibilityChange(wasVisible, nowVisible)
 	}
+	// Render this view's own broadcasts before the frame Bubble Tea draws
+	// from this return: everything update just appended went out as an
+	// entryMsg, and waiting for the mailbox goroutine to bring it back round
+	// through p.Send would leave the transcript one message behind its own
+	// keystroke. The mailbox goroutine still matters — it is how broadcasts
+	// from *other* goroutines wake this program — it simply finds the queue
+	// already empty for the ones raised here.
+	if drained := m.mb.drainInto(m); drained != nil {
+		cmd = tea.Batch(cmd, drained)
+	}
 	return model, cmd
 }
 
 // publishAfterKey publishes the right set of overlays after a keystroke:
 // clear/republish the whole roster if the key just flipped overlayVisible
 // (see publishVisibilityChange), or just the sender otherwise.
-func (m *Model) publishAfterKey(wasVisible, nowVisible bool, client int) {
+func (m *View) publishAfterKey(wasVisible, nowVisible bool, client int) {
 	if m.publishVisibilityChange(wasVisible, nowVisible) {
 		return
 	}
@@ -411,7 +267,7 @@ func (m *Model) publishAfterKey(wasVisible, nowVisible bool, client int) {
 // real rows if it just went false→true (a modal closed). Reports whether
 // either happened, so callers know not to do anything more granular of
 // their own for this message.
-func (m *Model) publishVisibilityChange(wasVisible, nowVisible bool) bool {
+func (m *View) publishVisibilityChange(wasVisible, nowVisible bool) bool {
 	switch {
 	case wasVisible && !nowVisible:
 		m.clearAllOverlays()
@@ -423,7 +279,7 @@ func (m *Model) publishVisibilityChange(wasVisible, nowVisible bool) bool {
 	return false
 }
 
-func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	enteredMode := m.mode
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
@@ -436,7 +292,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// wipes anything printed before it opened. Once only.
 		if !m.ideAnnounced && m.ag.IDEName != "" {
 			m.ideAnnounced = true
-			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)})
 		}
 		// Nudge once toward /init for a project with no notes file yet. The
 		// check itself is latched, not just the hint: this runs on every
@@ -445,7 +301,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initChecked = true
 			if ui.NeedsInitHint(m.ag.Tools.Root) {
 				m.initHinted = true
-				m.appendEntry(entry{Kind: entryDim, Text: ui.InitHint})
+				m.appendEntryLocked(entry{Kind: entryDim, Text: ui.InitHint})
 			}
 		}
 		m.rebuild()
@@ -462,24 +318,32 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.wheelTick()
 		}
 		return m, nil
+	case entryMsg:
+		// The session already recorded it; this view renders it — unless a
+		// rebuild has overtaken it (see renderedN), in which case it is
+		// already on screen and this copy is dropped.
+		if m.renderedN < len(m.entries) {
+			m.renderEntryLocal(msg.e)
+			m.renderedN++
+		}
 	case deltaMsg:
 		m.streaming.WriteString(string(msg))
 		m.refreshTranscript()
 	case toolStartMsg:
 		m.flushStreaming()
-		m.appendEntry(entry{Kind: entryTool, Label: msg.name, Text: msg.args})
+		m.appendEntryLocked(entry{Kind: entryTool, Label: msg.name, Text: msg.args})
 		m.statusNote = "running " + msg.name
 	case toolEndMsg:
 		m.lastTool = msg.res.Content
 		if msg.res.IsError {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
-			m.appendEntry(entry{Kind: entryToolErr, Text: first})
+			m.appendEntryLocked(entry{Kind: entryToolErr, Text: first})
 		} else {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
 			if len(first) > 100 {
 				first = first[:100] + "…"
 			}
-			m.appendEntry(entry{Kind: entryToolOK, Text: first})
+			m.appendEntryLocked(entry{Kind: entryToolOK, Text: first})
 		}
 		m.statusNote = "thinking"
 	case thinkingMsg:
@@ -500,9 +364,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The editor context note is ambient information, not a warning:
 		// render it dimmed and unlabelled.
 		if strings.HasPrefix(string(msg), "[editor:") {
-			m.appendEntry(entry{Kind: entryDim, Text: string(msg)})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: string(msg)})
 		} else {
-			m.appendEntry(entry{Kind: entryNote, Text: string(msg)})
+			m.appendEntryLocked(entry{Kind: entryNote, Text: string(msg)})
 		}
 	case statusMsg:
 		m.statusNote = string(msg)
@@ -541,7 +405,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// duplicate withdrawal is a no-op: the modal is already gone.
 		if m.mode == modeApproval && m.approval != nil {
 			if msg.note != "" {
-				m.appendEntry(entry{Kind: entryDim, Text: msg.note})
+				m.appendEntryLocked(entry{Kind: entryDim, Text: msg.note})
 			}
 			m.approval = nil
 			m.approvalGen = 0
@@ -554,29 +418,29 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushStreaming()
 		if msg.err != nil {
 			if msg.err != context.Canceled && !strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendEntry(entry{Kind: entryError, Label: "error ", Text: msg.err.Error()})
+				m.appendEntryLocked(entry{Kind: entryError, Label: "error ", Text: msg.err.Error()})
 			} else {
-				m.appendEntry(entry{Kind: entryWarn, Text: "cancelled"})
+				m.appendEntryLocked(entry{Kind: entryWarn, Text: "cancelled"})
 			}
 		}
 		if msg.rep != nil && msg.rep.Verify != nil {
 			for _, line := range strings.Split(msg.rep.Verify.Human(), "\n") {
-				m.appendEntry(entry{Kind: entryDim, Text: line})
+				m.appendEntryLocked(entry{Kind: entryDim, Text: line})
 			}
 			if msg.rep.Verify.Passed() {
-				m.appendEntry(entry{Kind: entryOK, Text: "✓ verified"})
+				m.appendEntryLocked(entry{Kind: entryOK, Text: "✓ verified"})
 			} else {
-				m.appendEntry(entry{Kind: entryErr, Text: "✗ verification failed after repairs"})
+				m.appendEntryLocked(entry{Kind: entryErr, Text: "✗ verification failed after repairs"})
 			}
 		}
 		if msg.rep != nil && msg.rep.Reviewed {
 			if msg.rep.ReviewIssues == "" {
-				m.appendEntry(entry{Kind: entryOK, Text: "✓ reviewer approved"})
+				m.appendEntryLocked(entry{Kind: entryOK, Text: "✓ reviewer approved"})
 			} else {
-				m.appendEntry(entry{Kind: entryWarn, Text: "reviewer raised issues (repair attempted)"})
+				m.appendEntryLocked(entry{Kind: entryWarn, Text: "reviewer raised issues (repair attempted)"})
 			}
 		}
-		m.appendEntry(entry{Kind: entryPlain})
+		m.appendEntryLocked(entry{Kind: entryPlain})
 		m.running = false
 		if m.mode == modeBusy {
 			m.mode = modeInput
@@ -589,7 +453,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if left := m.ag.DrainItems(); len(left) > 0 {
 			texts := make([]string, 0, len(left))
 			for _, it := range left {
-				m.appendEntry(entry{Kind: entryUser, Label: m.userPrefix(it.From), Text: it.Text})
+				m.appendEntryLocked(entry{Kind: entryUser, Label: m.userPrefix(it.From), Text: it.Text})
 				texts = append(texts, it.Text)
 			}
 			return m.startTurn(strings.Join(texts, "\n"))
@@ -605,12 +469,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) || strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendEntry(entry{Kind: entryWarn, Text: "cancelled"})
+				m.appendEntryLocked(entry{Kind: entryWarn, Text: "cancelled"})
 			} else {
-				m.appendEntry(entry{Kind: entryError, Label: "init failed: ", Text: msg.err.Error()})
+				m.appendEntryLocked(entry{Kind: entryError, Label: "init failed: ", Text: msg.err.Error()})
 			}
 		} else {
-			m.appendEntry(entry{Kind: entryOK, Text: "wrote " + msg.path})
+			m.appendEntryLocked(entry{Kind: entryOK, Text: "wrote " + msg.path})
 		}
 		// Queued as a Cmd, not sent here directly: m.send is p.Send on the
 		// unbuffered channel this very update goroutine reads from, so a
@@ -620,7 +484,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
-			m.appendEntry(entry{Kind: entryError, Label: "plan failed: ", Text: msg.err.Error()})
+			m.appendEntryLocked(entry{Kind: entryError, Label: "plan failed: ", Text: msg.err.Error()})
 			m.mode = modeInput
 			m.focusInputs()
 			break
@@ -693,7 +557,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // is the local terminal). Drafts, the palette and the queue popup belong to
 // their sender; modals that speak for the whole session (approvals, plans,
 // pickers) stay shared.
-func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeApproval:
 		return m.handleApprovalKey(k)
@@ -736,7 +600,7 @@ func (m *Model) handleKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 // the mode switch that would have hidden the owner's popup is rolled back,
 // and the owner's own Esc lands them in m.idleMode(), which is modeBusy
 // while that turn runs.
-func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	// Everything the popup is made of, put back exactly as it was once the
 	// guest's key has had its effect on the guest's own draft. A guest key
 	// that would have opened a popup of its own (its own palette, its own
@@ -752,7 +616,7 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	// turnDoneMsg) that would rewrite or close whatever popup is open by
 	// then — the owner's. Busy mode already refuses commands.
 	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
-		m.appendEntry(entry{Kind: entryDim, Text: "commands wait until the open popup closes; plain text still sends"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "commands wait until the open popup closes; plain text still sends"})
 		return m, nil
 	}
 	mode, pick, prev := m.mode, m.picker, m.prevMode
@@ -780,21 +644,21 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 // setQuitHint arms one terminal's "press Ctrl+C again to quit", and
 // clearQuitHint disarms it. Only the sender's own hint moves: a Ctrl+C from
 // another terminal is about that terminal's draft, not this one's.
-func (m *Model) setQuitHint(from int) {
+func (m *View) setQuitHint(from int) {
 	if m.quitHint == nil {
 		m.quitHint = map[int]bool{}
 	}
 	m.quitHint[from] = true
 }
 
-func (m *Model) clearQuitHint(from int) {
+func (m *View) clearQuitHint(from int) {
 	delete(m.quitHint, from)
 }
 
 // handleInputKey is modeInput: the key edits, submits or acts on the
 // sender's own draft. Reached both from handleKey and, for a client that
 // does not own the popup currently on screen, from handleGuestKey.
-func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC:
@@ -813,7 +677,7 @@ func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.setQuitHint(from)
-		m.appendEntry(entry{Kind: entryDim, Text: "press Ctrl+C again to quit"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "press Ctrl+C again to quit"})
 		return m, nil
 	case tea.KeyEnter:
 		text := strings.TrimSpace(in.Value())
@@ -864,7 +728,7 @@ func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *Model) handleApprovalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *View) handleApprovalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(k.String()) {
 	case "y":
 		m.resolveApproval(true, "")
@@ -889,7 +753,7 @@ func (m *Model) handleApprovalKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) resolveApproval(ok bool, note string) {
+func (m *View) resolveApproval(ok bool, note string) {
 	if m.approval == nil {
 		return
 	}
@@ -897,9 +761,9 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	if ok {
 		verdict = "approved"
 	}
-	m.appendEntry(entry{Kind: entryVerdict, Label: m.approval.action, Text: verdict})
+	m.appendEntryLocked(entry{Kind: entryVerdict, Label: m.approval.action, Text: verdict})
 	if note != "" {
-		m.appendEntry(entry{Kind: entryDim, Text: note})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: note})
 	}
 	m.approval.resp <- ok
 	m.approval = nil
@@ -909,14 +773,14 @@ func (m *Model) resolveApproval(ok bool, note string) {
 
 // startTurnFrom echoes the request under its sender's prefix and launches
 // the agent.
-func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
-	m.appendEntry(entry{Kind: entryUser, Label: m.userPrefix(from), Text: text})
+func (m *View) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
+	m.appendEntryLocked(entry{Kind: entryUser, Label: m.userPrefix(from), Text: text})
 	return m.startTurn(text)
 }
 
 // startTurn launches the agent in a goroutine. The caller has already
 // echoed the request into the transcript.
-func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
+func (m *View) startTurn(text string) (tea.Model, tea.Cmd) {
 	if m.startTurnHook != nil {
 		m.startTurnHook(text)
 	}
@@ -946,7 +810,7 @@ func (m *Model) startTurn(text string) (tea.Model, tea.Cmd) {
 // handleBusyKey: while the agent works the input stays live. Enter queues
 // the text for delivery at the model's next call; Esc/Ctrl-C cancels the
 // run and discards the queue; PgUp/PgDn scroll; everything else edits.
-func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	in := m.inputFor(from)
 	switch k.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
@@ -959,7 +823,7 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			m.cancelFn()
 		}
 		if n := len(m.ag.DrainInbox()); n > 0 {
-			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("discarded %d queued message(s)", n)})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("discarded %d queued message(s)", n)})
 		}
 		return m, nil
 	case tea.KeyEnter:
@@ -973,15 +837,15 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 				m.histFile.add(text, from)
 				return m.slashCommand(text, from)
 			}
-			m.appendEntry(entry{Kind: entryDim, Text: "commands wait until the agent is done (Esc cancels); plain text is queued"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "commands wait until the agent is done (Esc cancels); plain text is queued"})
 			return m, nil
 		}
 		m.histFile.add(text, from)
 		m.ag.EnqueueFrom(text, from)
 		if len(m.clients) > 1 {
-			m.appendEntry(entry{Kind: entryQueued, Label: "queued> ", Text: m.userPrefix(from) + text})
+			m.appendEntryLocked(entry{Kind: entryQueued, Label: "queued> ", Text: m.userPrefix(from) + text})
 		} else {
-			m.appendEntry(entry{Kind: entryQueued, Label: "queued (delivered at the next step)> ", Text: text})
+			m.appendEntryLocked(entry{Kind: entryQueued, Label: "queued (delivered at the next step)> ", Text: text})
 		}
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -1005,7 +869,7 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 }
 
 // handlePlanKey resolves the plan-approval modal.
-func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *View) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.pending
 	if p == nil {
 		m.mode = modeInput
@@ -1014,7 +878,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(k.String()) {
 	case "y":
 		m.pending = nil
-		m.appendEntry(entry{Kind: entryOK, Text: "plan approved — executing"})
+		m.appendEntryLocked(entry{Kind: entryOK, Text: "plan approved — executing"})
 		m.mode = modeBusy
 		m.statusNote = "executing plan"
 		ctx, cancel := context.WithCancel(m.rootCtx)
@@ -1026,7 +890,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}()
 	case "n", "esc":
 		m.pending = nil
-		m.appendEntry(entry{Kind: entryWarn, Text: "plan discarded"})
+		m.appendEntryLocked(entry{Kind: entryWarn, Text: "plan discarded"})
 		m.mode = modeInput
 		m.focusInputs()
 	default:
@@ -1039,10 +903,11 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ---- transcript helpers ----------------------------------------------------
 
-// appendEntry records one transcript entry and renders it for this
-// terminal.
-func (m *Model) appendEntry(e entry) {
-	m.entries = append(m.entries, e)
+// renderEntryLocal renders one entry into this view's own buffer. It is the
+// second half of Session.appendEntryLocked: the entry is already on the
+// shared transcript, and this is the view's private rendering of it, at its
+// width and in its theme.
+func (m *View) renderEntryLocal(e entry) {
 	m.rendered.WriteString(renderEntry(e, m.st, m.width, m.compact(), m.richText))
 	m.rendered.WriteString("\n")
 	m.refreshTranscript()
@@ -1050,26 +915,27 @@ func (m *Model) appendEntry(e entry) {
 
 // rebuild re-renders every entry — after a theme change or a resize, since
 // tool-argument truncation and Markdown colouring depend on both.
-func (m *Model) rebuild() {
+func (m *View) rebuild() {
 	m.rendered.Reset()
 	for _, e := range m.entries {
 		m.rendered.WriteString(renderEntry(e, m.st, m.width, m.compact(), m.richText))
 		m.rendered.WriteString("\n")
 	}
+	m.renderedN = len(m.entries)
 	m.refreshTranscript()
 }
 
-func (m *Model) flushStreaming() {
+func (m *View) flushStreaming() {
 	if m.streaming.Len() == 0 {
 		return
 	}
 	text := strings.TrimRight(m.streaming.String(), "\n")
 	m.lastReply = text
 	m.streaming.Reset()
-	m.appendEntry(entry{Kind: entryAssistant, Text: text})
+	m.appendEntryLocked(entry{Kind: entryAssistant, Text: text})
 }
 
-func (m *Model) refreshTranscript() {
+func (m *View) refreshTranscript() {
 	if !m.ready {
 		return
 	}
@@ -1090,16 +956,16 @@ const PublicVersion = "v1.0"
 // drawn; below it the rows go to the transcript.
 const headerMinRows = 30
 
-func (m *Model) showHeader() bool { return m.height >= headerMinRows && !m.compact() }
+func (m *View) showHeader() bool { return m.height >= headerMinRows && !m.compact() }
 
-func (m *Model) headerHeight() int {
+func (m *View) headerHeight() int {
 	if m.showHeader() {
 		return 5 // 3-row title box, attribution line, dashed rule
 	}
 	return 0
 }
 
-func (m *Model) layout() {
+func (m *View) layout() {
 	bottomH := 1
 	vpH := m.height - m.headerHeight() - m.inputRows() - bottomH - 1
 	if vpH < 3 {
@@ -1117,14 +983,14 @@ func (m *Model) layout() {
 // focusInputs refocuses every client's input line after a modal closes, and
 // republishes every client's overlay since a focus change can alter what a
 // textarea renders.
-func (m *Model) focusInputs() {
+func (m *View) focusInputs() {
 	for _, ta := range m.inputs {
 		ta.Focus()
 	}
 	m.publishAllOverlays()
 }
 
-func (m *Model) modalHeight() int {
+func (m *View) modalHeight() int {
 	if m.compact() {
 		h := m.height - 3
 		if h < 3 {
@@ -1141,7 +1007,9 @@ func (m *Model) modalHeight() int {
 
 // ---- view ------------------------------------------------------------------
 
-func (m *Model) View() string {
+func (m *View) View() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.ready {
 		return "loading…"
 	}
@@ -1208,7 +1076,7 @@ func (m *Model) View() string {
 
 // headerView draws the branded header: boxed title, logo at the right,
 // attribution, dashed rule.
-func (m *Model) headerView() string {
+func (m *View) headerView() string {
 	box := m.st.Border.Render("BE-Code Redux")
 	lines := strings.Split(box, "\n")
 	code := "—"
@@ -1229,7 +1097,7 @@ func (m *Model) headerView() string {
 }
 
 // bottomLine is the single row under the input: menu hint, model, state.
-func (m *Model) bottomLine() string {
+func (m *View) bottomLine() string {
 	if m.compact() {
 		return m.compactBottomLine()
 	}
@@ -1269,7 +1137,7 @@ func shortModel(name string) string {
 	return name
 }
 
-func (m *Model) viewApproval() string {
+func (m *View) viewApproval() string {
 	title := "Shell command"
 	hint := "y approve · n deny · a always-approve shell · ↑↓ scroll"
 	if m.approval != nil && m.approval.action == "file_write" {
@@ -1286,7 +1154,7 @@ func (m *Model) viewApproval() string {
 
 // ---- slash commands --------------------------------------------------------
 
-func (m *Model) completeSlash(from int) {
+func (m *View) completeSlash(from int) {
 	in := m.inputFor(from)
 	v := in.Value()
 
@@ -1298,7 +1166,7 @@ func (m *Model) completeSlash(from int) {
 			in.SetValue(v[:i+1] + matches[0])
 			in.CursorEnd()
 		} else if len(matches) > 1 {
-			m.appendEntry(entry{Kind: entryDim, Text: "@" + strings.Join(matches, "  @")})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "@" + strings.Join(matches, "  @")})
 		}
 		return
 	}
@@ -1320,14 +1188,14 @@ func (m *Model) completeSlash(from int) {
 		in.SetValue(matches[0] + " ")
 		in.CursorEnd()
 	} else if len(matches) > 1 {
-		m.appendEntry(entry{Kind: entryDim, Text: strings.Join(matches, "  ")})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(matches, "  ")})
 	}
 }
 
 // slashCommand runs a command typed by client from (0 is the local
 // terminal): commands that fill an input line or act on a terminal need to
 // know whose.
-func (m *Model) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
+func (m *View) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(text)
 	switch fields[0] {
 	case "/quit", "/exit", "/q":
@@ -1361,16 +1229,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		if len(m.custom) > 0 {
 			help += "\ncustom: /" + strings.Join(commands.Names(m.custom), " /")
 		}
-		m.appendEntry(entry{Kind: entryDim, Text: help})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: help})
 	case "/clear":
 		m.ag.History.Messages = nil
 		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
-		m.appendEntry(entry{Kind: entryOK, Text: "history cleared; new session started"})
+		m.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
 	case "/tools":
-		m.appendEntry(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
 	case "/config":
 		p, _ := config.Path()
-		m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf(
+		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"%s\nprovider=%s model=%s ui=%s ctx=%d max_turns=%d max_repairs=%d compat=%s previews=%v",
 			p, m.cfg.DefaultProvider, m.cfg.Model, m.cfg.UI, m.cfg.ContextTokens,
 			m.cfg.MaxTurns, m.cfg.MaxRepairs, m.cfg.CompatToolCalls, m.cfg.ApproveFileWrites)})
@@ -1385,17 +1253,17 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/model":
 		if len(fields) > 1 {
 			m.ag.SetModel(fields[1])
-			m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)})
+			m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)})
 			break
 		}
 		return m.openModelPicker()
 	case "/undo":
 		restored, err := m.ag.Undo()
 		if err != nil {
-			m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
+			m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
 			break
 		}
-		m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("restored: %s (%d undo levels left)",
+		m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("restored: %s (%d undo levels left)",
 			strings.Join(restored, ", "), m.ag.Checkpoints.Depth())})
 	case "/commit":
 		m.mode = modeBusy
@@ -1450,23 +1318,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/stats":
 		s := m.ag.Stats
-		m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf(
+		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
 			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)})
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
-			m.appendEntry(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})
 		} else {
-			m.appendEntry(entry{Kind: entryDim, Text: mp})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: mp})
 		}
 	case "/plan":
 		req := strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
 		if req == "" {
-			m.appendEntry(entry{Kind: entryErr, Text: "usage: /plan <task description>"})
+			m.appendEntryLocked(entry{Kind: entryErr, Text: "usage: /plan <task description>"})
 			break
 		}
-		m.appendEntry(entry{Kind: entryUser, Label: "plan> ", Text: req})
+		m.appendEntryLocked(entry{Kind: entryUser, Label: "plan> ", Text: req})
 		m.mode = modeBusy
 		m.statusNote = "planning (read-only)"
 		for _, ta := range m.inputs {
@@ -1490,29 +1358,29 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/handoff":
 		if h := m.ag.Handoff(); h != "" {
 			for _, line := range strings.Split(h, "\n") {
-				m.appendEntry(entry{Kind: entryDim, Text: line})
+				m.appendEntryLocked(entry{Kind: entryDim, Text: line})
 			}
 		} else {
-			m.appendEntry(entry{Kind: entryDim, Text: "no handoff briefing in this session"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "no handoff briefing in this session"})
 		}
 	case "/review":
 		m.reviewCommand(fields)
 	case "/clients":
 		if !m.served {
-			m.appendEntry(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
 			return m, nil
 		}
 		if len(m.clients) == 0 {
-			m.appendEntry(entry{Kind: entryDim, Text: "no terminals attached"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "no terminals attached"})
 			return m, nil
 		}
 		for _, c := range m.clients {
-			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)})
 		}
 		return m, nil
 	case "/detach":
 		if m.detachClient == nil {
-			m.appendEntry(entry{Kind: entryDim, Text: "nothing to detach: not served"})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "nothing to detach: not served"})
 			return m, nil
 		}
 		// As a command, not a call: detaching makes the host notify its
@@ -1532,21 +1400,21 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 			return m.startTurnFrom(c.Expand(args), from)
 		}
-		m.appendEntry(entry{Kind: entryErr, Text: "unknown command " + fields[0] + " (/help)"})
+		m.appendEntryLocked(entry{Kind: entryErr, Text: "unknown command " + fields[0] + " (/help)"})
 	}
 	return m, nil
 }
 
-func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
+func (m *View) setProvider(name string) (tea.Model, tea.Cmd) {
 	p, err := provider.FromConfig(m.cfg, name)
 	if err != nil {
-		m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
+		m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
 		return m, nil
 	}
 	m.prov = p
 	m.ag.Provider = p
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
-	m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
+	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
 	return m, m.pingCmd()
 }
 
@@ -1555,7 +1423,7 @@ func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 // forked: two programs on one session file are blind to each other's turns
 // and overwrite each other's saves. from is the terminal that asked, which
 // is the one handed over to the live host.
-func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
+func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	// The live registry answers before the store: a host's session exists
 	// in memory before its first autosave, so a live code may have no file
 	// yet (the same order as the launcher's decideStart).
@@ -1564,7 +1432,7 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	}
 	s, err := m.loadSession(id)
 	if err != nil {
-		m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
+		m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
 		return m, nil
 	}
 	code := s.ResumeCode()
@@ -1572,22 +1440,22 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 		return m.joinLive(code, from)
 	}
 	m.ag.Resume(s)
-	m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))})
+	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))})
 	if s.Handoff != "" {
-		m.appendEntry(entry{Kind: entryDim, Text: "handoff briefing loaded into the system prompt; /handoff shows it"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "handoff briefing loaded into the system prompt; /handoff shows it"})
 	}
 	return m, nil
 }
 
 // ownCode reports whether code is this program's own session, which is live
 // by definition; resuming it is a no-op, not a switch to itself.
-func (m *Model) ownCode(code string) bool {
+func (m *View) ownCode(code string) bool {
 	return m.ag.Session != nil && m.ag.Session.ResumeCode() == code
 }
 
 // joinLive hands from's terminal to the host of a live code instead of
 // loading a second copy of its session.
-func (m *Model) joinLive(code string, from int) (tea.Model, tea.Cmd) {
+func (m *View) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 	if m.served && m.switchClient != nil {
 		m.switchPending = true
 		// As a command, not a call: the host notifies its callbacks, which
@@ -1595,6 +1463,6 @@ func (m *Model) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 		sw, c := m.switchClient, from
 		return m, func() tea.Msg { sw(c, code); return nil }
 	}
-	m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)})
+	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)})
 	return m, nil
 }

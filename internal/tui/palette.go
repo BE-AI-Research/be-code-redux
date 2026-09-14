@@ -18,7 +18,7 @@ import (
 
 // ---- palette -----------------------------------------------------------------
 
-func (m *Model) slashEntries() []pickItem {
+func (m *View) slashEntries() []pickItem {
 	items := make([]pickItem, 0, len(ui.SlashCommandTable)+len(m.custom))
 	for _, c := range ui.SlashCommandTable {
 		desc := c.Desc
@@ -45,10 +45,10 @@ func (m *Model) slashEntries() []pickItem {
 // openPalette shows the command popup with an initial filter (text typed
 // after the slash). The popup belongs to the client that opened it: it
 // fills that client's input line, and only its keys reach it.
-func (m *Model) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
+func (m *View) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
 	m.paletteOwner = from
 	m.picker = &picker{title: "Commands", items: m.slashEntries(), filter: initial, inline: true, prefix: true,
-		onPick: func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+		onPick: func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 			if it.args {
 				in := m.inputFor(m.paletteOwner)
 				in.SetValue(it.id + " ")
@@ -62,7 +62,7 @@ func (m *Model) openPalette(initial string, from int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.paletteOwner {
 		// Another terminal's keys are none of this popup's business — but
 		// they are that terminal's own business (see handleGuestKey).
@@ -111,7 +111,7 @@ func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 }
 
 // paletteBox renders the popup: title, up to 8 matching entries.
-func (m *Model) paletteBox() string {
+func (m *View) paletteBox() string {
 	p := m.picker
 	var b strings.Builder
 	b.WriteString(m.st.ModalTi.Render("/ commands") + m.st.Dim.Render("  ↑↓ pick · Enter run · Tab fill · Esc close"))
@@ -152,7 +152,7 @@ func (m *Model) paletteBox() string {
 
 // ---- theme picker ------------------------------------------------------------
 
-func (m *Model) themeItems() []pickItem {
+func (m *View) themeItems() []pickItem {
 	items := make([]pickItem, 0, len(themes))
 	for _, n := range ThemeNames() {
 		p := themes[n]
@@ -165,16 +165,16 @@ func (m *Model) themeItems() []pickItem {
 	return items
 }
 
-func (m *Model) openThemePicker() (tea.Model, tea.Cmd) {
+func (m *View) openThemePicker() (tea.Model, tea.Cmd) {
 	return m.openPicker("Theme", func() ([]pickItem, error) { return m.themeItems(), nil },
-		func(m *Model, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id) })
+		func(m *View, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id) })
 }
 
 // applyTheme switches the live palette and persists the choice.
-func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
+func (m *View) applyTheme(name string) (tea.Model, tea.Cmd) {
 	st, ok := newStyles(name)
 	if !ok {
-		m.appendEntry(entry{Kind: entryErr, Text: "unknown theme " + name + "; try /theme to pick one"})
+		m.appendEntryLocked(entry{Kind: entryErr, Text: "unknown theme " + name + "; try /theme to pick one"})
 		return m, nil
 	}
 	m.st = st
@@ -185,9 +185,9 @@ func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
 		m.termWrite(terminalColorSeq(name))
 	}
 	if err := m.cfg.Save(); err != nil {
-		m.appendEntry(entry{Kind: entryWarn, Text: "theme set to " + name + " for this session; could not save config: " + err.Error()})
+		m.appendEntryLocked(entry{Kind: entryWarn, Text: "theme set to " + name + " for this session; could not save config: " + err.Error()})
 	} else {
-		m.appendEntry(entry{Kind: entryOK, Text: "theme set to " + name})
+		m.appendEntryLocked(entry{Kind: entryOK, Text: "theme set to " + name})
 	}
 	m.rebuild()
 	return m, nil
@@ -197,24 +197,24 @@ func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
 
 type menuEntry struct {
 	group, label, desc string
-	run                func(m *Model) (tea.Model, tea.Cmd)
+	run                func(m *View) (tea.Model, tea.Cmd)
 }
 
 // menuEntries builds the grouped menu. Its commands run as the client that
 // opened the menu — "Detach this terminal" has to mean the terminal whose
 // user picked it, not whoever happened to press a key.
-func (m *Model) menuEntries(owner int) []menuEntry {
-	cmd := func(c string) func(*Model) (tea.Model, tea.Cmd) {
-		return func(m *Model) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
+func (m *View) menuEntries(owner int) []menuEntry {
+	cmd := func(c string) func(*View) (tea.Model, tea.Cmd) {
+		return func(m *View) (tea.Model, tea.Cmd) { return m.slashCommand(c, owner) }
 	}
 	return []menuEntry{
-		{"Sessions", "Resume a saved session", "pick from the session list", func(m *Model) (tea.Model, tea.Cmd) { return m.openSessionPicker(owner) }},
+		{"Sessions", "Resume a saved session", "pick from the session list", func(m *View) (tea.Model, tea.Cmd) { return m.openSessionPicker(owner) }},
 		{"Sessions", "New session", "clear the transcript and start fresh", cmd("/clear")},
 		{"Sessions", "Show handoff briefing", "what was carried over from the resumed session", cmd("/handoff")},
 		{"Sessions", "Attached terminals", "who is viewing this session", cmd("/clients")},
 		{"Sessions", "Detach this terminal", "session keeps running; be-code attach <code> to return", cmd("/detach")},
-		{"Models", "Switch model", "list models on the backend", func(m *Model) (tea.Model, tea.Cmd) { return m.openModelPicker() }},
-		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *Model) (tea.Model, tea.Cmd) { return m.openProviderPicker() }},
+		{"Models", "Switch model", "list models on the backend", func(m *View) (tea.Model, tea.Cmd) { return m.openModelPicker() }},
+		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *View) (tea.Model, tea.Cmd) { return m.openProviderPicker() }},
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},
 		{"Tools", "Run verification", "build/lint/test checks for this workspace", cmd("/verify")},
 		{"Tools", "Undo last turn", "roll back the last turn's file changes", cmd("/undo")},
@@ -228,7 +228,7 @@ func (m *Model) menuEntries(owner int) []menuEntry {
 	}
 }
 
-func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
+func (m *View) openMenu(from int) (tea.Model, tea.Cmd) {
 	m.menuOwner = from
 	entries := m.menuEntries(from)
 	items := make([]pickItem, 0, len(entries))
@@ -236,7 +236,7 @@ func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
 		items = append(items, pickItem{id: fmt.Sprint(i),
 			label: fmt.Sprintf("%-9s %-26s", e.group, e.label), desc: e.desc})
 	}
-	m.picker = &picker{title: "Menu", items: items, onPick: func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+	m.picker = &picker{title: "Menu", items: items, onPick: func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 		var idx int
 		fmt.Sscan(it.id, &idx)
 		if idx >= 0 && idx < len(entries) {
@@ -248,7 +248,7 @@ func (m *Model) openMenu(from int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
+func (m *View) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	if from != m.menuOwner {
 		// The menu acts for the terminal that opened it; everyone else
 		// keeps typing into their own input line (see handleGuestKey).
@@ -259,7 +259,7 @@ func (m *Model) handleMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 
 // menuStatus is the block above the menu entries: everything the old
 // status bar showed, plus the backend window.
-func (m *Model) menuStatus() string {
+func (m *View) menuStatus() string {
 	win := "unknown"
 	if m.ag.Window > 0 {
 		win = fmt.Sprintf("%d tokens", m.ag.Window)
@@ -282,7 +282,7 @@ func (m *Model) menuStatus() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func (m *Model) viewMenu() string {
+func (m *View) viewMenu() string {
 	p := m.picker
 	if p == nil {
 		return ""

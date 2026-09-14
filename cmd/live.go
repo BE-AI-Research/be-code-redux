@@ -99,13 +99,13 @@ func runSessionHost(code string) error {
 		editor = ideSession.ReviewEditor()
 		defer ideSession.Close()
 	}
-	m := tui.New(cfg, ag, p)
+	s := tui.NewSession(cfg, ag, p)
 	// Served: auto resolves per write from the roster — the editor alone
 	// while VS Code's own terminal is the only one attached, both places as
 	// soon as anyone else joins. Clients() only takes the host's lock to
 	// copy the roster, and this runs on the agent goroutine (never inside
 	// the program's Update), so it cannot deadlock the host.
-	coord := review.New(reviewMode(cfg.IDE.Review), editor, m.ReviewTerminal(), func() []string {
+	coord := review.New(reviewMode(cfg.IDE.Review), editor, s.ReviewTerminal(), func() []string {
 		infos := h.Clients()
 		labels := make([]string, 0, len(infos))
 		for _, c := range infos {
@@ -113,7 +113,7 @@ func runSessionHost(code string) error {
 		}
 		return labels
 	})
-	m.SetReview(coord)
+	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	// See root.go: the editor-side status note only for reviews that reach it.
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
@@ -131,7 +131,7 @@ func runSessionHost(code string) error {
 		}
 	}()
 
-	err = m.RunServed(context.Background(), h)
+	err = s.RunServed(context.Background(), h)
 	// Order matters: the resume line goes to every attached terminal, so it
 	// has to be written before Close says goodbye to them. Two details make
 	// it actually readable there: every client is in raw mode with its own

@@ -40,12 +40,12 @@ func wheelGlyph(pct int, busy bool, frame int) string {
 	}
 }
 
-func (m *Model) wheelTick() tea.Cmd {
+func (m *View) wheelTick() tea.Cmd {
 	return tea.Tick(wheelEvery, func(time.Time) tea.Msg { return wheelTickMsg{} })
 }
 
 // ctxPercent is context usage relative to the compaction limit.
-func (m *Model) ctxPercent() int {
+func (m *View) ctxPercent() int {
 	budget := m.usage.budget
 	if budget <= 0 {
 		budget = 1
@@ -60,7 +60,7 @@ func (m *Model) ctxPercent() int {
 	return pct
 }
 
-func (m *Model) wheelView() string {
+func (m *View) wheelView() string {
 	pct := m.ctxPercent()
 	g := wheelGlyph(pct, m.running, m.wheelFrame)
 	if m.ascii {

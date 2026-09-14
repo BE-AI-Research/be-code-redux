@@ -27,7 +27,7 @@ func TestClientsMsgRendersRoster(t *testing.T) {
 	// fallback (see TestASCIIFallbacks in compact_test.go); m.ascii has a
 	// reader (the clients marker glyph), so a fixture that leaves UTF8 at its
 	// zero value would render the ASCII marker instead.
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)", UTF8: true}, {ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true}})
+	setClients(m, live.ClientInfo{ID: 1, Label: "vscode (pid 1)", UTF8: true}, live.ClientInfo{ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true})
 	v := m.View()
 	for _, want := range []string{"⧉ 2", "vscode (pid 1), ssh from 10.0.0.5 (pid 2)"} {
 		if !strings.Contains(v, want) {
@@ -42,7 +42,7 @@ func TestClientsMsgRendersRoster(t *testing.T) {
 	if !strings.Contains(m.rendered.String(), "attached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatalf("no attach line:\n%s", m.rendered.String())
 	}
-	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)"}})
+	setClients(m, live.ClientInfo{ID: 1, Label: "vscode (pid 1)"})
 	if !strings.Contains(m.rendered.String(), "detached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatal("no detach line")
 	}
@@ -55,8 +55,9 @@ func TestClientsMsgRendersRoster(t *testing.T) {
 // command was typed on.
 func TestClientsAndDetachCommands(t *testing.T) {
 	m := newTestModel(t)
-	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)"}})
+	setClients(m, live.ClientInfo{ID: 1, Label: "local (pid 1)"})
 	m.slashCommand("/clients", 1)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
@@ -98,6 +99,7 @@ func TestClientsNotServedMessage(t *testing.T) {
 	m.served = false
 	m.clients = nil
 	m.slashCommand("/clients", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "not served") {
 		t.Fatalf("expected a not-served note:\n%s", m.rendered.String())
 	}
@@ -110,6 +112,7 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	m.served = true
 	m.clients = nil
 	m.slashCommand("/clients", 0)
+	flush(m)
 	if !strings.Contains(m.rendered.String(), "no terminals attached") {
 		t.Fatalf("expected a no-terminals-attached note:\n%s", m.rendered.String())
 	}
