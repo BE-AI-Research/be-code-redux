@@ -114,11 +114,11 @@ func (m *Model) handlePaletteKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 func (m *Model) paletteBox() string {
 	p := m.picker
 	var b strings.Builder
-	b.WriteString(stModalTi.Render("/ commands") + stDim.Render("  ↑↓ pick · Enter run · Tab fill · Esc close"))
+	b.WriteString(m.st.ModalTi.Render("/ commands") + m.st.Dim.Render("  ↑↓ pick · Enter run · Tab fill · Esc close"))
 	b.WriteString("\n")
 	items := p.filtered()
 	if len(items) == 0 {
-		b.WriteString(stDim.Render("(no command matches /" + p.filter + ")"))
+		b.WriteString(m.st.Dim.Render("(no command matches /" + p.filter + ")"))
 	}
 	maxRows := m.popupRows(8)
 	omitDesc := m.omitPopupDesc()
@@ -134,7 +134,7 @@ func (m *Model) paletteBox() string {
 			desc = ""
 		}
 		if i == p.cursor {
-			line := stAccent.Render("> " + name)
+			line := m.st.Accent.Render("> " + name)
 			if desc != "" {
 				line += " " + desc
 			}
@@ -142,12 +142,12 @@ func (m *Model) paletteBox() string {
 		} else {
 			line := "  " + name
 			if desc != "" {
-				line += " " + stDim.Render(desc)
+				line += " " + m.st.Dim.Render(desc)
 			}
 			b.WriteString(line + "\n")
 		}
 	}
-	return stBorder.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
+	return m.st.Border.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
 }
 
 // ---- theme picker ------------------------------------------------------------
@@ -172,20 +172,22 @@ func (m *Model) openThemePicker() (tea.Model, tea.Cmd) {
 
 // applyTheme switches the live palette and persists the choice.
 func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
-	applied := SetTheme(name)
-	if applied != name {
-		m.appendLine(stErr.Render("unknown theme " + name + "; try /theme to pick one"))
+	st, ok := newStyles(name)
+	if !ok {
+		m.appendLine(m.st.Err.Render("unknown theme " + name + "; try /theme to pick one"))
 		return m, nil
 	}
-	m.cfg.Theme = applied
-	m.richText = applied != "mono"
+	m.st = st
+	m.spin.Style = st.Accent
+	m.cfg.Theme = name
+	m.richText = name != "mono"
 	if m.cfg.ThemeTerminalColors && m.termWrite != nil {
-		m.termWrite(terminalColorSeq(applied))
+		m.termWrite(terminalColorSeq(name))
 	}
 	if err := m.cfg.Save(); err != nil {
-		m.appendLine(stWarn.Render("theme set to " + applied + " for this session; could not save config: " + err.Error()))
+		m.appendLine(m.st.Warn.Render("theme set to " + name + " for this session; could not save config: " + err.Error()))
 	} else {
-		m.appendLine(stOK.Render("theme set to " + applied))
+		m.appendLine(m.st.OK.Render("theme set to " + name))
 	}
 	m.refreshTranscript()
 	return m, nil
@@ -275,7 +277,7 @@ func (m *Model) menuStatus() string {
 	}
 	var b strings.Builder
 	for _, r := range rows {
-		fmt.Fprintf(&b, "%s %s\n", stDim.Render(fmt.Sprintf("%-14s", r[0])), r[1])
+		fmt.Fprintf(&b, "%s %s\n", m.st.Dim.Render(fmt.Sprintf("%-14s", r[0])), r[1])
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -286,15 +288,15 @@ func (m *Model) viewMenu() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(stModalTi.Render("BE-Code menu") + "\n\n")
+	b.WriteString(m.st.ModalTi.Render("BE-Code menu") + "\n\n")
 	if m.compact() {
 		b.WriteString(m.compactMenuStatus() + "\n\n")
 	} else {
 		b.WriteString(m.menuStatus() + "\n\n")
 	}
 	b.WriteString(m.renderPickList(p, m.popupRows(m.height-14), m.compact()))
-	body := stBorder.Width(m.width - 4).Render(b.String())
-	return body + "\n" + stDim.Render(" ↑↓ move · Enter select · Esc back · type to filter")
+	body := m.st.Border.Width(m.width - 4).Render(b.String())
+	return body + "\n" + m.st.Dim.Render(" ↑↓ move · Enter select · Esc back · type to filter")
 }
 
 var _ = lipgloss.Width

@@ -64,7 +64,7 @@ func (m *Model) openModelPicker() (tea.Model, tea.Cmd) {
 		return items, nil
 	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
 		m.ag.SetModel(it.id)
-		m.appendLine(stOK.Render("model set to " + it.id))
+		m.appendLine(m.st.OK.Render("model set to " + it.id))
 		return m, nil
 	})
 }
@@ -110,7 +110,7 @@ func (m *Model) sessionItems(metas []store.Meta) []pickItem {
 		label := s.Code + "  " + s.Title
 		desc := fmt.Sprintf("%s · %d turns · %s", s.ID, s.Turns, s.UpdatedAt.Format("Jan 2 15:04"))
 		if now[s.Code] {
-			label = s.Code + " " + stAccent.Render("LIVE") + " " + s.Title
+			label = s.Code + " " + m.st.Accent.Render("LIVE") + " " + s.Title
 			desc = "live now · joins it · " + desc
 		}
 		items = append(items, pickItem{id: s.ID, label: label, desc: desc})
@@ -127,7 +127,7 @@ func (m *Model) sessionItems(metas []store.Meta) []pickItem {
 			seen[r.Code] = true
 			items = append(items, pickItem{
 				id:    r.Code,
-				label: r.Code + " " + stAccent.Render("LIVE") + " (no saved turns yet)",
+				label: r.Code + " " + m.st.Accent.Render("LIVE") + " (no saved turns yet)",
 				desc:  fmt.Sprintf("live now · joins it · no saved turns yet · %s · started %s", r.Workspace, r.StartedAt.Format("Jan 2 15:04")),
 			})
 		}
@@ -248,7 +248,7 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 	}
 	m.picker.loading = false
 	if msg.err != nil {
-		m.appendLine(stErr.Render(msg.err.Error()))
+		m.appendLine(m.st.Err.Render(msg.err.Error()))
 		m.picker = nil
 		m.mode = m.idleMode()
 		return
@@ -262,11 +262,11 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 func (m *Model) renderPickList(p *picker, maxRows int, omitDesc bool) string {
 	var b strings.Builder
 	if p.filter != "" {
-		b.WriteString(stDim.Render("filter: "+p.filter) + "\n")
+		b.WriteString(m.st.Dim.Render("filter: "+p.filter) + "\n")
 	}
 	items := p.filtered()
 	if len(items) == 0 {
-		b.WriteString(stDim.Render("(nothing matches)"))
+		b.WriteString(m.st.Dim.Render("(nothing matches)"))
 	}
 	if maxRows < 3 {
 		maxRows = 3
@@ -289,13 +289,13 @@ func (m *Model) renderPickList(p *picker, maxRows int, omitDesc bool) string {
 		cursor := "  "
 		line := it.label
 		if desc != "" {
-			line += "  " + stDim.Render(desc)
+			line += "  " + m.st.Dim.Render(desc)
 		}
 		if i == p.cursor {
-			cursor = stAccent.Render("> ")
-			line = stAccent.Render(it.label)
+			cursor = m.st.Accent.Render("> ")
+			line = m.st.Accent.Render(it.label)
 			if desc != "" {
-				line += "  " + stDim.Render(desc)
+				line += "  " + m.st.Dim.Render(desc)
 			}
 		}
 		b.WriteString(cursor + line + "\n")
@@ -309,15 +309,15 @@ func (m *Model) viewPicker() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(stModalTi.Render(p.title))
+	b.WriteString(m.st.ModalTi.Render(p.title))
 	if p.loading {
 		b.WriteString("\n\n" + m.spin.View() + " loading…")
 	} else {
-		b.WriteString(stDim.Render("   type to filter: "+p.filter) + "\n\n")
+		b.WriteString(m.st.Dim.Render("   type to filter: "+p.filter) + "\n\n")
 		b.WriteString(m.renderPickList(p, m.popupRows(m.height-8), m.omitPopupDesc()))
 	}
-	body := stBorder.Width(m.width - 4).Render(b.String())
-	return body + "\n" + stDim.Render(" ↑↓ move · Enter select · Esc cancel · type to filter")
+	body := m.st.Border.Width(m.width - 4).Render(b.String())
+	return body + "\n" + m.st.Dim.Render(" ↑↓ move · Enter select · Esc cancel · type to filter")
 }
 
 var _ = lipgloss.Width // keep import if styles change

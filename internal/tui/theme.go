@@ -52,32 +52,52 @@ func lookupTheme(name string) (Palette, bool) {
 	return p, ok
 }
 
-// SetTheme applies a theme to the live palette and returns the name that
-// was actually applied ("dark" when name is unknown).
-func SetTheme(name string) string {
+// styles is one theme's set of lipgloss styles. Every View carries its own
+// value, so two terminals on one session can render in different themes.
+type styles struct {
+	Accent, Dim, Tool, Err, OK, Warn, User, Status, ModalTi, Border lipgloss.Style
+	name                                                            string
+}
+
+// Name is the theme this styles value was built from.
+func (s styles) Name() string { return s.name }
+
+// newStyles builds the styles for a theme. ok is false for an unknown name;
+// the caller decides the fallback (View uses dark).
+func newStyles(name string) (styles, bool) {
 	p, ok := themes[name]
 	if !ok {
-		p = themes["dark"]
+		return styles{}, false
 	}
+	st := styles{name: p.Name}
 	if p.Mono {
 		plain := lipgloss.NewStyle()
-		stAccent, stDim, stTool, stErr, stOK, stWarn = plain, plain, plain, plain, plain, plain
-		stUser = lipgloss.NewStyle().Bold(true)
-		stStatus = lipgloss.NewStyle().Reverse(true).Padding(0, 1)
-		stModalTi = lipgloss.NewStyle().Bold(true)
-		stBorder = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1)
-		return p.Name
+		st.Accent, st.Dim, st.Tool, st.Err, st.OK, st.Warn = plain, plain, plain, plain, plain, plain
+		st.User = lipgloss.NewStyle().Bold(true)
+		st.Status = lipgloss.NewStyle().Reverse(true).Padding(0, 1)
+		st.ModalTi = lipgloss.NewStyle().Bold(true)
+		st.Border = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1)
+		return st, true
 	}
 	fg := func(c string) lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(c)) }
-	stAccent, stDim, stTool = fg(p.Accent), fg(p.Dim), fg(p.Tool)
-	stErr, stOK, stWarn = fg(p.Err), fg(p.OK), fg(p.Warn)
-	stUser = fg(p.User).Bold(true)
-	stStatus = lipgloss.NewStyle().Background(lipgloss.Color(p.StatusBG)).Foreground(lipgloss.Color(p.StatusFG)).Padding(0, 1)
-	stModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.ModalTitle))
+	st.Accent, st.Dim, st.Tool = fg(p.Accent), fg(p.Dim), fg(p.Tool)
+	st.Err, st.OK, st.Warn = fg(p.Err), fg(p.OK), fg(p.Warn)
+	st.User = fg(p.User).Bold(true)
+	st.Status = lipgloss.NewStyle().Background(lipgloss.Color(p.StatusBG)).Foreground(lipgloss.Color(p.StatusFG)).Padding(0, 1)
+	st.ModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.ModalTitle))
 	border := lipgloss.RoundedBorder()
 	if p.SquareBorder {
 		border = lipgloss.NormalBorder()
 	}
-	stBorder = lipgloss.NewStyle().Border(border).BorderForeground(lipgloss.Color(p.Border)).Padding(0, 1)
-	return p.Name
+	st.Border = lipgloss.NewStyle().Border(border).BorderForeground(lipgloss.Color(p.Border)).Padding(0, 1)
+	return st, true
+}
+
+// stylesOr is newStyles with the dark fallback for unknown names.
+func stylesOr(name string) styles {
+	if st, ok := newStyles(name); ok {
+		return st
+	}
+	st, _ := newStyles("dark")
+	return st
 }

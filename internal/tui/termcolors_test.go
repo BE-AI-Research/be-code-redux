@@ -43,5 +43,4 @@ func TestApplyThemeSendsTerminalColors(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sequence sent although disabled: %q", sent)
 	}
-	SetTheme("dark")
 }

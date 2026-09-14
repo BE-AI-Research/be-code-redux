@@ -30,21 +30,6 @@ import (
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
-// ---- styles (reassigned by SetTheme) ---------------------------------------
-
-var (
-	stAccent  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	stDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	stTool    = lipgloss.NewStyle().Foreground(lipgloss.Color("44"))
-	stErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	stOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	stWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	stUser    = lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true)
-	stStatus  = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250")).Padding(0, 1)
-	stModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-	stBorder  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-)
-
 // ---- messages from the agent goroutine ------------------------------------
 
 type deltaMsg string
@@ -200,6 +185,7 @@ type Model struct {
 	custom  map[string]commands.Command
 
 	histFile   *inputHistory
+	st         styles   // this terminal's theme; see theme.go
 	richText   bool     // markdown/syntax rendering enabled
 	usage      usageMsg // cached usage for the wheel and menu (see usageMsg)
 	wheelFrame int      // rotation frame while busy
@@ -261,13 +247,14 @@ type Model struct {
 
 // New builds the TUI model.
 func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
+	st := stylesOr(cfg.Theme)
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
-	sp.Style = stAccent
+	sp.Style = st.Accent
 
-	SetTheme(cfg.Theme)
 	m := &Model{
 		cfg: cfg, ag: ag, prov: prov,
+		st:       st,
 		spin:     sp,
 		now:      time.Now,
 		histFile: loadInputHistory(ui.HistoryFile()),
@@ -448,7 +435,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// wipes anything printed before it opened. Once only.
 		if !m.ideAnnounced && m.ag.IDEName != "" {
 			m.ideAnnounced = true
-			m.appendLine(stDim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
+			m.appendLine(m.st.Dim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
 		}
 		// Nudge once toward /init for a project with no notes file yet. The
 		// check itself is latched, not just the hint: this runs on every
@@ -457,7 +444,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initChecked = true
 			if ui.NeedsInitHint(m.ag.Tools.Root) {
 				m.initHinted = true
-				m.appendLine(stDim.Render(ui.InitHint))
+				m.appendLine(m.st.Dim.Render(ui.InitHint))
 			}
 		}
 		m.refreshTranscript()
@@ -490,19 +477,19 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(args) > limit {
 			args = args[:limit] + "…"
 		}
-		m.appendLine(stTool.Render("● "+msg.name) + " " + stDim.Render(args))
+		m.appendLine(m.st.Tool.Render("● "+msg.name) + " " + m.st.Dim.Render(args))
 		m.statusNote = "running " + msg.name
 	case toolEndMsg:
 		m.lastTool = msg.res.Content
 		if msg.res.IsError {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
-			m.appendLine(stErr.Render("  ✗ ") + stDim.Render(first))
+			m.appendLine(m.st.Err.Render("  ✗ ") + m.st.Dim.Render(first))
 		} else {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
 			if len(first) > 100 {
 				first = first[:100] + "…"
 			}
-			m.appendLine(stOK.Render("  ✓ ") + stDim.Render(first))
+			m.appendLine(m.st.OK.Render("  ✓ ") + m.st.Dim.Render(first))
 		}
 		m.statusNote = "thinking"
 	case thinkingMsg:
@@ -523,9 +510,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The editor context note is ambient information, not a warning:
 		// render it dimmed and unlabelled.
 		if strings.HasPrefix(string(msg), "[editor:") {
-			m.appendLine(stDim.Render(string(msg)))
+			m.appendLine(m.st.Dim.Render(string(msg)))
 		} else {
-			m.appendLine(stWarn.Render("note ") + string(msg))
+			m.appendLine(m.st.Warn.Render("note ") + string(msg))
 		}
 	case statusMsg:
 		m.statusNote = string(msg)
@@ -564,7 +551,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// duplicate withdrawal is a no-op: the modal is already gone.
 		if m.mode == modeApproval && m.approval != nil {
 			if msg.note != "" {
-				m.appendLine(stDim.Render(msg.note))
+				m.appendLine(m.st.Dim.Render(msg.note))
 			}
 			m.approval = nil
 			m.approvalGen = 0
@@ -577,26 +564,26 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushStreaming()
 		if msg.err != nil {
 			if msg.err != context.Canceled && !strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendLine(stErr.Render("error ") + msg.err.Error())
+				m.appendLine(m.st.Err.Render("error ") + msg.err.Error())
 			} else {
-				m.appendLine(stWarn.Render("cancelled"))
+				m.appendLine(m.st.Warn.Render("cancelled"))
 			}
 		}
 		if msg.rep != nil && msg.rep.Verify != nil {
 			for _, line := range strings.Split(msg.rep.Verify.Human(), "\n") {
-				m.appendLine(stDim.Render(line))
+				m.appendLine(m.st.Dim.Render(line))
 			}
 			if msg.rep.Verify.Passed() {
-				m.appendLine(stOK.Render("✓ verified"))
+				m.appendLine(m.st.OK.Render("✓ verified"))
 			} else {
-				m.appendLine(stErr.Render("✗ verification failed after repairs"))
+				m.appendLine(m.st.Err.Render("✗ verification failed after repairs"))
 			}
 		}
 		if msg.rep != nil && msg.rep.Reviewed {
 			if msg.rep.ReviewIssues == "" {
-				m.appendLine(stOK.Render("✓ reviewer approved"))
+				m.appendLine(m.st.OK.Render("✓ reviewer approved"))
 			} else {
-				m.appendLine(stWarn.Render("reviewer raised issues (repair attempted)"))
+				m.appendLine(m.st.Warn.Render("reviewer raised issues (repair attempted)"))
 			}
 		}
 		m.appendLine("")
@@ -612,7 +599,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if left := m.ag.DrainItems(); len(left) > 0 {
 			texts := make([]string, 0, len(left))
 			for _, it := range left {
-				m.appendLine(stUser.Render(m.userPrefix(it.From)) + it.Text)
+				m.appendLine(m.st.User.Render(m.userPrefix(it.From)) + it.Text)
 				texts = append(texts, it.Text)
 			}
 			return m.startTurn(strings.Join(texts, "\n"))
@@ -628,12 +615,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) || strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendLine(stWarn.Render("cancelled"))
+				m.appendLine(m.st.Warn.Render("cancelled"))
 			} else {
-				m.appendLine(stErr.Render("init failed: ") + msg.err.Error())
+				m.appendLine(m.st.Err.Render("init failed: ") + msg.err.Error())
 			}
 		} else {
-			m.appendLine(stOK.Render("wrote " + msg.path))
+			m.appendLine(m.st.OK.Render("wrote " + msg.path))
 		}
 		// Queued as a Cmd, not sent here directly: m.send is p.Send on the
 		// unbuffered channel this very update goroutine reads from, so a
@@ -643,7 +630,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
-			m.appendLine(stErr.Render("plan failed: ") + msg.err.Error())
+			m.appendLine(m.st.Err.Render("plan failed: ") + msg.err.Error())
 			m.mode = modeInput
 			m.focusInputs()
 			break
@@ -775,7 +762,7 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	// turnDoneMsg) that would rewrite or close whatever popup is open by
 	// then — the owner's. Busy mode already refuses commands.
 	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
-		m.appendLine(stDim.Render("commands wait until the open popup closes; plain text still sends"))
+		m.appendLine(m.st.Dim.Render("commands wait until the open popup closes; plain text still sends"))
 		return m, nil
 	}
 	mode, pick, prev := m.mode, m.picker, m.prevMode
@@ -836,7 +823,7 @@ func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.setQuitHint(from)
-		m.appendLine(stDim.Render("press Ctrl+C again to quit"))
+		m.appendLine(m.st.Dim.Render("press Ctrl+C again to quit"))
 		return m, nil
 	case tea.KeyEnter:
 		text := strings.TrimSpace(in.Value())
@@ -916,13 +903,13 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	if m.approval == nil {
 		return
 	}
-	verdict := stErr.Render("denied")
+	verdict := m.st.Err.Render("denied")
 	if ok {
-		verdict = stOK.Render("approved")
+		verdict = m.st.OK.Render("approved")
 	}
-	m.appendLine(stWarn.Render(m.approval.action+" ") + verdict)
+	m.appendLine(m.st.Warn.Render(m.approval.action+" ") + verdict)
 	if note != "" {
-		m.appendLine(stDim.Render(note))
+		m.appendLine(m.st.Dim.Render(note))
 	}
 	m.approval.resp <- ok
 	m.approval = nil
@@ -933,7 +920,7 @@ func (m *Model) resolveApproval(ok bool, note string) {
 // startTurnFrom echoes the request under its sender's prefix and launches
 // the agent.
 func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
-	m.appendLine(stUser.Render(m.userPrefix(from)) + text)
+	m.appendLine(m.st.User.Render(m.userPrefix(from)) + text)
 	return m.startTurn(text)
 }
 
@@ -982,7 +969,7 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			m.cancelFn()
 		}
 		if n := len(m.ag.DrainInbox()); n > 0 {
-			m.appendLine(stDim.Render(fmt.Sprintf("discarded %d queued message(s)", n)))
+			m.appendLine(m.st.Dim.Render(fmt.Sprintf("discarded %d queued message(s)", n)))
 		}
 		return m, nil
 	case tea.KeyEnter:
@@ -996,15 +983,15 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 				m.histFile.add(text, from)
 				return m.slashCommand(text, from)
 			}
-			m.appendLine(stDim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
+			m.appendLine(m.st.Dim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
 			return m, nil
 		}
 		m.histFile.add(text, from)
 		m.ag.EnqueueFrom(text, from)
 		if len(m.clients) > 1 {
-			m.appendLine(stDim.Render("queued> ") + m.userPrefix(from) + text)
+			m.appendLine(m.st.Dim.Render("queued> ") + m.userPrefix(from) + text)
 		} else {
-			m.appendLine(stDim.Render("queued (delivered at the next step)> ") + text)
+			m.appendLine(m.st.Dim.Render("queued (delivered at the next step)> ") + text)
 		}
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -1037,7 +1024,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(k.String()) {
 	case "y":
 		m.pending = nil
-		m.appendLine(stOK.Render("plan approved — executing"))
+		m.appendLine(m.st.OK.Render("plan approved — executing"))
 		m.mode = modeBusy
 		m.statusNote = "executing plan"
 		ctx, cancel := context.WithCancel(m.rootCtx)
@@ -1049,7 +1036,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}()
 	case "n", "esc":
 		m.pending = nil
-		m.appendLine(stWarn.Render("plan discarded"))
+		m.appendLine(m.st.Warn.Render("plan discarded"))
 		m.mode = modeInput
 		m.focusInputs()
 	default:
@@ -1168,9 +1155,9 @@ func (m *Model) View() string {
 		if m.compact() {
 			hint = " y/n · ↑↓"
 		}
-		body := stBorder.Width(m.width - 4).Render(
-			stModalTi.Render("Implementation plan — approve to execute") + "\n\n" + m.modalVP.View())
-		return body + "\n" + stDim.Render(hint)
+		body := m.st.Border.Width(m.width - 4).Render(
+			m.st.ModalTi.Render("Implementation plan — approve to execute") + "\n\n" + m.modalVP.View())
+		return body + "\n" + m.st.Dim.Render(hint)
 	}
 
 	var b strings.Builder
@@ -1205,7 +1192,7 @@ func (m *Model) View() string {
 		// (and the served overlays anchored to them) never move.
 		lines := strings.Split(transcript, "\n")
 		if len(lines) > 0 {
-			lines[len(lines)-1] = stWarn.Render(padToWidth(" "+m.toast, m.width))
+			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+m.toast, m.width))
 			transcript = strings.Join(lines, "\n")
 		}
 	}
@@ -1220,13 +1207,13 @@ func (m *Model) View() string {
 // headerView draws the branded header: boxed title, logo at the right,
 // attribution, dashed rule.
 func (m *Model) headerView() string {
-	box := stBorder.Render("BE-Code Redux")
+	box := m.st.Border.Render("BE-Code Redux")
 	lines := strings.Split(box, "\n")
 	code := "—"
 	if m.ag.Session != nil {
 		code = m.ag.Session.ResumeCode()
 	}
-	logo := stAccent.Render("session " + code)
+	logo := m.st.Accent.Render("session " + code)
 	if len(lines) >= 2 {
 		gap := m.width - lipgloss.Width(lines[1]) - lipgloss.Width(logo) - 1
 		if gap < 1 {
@@ -1234,8 +1221,8 @@ func (m *Model) headerView() string {
 		}
 		lines[1] += strings.Repeat(" ", gap) + logo
 	}
-	attribution := stDim.Render("  2026 BE AI Research · https://github.com/BE-AI-Research - " + PublicVersion)
-	rule := stDim.Render(strings.Repeat("- ", m.width/2))
+	attribution := m.st.Dim.Render("  2026 BE AI Research · https://github.com/BE-AI-Research - " + PublicVersion)
+	rule := m.st.Dim.Render(strings.Repeat("- ", m.width/2))
 	return strings.Join(lines, "\n") + "\n" + attribution + "\n" + rule
 }
 
@@ -1244,26 +1231,26 @@ func (m *Model) bottomLine() string {
 	if m.compact() {
 		return m.compactBottomLine()
 	}
-	state := stOK.Render("ready")
+	state := m.st.OK.Render("ready")
 	if m.running {
-		state = m.spin.View() + " " + m.statusNote + stDim.Render(" · Enter queues · Esc cancels")
+		state = m.spin.View() + " " + m.statusNote + m.st.Dim.Render(" · Enter queues · Esc cancels")
 		if n := m.ag.Pending(); n > 0 {
-			state += stAccent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
+			state += m.st.Accent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
 		}
 	}
-	line := " " + stAccent.Render("/menu") + " " + stAccent.Render("/help") +
-		stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
+	line := " " + m.st.Accent.Render("/menu") + " " + m.st.Accent.Render("/help") +
+		m.st.Dim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
 	if m.ag.IDEName != "" {
-		line += stAccent.Render(" " + m.ideMarker())
+		line += m.st.Accent.Render(" " + m.ideMarker())
 	}
 	if n := len(m.clients); n > 1 {
-		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
+		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
-			line += stDim.Render(" · " + labels)
+			line += m.st.Dim.Render(" · " + labels)
 		}
 	}
 	if m.sel != nil {
-		line += stDim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
+		line += m.st.Dim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
 	}
 	return line
 }
@@ -1290,9 +1277,9 @@ func (m *Model) viewApproval() string {
 	if m.compact() {
 		hint = "y/n/a · ↑↓"
 	}
-	body := stBorder.Width(m.width - 4).Render(
-		stModalTi.Render(title+" — approval required") + "\n\n" + m.modalVP.View())
-	return body + "\n" + stDim.Render(" "+hint)
+	body := m.st.Border.Width(m.width - 4).Render(
+		m.st.ModalTi.Render(title+" — approval required") + "\n\n" + m.modalVP.View())
+	return body + "\n" + m.st.Dim.Render(" "+hint)
 }
 
 // ---- slash commands --------------------------------------------------------
@@ -1309,7 +1296,7 @@ func (m *Model) completeSlash(from int) {
 			in.SetValue(v[:i+1] + matches[0])
 			in.CursorEnd()
 		} else if len(matches) > 1 {
-			m.appendLine(stDim.Render("@" + strings.Join(matches, "  @")))
+			m.appendLine(m.st.Dim.Render("@" + strings.Join(matches, "  @")))
 		}
 		return
 	}
@@ -1331,7 +1318,7 @@ func (m *Model) completeSlash(from int) {
 		in.SetValue(matches[0] + " ")
 		in.CursorEnd()
 	} else if len(matches) > 1 {
-		m.appendLine(stDim.Render(strings.Join(matches, "  ")))
+		m.appendLine(m.st.Dim.Render(strings.Join(matches, "  ")))
 	}
 }
 
@@ -1372,16 +1359,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		if len(m.custom) > 0 {
 			help += "\ncustom: /" + strings.Join(commands.Names(m.custom), " /")
 		}
-		m.appendLine(stDim.Render(help))
+		m.appendLine(m.st.Dim.Render(help))
 	case "/clear":
 		m.ag.History.Messages = nil
 		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
-		m.appendLine(stOK.Render("history cleared; new session started"))
+		m.appendLine(m.st.OK.Render("history cleared; new session started"))
 	case "/tools":
-		m.appendLine(stDim.Render(strings.Join(m.ag.Tools.Names(), " · ")))
+		m.appendLine(m.st.Dim.Render(strings.Join(m.ag.Tools.Names(), " · ")))
 	case "/config":
 		p, _ := config.Path()
-		m.appendLine(stDim.Render(fmt.Sprintf(
+		m.appendLine(m.st.Dim.Render(fmt.Sprintf(
 			"%s\nprovider=%s model=%s ui=%s ctx=%d max_turns=%d max_repairs=%d compat=%s previews=%v",
 			p, m.cfg.DefaultProvider, m.cfg.Model, m.cfg.UI, m.cfg.ContextTokens,
 			m.cfg.MaxTurns, m.cfg.MaxRepairs, m.cfg.CompatToolCalls, m.cfg.ApproveFileWrites)))
@@ -1396,17 +1383,17 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/model":
 		if len(fields) > 1 {
 			m.ag.SetModel(fields[1])
-			m.appendLine(stOK.Render(fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)))
+			m.appendLine(m.st.OK.Render(fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)))
 			break
 		}
 		return m.openModelPicker()
 	case "/undo":
 		restored, err := m.ag.Undo()
 		if err != nil {
-			m.appendLine(stErr.Render(err.Error()))
+			m.appendLine(m.st.Err.Render(err.Error()))
 			break
 		}
-		m.appendLine(stOK.Render(fmt.Sprintf("restored: %s (%d undo levels left)",
+		m.appendLine(m.st.OK.Render(fmt.Sprintf("restored: %s (%d undo levels left)",
 			strings.Join(restored, ", "), m.ag.Checkpoints.Depth())))
 	case "/commit":
 		m.mode = modeBusy
@@ -1461,23 +1448,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/stats":
 		s := m.ag.Stats
-		m.appendLine(stDim.Render(fmt.Sprintf(
+		m.appendLine(m.st.Dim.Render(fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
 			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)))
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
-			m.appendLine(stDim.Render("no repo map (unrecognized files or disabled)"))
+			m.appendLine(m.st.Dim.Render("no repo map (unrecognized files or disabled)"))
 		} else {
-			m.appendLine(stDim.Render(mp))
+			m.appendLine(m.st.Dim.Render(mp))
 		}
 	case "/plan":
 		req := strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
 		if req == "" {
-			m.appendLine(stErr.Render("usage: /plan <task description>"))
+			m.appendLine(m.st.Err.Render("usage: /plan <task description>"))
 			break
 		}
-		m.appendLine(stUser.Render("plan> ") + req)
+		m.appendLine(m.st.User.Render("plan> ") + req)
 		m.mode = modeBusy
 		m.statusNote = "planning (read-only)"
 		for _, ta := range m.inputs {
@@ -1501,29 +1488,29 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/handoff":
 		if h := m.ag.Handoff(); h != "" {
 			for _, line := range strings.Split(h, "\n") {
-				m.appendLine(stDim.Render(line))
+				m.appendLine(m.st.Dim.Render(line))
 			}
 		} else {
-			m.appendLine(stDim.Render("no handoff briefing in this session"))
+			m.appendLine(m.st.Dim.Render("no handoff briefing in this session"))
 		}
 	case "/review":
 		m.reviewCommand(fields)
 	case "/clients":
 		if !m.served {
-			m.appendLine(stDim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
+			m.appendLine(m.st.Dim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
 			return m, nil
 		}
 		if len(m.clients) == 0 {
-			m.appendLine(stDim.Render("no terminals attached"))
+			m.appendLine(m.st.Dim.Render("no terminals attached"))
 			return m, nil
 		}
 		for _, c := range m.clients {
-			m.appendLine(stDim.Render(fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)))
+			m.appendLine(m.st.Dim.Render(fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)))
 		}
 		return m, nil
 	case "/detach":
 		if m.detachClient == nil {
-			m.appendLine(stDim.Render("nothing to detach: not served"))
+			m.appendLine(m.st.Dim.Render("nothing to detach: not served"))
 			return m, nil
 		}
 		// As a command, not a call: detaching makes the host notify its
@@ -1543,7 +1530,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 			return m.startTurnFrom(c.Expand(args), from)
 		}
-		m.appendLine(stErr.Render("unknown command " + fields[0] + " (/help)"))
+		m.appendLine(m.st.Err.Render("unknown command " + fields[0] + " (/help)"))
 	}
 	return m, nil
 }
@@ -1551,13 +1538,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 	p, err := provider.FromConfig(m.cfg, name)
 	if err != nil {
-		m.appendLine(stErr.Render(err.Error()))
+		m.appendLine(m.st.Err.Render(err.Error()))
 		return m, nil
 	}
 	m.prov = p
 	m.ag.Provider = p
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
-	m.appendLine(stOK.Render(fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)))
+	m.appendLine(m.st.OK.Render(fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)))
 	return m, m.pingCmd()
 }
 
@@ -1575,7 +1562,7 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	}
 	s, err := m.loadSession(id)
 	if err != nil {
-		m.appendLine(stErr.Render(err.Error()))
+		m.appendLine(m.st.Err.Render(err.Error()))
 		return m, nil
 	}
 	code := s.ResumeCode()
@@ -1583,9 +1570,9 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 		return m.joinLive(code, from)
 	}
 	m.ag.Resume(s)
-	m.appendLine(stOK.Render(fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))))
+	m.appendLine(m.st.OK.Render(fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))))
 	if s.Handoff != "" {
-		m.appendLine(stDim.Render("handoff briefing loaded into the system prompt; /handoff shows it"))
+		m.appendLine(m.st.Dim.Render("handoff briefing loaded into the system prompt; /handoff shows it"))
 	}
 	return m, nil
 }
@@ -1606,6 +1593,6 @@ func (m *Model) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 		sw, c := m.switchClient, from
 		return m, func() tea.Msg { sw(c, code); return nil }
 	}
-	m.appendLine(stDim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
+	m.appendLine(m.st.Dim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
 	return m, nil
 }

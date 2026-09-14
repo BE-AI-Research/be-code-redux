@@ -54,12 +54,12 @@ func (t reviewTerminal) Withdraw(note string) {
 // auto currently resolves to; with one it sets the mode for the session.
 func (m *Model) reviewCommand(fields []string) {
 	if m.review == nil {
-		m.appendLine(stDim.Render("review: not available in this session"))
+		m.appendLine(m.st.Dim.Render("review: not available in this session"))
 		return
 	}
 	if len(fields) > 1 {
 		if err := m.review.SetMode(review.Mode(strings.ToLower(fields[1]))); err != nil {
-			m.appendLine(stErr.Render(err.Error()))
+			m.appendLine(m.st.Err.Render(err.Error()))
 			return
 		}
 	}
@@ -69,5 +69,5 @@ func (m *Model) reviewCommand(fields []string) {
 	// receives from (Detach, SetOverlay — see /detach). Clients() only takes
 	// h.mu long enough to copy the roster and notifies nobody, and no holder
 	// of h.mu ever blocks on the program, so it cannot deadlock.
-	m.appendLine(stDim.Render(fmt.Sprintf("review: %s (resolves to %s)", m.review.Mode(), m.review.Resolve())))
+	m.appendLine(m.st.Dim.Render(fmt.Sprintf("review: %s (resolves to %s)", m.review.Mode(), m.review.Resolve())))
 }

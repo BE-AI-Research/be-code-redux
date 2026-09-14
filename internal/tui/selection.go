@@ -160,14 +160,14 @@ func (m *Model) selectAll() {
 // copyText sends text to the clipboard and confirms in the transcript.
 func (m *Model) copyText(text, what string) {
 	if strings.TrimSpace(text) == "" {
-		m.appendLine(stDim.Render("nothing to copy (" + what + ")"))
+		m.appendLine(m.st.Dim.Render("nothing to copy (" + what + ")"))
 		return
 	}
 	if err := m.clipboardWrite(text); err != nil {
-		m.appendLine(stErr.Render("copy failed: ") + err.Error())
+		m.appendLine(m.st.Err.Render("copy failed: ") + err.Error())
 		return
 	}
-	m.appendLine(stDim.Render(fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)))
+	m.appendLine(m.st.Dim.Render(fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)))
 }
 
 // copyTarget implements /copy [selection|reply|tool|all].
@@ -180,7 +180,7 @@ func (m *Model) copyTarget(target string) {
 			return
 		}
 		if target != "" {
-			m.appendLine(stDim.Render("no selection; drag over the transcript first"))
+			m.appendLine(m.st.Dim.Render("no selection; drag over the transcript first"))
 			return
 		}
 		m.copyText(m.lastReply, "last reply")
@@ -191,7 +191,7 @@ func (m *Model) copyTarget(target string) {
 	case "all", "transcript":
 		m.copyText(strings.Join(m.plainLines(), "\n"), "transcript")
 	default:
-		m.appendLine(stDim.Render("usage: /copy [selection|reply|tool|all]"))
+		m.appendLine(m.st.Dim.Render("usage: /copy [selection|reply|tool|all]"))
 	}
 }
 
@@ -232,7 +232,7 @@ func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
 			case "paste":
 				text, err := m.clipboardRead()
 				if err != nil {
-					m.appendLine(stErr.Render("paste failed: ") + err.Error())
+					m.appendLine(m.st.Err.Render("paste failed: ") + err.Error())
 				} else {
 					in := m.inputFor(from)
 					in.SetValue(in.Value() + text)
@@ -274,7 +274,7 @@ func (m *Model) handleContextMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd
 func (m *Model) contextMenuBox() string {
 	p := m.picker
 	var b strings.Builder
-	b.WriteString(stModalTi.Render(p.title) + stDim.Render("  ↑↓ pick · Enter · Esc close") + "\n")
+	b.WriteString(m.st.ModalTi.Render(p.title) + m.st.Dim.Render("  ↑↓ pick · Enter · Esc close") + "\n")
 	b.WriteString(m.renderPickList(p, m.popupRows(8), m.omitPopupDesc()))
-	return stBorder.Width(m.width - 4).Render(b.String())
+	return m.st.Border.Width(m.width - 4).Render(b.String())
 }

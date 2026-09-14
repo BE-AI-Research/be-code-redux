@@ -67,9 +67,9 @@ func (m *Model) wheelView() string {
 		g = wheelGlyphASCII(pct, m.running, m.wheelFrame)
 	}
 	if m.compact() {
-		return stAccent.Render(g) + fmt.Sprintf(" %d%%", pct)
+		return m.st.Accent.Render(g) + fmt.Sprintf(" %d%%", pct)
 	}
-	return stAccent.Render(g) + fmt.Sprintf(" %3d%%", pct)
+	return m.st.Accent.Render(g) + fmt.Sprintf(" %3d%%", pct)
 }
 
 // wheelWidth is the cells the wheel column takes (glyph, space, "100%").

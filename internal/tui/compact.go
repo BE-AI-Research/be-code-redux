@@ -101,7 +101,7 @@ func (m *Model) omitPopupDesc() bool {
 // for the clients marker), the IDE marker, and the clients marker — no
 // hint text.
 func (m *Model) compactBottomLine() string {
-	state := stOK.Render("ready")
+	state := m.st.OK.Render("ready")
 	if m.running {
 		word := ""
 		if fields := strings.Fields(m.statusNote); len(fields) > 0 {
@@ -109,15 +109,15 @@ func (m *Model) compactBottomLine() string {
 		}
 		state = m.spin.View() + " " + word
 		if n := m.ag.Pending(); n > 0 {
-			state += stAccent.Render(fmt.Sprintf(" · q%d", n))
+			state += m.st.Accent.Render(fmt.Sprintf(" · q%d", n))
 		}
 	}
-	line := " " + stAccent.Render("/menu") + stDim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
+	line := " " + m.st.Accent.Render("/menu") + m.st.Dim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
 	if m.ag.IDEName != "" {
-		line += stAccent.Render(" " + m.ideMarker())
+		line += m.st.Accent.Render(" " + m.ideMarker())
 	}
 	if len(m.clients) > 1 {
-		line += stAccent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients)))
+		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients)))
 	}
 	return line
 }
@@ -129,5 +129,5 @@ func (m *Model) compactBottomLine() string {
 func (m *Model) compactMenuStatus() string {
 	line1 := fmt.Sprintf("%s · %s", m.ag.Model, m.ag.Profile.Family)
 	line2 := fmt.Sprintf("context %d%% · session %dk tokens", m.ctxPercent(), m.usage.total/1000)
-	return stDim.Render(line1) + "\n" + stDim.Render(line2)
+	return m.st.Dim.Render(line1) + "\n" + m.st.Dim.Render(line2)
 }

@@ -7,39 +7,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Every theme in the table resolves, and each has its own accent colour.
-func TestThemeTableResolvesDistinctAccents(t *testing.T) {
-	names := ThemeNames()
-	if len(names) != 13 {
-		t.Fatalf("expected 13 themes, got %d: %v", len(names), names)
-	}
-	seen := map[string]string{}
-	for _, n := range names {
-		p, ok := lookupTheme(n)
+func TestNewStylesResolvesEveryThemeAndRejectsUnknown(t *testing.T) {
+	for _, name := range ThemeNames() {
+		st, ok := newStyles(name)
 		if !ok {
-			t.Fatalf("theme %q missing from the table", n)
+			t.Fatalf("theme %q not resolved", name)
 		}
-		if n == "mono" {
-			continue
+		if st.Name() != name {
+			t.Fatalf("styles for %q report name %q", name, st.Name())
 		}
-		key := p.Accent + "/" + p.StatusBG // Solarized dark/light share hues, not backgrounds
-		if prev, dup := seen[key]; dup {
-			t.Fatalf("themes %q and %q are identical (%s)", prev, n, key)
-		}
-		seen[key] = n
+	}
+	if _, ok := newStyles("no-such-theme"); ok {
+		t.Fatal("unknown theme resolved")
+	}
+	// Render actually differs only under a colour-capable profile; outside a
+	// real terminal (as in this test run) lipgloss degrades to no colour and
+	// every Render call would look identical regardless of style.
+	defer pinColorProfile()()
+	dark, _ := newStyles("dark")
+	nord, _ := newStyles("nord")
+	if dark.Accent.Render("x") == nord.Accent.Render("x") {
+		t.Fatal("two themes render the accent identically; styles are not per value")
 	}
 }
 
-// Unknown names fall back to dark and report it.
-func TestUnknownThemeFallsBackToDark(t *testing.T) {
-	applied := SetTheme("no-such-theme")
-	if applied != "dark" {
-		t.Fatalf("applied = %q, want dark", applied)
+func TestModelCarriesItsOwnStyles(t *testing.T) {
+	m := newTestModel(t)
+	if m.st.Name() != "dark" {
+		t.Fatalf("default styles %q, want dark", m.st.Name())
 	}
-	if applied := SetTheme("dracula"); applied != "dracula" {
-		t.Fatalf("applied = %q", applied)
+	m.applyTheme("nord")
+	if m.st.Name() != "nord" {
+		t.Fatalf("applyTheme left styles at %q", m.st.Name())
 	}
-	SetTheme("dark")
+	other := newTestModel(t)
+	if other.st.Name() != "dark" {
+		t.Fatalf("a second model inherited the first one's theme: %q — styles are still global", other.st.Name())
+	}
 }
 
 // /theme <name> changes the live palette and persists the choice.
@@ -47,10 +51,9 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())
 	m := newTestModel(t)
-	SetTheme("dark")
-	before := stAccent.GetForeground()
+	before := m.st.Accent.GetForeground()
 	m.slashCommand("/theme nord", 0)
-	after := stAccent.GetForeground()
+	after := m.st.Accent.GetForeground()
 	if before == after {
 		t.Fatal("accent did not change")
 	}
@@ -61,7 +64,6 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 		t.Fatal("no confirmation line")
 	}
 	_ = lipgloss.Color("")
-	SetTheme("dark")
 }
 
 // /theme with no argument opens a picker with every theme.

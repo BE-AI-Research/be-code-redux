@@ -33,7 +33,7 @@ func (m *Model) openQueue(from int) (tea.Model, tea.Cmd) {
 	m.queueOwner = from
 	items, _ := m.ownerQueue()
 	if len(items) == 0 {
-		m.appendLine(stDim.Render("no queued messages (type while the agent works and press Enter to queue one)"))
+		m.appendLine(m.st.Dim.Render("no queued messages (type while the agent works and press Enter to queue one)"))
 		return m, nil
 	}
 	m.ag.Hold(true)
@@ -80,13 +80,13 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		text, ok := m.ag.Remove(idx[m.queueCursor])
 		m.closeQueue()
 		if !ok {
-			m.appendLine(stDim.Render("that message was already delivered"))
+			m.appendLine(m.st.Dim.Render("that message was already delivered"))
 			return m, nil
 		}
 		in := m.inputFor(owner)
 		in.SetValue(text)
 		in.CursorEnd()
-		m.appendLine(stDim.Render("editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"))
+		m.appendLine(m.st.Dim.Render("editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"))
 		return m, nil
 	case tea.KeyDelete, tea.KeyBackspace:
 		return m.dropQueued(idx[m.queueCursor])
@@ -102,9 +102,9 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 func (m *Model) dropQueued(i int) (tea.Model, tea.Cmd) {
 	text, ok := m.ag.Remove(i)
 	if !ok {
-		m.appendLine(stDim.Render("that message was already delivered"))
+		m.appendLine(m.st.Dim.Render("that message was already delivered"))
 	} else {
-		m.appendLine(stDim.Render("dropped queued message: " + firstLineOf(text, 80)))
+		m.appendLine(m.st.Dim.Render("dropped queued message: " + firstLineOf(text, 80)))
 	}
 	left, _ := m.ownerQueue()
 	if len(left) == 0 {
@@ -118,7 +118,7 @@ func (m *Model) dropQueued(i int) (tea.Model, tea.Cmd) {
 func (m *Model) queueBox() string {
 	items, _ := m.ownerQueue()
 	var b strings.Builder
-	b.WriteString(stModalTi.Render("queued messages") + stDim.Render("  ↑↓ pick · Enter edit · d drop · Esc close") + "\n")
+	b.WriteString(m.st.ModalTi.Render("queued messages") + m.st.Dim.Render("  ↑↓ pick · Enter edit · d drop · Esc close") + "\n")
 	maxRows := m.popupRows(len(items))
 	start := 0
 	if m.queueCursor >= maxRows {
@@ -128,12 +128,12 @@ func (m *Model) queueBox() string {
 		it := items[i]
 		line := fmt.Sprintf("%d  %s", i+1, firstLineOf(it, m.width-14))
 		if i == m.queueCursor {
-			b.WriteString(stAccent.Render("> "+line) + "\n")
+			b.WriteString(m.st.Accent.Render("> "+line) + "\n")
 		} else {
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	return stBorder.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
+	return m.st.Border.Width(m.width - 4).Render(strings.TrimRight(b.String(), "\n"))
 }
 
 func firstLineOf(s string, max int) string {
