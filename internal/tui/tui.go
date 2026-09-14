@@ -169,7 +169,8 @@ type Model struct {
 	toastUntil time.Time
 	now        func() time.Time
 
-	transcript strings.Builder // finished content
+	entries    []entry         // transcript, as raw entries; see entry.go
+	rendered   strings.Builder // entries rendered with this model's styles at its width
 	streaming  strings.Builder // current assistant text
 	statusNote string
 
@@ -435,7 +436,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// wipes anything printed before it opened. Once only.
 		if !m.ideAnnounced && m.ag.IDEName != "" {
 			m.ideAnnounced = true
-			m.appendLine(m.st.Dim.Render(fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)))
+			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)})
 		}
 		// Nudge once toward /init for a project with no notes file yet. The
 		// check itself is latched, not just the hint: this runs on every
@@ -444,10 +445,10 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initChecked = true
 			if ui.NeedsInitHint(m.ag.Tools.Root) {
 				m.initHinted = true
-				m.appendLine(m.st.Dim.Render(ui.InitHint))
+				m.appendEntry(entry{Kind: entryDim, Text: ui.InitHint})
 			}
 		}
-		m.refreshTranscript()
+		m.rebuild()
 		// A resize moves every input row's absolute position; republish for
 		// the whole roster, not just whoever happens to type next.
 		m.publishAllOverlays()
@@ -466,30 +467,19 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTranscript()
 	case toolStartMsg:
 		m.flushStreaming()
-		args := msg.args
-		limit := 140
-		if m.compact() {
-			limit = m.width - 12
-			if limit < 10 {
-				limit = 10
-			}
-		}
-		if len(args) > limit {
-			args = args[:limit] + "…"
-		}
-		m.appendLine(m.st.Tool.Render("● "+msg.name) + " " + m.st.Dim.Render(args))
+		m.appendEntry(entry{Kind: entryTool, Label: msg.name, Text: msg.args})
 		m.statusNote = "running " + msg.name
 	case toolEndMsg:
 		m.lastTool = msg.res.Content
 		if msg.res.IsError {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
-			m.appendLine(m.st.Err.Render("  ✗ ") + m.st.Dim.Render(first))
+			m.appendEntry(entry{Kind: entryToolErr, Text: first})
 		} else {
 			first := strings.SplitN(msg.res.Content, "\n", 2)[0]
 			if len(first) > 100 {
 				first = first[:100] + "…"
 			}
-			m.appendLine(m.st.OK.Render("  ✓ ") + m.st.Dim.Render(first))
+			m.appendEntry(entry{Kind: entryToolOK, Text: first})
 		}
 		m.statusNote = "thinking"
 	case thinkingMsg:
@@ -510,9 +500,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The editor context note is ambient information, not a warning:
 		// render it dimmed and unlabelled.
 		if strings.HasPrefix(string(msg), "[editor:") {
-			m.appendLine(m.st.Dim.Render(string(msg)))
+			m.appendEntry(entry{Kind: entryDim, Text: string(msg)})
 		} else {
-			m.appendLine(m.st.Warn.Render("note ") + string(msg))
+			m.appendEntry(entry{Kind: entryNote, Text: string(msg)})
 		}
 	case statusMsg:
 		m.statusNote = string(msg)
@@ -551,7 +541,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// duplicate withdrawal is a no-op: the modal is already gone.
 		if m.mode == modeApproval && m.approval != nil {
 			if msg.note != "" {
-				m.appendLine(m.st.Dim.Render(msg.note))
+				m.appendEntry(entry{Kind: entryDim, Text: msg.note})
 			}
 			m.approval = nil
 			m.approvalGen = 0
@@ -564,29 +554,29 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushStreaming()
 		if msg.err != nil {
 			if msg.err != context.Canceled && !strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendLine(m.st.Err.Render("error ") + msg.err.Error())
+				m.appendEntry(entry{Kind: entryError, Label: "error ", Text: msg.err.Error()})
 			} else {
-				m.appendLine(m.st.Warn.Render("cancelled"))
+				m.appendEntry(entry{Kind: entryWarn, Text: "cancelled"})
 			}
 		}
 		if msg.rep != nil && msg.rep.Verify != nil {
 			for _, line := range strings.Split(msg.rep.Verify.Human(), "\n") {
-				m.appendLine(m.st.Dim.Render(line))
+				m.appendEntry(entry{Kind: entryDim, Text: line})
 			}
 			if msg.rep.Verify.Passed() {
-				m.appendLine(m.st.OK.Render("✓ verified"))
+				m.appendEntry(entry{Kind: entryOK, Text: "✓ verified"})
 			} else {
-				m.appendLine(m.st.Err.Render("✗ verification failed after repairs"))
+				m.appendEntry(entry{Kind: entryErr, Text: "✗ verification failed after repairs"})
 			}
 		}
 		if msg.rep != nil && msg.rep.Reviewed {
 			if msg.rep.ReviewIssues == "" {
-				m.appendLine(m.st.OK.Render("✓ reviewer approved"))
+				m.appendEntry(entry{Kind: entryOK, Text: "✓ reviewer approved"})
 			} else {
-				m.appendLine(m.st.Warn.Render("reviewer raised issues (repair attempted)"))
+				m.appendEntry(entry{Kind: entryWarn, Text: "reviewer raised issues (repair attempted)"})
 			}
 		}
-		m.appendLine("")
+		m.appendEntry(entry{Kind: entryPlain})
 		m.running = false
 		if m.mode == modeBusy {
 			m.mode = modeInput
@@ -599,7 +589,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if left := m.ag.DrainItems(); len(left) > 0 {
 			texts := make([]string, 0, len(left))
 			for _, it := range left {
-				m.appendLine(m.st.User.Render(m.userPrefix(it.From)) + it.Text)
+				m.appendEntry(entry{Kind: entryUser, Label: m.userPrefix(it.From), Text: it.Text})
 				texts = append(texts, it.Text)
 			}
 			return m.startTurn(strings.Join(texts, "\n"))
@@ -615,12 +605,12 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) || strings.Contains(msg.err.Error(), "context canceled") {
-				m.appendLine(m.st.Warn.Render("cancelled"))
+				m.appendEntry(entry{Kind: entryWarn, Text: "cancelled"})
 			} else {
-				m.appendLine(m.st.Err.Render("init failed: ") + msg.err.Error())
+				m.appendEntry(entry{Kind: entryError, Label: "init failed: ", Text: msg.err.Error()})
 			}
 		} else {
-			m.appendLine(m.st.OK.Render("wrote " + msg.path))
+			m.appendEntry(entry{Kind: entryOK, Text: "wrote " + msg.path})
 		}
 		// Queued as a Cmd, not sent here directly: m.send is p.Send on the
 		// unbuffered channel this very update goroutine reads from, so a
@@ -630,7 +620,7 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case planReadyMsg:
 		m.flushStreaming()
 		if msg.err != nil {
-			m.appendLine(m.st.Err.Render("plan failed: ") + msg.err.Error())
+			m.appendEntry(entry{Kind: entryError, Label: "plan failed: ", Text: msg.err.Error()})
 			m.mode = modeInput
 			m.focusInputs()
 			break
@@ -762,7 +752,7 @@ func (m *Model) handleGuestKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	// turnDoneMsg) that would rewrite or close whatever popup is open by
 	// then — the owner's. Busy mode already refuses commands.
 	if !m.running && k.Type == tea.KeyEnter && strings.HasPrefix(strings.TrimSpace(m.inputFor(from).Value()), "/") {
-		m.appendLine(m.st.Dim.Render("commands wait until the open popup closes; plain text still sends"))
+		m.appendEntry(entry{Kind: entryDim, Text: "commands wait until the open popup closes; plain text still sends"})
 		return m, nil
 	}
 	mode, pick, prev := m.mode, m.picker, m.prevMode
@@ -823,7 +813,7 @@ func (m *Model) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.setQuitHint(from)
-		m.appendLine(m.st.Dim.Render("press Ctrl+C again to quit"))
+		m.appendEntry(entry{Kind: entryDim, Text: "press Ctrl+C again to quit"})
 		return m, nil
 	case tea.KeyEnter:
 		text := strings.TrimSpace(in.Value())
@@ -903,13 +893,13 @@ func (m *Model) resolveApproval(ok bool, note string) {
 	if m.approval == nil {
 		return
 	}
-	verdict := m.st.Err.Render("denied")
+	verdict := "denied"
 	if ok {
-		verdict = m.st.OK.Render("approved")
+		verdict = "approved"
 	}
-	m.appendLine(m.st.Warn.Render(m.approval.action+" ") + verdict)
+	m.appendEntry(entry{Kind: entryVerdict, Label: m.approval.action, Text: verdict})
 	if note != "" {
-		m.appendLine(m.st.Dim.Render(note))
+		m.appendEntry(entry{Kind: entryDim, Text: note})
 	}
 	m.approval.resp <- ok
 	m.approval = nil
@@ -920,7 +910,7 @@ func (m *Model) resolveApproval(ok bool, note string) {
 // startTurnFrom echoes the request under its sender's prefix and launches
 // the agent.
 func (m *Model) startTurnFrom(text string, from int) (tea.Model, tea.Cmd) {
-	m.appendLine(m.st.User.Render(m.userPrefix(from)) + text)
+	m.appendEntry(entry{Kind: entryUser, Label: m.userPrefix(from), Text: text})
 	return m.startTurn(text)
 }
 
@@ -969,7 +959,7 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			m.cancelFn()
 		}
 		if n := len(m.ag.DrainInbox()); n > 0 {
-			m.appendLine(m.st.Dim.Render(fmt.Sprintf("discarded %d queued message(s)", n)))
+			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("discarded %d queued message(s)", n)})
 		}
 		return m, nil
 	case tea.KeyEnter:
@@ -983,15 +973,15 @@ func (m *Model) handleBusyKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 				m.histFile.add(text, from)
 				return m.slashCommand(text, from)
 			}
-			m.appendLine(m.st.Dim.Render("commands wait until the agent is done (Esc cancels); plain text is queued"))
+			m.appendEntry(entry{Kind: entryDim, Text: "commands wait until the agent is done (Esc cancels); plain text is queued"})
 			return m, nil
 		}
 		m.histFile.add(text, from)
 		m.ag.EnqueueFrom(text, from)
 		if len(m.clients) > 1 {
-			m.appendLine(m.st.Dim.Render("queued> ") + m.userPrefix(from) + text)
+			m.appendEntry(entry{Kind: entryQueued, Label: "queued> ", Text: m.userPrefix(from) + text})
 		} else {
-			m.appendLine(m.st.Dim.Render("queued (delivered at the next step)> ") + text)
+			m.appendEntry(entry{Kind: entryQueued, Label: "queued (delivered at the next step)> ", Text: text})
 		}
 		return m, nil
 	case tea.KeyPgUp, tea.KeyPgDown:
@@ -1024,7 +1014,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(k.String()) {
 	case "y":
 		m.pending = nil
-		m.appendLine(m.st.OK.Render("plan approved — executing"))
+		m.appendEntry(entry{Kind: entryOK, Text: "plan approved — executing"})
 		m.mode = modeBusy
 		m.statusNote = "executing plan"
 		ctx, cancel := context.WithCancel(m.rootCtx)
@@ -1036,7 +1026,7 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}()
 	case "n", "esc":
 		m.pending = nil
-		m.appendLine(m.st.Warn.Render("plan discarded"))
+		m.appendEntry(entry{Kind: entryWarn, Text: "plan discarded"})
 		m.mode = modeInput
 		m.focusInputs()
 	default:
@@ -1049,9 +1039,23 @@ func (m *Model) handlePlanKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ---- transcript helpers ----------------------------------------------------
 
-func (m *Model) appendLine(s string) {
-	m.transcript.WriteString(s)
-	m.transcript.WriteString("\n")
+// appendEntry records one transcript entry and renders it for this
+// terminal.
+func (m *Model) appendEntry(e entry) {
+	m.entries = append(m.entries, e)
+	m.rendered.WriteString(renderEntry(e, m.st, m.width, m.compact(), m.richText))
+	m.rendered.WriteString("\n")
+	m.refreshTranscript()
+}
+
+// rebuild re-renders every entry — after a theme change or a resize, since
+// tool-argument truncation and Markdown colouring depend on both.
+func (m *Model) rebuild() {
+	m.rendered.Reset()
+	for _, e := range m.entries {
+		m.rendered.WriteString(renderEntry(e, m.st, m.width, m.compact(), m.richText))
+		m.rendered.WriteString("\n")
+	}
 	m.refreshTranscript()
 }
 
@@ -1061,17 +1065,15 @@ func (m *Model) flushStreaming() {
 	}
 	text := strings.TrimRight(m.streaming.String(), "\n")
 	m.lastReply = text
-	m.transcript.WriteString(ui.RenderMarkdown(text, m.richText))
-	m.transcript.WriteString("\n")
 	m.streaming.Reset()
-	m.refreshTranscript()
+	m.appendEntry(entry{Kind: entryAssistant, Text: text})
 }
 
 func (m *Model) refreshTranscript() {
 	if !m.ready {
 		return
 	}
-	content := m.transcript.String() + m.streaming.String()
+	content := m.rendered.String() + m.streaming.String()
 	m.wrapped = lipgloss.NewStyle().Width(m.vp.Width).Render(content)
 	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(m.highlighted())
@@ -1296,7 +1298,7 @@ func (m *Model) completeSlash(from int) {
 			in.SetValue(v[:i+1] + matches[0])
 			in.CursorEnd()
 		} else if len(matches) > 1 {
-			m.appendLine(m.st.Dim.Render("@" + strings.Join(matches, "  @")))
+			m.appendEntry(entry{Kind: entryDim, Text: "@" + strings.Join(matches, "  @")})
 		}
 		return
 	}
@@ -1318,7 +1320,7 @@ func (m *Model) completeSlash(from int) {
 		in.SetValue(matches[0] + " ")
 		in.CursorEnd()
 	} else if len(matches) > 1 {
-		m.appendLine(m.st.Dim.Render(strings.Join(matches, "  ")))
+		m.appendEntry(entry{Kind: entryDim, Text: strings.Join(matches, "  ")})
 	}
 }
 
@@ -1359,19 +1361,19 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		if len(m.custom) > 0 {
 			help += "\ncustom: /" + strings.Join(commands.Names(m.custom), " /")
 		}
-		m.appendLine(m.st.Dim.Render(help))
+		m.appendEntry(entry{Kind: entryDim, Text: help})
 	case "/clear":
 		m.ag.History.Messages = nil
 		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
-		m.appendLine(m.st.OK.Render("history cleared; new session started"))
+		m.appendEntry(entry{Kind: entryOK, Text: "history cleared; new session started"})
 	case "/tools":
-		m.appendLine(m.st.Dim.Render(strings.Join(m.ag.Tools.Names(), " · ")))
+		m.appendEntry(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
 	case "/config":
 		p, _ := config.Path()
-		m.appendLine(m.st.Dim.Render(fmt.Sprintf(
+		m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"%s\nprovider=%s model=%s ui=%s ctx=%d max_turns=%d max_repairs=%d compat=%s previews=%v",
 			p, m.cfg.DefaultProvider, m.cfg.Model, m.cfg.UI, m.cfg.ContextTokens,
-			m.cfg.MaxTurns, m.cfg.MaxRepairs, m.cfg.CompatToolCalls, m.cfg.ApproveFileWrites)))
+			m.cfg.MaxTurns, m.cfg.MaxRepairs, m.cfg.CompatToolCalls, m.cfg.ApproveFileWrites)})
 	case "/verify":
 		m.mode = modeBusy
 		m.statusNote = "verifying"
@@ -1383,18 +1385,18 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/model":
 		if len(fields) > 1 {
 			m.ag.SetModel(fields[1])
-			m.appendLine(m.st.OK.Render(fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)))
+			m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("model set to %s (profile %s)", fields[1], m.ag.Profile.Family)})
 			break
 		}
 		return m.openModelPicker()
 	case "/undo":
 		restored, err := m.ag.Undo()
 		if err != nil {
-			m.appendLine(m.st.Err.Render(err.Error()))
+			m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
 			break
 		}
-		m.appendLine(m.st.OK.Render(fmt.Sprintf("restored: %s (%d undo levels left)",
-			strings.Join(restored, ", "), m.ag.Checkpoints.Depth())))
+		m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("restored: %s (%d undo levels left)",
+			strings.Join(restored, ", "), m.ag.Checkpoints.Depth())})
 	case "/commit":
 		m.mode = modeBusy
 		m.statusNote = "committing"
@@ -1448,23 +1450,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/stats":
 		s := m.ag.Stats
-		m.appendLine(m.st.Dim.Render(fmt.Sprintf(
+		m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
-			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)))
+			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)})
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
-			m.appendLine(m.st.Dim.Render("no repo map (unrecognized files or disabled)"))
+			m.appendEntry(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})
 		} else {
-			m.appendLine(m.st.Dim.Render(mp))
+			m.appendEntry(entry{Kind: entryDim, Text: mp})
 		}
 	case "/plan":
 		req := strings.TrimSpace(strings.TrimPrefix(text, "/plan"))
 		if req == "" {
-			m.appendLine(m.st.Err.Render("usage: /plan <task description>"))
+			m.appendEntry(entry{Kind: entryErr, Text: "usage: /plan <task description>"})
 			break
 		}
-		m.appendLine(m.st.User.Render("plan> ") + req)
+		m.appendEntry(entry{Kind: entryUser, Label: "plan> ", Text: req})
 		m.mode = modeBusy
 		m.statusNote = "planning (read-only)"
 		for _, ta := range m.inputs {
@@ -1488,29 +1490,29 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/handoff":
 		if h := m.ag.Handoff(); h != "" {
 			for _, line := range strings.Split(h, "\n") {
-				m.appendLine(m.st.Dim.Render(line))
+				m.appendEntry(entry{Kind: entryDim, Text: line})
 			}
 		} else {
-			m.appendLine(m.st.Dim.Render("no handoff briefing in this session"))
+			m.appendEntry(entry{Kind: entryDim, Text: "no handoff briefing in this session"})
 		}
 	case "/review":
 		m.reviewCommand(fields)
 	case "/clients":
 		if !m.served {
-			m.appendLine(m.st.Dim.Render("not served: this session is running in-process (start without --no-host to allow attach)"))
+			m.appendEntry(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
 			return m, nil
 		}
 		if len(m.clients) == 0 {
-			m.appendLine(m.st.Dim.Render("no terminals attached"))
+			m.appendEntry(entry{Kind: entryDim, Text: "no terminals attached"})
 			return m, nil
 		}
 		for _, c := range m.clients {
-			m.appendLine(m.st.Dim.Render(fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)))
+			m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)})
 		}
 		return m, nil
 	case "/detach":
 		if m.detachClient == nil {
-			m.appendLine(m.st.Dim.Render("nothing to detach: not served"))
+			m.appendEntry(entry{Kind: entryDim, Text: "nothing to detach: not served"})
 			return m, nil
 		}
 		// As a command, not a call: detaching makes the host notify its
@@ -1530,7 +1532,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			args := strings.TrimSpace(strings.TrimPrefix(text, fields[0]))
 			return m.startTurnFrom(c.Expand(args), from)
 		}
-		m.appendLine(m.st.Err.Render("unknown command " + fields[0] + " (/help)"))
+		m.appendEntry(entry{Kind: entryErr, Text: "unknown command " + fields[0] + " (/help)"})
 	}
 	return m, nil
 }
@@ -1538,13 +1540,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 	p, err := provider.FromConfig(m.cfg, name)
 	if err != nil {
-		m.appendLine(m.st.Err.Render(err.Error()))
+		m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
 		return m, nil
 	}
 	m.prov = p
 	m.ag.Provider = p
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
-	m.appendLine(m.st.OK.Render(fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)))
+	m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
 	return m, m.pingCmd()
 }
 
@@ -1562,7 +1564,7 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	}
 	s, err := m.loadSession(id)
 	if err != nil {
-		m.appendLine(m.st.Err.Render(err.Error()))
+		m.appendEntry(entry{Kind: entryErr, Text: err.Error()})
 		return m, nil
 	}
 	code := s.ResumeCode()
@@ -1570,9 +1572,9 @@ func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 		return m.joinLive(code, from)
 	}
 	m.ag.Resume(s)
-	m.appendLine(m.st.OK.Render(fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))))
+	m.appendEntry(entry{Kind: entryOK, Text: fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))})
 	if s.Handoff != "" {
-		m.appendLine(m.st.Dim.Render("handoff briefing loaded into the system prompt; /handoff shows it"))
+		m.appendEntry(entry{Kind: entryDim, Text: "handoff briefing loaded into the system prompt; /handoff shows it"})
 	}
 	return m, nil
 }
@@ -1593,6 +1595,6 @@ func (m *Model) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 		sw, c := m.switchClient, from
 		return m, func() tea.Msg { sw(c, code); return nil }
 	}
-	m.appendLine(m.st.Dim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
+	m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)})
 	return m, nil
 }

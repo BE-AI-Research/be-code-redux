@@ -174,7 +174,7 @@ func (m *Model) openThemePicker() (tea.Model, tea.Cmd) {
 func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
 	st, ok := newStyles(name)
 	if !ok {
-		m.appendLine(m.st.Err.Render("unknown theme " + name + "; try /theme to pick one"))
+		m.appendEntry(entry{Kind: entryErr, Text: "unknown theme " + name + "; try /theme to pick one"})
 		return m, nil
 	}
 	m.st = st
@@ -185,11 +185,11 @@ func (m *Model) applyTheme(name string) (tea.Model, tea.Cmd) {
 		m.termWrite(terminalColorSeq(name))
 	}
 	if err := m.cfg.Save(); err != nil {
-		m.appendLine(m.st.Warn.Render("theme set to " + name + " for this session; could not save config: " + err.Error()))
+		m.appendEntry(entry{Kind: entryWarn, Text: "theme set to " + name + " for this session; could not save config: " + err.Error()})
 	} else {
-		m.appendLine(m.st.OK.Render("theme set to " + name))
+		m.appendEntry(entry{Kind: entryOK, Text: "theme set to " + name})
 	}
-	m.refreshTranscript()
+	m.rebuild()
 	return m, nil
 }
 

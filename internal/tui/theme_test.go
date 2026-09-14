@@ -60,7 +60,7 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	if m.cfg.Theme != "nord" {
 		t.Fatalf("cfg.Theme = %q", m.cfg.Theme)
 	}
-	if !strings.Contains(m.transcript.String(), "theme set to nord") {
+	if !strings.Contains(m.rendered.String(), "theme set to nord") {
 		t.Fatal("no confirmation line")
 	}
 	_ = lipgloss.Color("")

@@ -17,11 +17,11 @@ func TestInitHintShownOnceForAProjectWithoutNotes(t *testing.T) {
 	m := newTestModel(t, func(ag *agent.Agent) {
 		os.WriteFile(filepath.Join(ag.Tools.Root, "go.mod"), []byte("module x\n"), 0o644)
 	})
-	if strings.Count(m.transcript.String(), "no BECODE.md; /init maps this project") != 1 {
-		t.Fatalf("hint:\n%s", m.transcript.String())
+	if strings.Count(m.rendered.String(), "no BECODE.md; /init maps this project") != 1 {
+		t.Fatalf("hint:\n%s", m.rendered.String())
 	}
 	m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
-	if strings.Count(m.transcript.String(), "no BECODE.md") != 1 {
+	if strings.Count(m.rendered.String(), "no BECODE.md") != 1 {
 		t.Fatal("hint repeated")
 	}
 }
@@ -36,7 +36,7 @@ func TestInitHintCheckIsLatched(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(m.ag.Tools.Root, "go.mod"), []byte("module x\n"), 0o644)
 	m.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
-	if strings.Contains(m.transcript.String(), "no BECODE.md") {
+	if strings.Contains(m.rendered.String(), "no BECODE.md") {
 		t.Fatal("the workspace was re-checked on a resize")
 	}
 }

@@ -83,8 +83,8 @@ func TestInProcessResumeOfALiveCodePrintsInsteadOfLoading(t *testing.T) {
 	if m.ag.Session != before {
 		t.Fatal("an in-process resume of a live code must load nothing")
 	}
-	if !strings.Contains(m.transcript.String(), "ABC123 is live elsewhere; join it with: be-code attach ABC123") {
-		t.Fatalf("in-process resume of a live code:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "ABC123 is live elsewhere; join it with: be-code attach ABC123") {
+		t.Fatalf("in-process resume of a live code:\n%s", m.rendered.String())
 	}
 }
 
@@ -220,13 +220,13 @@ func TestResumeOfAnUnsavedLiveCodeSwitchesWithoutLoading(t *testing.T) {
 
 	_, cmd := m.resumeFrom("xyz789", 2)
 	if cmd == nil {
-		t.Fatalf("a live code must switch without a saved file:\n%s", m.transcript.String())
+		t.Fatalf("a live code must switch without a saved file:\n%s", m.rendered.String())
 	}
 	cmd()
 	if len(switched) != 1 || switched[0] != "2:XYZ789" {
 		t.Fatalf("switch: %v", switched)
 	}
-	if strings.Contains(m.transcript.String(), "no session") {
-		t.Fatalf("store error surfaced for a live code:\n%s", m.transcript.String())
+	if strings.Contains(m.rendered.String(), "no session") {
+		t.Fatalf("store error surfaced for a live code:\n%s", m.rendered.String())
 	}
 }

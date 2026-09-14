@@ -80,7 +80,7 @@ func TestDropRemovesMessage(t *testing.T) {
 	if got := m.ag.Peek(); len(got) != 1 || got[0] != "keep me" {
 		t.Fatalf("after drop: %v", got)
 	}
-	if !strings.Contains(m.transcript.String(), "dropped") {
+	if !strings.Contains(m.rendered.String(), "dropped") {
 		t.Fatal("no confirmation line")
 	}
 	// Dropping the last one closes the popup.
@@ -107,7 +107,7 @@ func TestRunFinishingClosesQueuePopup(t *testing.T) {
 	if m.mode == modeQueue || m.ag.Held() {
 		t.Fatalf("popup survived the run: mode=%v held=%v", m.mode, m.ag.Held())
 	}
-	if !strings.Contains(m.transcript.String(), "next thing") {
+	if !strings.Contains(m.rendered.String(), "next thing") {
 		t.Fatal("leftover queue did not start the next turn")
 	}
 }

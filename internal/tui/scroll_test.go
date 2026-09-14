@@ -49,7 +49,7 @@ func newTestModel(t *testing.T, prep ...func(*agent.Agent)) *Model {
 func TestTranscriptScrollsWithPageUpAndWheel(t *testing.T) {
 	m := newTestModel(t)
 	for i := 0; i < 200; i++ {
-		m.appendLine(strings.Repeat("x", 10))
+		m.appendEntry(entry{Kind: entryPlain, Text: strings.Repeat("x", 10)})
 	}
 	if !m.vp.AtBottom() {
 		t.Fatal("expected transcript pinned to bottom after append")
@@ -105,7 +105,7 @@ func TestBusyEnterQueuesMessage(t *testing.T) {
 	if m.mode != modeBusy {
 		t.Fatal("queuing must not change mode")
 	}
-	if !strings.Contains(m.transcript.String(), "queued") {
+	if !strings.Contains(m.rendered.String(), "queued") {
 		t.Fatal("transcript does not show the queued message")
 	}
 }
@@ -119,7 +119,7 @@ func TestLeftoverQueueStartsNextTurn(t *testing.T) {
 	if m.mode != modeBusy {
 		t.Fatalf("expected a new turn to start, mode=%v", m.mode)
 	}
-	if !strings.Contains(m.transcript.String(), "next thing please") {
+	if !strings.Contains(m.rendered.String(), "next thing please") {
 		t.Fatal("queued text not echoed as the new turn")
 	}
 }

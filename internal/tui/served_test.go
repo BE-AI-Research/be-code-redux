@@ -39,11 +39,11 @@ func TestClientsMsgRendersRoster(t *testing.T) {
 			t.Fatalf("holder text %q survives:\n%s", gone, v)
 		}
 	}
-	if !strings.Contains(m.transcript.String(), "attached: ssh from 10.0.0.5 (pid 2)") {
-		t.Fatalf("no attach line:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "attached: ssh from 10.0.0.5 (pid 2)") {
+		t.Fatalf("no attach line:\n%s", m.rendered.String())
 	}
 	m.Update(clientsMsg{{ID: 1, Label: "vscode (pid 1)"}})
-	if !strings.Contains(m.transcript.String(), "detached: ssh from 10.0.0.5 (pid 2)") {
+	if !strings.Contains(m.rendered.String(), "detached: ssh from 10.0.0.5 (pid 2)") {
 		t.Fatal("no detach line")
 	}
 	if strings.Contains(m.View(), "⧉") {
@@ -57,7 +57,7 @@ func TestClientsAndDetachCommands(t *testing.T) {
 	m := newTestModel(t)
 	m.Update(clientsMsg{{ID: 1, Label: "local (pid 1)"}})
 	m.slashCommand("/clients", 1)
-	if !strings.Contains(m.transcript.String(), "local (pid 1)") {
+	if !strings.Contains(m.rendered.String(), "local (pid 1)") {
 		t.Fatal("/clients did not list")
 	}
 	detached := make(chan int, 1)
@@ -98,8 +98,8 @@ func TestClientsNotServedMessage(t *testing.T) {
 	m.served = false
 	m.clients = nil
 	m.slashCommand("/clients", 0)
-	if !strings.Contains(m.transcript.String(), "not served") {
-		t.Fatalf("expected a not-served note:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "not served") {
+		t.Fatalf("expected a not-served note:\n%s", m.rendered.String())
 	}
 }
 
@@ -110,10 +110,10 @@ func TestClientsServedEmptyMessage(t *testing.T) {
 	m.served = true
 	m.clients = nil
 	m.slashCommand("/clients", 0)
-	if !strings.Contains(m.transcript.String(), "no terminals attached") {
-		t.Fatalf("expected a no-terminals-attached note:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "no terminals attached") {
+		t.Fatalf("expected a no-terminals-attached note:\n%s", m.rendered.String())
 	}
-	if strings.Contains(m.transcript.String(), "not served") {
+	if strings.Contains(m.rendered.String(), "not served") {
 		t.Fatal("served-but-empty must not say \"not served\"")
 	}
 }

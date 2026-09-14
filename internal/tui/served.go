@@ -143,14 +143,14 @@ func (m *Model) updateClients(msg clientsMsg) tea.Cmd {
 	}
 	for _, c := range m.clients {
 		if !hasClient(prev, c.ID) {
-			m.appendLine(m.st.Dim.Render("attached: " + c.Label))
+			m.appendEntry(entry{Kind: entryDim, Text: "attached: " + c.Label})
 		}
 	}
 	for _, c := range prev {
 		if hasClient(m.clients, c.ID) {
 			continue
 		}
-		m.appendLine(m.st.Dim.Render("detached: " + c.Label))
+		m.appendEntry(entry{Kind: entryDim, Text: "detached: " + c.Label})
 		// A terminal that has gone leaves no draft, no half-typed escape
 		// sequence and no popup of its own behind it.
 		m.dropInput(c.ID)

@@ -64,7 +64,7 @@ func (m *Model) openModelPicker() (tea.Model, tea.Cmd) {
 		return items, nil
 	}, func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
 		m.ag.SetModel(it.id)
-		m.appendLine(m.st.OK.Render("model set to " + it.id))
+		m.appendEntry(entry{Kind: entryOK, Text: "model set to " + it.id})
 		return m, nil
 	})
 }
@@ -248,7 +248,7 @@ func (m *Model) pickerUpdate(msg pickerItemsMsg) {
 	}
 	m.picker.loading = false
 	if msg.err != nil {
-		m.appendLine(m.st.Err.Render(msg.err.Error()))
+		m.appendEntry(entry{Kind: entryErr, Text: msg.err.Error()})
 		m.picker = nil
 		m.mode = m.idleMode()
 		return

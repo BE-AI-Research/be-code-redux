@@ -63,8 +63,8 @@ func TestEnterQueuesOnlyTheSendersTextWithLabel(t *testing.T) {
 	if got := m.inputFor(1).Value(); got != "mine" {
 		t.Fatalf("client 1's draft was disturbed: %q", got)
 	}
-	if !strings.Contains(m.transcript.String(), "tablet (pid 2)> ") {
-		t.Fatalf("queued line lacks the sender label:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "tablet (pid 2)> ") {
+		t.Fatalf("queued line lacks the sender label:\n%s", m.rendered.String())
 	}
 }
 
@@ -274,7 +274,7 @@ func TestLeftoverQueueEchoesEverySender(t *testing.T) {
 	m.ag.EnqueueFrom("from one", 1)
 	m.ag.EnqueueFrom("from two", 2)
 	m.Update(turnDoneMsg{})
-	tr := m.transcript.String()
+	tr := m.rendered.String()
 	for _, want := range []string{"desk (pid 1)> from one", "tablet (pid 2)> from two"} {
 		if !strings.Contains(tr, want) {
 			t.Fatalf("transcript lacks %q:\n%s", want, tr)
@@ -441,8 +441,8 @@ func TestGuestSlashCommandIsRefusedWhileAPopupIsOwned(t *testing.T) {
 	if m.mode != modePalette || m.picker != owner {
 		t.Fatal("the owner's palette was disturbed")
 	}
-	if !strings.Contains(m.transcript.String(), "commands wait until the open popup closes") {
-		t.Fatalf("no refusal note:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "commands wait until the open popup closes") {
+		t.Fatalf("no refusal note:\n%s", m.rendered.String())
 	}
 	if got := m.inputFor(2).Value(); got != "/model" {
 		t.Fatalf("guest draft %q must be kept", got)

@@ -160,14 +160,14 @@ func (m *Model) selectAll() {
 // copyText sends text to the clipboard and confirms in the transcript.
 func (m *Model) copyText(text, what string) {
 	if strings.TrimSpace(text) == "" {
-		m.appendLine(m.st.Dim.Render("nothing to copy (" + what + ")"))
+		m.appendEntry(entry{Kind: entryDim, Text: "nothing to copy (" + what + ")"})
 		return
 	}
 	if err := m.clipboardWrite(text); err != nil {
-		m.appendLine(m.st.Err.Render("copy failed: ") + err.Error())
+		m.appendEntry(entry{Kind: entryError, Label: "copy failed: ", Text: err.Error()})
 		return
 	}
-	m.appendLine(m.st.Dim.Render(fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)))
+	m.appendEntry(entry{Kind: entryDim, Text: fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)})
 }
 
 // copyTarget implements /copy [selection|reply|tool|all].
@@ -180,7 +180,7 @@ func (m *Model) copyTarget(target string) {
 			return
 		}
 		if target != "" {
-			m.appendLine(m.st.Dim.Render("no selection; drag over the transcript first"))
+			m.appendEntry(entry{Kind: entryDim, Text: "no selection; drag over the transcript first"})
 			return
 		}
 		m.copyText(m.lastReply, "last reply")
@@ -191,7 +191,7 @@ func (m *Model) copyTarget(target string) {
 	case "all", "transcript":
 		m.copyText(strings.Join(m.plainLines(), "\n"), "transcript")
 	default:
-		m.appendLine(m.st.Dim.Render("usage: /copy [selection|reply|tool|all]"))
+		m.appendEntry(entry{Kind: entryDim, Text: "usage: /copy [selection|reply|tool|all]"})
 	}
 }
 
@@ -232,7 +232,7 @@ func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
 			case "paste":
 				text, err := m.clipboardRead()
 				if err != nil {
-					m.appendLine(m.st.Err.Render("paste failed: ") + err.Error())
+					m.appendEntry(entry{Kind: entryError, Label: "paste failed: ", Text: err.Error()})
 				} else {
 					in := m.inputFor(from)
 					in.SetValue(in.Value() + text)

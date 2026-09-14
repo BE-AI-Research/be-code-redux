@@ -26,9 +26,9 @@ func captureClipboard(m *Model) *[]string {
 // the anchor and the release point, across lines.
 func TestDragSelectsTextAcrossLines(t *testing.T) {
 	m := newTestModel(t) // 80x24, no header: transcript starts at row 0
-	m.appendLine("alpha beta gamma")
-	m.appendLine("delta epsilon")
-	m.appendLine("zeta")
+	m.appendEntry(entry{Kind: entryPlain, Text: "alpha beta gamma"})
+	m.appendEntry(entry{Kind: entryPlain, Text: "delta epsilon"})
+	m.appendEntry(entry{Kind: entryPlain, Text: "zeta"})
 	m.Update(mouse(6, 0, tea.MouseButtonLeft, tea.MouseActionPress))
 	m.Update(mouse(4, 1, tea.MouseButtonLeft, tea.MouseActionMotion))
 	m.Update(mouse(4, 1, tea.MouseButtonLeft, tea.MouseActionRelease))
@@ -50,7 +50,7 @@ func TestDragSelectsTextAcrossLines(t *testing.T) {
 func TestCtrlCCopiesSelection(t *testing.T) {
 	m := newTestModel(t)
 	got := captureClipboard(m)
-	m.appendLine("copy me please")
+	m.appendEntry(entry{Kind: entryPlain, Text: "copy me please"})
 	m.Update(mouse(0, 0, tea.MouseButtonLeft, tea.MouseActionPress))
 	m.Update(mouse(6, 0, tea.MouseButtonLeft, tea.MouseActionRelease))
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -68,7 +68,7 @@ func TestCtrlCCopiesSelection(t *testing.T) {
 // Right-click opens the context menu with the copy/paste entries.
 func TestRightClickOpensContextMenu(t *testing.T) {
 	m := newTestModel(t)
-	m.appendLine("something")
+	m.appendEntry(entry{Kind: entryPlain, Text: "something"})
 	m.Update(mouse(2, 0, tea.MouseButtonRight, tea.MouseActionPress))
 	if m.mode != modeContextMenu {
 		t.Fatalf("mode = %v, want context menu", m.mode)
@@ -97,7 +97,7 @@ func TestCopyCommandTargets(t *testing.T) {
 	if len(*got) != 2 || (*got)[0] != "The answer is 42." || (*got)[1] != "total 3\nfile a\nfile b" {
 		t.Fatalf("clipboard = %q", *got)
 	}
-	if !strings.Contains(m.transcript.String(), "copied") {
+	if !strings.Contains(m.rendered.String(), "copied") {
 		t.Fatal("no confirmation in transcript")
 	}
 }

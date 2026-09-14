@@ -33,7 +33,7 @@ func (m *Model) openQueue(from int) (tea.Model, tea.Cmd) {
 	m.queueOwner = from
 	items, _ := m.ownerQueue()
 	if len(items) == 0 {
-		m.appendLine(m.st.Dim.Render("no queued messages (type while the agent works and press Enter to queue one)"))
+		m.appendEntry(entry{Kind: entryDim, Text: "no queued messages (type while the agent works and press Enter to queue one)"})
 		return m, nil
 	}
 	m.ag.Hold(true)
@@ -80,13 +80,13 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		text, ok := m.ag.Remove(idx[m.queueCursor])
 		m.closeQueue()
 		if !ok {
-			m.appendLine(m.st.Dim.Render("that message was already delivered"))
+			m.appendEntry(entry{Kind: entryDim, Text: "that message was already delivered"})
 			return m, nil
 		}
 		in := m.inputFor(owner)
 		in.SetValue(text)
 		in.CursorEnd()
-		m.appendLine(m.st.Dim.Render("editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"))
+		m.appendEntry(entry{Kind: entryDim, Text: "editing queued message (paused): Enter re-queues it, Esc keeps it out of the queue"})
 		return m, nil
 	case tea.KeyDelete, tea.KeyBackspace:
 		return m.dropQueued(idx[m.queueCursor])
@@ -102,9 +102,9 @@ func (m *Model) handleQueueKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 func (m *Model) dropQueued(i int) (tea.Model, tea.Cmd) {
 	text, ok := m.ag.Remove(i)
 	if !ok {
-		m.appendLine(m.st.Dim.Render("that message was already delivered"))
+		m.appendEntry(entry{Kind: entryDim, Text: "that message was already delivered"})
 	} else {
-		m.appendLine(m.st.Dim.Render("dropped queued message: " + firstLineOf(text, 80)))
+		m.appendEntry(entry{Kind: entryDim, Text: "dropped queued message: " + firstLineOf(text, 80)})
 	}
 	left, _ := m.ownerQueue()
 	if len(left) == 0 {

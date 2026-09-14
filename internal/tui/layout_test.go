@@ -91,7 +91,7 @@ func TestPaletteEnterRunsOrFillsInput(t *testing.T) {
 		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mode != modeInput || !strings.Contains(m.transcript.String(), "/sessions") {
+	if m.mode != modeInput || !strings.Contains(m.rendered.String(), "/sessions") {
 		t.Fatalf("help not run from palette: mode=%v", m.mode)
 	}
 

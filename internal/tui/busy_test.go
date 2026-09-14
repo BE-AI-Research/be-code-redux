@@ -36,13 +36,13 @@ func TestSafeCommandsRunWhileBusyOthersWait(t *testing.T) {
 	m := busyModel(t)
 	m.inputFor(0).SetValue("/clients")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.Contains(m.transcript.String(), "not served") {
-		t.Fatalf("/clients did not run during the turn:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "not served") {
+		t.Fatalf("/clients did not run during the turn:\n%s", m.rendered.String())
 	}
 	m.inputFor(0).SetValue("/verify")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.Contains(m.transcript.String(), "commands wait until the agent is done") {
-		t.Fatalf("/verify must wait:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "commands wait until the agent is done") {
+		t.Fatalf("/verify must wait:\n%s", m.rendered.String())
 	}
 	if m.ag.Pending() != 0 {
 		t.Fatal("a refused command must not be queued as text")
@@ -98,7 +98,7 @@ func TestTransientNoticeShowsAboveTheInputThenExpires(t *testing.T) {
 	if !strings.Contains(v, "waiting for backend") {
 		t.Fatalf("notice not shown:\n%s", v)
 	}
-	if strings.Contains(m.transcript.String(), "waiting for backend") {
+	if strings.Contains(m.rendered.String(), "waiting for backend") {
 		t.Fatal("transient notices must not enter the transcript")
 	}
 	lines := strings.Split(v, "\n")
