@@ -226,6 +226,7 @@ type Model struct {
 	// host.Switch) hands one terminal over to another session's host. All
 	// three are fields so tests can stand in for the filesystem and host.
 	liveCodes    func() map[string]bool
+	liveRecords  func() []live.Record // the advertised hosts, for sessions the store has no file for
 	loadSession  func(id string) (*store.Session, error)
 	switchClient func(id int, code string)
 	// switchPending is set between asking the host to switch a terminal and
@@ -278,6 +279,7 @@ func New(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Model {
 		termWrite:      writeTerminal,
 
 		liveCodes:   liveSessionCodes,
+		liveRecords: liveSessionRecords,
 		loadSession: store.Load,
 	}
 	ag.Tools.Approve = m.approveFromAgent
@@ -1565,31 +1567,45 @@ func (m *Model) setProvider(name string) (tea.Model, tea.Cmd) {
 // and overwrite each other's saves. from is the terminal that asked, which
 // is the one handed over to the live host.
 func (m *Model) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
+	// The live registry answers before the store: a host's session exists
+	// in memory before its first autosave, so a live code may have no file
+	// yet (the same order as the launcher's decideStart).
+	if code := strings.ToUpper(strings.TrimSpace(id)); m.liveCodes()[code] && !m.ownCode(code) {
+		return m.joinLive(code, from)
+	}
 	s, err := m.loadSession(id)
 	if err != nil {
 		m.appendLine(stErr.Render(err.Error()))
 		return m, nil
 	}
 	code := s.ResumeCode()
-	// This program's own session is live by definition; resuming it is a
-	// no-op, not a switch to itself.
-	own := m.ag.Session != nil && m.ag.Session.ResumeCode() == code
-	if m.liveCodes()[code] && !own {
-		if m.served && m.switchClient != nil {
-			m.switchPending = true
-			// As a command, not a call: the host notifies its callbacks,
-			// which p.Send into the channel this goroutine receives from
-			// (see /detach).
-			sw, c := m.switchClient, from
-			return m, func() tea.Msg { sw(c, code); return nil }
-		}
-		m.appendLine(stDim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
-		return m, nil
+	if m.liveCodes()[code] && !m.ownCode(code) {
+		return m.joinLive(code, from)
 	}
 	m.ag.Resume(s)
 	m.appendLine(stOK.Render(fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))))
 	if s.Handoff != "" {
 		m.appendLine(stDim.Render("handoff briefing loaded into the system prompt; /handoff shows it"))
 	}
+	return m, nil
+}
+
+// ownCode reports whether code is this program's own session, which is live
+// by definition; resuming it is a no-op, not a switch to itself.
+func (m *Model) ownCode(code string) bool {
+	return m.ag.Session != nil && m.ag.Session.ResumeCode() == code
+}
+
+// joinLive hands from's terminal to the host of a live code instead of
+// loading a second copy of its session.
+func (m *Model) joinLive(code string, from int) (tea.Model, tea.Cmd) {
+	if m.served && m.switchClient != nil {
+		m.switchPending = true
+		// As a command, not a call: the host notifies its callbacks, which
+		// p.Send into the channel this goroutine receives from (see /detach).
+		sw, c := m.switchClient, from
+		return m, func() tea.Msg { sw(c, code); return nil }
+	}
+	m.appendLine(stDim.Render(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)))
 	return m, nil
 }

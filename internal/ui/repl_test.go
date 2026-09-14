@@ -227,3 +227,56 @@ func TestPromptCtxCancelled(t *testing.T) {
 		t.Fatal("cancelled question still registered")
 	}
 }
+
+// liveOnly advertises a host for a code that has no saved session file — a
+// session that has not autosaved yet.
+func liveOnly(t *testing.T, code string) {
+	t.Helper()
+	dir, err := live.Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := live.Record{Code: code, PID: os.Getpid(), Socket: filepath.Join(dir, code+".sock"), Workspace: "/w/unsaved", StartedAt: time.Now()}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A live code with no saved file yet is still a session to join, not a
+// store error: the registry answers before the store.
+func TestPlainResumeOfAnUnsavedLiveCodeSaysHowToJoin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	r := newTestREPL(t)
+	liveOnly(t, "XYZ789")
+
+	out := capture(t, func() { r.command(context.Background(), "/resume xyz789") })
+	want := "XYZ789 is live elsewhere; join it with: be-code attach XYZ789"
+	if !strings.Contains(out, want) {
+		t.Fatalf("/resume of an unsaved live code printed:\n%s\nwant %q", out, want)
+	}
+	if strings.Contains(out, "error>") {
+		t.Fatalf("store error surfaced for a live code:\n%s", out)
+	}
+}
+
+// /sessions lists live sessions the store has no file for, and marks the
+// saved ones that are live, as `be-code sessions` does.
+func TestPlainSessionsListsLiveOnes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	r := newTestREPL(t)
+	s := saveLive(t, true)
+	liveOnly(t, "XYZ789")
+
+	out := capture(t, func() { r.command(context.Background(), "/sessions") })
+	if !strings.Contains(out, s.ResumeCode()+"  LIVE") {
+		t.Fatalf("saved live session not marked:\n%s", out)
+	}
+	if !strings.Contains(out, "XYZ789  LIVE") || !strings.Contains(out, "no saved turns yet") || !strings.Contains(out, "/w/unsaved") {
+		t.Fatalf("unsaved live session missing:\n%s", out)
+	}
+	if !strings.Contains(out, "be-code attach <code>") {
+		t.Fatalf("no join hint:\n%s", out)
+	}
+}

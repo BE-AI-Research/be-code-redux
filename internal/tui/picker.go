@@ -104,7 +104,9 @@ func (m *Model) openSessionPicker(from int) (tea.Model, tea.Cmd) {
 func (m *Model) sessionItems(metas []store.Meta) []pickItem {
 	now := m.liveCodes()
 	items := make([]pickItem, 0, len(metas))
+	seen := map[string]bool{}
 	for _, s := range metas {
+		seen[s.Code] = true
 		label := s.Code + "  " + s.Title
 		desc := fmt.Sprintf("%s · %d turns · %s", s.ID, s.Turns, s.UpdatedAt.Format("Jan 2 15:04"))
 		if now[s.Code] {
@@ -113,20 +115,43 @@ func (m *Model) sessionItems(metas []store.Meta) []pickItem {
 		}
 		items = append(items, pickItem{id: s.ID, label: label, desc: desc})
 	}
+	// A host's session exists before its first autosave, so a live session
+	// with no turns yet has no file for store.List to find. List those from
+	// the registry (as `be-code sessions` does); their id is the code, which
+	// resumeFrom joins without touching the store.
+	if m.liveRecords != nil {
+		for _, r := range m.liveRecords() {
+			if seen[r.Code] {
+				continue
+			}
+			seen[r.Code] = true
+			items = append(items, pickItem{
+				id:    r.Code,
+				label: r.Code + " " + stAccent.Render("LIVE") + " (no saved turns yet)",
+				desc:  fmt.Sprintf("live now · joins it · no saved turns yet · %s · started %s", r.Workspace, r.StartedAt.Format("Jan 2 15:04")),
+			})
+		}
+	}
 	return items
 }
 
-// liveSessionCodes is the default for Model.liveCodes: the codes advertised
-// in ~/.be-code/live, minus the records whose host is gone (live.List
-// prunes those).
-func liveSessionCodes() map[string]bool {
-	codes := map[string]bool{}
+// liveSessionRecords is the default for Model.liveRecords: the hosts
+// advertised in ~/.be-code/live, minus the records whose host is gone
+// (live.List prunes those).
+func liveSessionRecords() []live.Record {
 	dir, err := live.Dir()
 	if err != nil {
-		return codes
+		return nil
 	}
 	recs, _ := live.List(dir)
-	for _, r := range recs {
+	return recs
+}
+
+// liveSessionCodes is the default for Model.liveCodes: the codes of
+// liveSessionRecords.
+func liveSessionCodes() map[string]bool {
+	codes := map[string]bool{}
+	for _, r := range liveSessionRecords() {
 		codes[r.Code] = true
 	}
 	return codes

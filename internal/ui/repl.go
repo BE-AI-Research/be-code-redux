@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -486,20 +487,22 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		if len(fields) > 1 {
 			id = fields[1]
 		}
+		// Join, never fork: a session with a host running somewhere is not
+		// loaded a second time here — two programs on one session file are
+		// blind to each other's turns. Plain mode has no host of its own to
+		// switch through, so it says how to join instead. The registry is
+		// asked before the store: a host's session exists before its first
+		// autosave, so a live code may have no file yet.
+		if joinLiveHint(strings.ToUpper(id)) {
+			break
+		}
 		s, err := store.Load(id)
 		if err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
-		// Join, never fork: a session with a host running somewhere is not
-		// loaded a second time here — two programs on one session file are
-		// blind to each other's turns. Plain mode has no host of its own to
-		// switch through, so it says how to join instead.
-		if dir, derr := live.Dir(); derr == nil {
-			if rec := live.LiveCode(dir, s.ResumeCode()); rec != nil {
-				fmt.Printf("%s\n", dim(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", rec.Code, rec.Code)))
-				break
-			}
+		if joinLiveHint(s.ResumeCode()) {
+			break
 		}
 		r.Agent.Resume(s)
 		fmt.Printf("resumed %s — %s (%d messages)\n", s.ResumeCode(), s.Title, len(s.Messages))
@@ -657,21 +660,61 @@ func (r *REPL) printOutcome(_ string, rep *agent.ReviewedReport, err error) {
 	fmt.Println()
 }
 
+// joinLiveHint prints how to join code if a host advertises it, and reports
+// whether it did.
+func joinLiveHint(code string) bool {
+	dir, err := live.Dir()
+	if err != nil {
+		return false
+	}
+	rec := live.LiveCode(dir, code)
+	if rec == nil {
+		return false
+	}
+	fmt.Printf("%s\n", dim(fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", rec.Code, rec.Code)))
+	return true
+}
+
+// printSessions lists the saved sessions, marking the ones a host is
+// running, plus the live sessions that have no file yet (a host's session
+// exists before its first autosave) — the same rows `be-code sessions` shows.
 func printSessions() {
 	metas, err := store.List()
 	if err != nil {
 		fmt.Printf("%s %v\n", red("error>"), err)
 		return
 	}
-	if len(metas) == 0 {
+	liveByCode := map[string]live.Record{}
+	if dir, derr := live.Dir(); derr == nil {
+		recs, _ := live.List(dir)
+		for _, r := range recs {
+			liveByCode[r.Code] = r
+		}
+	}
+	if len(metas) == 0 && len(liveByCode) == 0 {
 		fmt.Println("no saved sessions")
 		return
 	}
 	for _, m := range metas {
-		fmt.Printf("  %s  %s  %s\n", m.Code, m.Title,
+		mark := ""
+		if _, ok := liveByCode[m.Code]; ok {
+			mark = "LIVE  "
+			delete(liveByCode, m.Code)
+		}
+		fmt.Printf("  %s  %s%s  %s\n", m.Code, mark, m.Title,
 			dim(fmt.Sprintf("(%s, %d turns, %s)", m.ID, m.Turns, m.UpdatedAt.Format("Jan 2 15:04"))))
 	}
-	fmt.Println(dim("  /resume <code>"))
+	codes := make([]string, 0, len(liveByCode))
+	for code := range liveByCode {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	for _, code := range codes {
+		r := liveByCode[code]
+		fmt.Printf("  %s  LIVE  (no saved turns yet)  %s\n", r.Code,
+			dim(fmt.Sprintf("(%s, started %s)", r.Workspace, r.StartedAt.Format("Jan 2 15:04"))))
+	}
+	fmt.Println(dim("  /resume <code>   (a LIVE one: be-code attach <code>)"))
 }
 
 // Events wires agent callbacks to terminal output (plain mode).
