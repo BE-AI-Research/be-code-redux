@@ -35,14 +35,14 @@ func (m *View) openQueue() (tea.Model, tea.Cmd) {
 		m.appendEntryLocked(entry{Kind: entryDim, Text: "no queued messages (type while the agent works and press Enter to queue one)"})
 		return m, nil
 	}
-	m.ag.Hold(true)
+	m.holdQueueLocked(m.id, true)
 	m.queueCursor = 0
 	m.mode = modeQueue
 	return m, nil
 }
 
 func (m *View) closeQueue() {
-	m.ag.Hold(false)
+	m.holdQueueLocked(m.id, false)
 	m.mode = m.idleMode()
 }
 

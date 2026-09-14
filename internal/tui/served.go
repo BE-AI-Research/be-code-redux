@@ -121,7 +121,7 @@ func (s *Session) RunServed(ctx context.Context, h *live.Host) error {
 	defer pump.Close()
 
 	s.mu.Lock()
-	s.rootCtx, s.host, s.served, s.idleSince = ctx, h, true, time.Now()
+	s.rootCtx, s.served, s.idleSince = ctx, true, time.Now()
 	s.detachClient, s.switchClient = h.Detach, h.Switch
 	s.dropKeyClient = pump.Drop
 	s.onQuit = r.onSessionQuit
@@ -155,7 +155,6 @@ func (s *Session) RunLocal(ctx context.Context) error {
 		defer v.termWrite(terminalColorReset())
 	}
 	p := tea.NewProgram(v, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	v.program = p
 	defer s.retireView(v)
 	go v.mb.run(p.Send)
 	_, err := p.Run()
@@ -228,7 +227,7 @@ func (r *runner) startLocked(c live.ClientInfo) {
 		v.clipboardWrite = func(s string) error { io.WriteString(w, osc52(s)); return writeClipboardTools(s) }
 		p := tea.NewProgram(v, tea.WithInput(nil), tea.WithOutput(w), tea.WithAltScreen(),
 			tea.WithMouseCellMotion(), tea.WithoutSignalHandler(), tea.WithoutCatchPanics())
-		v.program, pr.p = p, p
+		pr.p = p
 		go pr.mb.run(func(msg tea.Msg) { p.Send(msg) })
 		// This terminal's own messages, in order, on a goroutine of their
 		// own: p.Send blocks until the program's update loop takes each one.
@@ -279,12 +278,8 @@ func (r *runner) stop(pr *program, id int) {
 	// would otherwise send on a closed channel (see mailbox.close). The same
 	// goes for ctrl, which is why every send to it happens under r.mu while
 	// the program is still in r.programs — this runs only once it is not.
-	r.s.detachView(id)
-	pr.mb.close()
+	r.s.retireView(pr.v)
 	close(pr.ctrl)
-	if r.h != nil && r.s.cfg.ThemeTerminalColors {
-		io.WriteString(r.h.ClientOutput(id), terminalColorReset())
-	}
 }
 
 // route delivers a client's key or mouse event to that client's program.
@@ -382,6 +377,15 @@ func (r *runner) stopAll() {
 	r.programs = map[int]*program{}
 	r.mu.Unlock()
 	for id, pr := range prs {
+		// The terminal-colour reset belongs here and not in stop: this is
+		// the path where the client is still attached (the session is
+		// ending, and the host says goodbye afterwards). A stop reached
+		// from onClients is a client that has already left the host's
+		// roster, so anything written to it is dropped by ClientOutput —
+		// the terminal is back at its own shell by then in any case.
+		if r.h != nil && r.s.cfg.ThemeTerminalColors {
+			io.WriteString(r.h.ClientOutput(id), terminalColorReset())
+		}
 		r.stop(pr, id)
 	}
 	// And whatever is still being stopped for a client that detached on the
@@ -408,10 +412,17 @@ func (r *runner) idleLoop() {
 	}
 }
 
-// retireView takes a view out of the broadcast set and closes its mailbox,
-// in that order: once no broadcast can reach the mailbox, closing it is safe
-// and the delivery goroutine ends.
+// retireView lets go of one terminal's view: it releases whatever that
+// terminal was holding on the shared session, then takes the view out of the
+// broadcast set and closes its mailbox, in that order — once no broadcast can
+// reach the mailbox, closing it is safe and the delivery goroutine ends.
 func (s *Session) retireView(v *View) {
+	s.mu.Lock()
+	// A terminal that has gone cannot close its own queue popup, and the
+	// delivery hold that popup took would then stop every later run's
+	// queued messages from ever being delivered.
+	s.holdQueueLocked(v.id, false)
+	s.mu.Unlock()
 	s.detachView(v.id)
 	v.mb.close()
 }

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"sync"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -34,6 +36,19 @@ type mailbox struct {
 	// drains everything queued rather than one message.
 	wake chan struct{}
 	done chan struct{}
+
+	// lost records that send had to drop something. A drop is allowed (see
+	// above) but it must not be silent: an entryMsg lost that way leaves a
+	// permanent hole in the view's buffer, because the next entry renders in
+	// its own place and the cursor moves past the gap for good. The drain
+	// turns the flag into a rebuild from Session.entries instead.
+	//
+	// lostStream narrows that to the one message a rebuild cannot repair: a
+	// streamEndMsg that never arrived leaves the half-streamed reply under
+	// the transcript for ever, doubled by the entry that followed it.
+	mu         sync.Mutex
+	lost       bool
+	lostStream bool
 }
 
 // drainMsg is the poke the delivery goroutine sends: "there is something in
@@ -56,7 +71,13 @@ func newMailbox() *mailbox {
 func (mb *mailbox) send(msg tea.Msg) {
 	select {
 	case mb.ch <- msg:
-	default: // the view has fallen too far behind; drop it
+	default: // the view has fallen too far behind; drop it, and say so
+		mb.mu.Lock()
+		mb.lost = true
+		if _, ok := msg.(streamEndMsg); ok {
+			mb.lostStream = true
+		}
+		mb.mu.Unlock()
 	}
 	select {
 	case mb.wake <- struct{}{}:
@@ -75,6 +96,16 @@ func (mb *mailbox) run(deliver func(tea.Msg)) {
 	for range mb.wake {
 		deliver(drainMsg{})
 	}
+}
+
+// takeLost reports whether anything was dropped since the last call, and
+// clears the flags.
+func (mb *mailbox) takeLost() (lost, stream bool) {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	lost, stream = mb.lost, mb.lostStream
+	mb.lost, mb.lostStream = false, false
+	return lost, stream
 }
 
 // close retires the mailbox. The caller must have detached the view from the
@@ -102,6 +133,17 @@ func (mb *mailbox) drainInto(v *View) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 		default:
+			if lost, stream := mb.takeLost(); lost {
+				// Something was dropped while this view was behind. The
+				// entries themselves are still on Session.entries, so render
+				// the transcript again from those rather than leave the hole
+				// the lost message made — and drop a half-streamed reply
+				// whose end-of-stream may have been what was lost.
+				if stream {
+					v.streaming = ""
+				}
+				v.rebuild()
+			}
 			if len(cmds) == 0 {
 				return nil
 			}

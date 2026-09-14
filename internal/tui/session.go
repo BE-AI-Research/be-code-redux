@@ -69,13 +69,22 @@ type Session struct {
 
 	clients []live.ClientInfo
 	served  bool
-	host    *live.Host
 	// quitting latches the end of the session: Quit sets it, broadcasts a
 	// quitMsg every view answers with tea.Quit, and calls onQuit — the
 	// runner's hook, which is what lets RunServed return even when there is
 	// no program left to exit (an idle quit with nobody attached).
 	quitting bool
 	onQuit   func()
+	// quitCh is closed once, by QuitLocked, and is how anything parked off
+	// the update loop learns that the session has ended. Ask selects on it:
+	// an approval left open when the last terminal goes away would otherwise
+	// keep the agent goroutine blocked for ever.
+	quitCh chan struct{}
+	// holders is the set of terminals with the queue popup open. The agent's
+	// delivery hold is refcounted over it (see holdQueueLocked): two
+	// terminals may have the popup open at once, and a terminal that goes
+	// away with it open must not leave delivery held for good.
+	holders map[int]bool
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -135,7 +144,9 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		liveRecords: liveSessionRecords,
 		loadSession: store.Load,
 
-		views: map[int]*View{},
+		views:   map[int]*View{},
+		quitCh:  make(chan struct{}),
+		holders: map[int]bool{},
 	}
 	ag.Tools.Approve = s.approveFromAgent
 	// Every callback records what happened on the session and broadcasts;
@@ -221,9 +232,58 @@ func (s *Session) NewView(id int, label string) *View {
 	// is released, or a delta broadcast in that gap would reach neither the
 	// seed nor the view.
 	v.streaming = s.streaming.String()
+	// A terminal that attaches in the middle of a run starts busy, exactly
+	// where runStateMsg{running:true} would have left it. mode's zero value
+	// is modeInput, and a view that started there would take Enter to
+	// Submit — a *second* concurrent RunFull on the one agent, clobbering
+	// cancelFn — instead of queueing, and would not cancel on Esc.
+	if s.running {
+		v.mode = modeBusy
+		v.input.Placeholder = busyPlaceholder
+	}
+	// And a terminal that attaches while a question is on every other screen
+	// is shown it too. Otherwise a detach and reattach during a file-write
+	// approval leaves the agent goroutine parked in Ask with nothing left
+	// that can answer it. There is no size yet, so the modal viewport built
+	// here is a placeholder: the first WindowSizeMsg builds it for real (see
+	// View.update).
+	if s.ask != nil {
+		v.showAsk(s.ask)
+	}
 	s.attachView(v)
 	s.mu.Unlock()
 	return v
+}
+
+// sendTo hands msg to one view's mailbox, if that view is still attached.
+// Like broadcast it takes only viewsMu and never blocks, so it is safe from
+// the agent goroutine and from inside Update alike — and going through the
+// roster is what keeps it off a mailbox that retireView has already closed.
+func (s *Session) sendTo(id int, msg tea.Msg) {
+	s.viewsMu.Lock()
+	defer s.viewsMu.Unlock()
+	if v := s.views[id]; v != nil {
+		v.mb.send(msg)
+	}
+}
+
+// holdQueueLocked records that one terminal has (or no longer has) its queue
+// popup open, and holds the agent's delivery while any of them does. The
+// caller holds mu.
+//
+// A refcount rather than a flag: two terminals may have the popup open at
+// once, and either one's close would otherwise resume delivery under the
+// other's cursor.
+func (s *Session) holdQueueLocked(id int, on bool) {
+	if s.holders == nil {
+		s.holders = map[int]bool{}
+	}
+	if on {
+		s.holders[id] = true
+	} else {
+		delete(s.holders, id)
+	}
+	s.ag.Hold(len(s.holders) > 0)
 }
 
 // attachView registers a view so broadcasts reach its mailbox.
@@ -346,8 +406,8 @@ func (s *Session) clientLabels(room int) string {
 // everything shared happens here under mu — the attach/detach transcript
 // lines, the pending-switch flag, and retiring a departed terminal's history
 // cursor and escape-sequence parser — and the roster then goes out as a
-// clientsMsg for each view to do its own local cleanup (see
-// View.updateClients).
+// clientsMsg, which is each view's cue to redraw its bottom line (the
+// programs themselves are the runner's: see runner.onClients).
 func (s *Session) SetClients(infos []live.ClientInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -540,6 +600,12 @@ func (s *Session) QuitLocked() {
 			s.cancelFn() // leaving mid-turn: stop the run, then write the briefing
 		}
 		s.quitting = true
+		if s.quitCh == nil {
+			s.quitCh = make(chan struct{})
+		}
+		// Anything parked off the update loop — an Ask nobody is left to
+		// answer — learns the session is over from this, once.
+		close(s.quitCh)
 		s.broadcast(quitMsg{})
 	}
 	if s.onQuit != nil {

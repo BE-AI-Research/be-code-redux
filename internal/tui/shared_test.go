@@ -283,6 +283,35 @@ func TestBottomLineFitsTheWidth(t *testing.T) {
 	}
 }
 
+// The compact line has the same job at a phone's width, where a long model
+// name is what overruns it — and the clients marker is the part that must
+// survive, since it is the only sign the session is shared.
+func TestCompactBottomLineFitsTheWidth(t *testing.T) {
+	m := newTestModel(t)
+	m.ag.SetModel("hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL")
+	m.clients = []live.ClientInfo{
+		{ID: 1, Label: "desk (pid 1111)", UTF8: true},
+		{ID: 2, Label: "phone over tailscale (pid 3333)", UTF8: true},
+	}
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 15})
+	if !m.compact() {
+		t.Fatal("40x15 must be the compact layout")
+	}
+	line := m.bottomLine()
+	if got := lipgloss.Width(line); got > 40 {
+		t.Fatalf("compact bottom line is %d cells wide at width 40:\n%s", got, line)
+	}
+	if !strings.Contains(line, "⧉ 2") {
+		t.Fatalf("the clients marker was truncated away:\n%s", line)
+	}
+	// And the frame itself never writes a line wider than the terminal.
+	for _, row := range strings.Split(m.View(), "\n") {
+		if got := lipgloss.Width(row); got > 40 {
+			t.Fatalf("a frame row is %d cells wide at width 40: %q", got, row)
+		}
+	}
+}
+
 // Messages left in the queue when a run ends start the next turn as one
 // request, but the transcript still says who wrote each of them.
 func TestLeftoverQueueEchoesEverySender(t *testing.T) {

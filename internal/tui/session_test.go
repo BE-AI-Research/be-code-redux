@@ -73,13 +73,19 @@ func TestBroadcastNeverBlocksOnAFullMailbox(t *testing.T) {
 	if got := len(s.Entries()); got != before+entries {
 		t.Fatalf("session kept %d entries, want %d: a dropped message must not lose the entry", got, before+entries)
 	}
-	flush(v)
-	if v.renderedN >= len(s.entries) {
-		t.Fatalf("renderedN = %d of %d: the test never actually overflowed the mailbox", v.renderedN, len(s.entries))
+	// The mailbox really did overflow: messages were dropped rather than the
+	// broadcast blocking.
+	v.mb.mu.Lock()
+	overflowed := v.mb.lost
+	v.mb.mu.Unlock()
+	if !overflowed {
+		t.Fatal("the test never actually overflowed the mailbox")
 	}
-	v.rebuild()
+	// And the drain repairs the hole itself, from the entries the session
+	// kept: a dropped message must not leave a permanent gap.
+	flush(v)
 	if v.renderedN != len(s.entries) {
-		t.Fatalf("rebuild left the view at %d of %d entries", v.renderedN, len(s.entries))
+		t.Fatalf("the drain left the view at %d of %d entries", v.renderedN, len(s.entries))
 	}
 	if !strings.Contains(v.rendered.String(), fmt.Sprintf("line %d", entries-1)) {
 		t.Fatal("rebuild did not resync the view to the newest entry")

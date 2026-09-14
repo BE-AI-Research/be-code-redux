@@ -58,18 +58,31 @@ func (m *View) openPicker(title string, load func() ([]pickItem, error),
 // on the transcript and asks nothing.
 func (m *View) askList(title string, load func() ([]pickItem, error),
 	onPick func(v *View, id string, from int) tea.Cmd) tea.Cmd {
-	s := m.Session
+	s, from := m.Session, m.id
 	ctx := s.rootCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return func() tea.Msg {
+		// This goroutine is Bubble Tea's, not the host's supervisor: a panic
+		// in a load (a provider listing malformed rows, a session file that
+		// cannot be parsed) would take the whole session host down with it.
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.appendEntry(entry{Kind: entryErr, Text: fmt.Sprintf("%s failed: %v", title, rec)})
+			}
+		}()
 		items, err := load()
 		if err != nil {
 			s.appendEntry(entry{Kind: entryErr, Text: err.Error()})
 			return nil
 		}
-		s.Ask(ctx, &ask{Kind: askPicker, Title: title, Items: items, onPick: onPick})
+		if ans := s.Ask(ctx, &ask{Kind: askPicker, Title: title, Items: items, onPick: onPick}); ans.Refused {
+			// An approval or a plan is already on every screen. The list is
+			// not raised over it, and the terminal that asked for it — only
+			// that one — is told why.
+			s.sendTo(from, noticeMsg("a prompt is already open; answer it first"))
+		}
 		return nil
 	}
 }

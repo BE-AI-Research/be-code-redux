@@ -120,9 +120,8 @@ const (
 type View struct {
 	*Session
 
-	id      int    // the live client id this view renders for; 0 is the local terminal
-	label   string // how that terminal names itself
-	program *tea.Program
+	id    int    // the live client id this view renders for; 0 is the local terminal
+	label string // how that terminal names itself
 
 	st       styles // this terminal's theme; see theme.go
 	richText bool   // markdown/syntax rendering enabled
@@ -292,6 +291,12 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if resized {
 			m.rebuild()
+		}
+		// A terminal that attached while a question was already open built
+		// its modal in NewView, before it had a size of its own. Now that it
+		// has one, build it for real.
+		if m.mode == modeAsk && m.shownAsk != nil && m.modalVP.Width <= 0 {
+			m.showAsk(m.shownAsk)
 		}
 		// The remembered-theme fallback warning, if any: once, on the first
 		// size this terminal reports, after the rebuild above so it is not
@@ -881,7 +886,11 @@ func (m *View) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.inputRow())
 	b.WriteString("\n")
-	b.WriteString(m.bottomLine())
+	// Padded, never written raw: the compact line in particular is built
+	// from whatever the model is called and how many terminals are
+	// attached, and one cell too many wraps the row and scrolls the whole
+	// frame up on a phone-sized terminal.
+	b.WriteString(padToWidth(m.bottomLine(), m.width))
 	return b.String()
 }
 
@@ -938,12 +947,21 @@ func (m *View) bottomLine() string {
 
 // shortModel trims registry prefixes and long tags so the model fits the
 // bottom line: "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL" → "Qwen3.8-27B-GGUF:UD-Q4_K_XL".
-func shortModel(name string) string {
+func shortModel(name string) string { return shortModelTo(name, 32) }
+
+// shortModelTo is shortModel with the cap spelled out: the compact layout
+// trims harder, because on a 40-column terminal the model name is what
+// pushes the clients marker — the only sign the session is shared — off the
+// end of the row.
+func shortModelTo(name string, max int) string {
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		name = name[i+1:]
 	}
-	if len(name) > 32 {
-		name = name[:31] + "…"
+	if max < 2 {
+		max = 2
+	}
+	if r := []rune(name); len(r) > max {
+		name = string(r[:max-1]) + "…"
 	}
 	return name
 }
@@ -1251,8 +1269,10 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			plan, err := sess.ag.Plan(ctx, req)
 			sess.send(sess.usageSnapshot())
 			if err != nil {
-				sess.appendEntry(entry{Kind: entryError, Label: "plan failed: ", Text: err.Error()})
-				sess.finishTurn(nil, nil)
+				// Through finishTurn, not as an error entry of its own, so a
+				// cancelled plan prints the same "cancelled" line every other
+				// cancelled turn does.
+				sess.finishTurn(nil, err)
 				return
 			}
 			// The verdict entry ("plan approved" / "plan discarded") is
