@@ -1,5 +1,30 @@
 # BE-Code Changelog
 
+## v0.8.0 — every terminal renders itself
+
+- **Per-terminal rendering in shared sessions.** The host now runs one
+  renderer per attached terminal: each has its own size and layout (a phone
+  gets compact while the desktop keeps the full layout and header), its own
+  scroll position, selection, input line and theme. The transcript, agent,
+  message queue, roster, approvals and pickers are one shared session. The
+  0.6.0 overlay mechanism and the "smallest terminal wins" shared size are
+  gone. (`internal/tui`: `Session` + `View`; `internal/live`:
+  `ClientOutput`, `OnClientSize`, `Drop`.)
+- **Shared prompts, answered once.** Approvals, the plan prompt and the
+  model/provider/session pickers appear on every terminal; the first answer
+  wins and the others close with `answered by <label>`. The shared review
+  prompt uses the same path.
+- **Themes per device.** `/theme <name>` recolours only the terminal that ran
+  it and is remembered in `client_themes` under that device's label;
+  `/theme default <name>` sets the config default for new devices; `/theme`
+  alone reports the theme in use and where it came from.
+- A terminal whose renderer fails is disconnected with `view error`; the
+  session and the other terminals continue.
+- Fixed: `/plan` now runs as a cancellable turn (Esc cancels planning while
+  it is in progress), and `/init`, `/verify`, `/commit` and `/compact` report
+  through the same shared run-state path as an ordinary turn, so every
+  attached terminal sees them start and finish consistently.
+
 ## v0.7.2 — live sessions in the session picker
 
 - **`/sessions`, `/menu` → Resume and `/resume <code>` see live sessions that

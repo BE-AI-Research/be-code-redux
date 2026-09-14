@@ -11,10 +11,9 @@ model). Walk this once per release, or after touching `internal/live`,
    before, and `/clients` showing one client.
 2. Second terminal: `be-code sessions` → LIVE column shows the code; `be-code attach <code>`.
    Expect the same screen in both, `⧉ 2` plus both labels in the bottom line.
-3. Type in both terminals at once, without pressing Enter: each terminal shows
-   only its own draft in its input rows. Press Enter in each: both messages
-   appear in the shared transcript, each prefixed with the label of the terminal
-   that sent it, and the other terminal's unsent draft is still on its screen.
+3. Type in both terminals at once, without pressing Enter: each terminal shows only its
+   own draft on its own input line. Press Enter in each: both messages appear in the
+   shared transcript, each prefixed with the label of the terminal that sent it.
 4. Third terminal: `be-code --resume <code>`. Expect `joining live session <code>`,
    a full frame, `⧉ 3`, and no prompt or refusal — it joins, it does not fork.
 5. Fourth terminal: `be-code --new` in the same workspace. Expect a *fresh*
@@ -23,15 +22,14 @@ model). Walk this once per release, or after touching `internal/live`,
    terminal switches into the live session (its transcript is the shared one)
    while the other three stay where they were, and `be-code sessions` no longer
    lists the fresh code as live (the empty host exited).
-6. Resize the smallest terminal: every view relayouts to the smaller size.
-   In an attached terminal, drag-select transcript text and paste a multi-line
-   snippet: selection highlights and the paste arrives as one message.
+6. Resize the smallest terminal: only that terminal relayouts; the others do not move.
+   Drag-select transcript text in one terminal: the highlight appears there only.
 7. `Ctrl+] d` in one terminal: `detached from <code> (still running)`. Close the
    VS Code window entirely; from another terminal `be-code attach <code>` — the
    session is still there.
 8. `ssh localhost be-code attach <code>` — same as 2 over SSH.
-9. From a phone SSH app: attach; expect the compact layout (no header, short
-   bottom line, `>` prompt) and an input line of its own.
+9. From a phone SSH app: attach; expect the compact layout on the phone (no header,
+   short bottom line, `>` prompt) while the desktop keeps its full layout and header.
 10. `/quit` from any client: every client prints the resume line at column 0 and
     returns to its shell; `be-code sessions` no longer lists it live and no
     `be-code --session-host` process is left.
@@ -63,6 +61,10 @@ model). Walk this once per release, or after touching `internal/live`,
     itself. Repeat, answering in VS Code this time: every terminal's modal closes with the
     dimmed line `answered in VS Code`. Then `/review editor` and confirm the terminals are
     no longer asked, and `/review tui` that the editor is not.
+14. On the phone: `/theme nord`. Expect the phone recoloured, the desktop unchanged, and
+    `theme set to nord` on the phone only. Detach and reattach the phone: still nord.
+    `/theme` on the desktop prints `dark (config default)`; `/theme default gruvbox`
+    there changes what a new device gets and the desktop itself, not the phone.
 
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own
 stdout/stderr from startup; `~/.be-code/live/<code>.json` is its record (code, pid,
