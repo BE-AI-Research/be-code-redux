@@ -34,12 +34,12 @@ func TestApplyThemeSendsTerminalColors(t *testing.T) {
 	m := newTestModel(t)
 	var sent []string
 	m.termWrite = func(s string) { sent = append(sent, s) }
-	m.applyTheme("nord")
+	m.applyTheme("nord", false)
 	if len(sent) != 1 || !strings.Contains(sent[0], "#2e3440") {
 		t.Fatalf("sent = %q", sent)
 	}
 	m.cfg.ThemeTerminalColors = false
-	m.applyTheme("dracula")
+	m.applyTheme("dracula", false)
 	if len(sent) != 1 {
 		t.Fatalf("sequence sent although disabled: %q", sent)
 	}

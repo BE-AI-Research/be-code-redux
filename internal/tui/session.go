@@ -163,16 +163,56 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 	return s
 }
 
+// themeFor resolves the theme for a client label: a remembered per-device
+// theme (client_themes, keyed by the label with its pid stripped) first,
+// else the config default, else the built-in default. A name that is not a
+// known theme at either step is skipped rather than returned, so a stale or
+// hand-edited config never leaves a view with no styles at all.
+func (s *Session) themeFor(label string) (name, origin string) {
+	key := live.LabelKey(label)
+	if remembered, ok := s.cfg.ClientThemes[key]; ok {
+		if _, ok := lookupTheme(remembered); ok {
+			return remembered, fmt.Sprintf("remembered for %q", key)
+		}
+	}
+	if _, ok := lookupTheme(s.cfg.Theme); ok {
+		return s.cfg.Theme, "config default"
+	}
+	return "dark", "built-in default"
+}
+
+// themeWarnFor reports the "theme X is not known; using Y" note this label
+// should see once, or "" when nothing at either step (remembered, config
+// default) needed to fall through to resolved.
+func (s *Session) themeWarnFor(label, resolved string) string {
+	key := live.LabelKey(label)
+	if remembered, ok := s.cfg.ClientThemes[key]; ok {
+		if _, ok := lookupTheme(remembered); !ok {
+			return fmt.Sprintf("theme %q is not known; using %s", remembered, resolved)
+		}
+		return ""
+	}
+	if s.cfg.Theme != "" {
+		if _, ok := lookupTheme(s.cfg.Theme); !ok {
+			return fmt.Sprintf("theme %q is not known; using %s", s.cfg.Theme, resolved)
+		}
+	}
+	return ""
+}
+
 // NewView opens one terminal's view of this session. id is the live client
 // id the view renders for (0 is the local terminal), label how that terminal
 // names itself.
 func (s *Session) NewView(id int, label string) *View {
 	s.mu.Lock()
-	st := stylesOr(s.cfg.Theme)
+	name, origin := s.themeFor(label)
+	warn := s.themeWarnFor(label, name)
+	st := stylesOr(name)
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 	sp.Style = st.Accent
-	v := &View{Session: s, id: id, label: label, st: st, richText: s.cfg.Theme != "mono", spin: sp,
+	v := &View{Session: s, id: id, label: label, st: st, richText: name != "mono", spin: sp,
+		theme: name, themeOrigin: origin, themeWarn: warn,
 		clipboardWrite: writeClipboard, clipboardRead: readClipboard, termWrite: writeTerminal,
 		mb: newMailbox()}
 	v.input = v.newInputArea() // this terminal's one input line; sized by the first layout()

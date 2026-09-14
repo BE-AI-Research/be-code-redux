@@ -41,14 +41,20 @@ func TestTranscriptRebuildsFromEntriesOnThemeChange(t *testing.T) {
 	m := newTestModel(t)
 	m.appendEntry(entry{Kind: entryOK, Text: "model set to x"})
 	before := m.wrapped
-	m.applyTheme("nord")
+	m.applyTheme("nord", false)
 	if m.wrapped == before {
 		t.Fatal("theme change did not re-render the transcript")
 	}
 	if !strings.Contains(m.wrapped, "model set to x") {
 		t.Fatalf("entry lost on rebuild: %q", m.wrapped)
 	}
-	if len(m.entries) < 2 { // the entry plus the "theme set to nord" line
-		t.Fatalf("entries = %d", len(m.entries))
+	// The theme confirmation is a local note, not a shared entry (another
+	// terminal must never see it) — appended after the rebuild, so it is
+	// still on screen alongside the rebuilt entry above.
+	if len(m.entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (theme confirmation must not be a shared entry)", len(m.entries))
+	}
+	if !strings.Contains(m.wrapped, "theme set to nord") {
+		t.Fatalf("theme confirmation missing from this terminal's own transcript: %q", m.wrapped)
 	}
 }

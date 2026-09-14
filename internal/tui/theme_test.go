@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -36,7 +37,7 @@ func TestModelCarriesItsOwnStyles(t *testing.T) {
 	if m.st.Name() != "dark" {
 		t.Fatalf("default styles %q, want dark", m.st.Name())
 	}
-	m.applyTheme("nord")
+	m.applyTheme("nord", false)
 	if m.st.Name() != "nord" {
 		t.Fatalf("applyTheme left styles at %q", m.st.Name())
 	}
@@ -46,7 +47,9 @@ func TestModelCarriesItsOwnStyles(t *testing.T) {
 	}
 }
 
-// /theme <name> changes the live palette and persists the choice.
+// /theme <name> changes the live palette for this device only: it is
+// remembered in client_themes under this view's label, and cfg.Theme (the
+// config default new devices get) is untouched.
 func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())
@@ -57,8 +60,11 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	if before == after {
 		t.Fatal("accent did not change")
 	}
-	if m.cfg.Theme != "nord" {
-		t.Fatalf("cfg.Theme = %q", m.cfg.Theme)
+	if m.cfg.Theme != "dark" {
+		t.Fatalf("cfg.Theme changed to %q by a per-device pick", m.cfg.Theme)
+	}
+	if got := m.cfg.ClientThemes["local"]; got != "nord" {
+		t.Fatalf(`client_themes["local"] = %q`, got)
 	}
 	if !strings.Contains(m.rendered.String(), "theme set to nord") {
 		t.Fatal("no confirmation line")
@@ -66,15 +72,62 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	_ = lipgloss.Color("")
 }
 
-// /theme with no argument opens a picker with every theme.
+// The theme picker (opened from the menu, not bare /theme — that now
+// reports the current theme) lists every theme plus the "default: …" row.
 func TestThemePickerListsAll(t *testing.T) {
 	m := newTestModel(t)
-	m.slashCommand("/theme")
+	m.openThemePicker()
 	if m.mode != modePicker || m.picker == nil {
 		t.Fatalf("picker not opened: mode=%v", m.mode)
 	}
 	m.pickerUpdate(pickerItemsMsg{items: m.themeItems()})
-	if n := len(m.picker.filtered()); n != 13 {
-		t.Fatalf("picker lists %d themes, want 13", n)
+	if n := len(m.picker.filtered()); n != 14 {
+		t.Fatalf("picker lists %d themes, want 14 (13 themes + default row)", n)
+	}
+}
+
+func TestThemeIsPerViewAndRememberedByDevice(t *testing.T) {
+	s, a, b := twoViews(t)
+	a.slashCommand("/theme nord")
+	if a.st.Name() != "nord" || b.st.Name() != "dark" {
+		t.Fatalf("themes: a=%s b=%s", a.st.Name(), b.st.Name())
+	}
+	if got := s.cfg.ClientThemes["desk"]; got != "nord" {
+		t.Fatalf("client_themes[desk] = %q", got)
+	}
+	if s.cfg.Theme != "dark" {
+		t.Fatalf("config theme changed to %q by a per-device pick", s.cfg.Theme)
+	}
+	c := s.NewView(3, "desk (pid 99)")
+	if c.st.Name() != "nord" {
+		t.Fatalf("a new view from the same device got %q", c.st.Name())
+	}
+	if name, origin := s.themeFor("desk (pid 99)"); name != "nord" || origin != `remembered for "desk"` {
+		t.Fatalf("themeFor = %q, %q", name, origin)
+	}
+	b.slashCommand("/theme default gruvbox")
+	if s.cfg.Theme != "gruvbox" || b.st.Name() != "gruvbox" || a.st.Name() != "nord" {
+		t.Fatalf("default: cfg=%s a=%s b=%s", s.cfg.Theme, a.st.Name(), b.st.Name())
+	}
+	d := s.NewView(4, "new device (pid 5)")
+	if d.st.Name() != "gruvbox" {
+		t.Fatalf("a new device did not get the config default: %s", d.st.Name())
+	}
+	b.slashCommand("/theme")
+	if !strings.Contains(b.wrapped, "gruvbox (config default)") {
+		t.Fatalf("/theme report:\n%s", b.wrapped)
+	}
+}
+
+func TestUnknownRememberedThemeFallsThroughWithAWarning(t *testing.T) {
+	s := newTestSession(t)
+	s.cfg.ClientThemes["phone"] = "no-such"
+	v := s.NewView(7, "phone (pid 1)")
+	v.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	if v.st.Name() != "dark" {
+		t.Fatalf("fallback theme %s", v.st.Name())
+	}
+	if !strings.Contains(v.wrapped, `theme "no-such" is not known; using dark`) {
+		t.Fatalf("no warning:\n%s", v.wrapped)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/ui"
 )
 
@@ -145,44 +146,74 @@ func (m *View) paletteBox() string {
 
 // ---- theme picker ------------------------------------------------------------
 
+// themeItems lists every theme (marking this view's own current one) plus a
+// trailing row for the config default that a new device would start from;
+// picking that row (its id is "") is a no-op — see applyTheme.
 func (m *View) themeItems() []pickItem {
-	items := make([]pickItem, 0, len(themes))
+	items := make([]pickItem, 0, len(themes)+1)
 	for _, n := range ThemeNames() {
 		p := themes[n]
 		desc := p.Desc
-		if n == m.cfg.Theme {
+		if n == m.theme {
 			desc += "  (current)"
 		}
 		items = append(items, pickItem{id: n, label: n, desc: desc})
 	}
+	items = append(items, pickItem{id: "", label: "default: " + m.cfg.Theme,
+		desc: "what a new device gets; /theme default <name> changes it"})
 	return items
 }
 
 func (m *View) openThemePicker() (tea.Model, tea.Cmd) {
 	return m.openPicker("Theme", func() ([]pickItem, error) { return m.themeItems(), nil },
-		func(m *View, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id) })
+		func(m *View, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id, false) })
 }
 
-// applyTheme switches the live palette and persists the choice.
-func (m *View) applyTheme(name string) (tea.Model, tea.Cmd) {
+// applyTheme switches this terminal's live palette. asDefault also sets
+// cfg.Theme (what a new device gets); otherwise the pick is remembered only
+// for this device, in cfg.ClientThemes. Every note here — the confirmation,
+// a save failure, an unknown name — is local to this terminal: two people on
+// one session must never see each other's theme changes on their shared
+// transcript.
+func (m *View) applyTheme(name string, asDefault bool) (tea.Model, tea.Cmd) {
+	if name == "" {
+		// The theme picker's trailing "default: <cfg.Theme>" row: nothing to
+		// apply, it only shows what a new device would get.
+		return m, nil
+	}
 	st, ok := newStyles(name)
 	if !ok {
-		m.appendEntryLocked(entry{Kind: entryErr, Text: "unknown theme " + name + "; try /theme to pick one"})
+		m.renderEntryLocal(entry{Kind: entryErr, Text: "unknown theme " + name + "; try /theme to pick one"})
 		return m, nil
 	}
 	m.st = st
 	m.spin.Style = st.Accent
-	m.cfg.Theme = name
 	m.richText = name != "mono"
+	m.theme = name
+	m.rebuild()
 	if m.cfg.ThemeTerminalColors && m.termWrite != nil {
 		m.termWrite(terminalColorSeq(name))
 	}
-	if err := m.cfg.Save(); err != nil {
-		m.appendEntryLocked(entry{Kind: entryWarn, Text: "theme set to " + name + " for this session; could not save config: " + err.Error()})
+	// cfg.Save() is a file write, not a broadcast — fine to make under mu
+	// (already held: applyTheme is only ever reached from Update). Applying
+	// the styles first means a save failure still leaves this terminal
+	// themed; only the note differs.
+	var confirm string
+	if asDefault {
+		m.cfg.Theme = name
+		m.themeOrigin = "config default"
+		confirm = "theme default set to " + name
 	} else {
-		m.appendEntryLocked(entry{Kind: entryOK, Text: "theme set to " + name})
+		key := live.LabelKey(m.label)
+		m.cfg.ClientThemes[key] = name
+		m.themeOrigin = fmt.Sprintf("remembered for %q", key)
+		confirm = "theme set to " + name
 	}
-	m.rebuild()
+	if err := m.cfg.Save(); err != nil {
+		m.renderEntryLocal(entry{Kind: entryWarn, Text: confirm + " for this session; could not save config: " + err.Error()})
+	} else {
+		m.renderEntryLocal(entry{Kind: entryOK, Text: confirm})
+	}
 	return m, nil
 }
 
@@ -213,7 +244,8 @@ func (m *View) menuEntries() []menuEntry {
 		{"Context", "Compact now", "summarize older conversation with the model", cmd("/compact")},
 		{"Context", "Repo map", "symbol outline in the system prompt", cmd("/map")},
 		{"Context", "Usage stats", "requests, tool calls, tokens", cmd("/stats")},
-		{"Settings", "Theme", "pick a colour theme (applies immediately)", cmd("/theme")},
+		{"Settings", "Theme", "pick a colour theme for this terminal (applies immediately)",
+			func(m *View) (tea.Model, tea.Cmd) { return m.openThemePicker() }},
 		{"Settings", "Show config", "effective configuration", cmd("/config")},
 		{"Settings", "Help", "command reference", cmd("/help")},
 		{"Settings", "Quit", "exit BE-Code (writes the resume briefing)", cmd("/quit")},

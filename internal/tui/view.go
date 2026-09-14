@@ -126,6 +126,14 @@ type View struct {
 
 	st       styles // this terminal's theme; see theme.go
 	richText bool   // markdown/syntax rendering enabled
+	// theme/themeOrigin track the name and provenance of this view's current
+	// theme — one of `remembered for "<key>"`, "config default" or "built-in
+	// default" — for /theme's bare report and themeItems' "(current)" mark.
+	// themeWarn is a pending "theme X is not known; using Y" note (set at
+	// construction when the value that would apply is not a known theme),
+	// printed once as a local note on this view's first WindowSizeMsg and
+	// cleared immediately after.
+	theme, themeOrigin, themeWarn string
 
 	vp      viewport.Model
 	modalVP viewport.Model
@@ -269,6 +277,13 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if resized {
 			m.rebuild()
+		}
+		// The remembered-theme fallback warning, if any: once, on the first
+		// size this terminal reports, after the rebuild above so it is not
+		// immediately wiped by it.
+		if m.themeWarn != "" {
+			m.renderLocalNote(m.themeWarn)
+			m.themeWarn = ""
 		}
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -1090,10 +1105,17 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 	case "/menu":
 		return m.openMenu()
 	case "/theme":
-		if len(fields) > 1 {
-			return m.applyTheme(strings.ToLower(fields[1]))
+		// This terminal's own theme, never a shared one: bare reports it,
+		// a name sets it for this device, "default <name>" changes what a
+		// new device gets. A list of every theme is one /menu away.
+		if len(fields) >= 3 && strings.ToLower(fields[1]) == "default" {
+			return m.applyTheme(strings.ToLower(fields[2]), true)
 		}
-		return m.openThemePicker()
+		if len(fields) > 1 {
+			return m.applyTheme(strings.ToLower(fields[1]), false)
+		}
+		m.renderLocalNote(fmt.Sprintf("%s (%s)", m.theme, m.themeOrigin))
+		return m, nil
 	case "/copy":
 		m.copyTarget(strings.TrimSpace(strings.TrimPrefix(text, "/copy")))
 		return m, nil

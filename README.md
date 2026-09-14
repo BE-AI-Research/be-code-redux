@@ -91,12 +91,14 @@ session total).
 
 Thirteen palettes: `dark` (default), `light`, `mono`, `dracula`, `nord`, `gruvbox`,
 `monokai`, `one-dark`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`
-and `github-light`. `/theme` opens a picker, `/theme nord` sets one directly; the choice
-applies at once and is saved as `theme` in the config. The ten named themes also
-recolour the terminal window itself (background, and foreground for light themes) on
-terminals that support it, restored when BE-Code exits; set `theme_terminal_colors`
-to false to keep your terminal's own background. Plain mode uses your terminal's own
-colours, so there `/theme` only records the choice for the TUI.
+and `github-light`. `/theme` reports the current theme and where it came from;
+`/theme nord` applies one for this terminal only, at once, remembered for this device
+in `client_themes`; `/theme default nord` instead sets `theme` — what a new device
+starts from. Pick from a list via `/menu` → Settings → Theme. The ten named themes
+also recolour the terminal window itself (background, and foreground for light
+themes) on terminals that support it, restored when BE-Code exits; set
+`theme_terminal_colors` to false to keep your terminal's own background. Plain mode
+uses your terminal's own colours, so there `/theme` only records the choice for the TUI.
 
 ## Select and copy
 
@@ -218,9 +220,11 @@ and the message goes into the one shared transcript, prefixed with the terminal
 that sent it (`local (pid 4321)> …`) whenever more than one terminal is
 attached — with a single terminal the prefix is the usual `you> `. Everything
 else is one shared rendering: the transcript, the header, the context wheel, the
-bottom line, and every modal (approvals, the model/provider/session/theme
-pickers, plan mode) — an approval prompt can be answered from whichever terminal
-is nearest, and Esc from any of them closes it.
+bottom line, and every modal (approvals, the model/provider/session pickers,
+plan mode) — an approval prompt can be answered from whichever terminal is
+nearest, and Esc from any of them closes it. Each terminal renders at its own
+size and in its own theme; `/theme` changes only the terminal that ran it and
+is remembered for that device.
 
 The bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) followed by the
 attached terminals' labels, and `/clients` lists them with their sizes. Chords
@@ -491,6 +495,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `compat_tool_calls` — `auto` | `always` | `never` (profiles refine `auto` per family)
 - `verify_on_done` (true), `auto_approve_shell` (false), `approve_file_writes` (true)
 - `ui` — `tui` | `plain`; `theme` — `dark` | `light` | `mono`
+- `client_themes` ({}): theme per device, keyed by the attached terminal's label
+  without its pid (`"ssh from 10.0.0.5": "nord"`). Written by `/theme <name>` in a
+  shared session; `/theme default <name>` sets `theme` instead.
 - `layout` — `auto` (default) | `compact` | `full`; `auto` switches the TUI to a
   reduced layout (no header, short prompt, one-line status, popups without
   descriptions) below 70 columns or 20 rows — the size every attached terminal

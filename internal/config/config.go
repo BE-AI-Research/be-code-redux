@@ -71,6 +71,11 @@ type Config struct {
 
 	// Theme: "dark" (default), "light", or "mono".
 	Theme string `json:"theme"`
+	// ClientThemes remembers a theme per device in a shared session, keyed
+	// by the attached terminal's label with its trailing pid stripped (see
+	// live.LabelKey). Set by /theme <name>; /theme default <name> changes
+	// Theme instead. Never nil, so a client's write never panics.
+	ClientThemes map[string]string `json:"client_themes"`
 	// StallNoticeSeconds is how long the backend may stay silent before the
 	// "waiting for backend" notice appears (a second notice follows at four
 	// times this). 0 means the default of 45.
@@ -190,6 +195,7 @@ func Default() *Config {
 		UI:                  "tui",
 		Layout:              "auto",
 		Theme:               "dark",
+		ClientThemes:        map[string]string{},
 		ThemeTerminalColors: true,
 		HostSessions:        true,
 		ShellAllow: []string{
@@ -277,6 +283,9 @@ func Load() (*Config, error) {
 	cfg := Default() // defaults for fields missing from older files
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", p, err)
+	}
+	if cfg.ClientThemes == nil {
+		cfg.ClientThemes = map[string]string{}
 	}
 	return cfg, nil
 }
