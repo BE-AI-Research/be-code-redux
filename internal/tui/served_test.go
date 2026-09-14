@@ -359,33 +359,40 @@ func TestRunnerRepaintsEveryProgramOnARosterChange(t *testing.T) {
 	}
 }
 
-// Typing must arrive in the order it was typed, so a terminal's own
-// messages do not go through the session mailbox. That has two consumers —
-// the delivery goroutine, parked inside p.Send with one message already
-// taken, and View.Update's own drain — so whatever the goroutine is holding
-// is applied after everything the drain took, and the second character of a
-// word lands last. The demonstration is below; this is the invariant.
-func TestKeysGoToTheProgramsOwnQueueNotTheSessionMailbox(t *testing.T) {
+// A terminal's own messages do not go through the session mailbox: that is
+// drained by View.Update itself, which never goes through the Program, so
+// Bubble Tea's renderer would never see them. Right for a transcript entry,
+// wrong for a size (no repaint, and no width to erase lines to) — and keys
+// go the same way so a keystroke and the size before it keep their order.
+func TestKeysAndSizesGoToTheProgramsOwnQueueNotTheSessionMailbox(t *testing.T) {
 	s := newTestSession(t)
 	s.served = true
 	r := &runner{s: s, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}), noPrograms: true}
 	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}})
 	pr := r.programs[1]
-	queued(pr.ctrl) // the size it was started with
+	// The size it was started with is already on its own queue, not the mailbox.
+	if got := queued(pr.ctrl); len(got) != 1 {
+		t.Fatalf("start-up messages on the program's queue: %+v", got)
+	}
 	flush(pr.v)
 
+	r.onClientSize(1, 90, 28)
 	for _, ch := range "typing" {
 		r.route(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}})
 	}
 	if n := len(queued(pr.mb.ch)); n != 0 {
-		t.Fatalf("%d keystroke(s) went onto the session mailbox, where the update drain can overtake them", n)
+		t.Fatalf("%d per-terminal message(s) went onto the session mailbox, where Bubble Tea never sees them", n)
+	}
+	msgs := queued(pr.ctrl)
+	if _, ok := msgs[0].(tea.WindowSizeMsg); !ok {
+		t.Fatalf("the resize is not first on the queue: %T", msgs[0])
 	}
 	var keys int
-	for _, msg := range queued(pr.ctrl) {
-		if k, ok := msg.(tea.KeyMsg); ok {
+	for _, msg := range msgs {
+		if _, ok := msg.(tea.KeyMsg); ok {
 			keys++
-			pr.v.Update(k) // Update drains the mailbox around each one
 		}
+		pr.v.Update(msg) // Update drains the mailbox around each one
 	}
 	if keys != 6 {
 		t.Fatalf("routed %d keys, want 6", keys)
@@ -393,22 +400,7 @@ func TestKeysGoToTheProgramsOwnQueueNotTheSessionMailbox(t *testing.T) {
 	if got := pr.v.input.Value(); got != "typing" {
 		t.Fatalf("input = %q, want %q", got, "typing")
 	}
-}
-
-// The hazard itself, so the reason for that queue stays checkable: a
-// message the delivery goroutine has taken but not yet handed to the
-// program is applied after everything View.Update's own drain took.
-func TestMailboxDeliveryIsOvertakenByTheUpdateDrain(t *testing.T) {
-	m := newTestModel(t)
-	mb := m.mailboxForTest()
-	for _, ch := range "typing" {
-		mb.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
-	}
-	held := <-mb.ch  // what the delivery goroutine is blocked in p.Send with
-	next := <-mb.ch  // what Bubble Tea delivers first
-	m.Update(next)   // its Update drains "ping" behind it...
-	m.Update(held)   // ...and the held keystroke only lands now
-	if got := m.input.Value(); got == "typing" {
-		t.Fatal("the mailbox no longer reorders; program.ctrl may be redundant")
+	if pr.v.width != 90 || pr.v.height != 28 {
+		t.Fatalf("view is %dx%d, want the size the host sent", pr.v.width, pr.v.height)
 	}
 }

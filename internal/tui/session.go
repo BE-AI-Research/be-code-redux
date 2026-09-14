@@ -177,10 +177,12 @@ func (s *Session) NewView(id int, label string) *View {
 		mb: newMailbox()}
 	v.input = v.newInputArea() // this terminal's one input line; sized by the first layout()
 	// A terminal that attaches in the middle of a reply starts from what has
-	// streamed so far, not from the next delta.
+	// streamed so far, not from the next delta — and is attached before mu
+	// is released, or a delta broadcast in that gap would reach neither the
+	// seed nor the view.
 	v.streaming = s.streaming.String()
-	s.mu.Unlock()
 	s.attachView(v)
+	s.mu.Unlock()
 	return v
 }
 

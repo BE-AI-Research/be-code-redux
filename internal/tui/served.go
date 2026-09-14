@@ -57,15 +57,16 @@ type program struct {
 	// ctrl carries what belongs to this terminal alone — its keystrokes, its
 	// mouse events and its size — straight to Bubble Tea, in order.
 	//
-	// It is deliberately not the mailbox. A mailbox has two consumers: the
-	// delivery goroutine, which sits blocked inside p.Send with one message
-	// already taken, and View.Update's own drainInto, which empties the rest
-	// on the update goroutine. Whatever the delivery goroutine is holding is
-	// therefore applied *after* everything the drain took — harmless for
-	// transcript entries, wrong for typing (the second character of a word
-	// would land last) and wrong for a size, which has to reach Bubble Tea's
-	// renderer to force a repaint and to set the width it erases lines to.
-	// One channel with one consumer keeps both honest.
+	// It is deliberately not the mailbox. A mailbox is drained by
+	// View.Update itself (mailbox.drainInto), which reaches the model
+	// without ever going through the Program — so Bubble Tea's renderer
+	// never sees what arrives that way. That is right for a transcript
+	// entry and wrong for a size, which the renderer needs in order to
+	// repaint in full and to know the width it erases lines to; a size
+	// delivered by the drain leaves a terminal showing only the lines that
+	// happened to change, with stale text past the end of any line that
+	// shrank. Keys go the same way, so that a keystroke and the size that
+	// may precede it cannot be reordered against each other.
 	ctrl chan tea.Msg
 	done chan struct{}
 }
@@ -93,6 +94,11 @@ type runner struct {
 	early    map[int][]tea.Msg // keys that arrived before the program started
 	quit     chan struct{}
 	quitOnce sync.Once
+	// stopping counts the stops running on goroutines of their own (a
+	// detached client's program, which onClients has already taken out of
+	// programs). RunServed waits on it, or it could return — and let the
+	// closing lines be written — while a program is still rendering.
+	stopping sync.WaitGroup
 
 	// noPrograms is a test seam: the view, its mailbox and its control queue
 	// are built as usual, but no Bubble Tea program is started and no
@@ -162,12 +168,15 @@ func (s *Session) RunLocal(ctx context.Context) error {
 // never drift from the set of terminals.
 func (r *runner) onClients(infos []live.ClientInfo) {
 	r.s.SetClients(infos)
-	// A session on its way out starts nothing new: a program born after
-	// RunServed stopped waiting would render over the closing lines, and
-	// stopAll would never take it down.
-	quitting := r.s.isQuitting()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A session on its way out starts nothing new: a program born after
+	// RunServed stopped waiting would render over the closing lines, and
+	// stopAll would never take it down. Read under r.mu, which stopAll takes
+	// to swap the map, so a quit landing between the roster and here cannot
+	// slip a program past both. (Lock order is r.mu → s.mu, as it already is
+	// for startLocked's NewView and emptyAfterSwitch below.)
+	quitting := r.s.isQuitting()
 	seen := map[int]bool{}
 	for _, c := range infos {
 		seen[c.ID] = true
@@ -190,8 +199,14 @@ func (r *runner) onClients(infos []live.ClientInfo) {
 	for id, pr := range r.programs {
 		if !seen[id] {
 			// On a goroutine: stop waits on the program, and this runs under
-			// the host's notify lock.
-			go r.stop(pr, id)
+			// the host's notify lock. Counted, because the program is out of
+			// r.programs from here on and neither programExited nor stopAll
+			// can see it any more.
+			r.stopping.Add(1)
+			go func(pr *program, id int) {
+				defer r.stopping.Done()
+				r.stop(pr, id)
+			}(pr, id)
 			delete(r.programs, id)
 		}
 	}
@@ -370,6 +385,9 @@ func (r *runner) stopAll() {
 	for id, pr := range prs {
 		r.stop(pr, id)
 	}
+	// And whatever is still being stopped for a client that detached on the
+	// way out: nothing may still be rendering when this returns.
+	r.stopping.Wait()
 }
 
 // idleLoop enforces live_idle_limit: a served session left with no terminal

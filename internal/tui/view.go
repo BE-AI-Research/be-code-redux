@@ -355,6 +355,10 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case quitMsg:
 		m.quitSeen = true
 		return m, tea.Quit
+	case drainMsg:
+		// Just "your mailbox has something in it": Update drains it around
+		// every message, this one included (see mailbox.run).
+		return m, nil
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
 	case tea.KeyMsg:

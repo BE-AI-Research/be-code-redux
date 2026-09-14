@@ -111,3 +111,49 @@ func TestRebuildOvertakingQueuedEntriesRendersEachOnce(t *testing.T) {
 		t.Fatalf("render cursor at %d of %d entries", v.renderedN, len(s.entries))
 	}
 }
+
+// A broadcast the delivery goroutine is holding must not be overtaken by the
+// drain View.Update runs at the end of its own body. The mailbox has two
+// would-be consumers — that goroutine, parked inside p.Send, and that drain
+// — and if both took messages off the queue, whatever the goroutine held
+// would be applied last: an entryMsg overtaken that way is dropped outright,
+// because its index is already behind View.renderedN by the time it lands.
+// So the goroutine takes nothing and delivers a bare poke instead.
+func TestABroadcastIsNotOvertakenByTheUpdateDrain(t *testing.T) {
+	s := newTestSession(t)
+	v := s.NewView(1, "desk")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	// Stands in for tea.Program.Send, which blocks until the program's update
+	// loop takes the message: the delivery goroutine parks here holding
+	// whatever it had to hand over.
+	held := make(chan tea.Msg, 1)
+	release := make(chan struct{})
+	go v.mb.run(func(msg tea.Msg) {
+		held <- msg
+		<-release
+	})
+
+	s.appendEntry(entry{Kind: entryPlain, Text: "five"})
+	s.appendEntry(entry{Kind: entryPlain, Text: "six"})
+	first := <-held // the goroutine has taken something and is parked
+
+	// Meanwhile the program is already inside Update for an earlier message,
+	// and that Update's own drain empties the queue behind the parked
+	// goroutine.
+	v.Update(statusMsg("busy"))
+	close(release)
+	v.Update(first) // and now what was held finally lands
+
+	got := v.rendered.String()
+	i, j := strings.Index(got, "five"), strings.Index(got, "six")
+	if i < 0 || j < 0 {
+		t.Fatalf("an entry was lost (five at %d, six at %d):\n%s", i, j, got)
+	}
+	if i > j {
+		t.Fatalf("entries rendered out of order:\n%s", got)
+	}
+	if n := strings.Count(got, "five"); n != 1 {
+		t.Fatalf("five rendered %d times, want once:\n%s", n, got)
+	}
+}

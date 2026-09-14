@@ -83,8 +83,14 @@ func TestQuitWhileBusyCancelsTheRun(t *testing.T) {
 	if !cancelled {
 		t.Fatal("/quit during a run must cancel it first")
 	}
-	if cmd == nil {
+	// /quit ends the session, and this terminal exits on the quitMsg that
+	// broadcasts — which Update's own drain brings back round, so the quit
+	// has to be in the command it returns.
+	if !hasQuit(cmd) {
 		t.Fatal("/quit must quit")
+	}
+	if !m.quitSeen {
+		t.Fatal("the view never saw its own quitMsg")
 	}
 }
 
