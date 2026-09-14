@@ -91,7 +91,7 @@ session total).
 
 Thirteen palettes: `dark` (default), `light`, `mono`, `dracula`, `nord`, `gruvbox`,
 `monokai`, `one-dark`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`
-and `github-light`. `/theme` reports the current theme and where it came from;
+and `github-light`. `/theme` opens this terminal's theme picker, whose title reports the current theme and where it came from;
 `/theme nord` applies one for this terminal only, at once, remembered for this device
 in `client_themes`; `/theme default nord` instead sets `theme` — what a new device
 starts from. Pick from a list via `/menu` → Settings → Theme. The ten named themes

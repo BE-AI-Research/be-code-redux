@@ -76,7 +76,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/stats", "requests, tool calls, tokens", false},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
-	{"/theme", "pick a colour theme, or /theme <name> (dracula, nord, gruvbox, …)", true},
+	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},

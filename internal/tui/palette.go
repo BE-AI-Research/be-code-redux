@@ -164,8 +164,13 @@ func (m *View) themeItems() []pickItem {
 	return items
 }
 
+// openThemePicker is this terminal's own theme list. The title reports the
+// theme in use and its provenance (remembered for this device, the config
+// default, or the built-in dark) so bare /theme answers "which theme am I
+// on?" and "how do I change it?" in one popup.
 func (m *View) openThemePicker() (tea.Model, tea.Cmd) {
-	return m.openPicker("Theme", func() ([]pickItem, error) { return m.themeItems(), nil },
+	title := fmt.Sprintf("Theme — %s (%s)", m.theme, m.themeOrigin)
+	return m.openPicker(title, func() ([]pickItem, error) { return m.themeItems(), nil },
 		func(m *View, it pickItem) (tea.Model, tea.Cmd) { return m.applyTheme(it.id, false) })
 }
 

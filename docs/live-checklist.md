@@ -65,7 +65,7 @@ model). Walk this once per release, or after touching `internal/live`,
     no longer asked, and `/review tui` that the editor is not.
 14. On the phone: `/theme nord`. Expect the phone recoloured, the desktop unchanged, and
     `theme set to nord` on the phone only. Detach and reattach the phone: still nord.
-    `/theme` on the desktop prints `dark (config default)`; `/theme default gruvbox`
+    `/theme` on the desktop opens a picker titled `Theme — dark (config default)`; `/theme default gruvbox`
     there changes what a new device gets and the desktop itself, not the phone.
 
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own

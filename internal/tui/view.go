@@ -1138,17 +1138,17 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 	case "/menu":
 		return m.openMenu()
 	case "/theme":
-		// This terminal's own theme, never a shared one: bare reports it,
-		// a name sets it for this device, "default <name>" changes what a
-		// new device gets. A list of every theme is one /menu away.
+		// This terminal's own theme, never a shared one: bare opens the
+		// picker (its title says which theme is in use and where it came
+		// from), a name sets it for this device, "default <name>" changes
+		// what a new device gets.
 		if len(fields) >= 3 && strings.ToLower(fields[1]) == "default" {
 			return m.applyTheme(strings.ToLower(fields[2]), true)
 		}
 		if len(fields) > 1 {
 			return m.applyTheme(strings.ToLower(fields[1]), false)
 		}
-		m.renderLocalNote(fmt.Sprintf("%s (%s)", m.theme, m.themeOrigin))
-		return m, nil
+		return m.openThemePicker()
 	case "/copy":
 		m.copyTarget(strings.TrimSpace(strings.TrimPrefix(text, "/copy")))
 		return m, nil

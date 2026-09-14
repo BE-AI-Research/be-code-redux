@@ -72,8 +72,8 @@ func TestThemeCommandAppliesAndPersists(t *testing.T) {
 	_ = lipgloss.Color("")
 }
 
-// The theme picker (opened from the menu, not bare /theme — that now
-// reports the current theme) lists every theme plus the "default: …" row.
+// The theme picker (bare /theme, or Settings → Theme in the menu) lists
+// every theme plus the "default: …" row.
 func TestThemePickerListsAll(t *testing.T) {
 	m := newTestModel(t)
 	m.openThemePicker()
@@ -113,9 +113,33 @@ func TestThemeIsPerViewAndRememberedByDevice(t *testing.T) {
 	if d.st.Name() != "gruvbox" {
 		t.Fatalf("a new device did not get the config default: %s", d.st.Name())
 	}
+	// Bare /theme opens this terminal's picker, whose title says which theme
+	// is in use and where it came from; nothing goes to the transcript.
+	before := b.wrapped
 	b.slashCommand("/theme")
-	if !strings.Contains(b.wrapped, "gruvbox (config default)") {
-		t.Fatalf("/theme report:\n%s", b.wrapped)
+	if b.mode != modePicker || b.picker == nil {
+		t.Fatalf("bare /theme did not open the picker: mode=%v", b.mode)
+	}
+	if !strings.Contains(b.picker.title, "gruvbox (config default)") {
+		t.Fatalf("picker title %q does not report the theme and its origin", b.picker.title)
+	}
+	if b.wrapped != before {
+		t.Fatal("bare /theme wrote to the transcript")
+	}
+	if a.mode == modePicker {
+		t.Fatal("the picker opened on another terminal")
+	}
+}
+
+// In the "/" palette, Enter on /theme opens the picker directly instead of
+// filling the input with "/theme " and waiting for a second Enter.
+func TestPaletteEnterOnThemeOpensThePicker(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("theme")})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.mode != modePicker || m.picker == nil || !strings.HasPrefix(m.picker.title, "Theme") {
+		t.Fatalf("palette Enter on /theme: mode=%v picker=%v", m.mode, m.picker)
 	}
 }
 

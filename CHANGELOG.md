@@ -17,7 +17,7 @@
 - **Themes per device.** `/theme <name>` recolours only the terminal that ran
   it and is remembered in `client_themes` under that device's label;
   `/theme default <name>` sets the config default for new devices; `/theme`
-  alone reports the theme in use and where it came from.
+  alone opens the picker, whose title reports the theme in use and where it came from.
 - A terminal whose renderer fails is disconnected with `view error`; the
   session and the other terminals continue.
 - Fixed: `/plan` now runs as a cancellable turn (Esc cancels planning while
