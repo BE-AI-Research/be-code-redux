@@ -336,3 +336,61 @@ func TestSpaceClosesThePaletteAndKeepsTheCommand(t *testing.T) {
 		t.Fatalf("input = %q, want %q", got, "/resume ABC123")
 	}
 }
+
+// /verify, /commit and /compact run a goroutine of their own, and every
+// attached terminal must be told about it the same way an ordinary turn
+// tells them: modeBusy while it runs, back to modeInput once it finishes.
+// Before the fix these three set m.mode directly on the initiating view only
+// (never broadcasting a runStateMsg), so a second terminal stayed in
+// modeInput and could start a turn of its own while one of these was still
+// running.
+//
+// The goroutine (verify.Detect/RunChecks on an empty workspace, or
+// GenerateCommit/Compact against nullProvider) can finish before this test
+// gets a chance to look, so the assertion does not poll b.mode directly: it
+// drains b's mailbox message by message — order-preserving, since the
+// runStateMsg{running:true} broadcast happens synchronously before the
+// goroutine is even spawned and so is always enqueued ahead of the
+// runStateMsg{running:false} the goroutine's own completion sends — and
+// records whether a running-true note was ever seen, regardless of how many
+// messages had already piled up in the channel by the time it looks.
+func TestVerifyCommitCompactBroadcastRunStateToOtherViews(t *testing.T) {
+	cases := []struct{ cmd, note string }{
+		{"/verify", "verifying"},
+		{"/commit", "committing"},
+		{"/compact", "compacting"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cmd, func(t *testing.T) {
+			_, a, b := twoViews(t)
+			a.input.SetValue(tc.cmd)
+			a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+			var sawBusy bool
+			var sawNote string
+			waitFor(t, func() bool {
+				for {
+					select {
+					case msg := <-b.mb.ch:
+						if rs, ok := msg.(runStateMsg); ok && rs.running {
+							sawBusy = true
+							sawNote = rs.note
+						}
+						b.update(msg)
+					default:
+						return b.mode == modeInput
+					}
+				}
+			})
+			if !sawBusy {
+				t.Fatalf("%s: the other terminal was never told the run started", tc.cmd)
+			}
+			if sawNote != tc.note {
+				t.Fatalf("%s: other terminal's status note = %q, want %q", tc.cmd, sawNote, tc.note)
+			}
+			if b.mode != modeInput {
+				t.Fatalf("%s: other terminal did not return to modeInput: mode=%v", tc.cmd, b.mode)
+			}
+		})
+	}
+}

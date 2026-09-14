@@ -1160,11 +1160,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			p, m.cfg.DefaultProvider, m.cfg.Model, m.cfg.UI, m.cfg.ContextTokens,
 			m.cfg.MaxTurns, m.cfg.MaxRepairs, m.cfg.CompatToolCalls, m.cfg.ApproveFileWrites)})
 	case "/verify":
-		m.mode = modeBusy
-		m.statusNote = "verifying"
+		m.setRunStateLocked(true, "verifying")
+		ctx := m.runContextLocked()
 		go func() {
 			proj := verify.Detect(m.ag.Tools.Root)
-			rep := verify.RunChecks(m.rootCtx, m.ag.Tools.Root, proj)
+			rep := verify.RunChecks(ctx, m.ag.Tools.Root, proj)
 			m.finishTurn(&agent.ReviewedReport{Verify: rep}, nil)
 		}()
 	case "/model":
@@ -1183,11 +1183,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("restored: %s (%d undo levels left)",
 			strings.Join(restored, ", "), m.ag.Checkpoints.Depth())})
 	case "/commit":
-		m.mode = modeBusy
-		m.statusNote = "committing"
+		m.setRunStateLocked(true, "committing")
+		ctx := m.runContextLocked()
 		sess := m.Session
 		go func() {
-			line, err := sess.ag.GenerateCommit(sess.rootCtx)
+			line, err := sess.ag.GenerateCommit(ctx)
 			if err != nil {
 				sess.notice("commit failed: " + err.Error())
 			} else {
@@ -1214,11 +1214,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 		return m, nil
 	case "/compact":
-		m.mode = modeBusy
-		m.statusNote = "compacting"
+		m.setRunStateLocked(true, "compacting")
+		ctx := m.runContextLocked()
 		sess := m.Session
 		go func() {
-			if err := sess.ag.Compact(sess.rootCtx); err != nil {
+			if err := sess.ag.Compact(ctx); err != nil {
 				sess.notice("compaction failed: " + err.Error())
 			} else {
 				sess.notice(fmt.Sprintf("compacted; context now ~%d tokens", sess.ag.History.Tokens()))
