@@ -198,6 +198,13 @@ type View struct {
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
 	quitSeen bool
+
+	// panicOnNextUpdate makes the next update panic with testPanicValue.
+	// Test-only, and the only way to exercise the runner's recover path for
+	// real: a view that dies mid-frame must take its own terminal down
+	// ("view error") and leave the session and every other terminal
+	// running. Never set in production.
+	panicOnNextUpdate bool
 }
 
 // mailboxForTest exposes this view's mailbox so a test can deliver what the
@@ -242,7 +249,15 @@ func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return model, cmd
 }
 
+// testPanicValue is what panicOnNextUpdate panics with, so the line the
+// runner logs is recognisably a test's doing and not a real fault.
+const testPanicValue = "tui: deliberate test panic in View.update"
+
 func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.panicOnNextUpdate {
+		m.panicOnNextUpdate = false
+		panic(testPanicValue)
+	}
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
