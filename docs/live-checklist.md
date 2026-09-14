@@ -24,6 +24,8 @@ model). Walk this once per release, or after touching `internal/live`,
    lists the fresh code as live (the empty host exited).
 6. Resize the smallest terminal: only that terminal relayouts; the others do not move.
    Drag-select transcript text in one terminal: the highlight appears there only.
+   Paste a multi-line snippet into one terminal: it arrives as one message, not one
+   per line.
 7. `Ctrl+] d` in one terminal: `detached from <code> (still running)`. Close the
    VS Code window entirely; from another terminal `be-code attach <code>` — the
    session is still there.

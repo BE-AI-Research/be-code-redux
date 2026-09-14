@@ -508,8 +508,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   shared session; `/theme default <name>` sets `theme` instead.
 - `layout` — `auto` (default) | `compact` | `full`; `auto` switches the TUI to a
   reduced layout (no header, short prompt, one-line status, popups without
-  descriptions) below 70 columns or 20 rows — the size every attached terminal
-  is clamped to in a served/shared session — `compact`/`full` force it on or off
+  descriptions) below 70 columns or 20 rows. Each attached terminal is judged by
+  its own size, so one can be compact while another keeps the full layout;
+  `compact`/`full` force it on or off
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
