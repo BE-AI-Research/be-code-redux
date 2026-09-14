@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
@@ -170,5 +171,62 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.updateClients(clientsMsg{{ID: 3, Label: "new", UTF8: true}})
 	if m.switchPending {
 		t.Fatal("an attach must clear the pending switch")
+	}
+}
+
+// A session that is live but has never autosaved (no turns yet) has no file
+// in the store, so store.List cannot name it; the picker must still list it
+// from the live registry, the way `be-code sessions` does, and picking it
+// must join it.
+func TestSessionPickerListsLiveSessionsWithoutASavedFile(t *testing.T) {
+	tempHome(t)
+	m := twoClients(t)
+	m.liveCodes = func() map[string]bool { return map[string]bool{"ABC123": true, "XYZ789": true} }
+	m.liveRecords = func() []live.Record {
+		return []live.Record{
+			{Code: "ABC123", Workspace: "/w/one", Model: "m"},
+			{Code: "XYZ789", Workspace: "/w/two", Model: "qwen", StartedAt: time.Date(2026, 9, 13, 17, 28, 0, 0, time.Local)},
+		}
+	}
+	items := m.sessionItems([]store.Meta{
+		{ID: "1", Code: "ABC123", Title: "live one", UpdatedAt: time.Now()},
+	})
+	if len(items) != 2 {
+		t.Fatalf("want the saved row plus the unsaved live one, got %+v", items)
+	}
+	row := items[1]
+	if row.id != "XYZ789" || !strings.Contains(row.label, "XYZ789") || !strings.Contains(row.label, "LIVE") {
+		t.Fatalf("unsaved live row: %+v", row)
+	}
+	if !strings.Contains(row.desc, "no saved turns yet") || !strings.Contains(row.desc, "/w/two") {
+		t.Fatalf("unsaved live row desc: %q", row.desc)
+	}
+	// The saved live row is not duplicated.
+	if items[0].id != "1" || !strings.Contains(items[0].label, "LIVE") {
+		t.Fatalf("saved live row: %+v", items[0])
+	}
+}
+
+// Resuming by a code that is live joins its host even when the store has no
+// file for it: the live registry is consulted before the store, as the
+// launcher's decideStart does.
+func TestResumeOfAnUnsavedLiveCodeSwitchesWithoutLoading(t *testing.T) {
+	tempHome(t)
+	m := twoClients(t)
+	var switched []string
+	m.switchClient = func(id int, code string) { switched = append(switched, fmt.Sprint(id, ":", code)) }
+	m.liveCodes = func() map[string]bool { return map[string]bool{"XYZ789": true} }
+	m.loadSession = func(id string) (*store.Session, error) { return nil, fmt.Errorf("no session %q", id) }
+
+	_, cmd := m.resumeFrom("xyz789", 2)
+	if cmd == nil {
+		t.Fatalf("a live code must switch without a saved file:\n%s", m.transcript.String())
+	}
+	cmd()
+	if len(switched) != 1 || switched[0] != "2:XYZ789" {
+		t.Fatalf("switch: %v", switched)
+	}
+	if strings.Contains(m.transcript.String(), "no session") {
+		t.Fatalf("store error surfaced for a live code:\n%s", m.transcript.String())
 	}
 }

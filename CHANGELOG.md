@@ -1,5 +1,19 @@
 # BE-Code Changelog
 
+## v0.7.2 — live sessions in the session picker
+
+- **`/sessions`, `/menu` → Resume and `/resume <code>` see live sessions that
+  have not saved yet.** A host's session exists before its first autosave, so a
+  live session with no turns had no file for the picker to list: `/sessions`
+  showed `(nothing matches)` while `be-code sessions` listed the host, and
+  `/resume <code>` of such a code printed a store error instead of joining. The
+  picker now adds rows from the live registry (`CODE LIVE (no saved turns yet)`,
+  with the workspace and start time) and both UIs ask the registry before the
+  store on resume, the order the launcher's `decideStart` already used. Plain
+  mode's `/sessions` marks `LIVE` rows and lists the unsaved live ones too.
+- The shared-review integration test waited on the wrong side of a race and
+  failed about one run in fifteen; it now waits for the editor side.
+
 ## v0.7.1 — git restore point before init
 
 - **`/init` and `be-code init` record a git restore point.** Inside a git

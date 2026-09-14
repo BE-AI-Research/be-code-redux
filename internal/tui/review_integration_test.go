@@ -107,9 +107,17 @@ func TestSharedReviewAnsweredFromTheSecondTerminal(t *testing.T) {
 	if !raised || m.mode != modeApproval {
 		t.Fatalf("mode = %v, want modeApproval", m.mode)
 	}
-	editor.mu.Lock()
-	shown := len(editor.reviewed)
-	editor.mu.Unlock()
+	// Both sides of the race start on their own goroutines, so the editor
+	// may be a few microseconds behind the terminal prompt: wait for it.
+	shown := 0
+	for deadline := time.Now().Add(2 * time.Second); shown == 0 && time.Now().Before(deadline); {
+		editor.mu.Lock()
+		shown = len(editor.reviewed)
+		editor.mu.Unlock()
+		if shown == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	if shown == 0 {
 		t.Fatal("the editor was never asked to show the diff")
 	}
