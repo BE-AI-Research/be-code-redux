@@ -319,8 +319,11 @@ rendered form of the streaming reply. Rules:
   Markdown and moves it into the buffer, as `flushStreaming` does today.
 - Resize or theme change: rebuild the whole buffer for **that view** from the
   core's entries (`Session.Entries()` returns a snapshot under the mutex).
-- `ui.RenderMarkdown` gains a width parameter (the current call sites pass the
-  terminal width) so a phone wraps narrow and the desktop keeps wide tables.
+- `ui.RenderMarkdown` renders without wrapping (it styles lines; it never
+  breaks them), so it needs no width parameter: each view wraps its rendered
+  buffer to its own width with the same lipgloss pass `refreshTranscript` uses
+  today, which is what makes a phone wrap narrow while the desktop keeps wide
+  tables.
 
 Scroll position follows the existing rules per view: pinned to the bottom while
 at the bottom, held once the reader scrolled up. Mouse selection
