@@ -114,11 +114,15 @@ func TestResumingTheSessionThisProgramAlreadyRunsIsANoSwitch(t *testing.T) {
 // running.
 func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	tempHome(t)
-	// The switch emptied the roster: nothing left to render for.
+	// The switch emptied the roster: nothing left to render for. End to end,
+	// the way the host does it — SetClients broadcasts the empty roster and
+	// Update drains its own mailbox — so the quit the view decides on has to
+	// survive that drain and come back as the command Update returns.
 	m := twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{}); cmd == nil {
+	m.SetClients(nil)
+	if _, cmd := m.Update(toastTickMsg(time.Now())); !hasQuit(cmd) {
 		t.Fatal("an empty fresh host must quit after a switch")
 	}
 

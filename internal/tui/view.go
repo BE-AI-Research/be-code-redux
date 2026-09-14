@@ -34,7 +34,19 @@ import (
 // way to a view that has yet to render it. The entry itself lives on
 // Session.entries; this only says "render this, in your styles, at your
 // width" (see Session.appendEntryLocked and View.renderEntryLocal).
-type entryMsg struct{ e entry }
+//
+// n is the entry's index in Session.entries, and it is what keeps the stream
+// and rebuild() honest: a view renders the message only when n is at or past
+// its own render cursor (View.renderedN). A rebuild that overtook this entry
+// leaves n behind the cursor, so the message is dropped instead of painting
+// the entry twice; an entry lost to a full mailbox leaves a gap, and the next
+// message that arrives is still rendered in its own place rather than in the
+// lost one's. A bare counter cannot do either, because it cannot tell which
+// entry a queued message is for.
+type entryMsg struct {
+	n int
+	e entry
+}
 
 type deltaMsg string
 type toolStartMsg struct{ name, args string }
@@ -156,10 +168,11 @@ type View struct {
 	ready         bool
 
 	rendered strings.Builder // the session's entries rendered with this view's styles at its width
-	// renderedN is how many of Session.entries are in that buffer. It is
-	// what lets rebuild() and the entryMsg stream coexist: a rebuild renders
-	// every entry recorded so far, so the entryMsgs still queued for those
-	// entries must not be rendered a second time when they arrive.
+	// renderedN is the index of the next Session.entries entry this buffer
+	// expects. It is what lets rebuild() and the entryMsg stream coexist: a
+	// rebuild renders every entry recorded so far and moves the cursor past
+	// them, so the entryMsgs still queued for those entries are dropped on
+	// arrival rather than painting them a second time (see entryMsg.n).
 	renderedN int
 	wrapped   string // the wrapped transcript the viewport shows
 	// Selection and clipboard (see selection.go, clipboard.go).
@@ -270,7 +283,7 @@ func (m *View) publishAfterKey(wasVisible, nowVisible bool, client int) {
 func (m *View) publishVisibilityChange(wasVisible, nowVisible bool) bool {
 	switch {
 	case wasVisible && !nowVisible:
-		m.clearAllOverlays()
+		m.clearAllOverlaysLocked()
 		return true
 	case !wasVisible && nowVisible:
 		m.publishAllOverlays()
@@ -320,11 +333,11 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case entryMsg:
 		// The session already recorded it; this view renders it — unless a
-		// rebuild has overtaken it (see renderedN), in which case it is
-		// already on screen and this copy is dropped.
-		if m.renderedN < len(m.entries) {
+		// rebuild has overtaken it (see renderedN and entryMsg.n), in which
+		// case it is already on screen and this copy is dropped.
+		if msg.n >= m.renderedN {
 			m.renderEntryLocal(msg.e)
-			m.renderedN++
+			m.renderedN = msg.n + 1
 		}
 	case deltaMsg:
 		m.streaming.WriteString(string(msg))
@@ -505,7 +518,7 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case idleTickMsg:
 		return m.updateIdleTick(msg)
 	case hostQuitMsg:
-		m.clearAllOverlays() // see the /quit path
+		m.clearAllOverlaysLocked() // see the /quit path
 		return m, tea.Quit
 	case pickerItemsMsg:
 		m.pickerUpdate(msg)
@@ -673,7 +686,7 @@ func (m *View) handleInputKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.quitHint[from] {
-			m.clearAllOverlays() // see the /quit path: no draft may follow the teardown frame
+			m.clearAllOverlaysLocked() // see the /quit path: no draft may follow the teardown frame
 			return m, tea.Quit
 		}
 		m.setQuitHint(from)
@@ -1205,7 +1218,7 @@ func (m *View) slashCommand(text string, from int) (tea.Model, tea.Cmd) {
 		// Clear the overlays before the quit, not only after the program
 		// returns: Bubble Tea's own teardown flushes one last frame, and
 		// the host would re-append every client's draft to it.
-		m.clearAllOverlays()
+		m.clearAllOverlaysLocked()
 		return m, tea.Quit
 	case "/menu":
 		return m.openMenu(from)

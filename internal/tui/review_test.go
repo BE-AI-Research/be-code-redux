@@ -149,7 +149,7 @@ func TestStaleApprovalCancelLeavesTheNewerPromptOpen(t *testing.T) {
 func TestReviewTerminalNumbersEachAsk(t *testing.T) {
 	m := newTestModel(t)
 	msgs := make(chan tea.Msg, 8)
-	m.sendHook = func(msg tea.Msg) { msgs <- msg }
+	m.sendOverride = func(msg tea.Msg) { msgs <- msg }
 	term := m.ReviewTerminal()
 
 	ctx, cancel := context.WithCancel(context.Background())

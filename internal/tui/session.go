@@ -106,13 +106,14 @@ type Session struct {
 	views   map[int]*View // each View carries its mailbox (v.mb)
 
 	// startTurnHook is a test seam consulted at the top of startTurn; nil in
-	// production. sendHook is a test seam consulted by broadcast: with no
-	// tea.Program running there is nothing to deliver a message from another
-	// goroutine to, so a test routes them into a channel it drains into
-	// Update itself (see review_integration_test.go). Both nil in production,
-	// and both set before anything else runs.
+	// production. sendOverride is a test seam that *replaces* the fan-out in
+	// broadcast — hence the name: a test that plays the event loop by hand
+	// wants each message once, in its own channel, to feed back into Update
+	// itself (see review_integration_test.go); also delivering it to the
+	// mailboxes would have every such message handled twice. Both nil in
+	// production, and both set before anything else runs.
 	startTurnHook func(string)
-	sendHook      func(tea.Msg)
+	sendOverride  func(tea.Msg)
 }
 
 // NewSession builds the shared core and wires the agent's callbacks to it.
@@ -201,12 +202,13 @@ func (s *Session) viewByID(id int) *View {
 	return s.views[id]
 }
 
-// broadcast hands msg to every attached view. It takes only viewsMu — never
-// mu — and every hand-off is non-blocking, so it is safe to call from the
-// agent goroutine and from inside Update alike.
+// broadcast hands msg to every attached view, or to sendOverride when a test
+// has taken delivery over. It takes only viewsMu — never mu — and every
+// hand-off is non-blocking, so it is safe to call from the agent goroutine
+// and from inside Update alike.
 func (s *Session) broadcast(msg tea.Msg) {
-	if s.sendHook != nil {
-		s.sendHook(msg)
+	if s.sendOverride != nil {
+		s.sendOverride(msg)
 		return
 	}
 	s.viewsMu.Lock()
@@ -234,7 +236,7 @@ func (s *Session) appendEntry(e entry) {
 // its own styles and width when its mailbox delivers the entryMsg.
 func (s *Session) appendEntryLocked(e entry) {
 	s.entries = append(s.entries, e)
-	s.broadcast(entryMsg{e})
+	s.broadcast(entryMsg{n: len(s.entries) - 1, e: e})
 }
 
 // Entries is a snapshot of the transcript, taken under the lock.

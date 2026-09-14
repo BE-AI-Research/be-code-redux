@@ -61,7 +61,7 @@ func TestSharedReviewAnsweredFromTheSecondTerminal(t *testing.T) {
 	// send has no tea.Program to deliver to in a test, so route what the
 	// coordinator's goroutine sends into a channel this goroutine drains.
 	msgs := make(chan tea.Msg, 8)
-	m.sendHook = func(msg tea.Msg) { msgs <- msg }
+	m.sendOverride = func(msg tea.Msg) { msgs <- msg }
 
 	editor := &stuckEditor{cancels: make(chan string, 1)}
 	// labels is read from the coordinator's goroutine; roster is written

@@ -52,6 +52,26 @@ func flush(views ...*View) {
 	}
 }
 
+// hasQuit reports whether cmd is tea.Quit, or a batch containing it —
+// Update batches whatever its own mailbox drain produced onto its result, so
+// a quit decided by a drained message can arrive either way.
+func hasQuit(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	switch msg := cmd().(type) {
+	case tea.QuitMsg:
+		return true
+	case tea.BatchMsg:
+		for _, c := range msg {
+			if hasQuit(c) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // setClients applies a roster to the session and delivers the resulting
 // messages to v, the way the host callback plus the mailbox goroutine would.
 func setClients(v *View, infos ...live.ClientInfo) {

@@ -279,8 +279,20 @@ func (m *View) publishAllOverlays() {
 	}
 }
 
-// clearAllOverlays clears every roster client's cached overlay at the host.
-// Called the instant overlayVisible flips to false (see
+// clearAllOverlays clears every roster client's cached overlay at the host
+// for a caller that does *not* hold the session lock: the served teardown,
+// which runs after p.Run has returned while the host's OnClients callback is
+// still registered, so a client detaching right then would be writing the
+// roster from the host's goroutine as this reads it. Every path through
+// Update holds the lock already and calls clearAllOverlaysLocked instead.
+func (m *View) clearAllOverlays() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clearAllOverlaysLocked()
+}
+
+// clearAllOverlaysLocked clears every roster client's cached overlay at the
+// host. Called the instant overlayVisible flips to false (see
 // publishVisibilityChange in view.go): Host.SetOverlay("") replaces whatever
 // draft was last published there with an empty string, and an empty
 // overlay is never re-appended by Host.fanout.Write — unlike
@@ -288,7 +300,7 @@ func (m *View) publishAllOverlays() {
 // the input row (and on the way into a quit), so it gates on neither
 // overlayVisible() nor m.ready: clearing an overlay that was never
 // published is free, and one that was must go.
-func (m *View) clearAllOverlays() {
+func (m *View) clearAllOverlaysLocked() {
 	if !m.served || m.setOverlay == nil {
 		return
 	}
@@ -308,7 +320,7 @@ func (m *View) updateIdleTick(msg idleTickMsg) (tea.Model, tea.Cmd) {
 	if len(m.clients) > 0 || m.running {
 		m.idleSince = time.Time(msg)
 	} else if time.Time(msg).Sub(m.idleSince) >= time.Duration(m.cfg.LiveIdleLimit)*time.Minute {
-		m.clearAllOverlays() // see the /quit path: nothing may ride on the teardown frame
+		m.clearAllOverlaysLocked() // see the /quit path: nothing may ride on the teardown frame
 		return m, tea.Quit
 	}
 	return m, idleTick()
