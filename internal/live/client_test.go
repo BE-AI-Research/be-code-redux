@@ -48,8 +48,8 @@ func TestAttachRoundTripAndDetach(t *testing.T) {
 		done <- reason
 	}()
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	if c, r := h.Size(); c != 90 || r != 30 {
-		t.Fatalf("host size %dx%d", c, r)
+	if cl := h.Clients(); len(cl) != 1 || cl[0].Cols != 90 || cl[0].Rows != 30 {
+		t.Fatalf("roster size %+v", cl)
 	}
 	// keystrokes reach the program, tagged with the sending client's id
 	gotInput := make(chan []byte, 8)
@@ -285,17 +285,11 @@ func TestAttachKeepsTheResumeLineVisibleAfterAnEndedSession(t *testing.T) {
 	}
 }
 
-func TestAttachWritesOverlayFramesVerbatim(t *testing.T) {
-	h, sock := startHost(t)
-	rec := &Record{Code: "T", PID: os.Getpid(), Socket: sock, Token: "tok"}
-	stdinR, _ := io.Pipe()
-	var stdout syncBuffer
-	go Attach(context.Background(), rec, AttachOptions{Label: "t", Stdin: stdinR, Stdout: &stdout,
-		Raw: func() (func(), error) { return func() {}, nil }, Size: func() (int, int) { return 80, 24 }, UTF8: true})
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	h.SetOverlay(h.Clients()[0].ID, "\x1b[22;1Hhello")
-	within(t, time.Second, func() bool { return strings.Contains(stdout.String(), "\x1b[22;1Hhello") })
-}
+// The old TestAttachWritesOverlayFramesVerbatim lived here. It exercised
+// Host.SetOverlay and the client's FOverlay rendering, both removed in
+// 0.8.0 along with the rest of the shared-size/overlay machinery: each
+// terminal now runs its own Bubble Tea program with no per-client overlay
+// frame to splice in.
 
 func TestSwitchTarget(t *testing.T) {
 	if code, ok := SwitchTarget("switch:ABC123"); !ok || code != "ABC123" {

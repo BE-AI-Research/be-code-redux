@@ -28,12 +28,11 @@ func startHost(t *testing.T) (*Host, string) {
 }
 
 type fakeClient struct {
-	conn    net.Conn
-	out     chan []byte // FOutput payloads
-	overlay chan []byte // FOverlay payloads
-	size    chan Size
-	cl      chan []ClientInfo
-	bye     chan string
+	conn net.Conn
+	out  chan []byte // FOutput payloads
+	size chan Size
+	cl   chan []ClientInfo
+	bye  chan string
 
 	// pauseMu guards paused: stopReading installs a gate the reader goroutine
 	// blocks on before its next ReadFrame; resumeReading closes it.
@@ -79,7 +78,7 @@ func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fc := &fakeClient{conn: c, out: make(chan []byte, 64), overlay: make(chan []byte, 64), size: make(chan Size, 8), cl: make(chan []ClientInfo, 8), bye: make(chan string, 1)}
+	fc := &fakeClient{conn: c, out: make(chan []byte, 64), size: make(chan Size, 8), cl: make(chan []ClientInfo, 8), bye: make(chan string, 1)}
 	WriteJSON(c, FHello, Hello{Token: token, Cols: cols, Rows: rows, Label: label, UTF8: true})
 	go func() {
 		for {
@@ -93,8 +92,6 @@ func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
 			switch typ {
 			case FOutput:
 				fc.out <- p
-			case FOverlay:
-				fc.overlay <- p
 			case FSize:
 				var s Size
 				json.Unmarshal(p, &s)
@@ -142,18 +139,14 @@ func idByLabel(t *testing.T, h *Host, label string) int {
 }
 
 // TestHostFansOutToAllClients covers what remains of the old holder-election
-// test once holder election is gone: every client gets the shared size (the
-// minimum across attached clients) and every output frame.
+// test once holder election is gone: every attached client gets every output
+// frame.
 func TestHostFansOutToAllClients(t *testing.T) {
 	h, sock := startHost(t)
 	a := dial(t, sock, "tok", "a", 100, 40)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
 	b := dial(t, sock, "tok", "b", 80, 24)
 	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
-	// shared size is the minimum
-	if c, r := h.Size(); c != 80 || r != 24 {
-		t.Fatalf("size = %dx%d", c, r)
-	}
 	// output goes to both
 	h.Output().Write([]byte("frame1"))
 	for _, fc := range []*fakeClient{a, b} {
@@ -249,163 +242,33 @@ func TestHostBuffersEarlyInputAndReplaysOnOnInput(t *testing.T) {
 	}
 }
 
-func TestHostOverlayGoesToOneClientAndFollowsEveryFrame(t *testing.T) {
+// TestResizeSendsNoSizeFrameToOtherClients covers the removal of the shared
+// minimum size: one client's resize must never send an FSize frame to any
+// client (its own roster row simply carries its new size).
+func TestResizeSendsNoSizeFrameToOtherClients(t *testing.T) {
 	h, sock := startHost(t)
-	a := dial(t, sock, "tok", "a", 100, 40)
-	b := dial(t, sock, "tok", "b", 100, 40)
-	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
-	idA := idByLabel(t, h, "a")
-	h.SetOverlay(idA, "OVERLAY-A")
-	select {
-	case p := <-a.overlay:
-		if string(p) != "OVERLAY-A" {
-			t.Fatalf("overlay payload %q", p)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("a did not get its overlay")
+	a := dial(t, sock, "tok", "a", 80, 24)
+	b := dial(t, sock, "tok", "b", 120, 40)
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 2 })
+	for len(b.cl) > 0 {
+		<-b.cl
 	}
+	a.resize(t, 40, 15)
 	select {
-	case p := <-b.overlay:
-		t.Fatalf("b received a's overlay: %q", p)
-	case <-time.After(200 * time.Millisecond):
-	}
-	h.Output().Write([]byte("FRAME"))
-	<-a.out
-	select { // a's overlay is re-sent right after the shared frame
-	case p := <-a.overlay:
-		if string(p) != "OVERLAY-A" {
-			t.Fatalf("re-sent overlay %q", p)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("overlay not re-sent after a frame")
-	}
-	<-b.out
-	select {
-	case <-b.overlay:
-		t.Fatal("b has no overlay yet must not receive one")
-	case <-time.After(200 * time.Millisecond):
-	}
-	h.SetOverlay(idA, "OVERLAY-A") // unchanged: no write
-	select {
-	case <-a.overlay:
-		t.Fatal("unchanged overlay was re-sent")
-	case <-time.After(200 * time.Millisecond):
-	}
-}
-
-// TestHostClearedOverlaySendsNoTrailingFrame covers the served TUI's need to
-// stop a stale overlay from being stamped onto a full-screen modal:
-// SetOverlay(id, "") must clear the cached value so fanout.Write's
-// "re-append the client's overlay after every frame" behaviour (see
-// TestHostOverlayGoesToOneClientAndFollowsEveryFrame) has nothing left to
-// re-append.
-func TestHostClearedOverlaySendsNoTrailingFrame(t *testing.T) {
-	h, sock := startHost(t)
-	a := dial(t, sock, "tok", "a", 100, 40)
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	idA := idByLabel(t, h, "a")
-
-	h.SetOverlay(idA, "x")
-	select {
-	case p := <-a.overlay:
-		if string(p) != "x" {
-			t.Fatalf("overlay payload %q", p)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("a did not get its overlay")
-	}
-
-	h.SetOverlay(idA, "")
-	select {
-	case p := <-a.overlay:
-		// An empty overlay frame is harmless (the client writes zero bytes
-		// to its terminal), so either nothing at all or an empty payload is
-		// acceptable here — what matters is what happens after the next
-		// frame, checked below.
-		if len(p) != 0 {
-			t.Fatalf("clearing sent a non-empty overlay: %q", p)
-		}
-	case <-time.After(200 * time.Millisecond):
-	}
-
-	h.Output().Write([]byte("FRAME"))
-	select {
-	case p := <-a.out:
-		if string(p) != "FRAME" {
-			t.Fatalf("frame payload %q", p)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("a did not get the frame")
-	}
-	select {
-	case p := <-a.overlay:
-		t.Fatalf("cleared overlay was re-sent after a frame: %q", p)
+	case <-b.size:
+		t.Fatal("b received a shared-size frame after a's resize")
 	case <-time.After(300 * time.Millisecond):
 	}
-}
-
-// TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate is a regression
-// test for a lost-update race between fanout.Write and SetOverlay: both used
-// to read/enqueue a client's overlay outside a shared critical section, so a
-// SetOverlay landing between another write's snapshot and its enqueue could
-// have its new value silently overwritten by that write's now-stale one —
-// permanently, since a private keystroke need not change the shared view
-// and so there may be no next frame to correct it. It drives both
-// concurrently for a few hundred iterations, then sequences one final
-// SetOverlay strictly after both stop, and asserts the last FOverlay the
-// client ever receives is that final value.
-func TestHostOverlaySetAndFrameWriteNeverLoseTheLatestUpdate(t *testing.T) {
-	h, sock := startHost(t)
-	a := dial(t, sock, "tok", "a", 100, 40)
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	idA := idByLabel(t, h, "a")
-
-	const n = 3000
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < n; i++ {
-			h.Output().Write([]byte("x"))
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		for i := 0; i < n; i++ {
-			h.SetOverlay(idA, fmt.Sprintf("O%d", i))
-		}
-	}()
-
-	// Drain both streams throughout, or the client's own buffered channels
-	// (or the host's per-client queue) could back up and stall delivery of
-	// the very frame this test is waiting for. Deliberately never stopped:
-	// it idles itself out (via the timeout below) once nothing more arrives.
-	var mu sync.Mutex
-	var last string
-	go func() {
-		for {
-			select {
-			case <-a.out:
-			case p := <-a.overlay:
-				mu.Lock()
-				last = string(p)
-				mu.Unlock()
-			case <-time.After(2 * time.Second):
-				return
+	select {
+	case cl := <-b.cl:
+		for _, c := range cl {
+			if c.Label == "a" && (c.Cols != 40 || c.Rows != 15) {
+				t.Fatalf("roster carries a's old size: %+v", c)
 			}
 		}
-	}()
-
-	wg.Wait()
-	// Sequenced strictly after both loops above have returned, so this is
-	// unambiguously "the last value SetOverlay set" for idA.
-	h.SetOverlay(idA, "FINAL")
-
-	within(t, 2*time.Second, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return last == "FINAL"
-	})
+	case <-time.After(2 * time.Second):
+		t.Fatal("b did not receive the roster update carrying a's new size")
+	}
 }
 
 func TestHostSwitchAndDetachByID(t *testing.T) {
@@ -449,40 +312,12 @@ func TestHostRejectsBadToken(t *testing.T) {
 	}
 }
 
-func TestHostSizeCallbackAndSlowClient(t *testing.T) {
-	h, sock := startHost(t)
-	sizes := make(chan Size, 8)
-	h.OnSize(func(c, r int) { sizes <- Size{c, r} })
-	expect := func(want Size) {
-		t.Helper()
-		select {
-		case got := <-sizes:
-			if got != want {
-				t.Fatalf("OnSize %+v, want %+v", got, want)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("OnSize not called")
-		}
-	}
-	dial(t, sock, "tok", "a", 120, 40)
-	expect(Size{120, 40})
-	slow := dial(t, sock, "tok", "slow", 60, 20)
-	expect(Size{60, 20})
-	// The slow client never reads; 200 frames must not block the writer.
-	done := make(chan struct{})
-	go func() {
-		for i := 0; i < 200; i++ {
-			h.Output().Write([]byte("x"))
-		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("Output blocked on a slow client")
-	}
-	_ = slow
-}
+// The old TestHostSizeCallbackAndSlowClient lived here. Its OnSize
+// assertions covered the shared minimum size, removed in 0.8.0; its
+// slow-client-does-not-block-Output coverage duplicates
+// TestHostStalledClientDoesNotBlockOthersOrClose below, which exercises a
+// client that truly never reads (rather than one whose buffered test
+// channel merely fills), so nothing is lost by dropping this one.
 
 func TestHostListenSocketPermissions(t *testing.T) {
 	_, sock := startHost(t)
@@ -519,10 +354,6 @@ func TestHostDetachByIDKeepsOthers(t *testing.T) {
 		labels := map[string]bool{c[0].Label: true, c[1].Label: true}
 		return labels["a"] && labels["c"]
 	})
-	// size is recomputed from the remaining clients (a=100x40, c=80x24)
-	if c, r := h.Size(); c != 80 || r != 24 {
-		t.Fatalf("size after detach = %dx%d", c, r)
-	}
 }
 
 func TestHostOnQuitViaFQuitFrame(t *testing.T) {
@@ -602,8 +433,14 @@ func TestHostStalledClientDoesNotBlockOthersOrClose(t *testing.T) {
 	within(t, time.Second, func() bool { return len(h.Clients()) == 2 })
 	resize, _ := json.Marshal(Size{Cols: 90, Rows: 20})
 	WriteFrame(b.conn, FResize, resize)
-	// shared size is the minimum across both clients (stalled is 80x24)
-	within(t, time.Second, func() bool { c, r := h.Size(); return c == 80 && r == 20 })
+	within(t, time.Second, func() bool {
+		for _, c := range h.Clients() {
+			if c.Label == "b" {
+				return c.Cols == 90 && c.Rows == 20
+			}
+		}
+		return false
+	})
 
 	// Close must return promptly even though the stalled client can never be
 	// told goodbye in any normal sense.
@@ -616,78 +453,12 @@ func TestHostStalledClientDoesNotBlockOthersOrClose(t *testing.T) {
 	}
 }
 
-// TestHostAttachAlwaysNotifiesTheProgramOfTheSize covers the repaint an
-// attacher depends on. A client clears its screen when it attaches, and the
-// Bubble Tea renderer only repaints in full when it is given a
-// WindowSizeMsg — which the host derives from OnSize. A second terminal at
-// the same size (or a larger one, leaving the shared minimum unchanged)
-// would otherwise see nothing but the next diff lines on a blank screen.
-func TestHostAttachAlwaysNotifiesTheProgramOfTheSize(t *testing.T) {
-	h, sock := startHost(t)
-	sizes := make(chan Size, 8)
-	h.OnSize(func(c, r int) { sizes <- Size{c, r} })
-	expect := func(want Size, what string) {
-		t.Helper()
-		select {
-		case got := <-sizes:
-			if got != want {
-				t.Fatalf("%s: OnSize %+v, want %+v", what, got, want)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("%s: OnSize not called", what)
-		}
-	}
-	dial(t, sock, "tok", "a", 80, 24)
-	expect(Size{80, 24}, "first attach")
-
-	// Same size: the shared minimum does not change, but the program must
-	// still be told so the new terminal gets a full frame.
-	same := dial(t, sock, "tok", "same", 80, 24)
-	expect(Size{80, 24}, "attach at the same size")
-	// Larger: still no change to the minimum, still a notification.
-	bigger := dial(t, sock, "tok", "bigger", 120, 40)
-	expect(Size{80, 24}, "attach at a larger size")
-
-	// Each of those clients learns the render size exactly once: the
-	// unchanged-minimum path must not broadcast to everyone, and the
-	// changed path must not be doubled by a second direct send.
-	for _, fc := range []*fakeClient{same, bigger} {
-		select {
-		case got := <-fc.size:
-			if got != (Size{80, 24}) {
-				t.Fatalf("client FSize %+v, want 80x24", got)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("client never received its attach-time FSize")
-		}
-		select {
-		case got := <-fc.size:
-			t.Fatalf("duplicate FSize %+v", got)
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	// And a real change still notifies exactly once.
-	smaller := dial(t, sock, "tok", "smaller", 60, 20)
-	expect(Size{60, 20}, "attach at a smaller size")
-	select {
-	case got := <-sizes:
-		t.Fatalf("second OnSize for one change: %+v", got)
-	case <-time.After(100 * time.Millisecond):
-	}
-	select {
-	case got := <-smaller.size:
-		if got != (Size{60, 20}) {
-			t.Fatalf("client FSize %+v, want 60x20", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("client never received the new shared size")
-	}
-	select {
-	case got := <-smaller.size:
-		t.Fatalf("duplicate FSize after a size change: %+v", got)
-	case <-time.After(100 * time.Millisecond):
-	}
-}
+// The old TestHostAttachAlwaysNotifiesTheProgramOfTheSize lived here. It
+// covered OnSize's shared-minimum semantics on attach, all removed in
+// 0.8.0: there is no shared size left to (not) change, and no FSize frame
+// sent to already-attached clients. TestEvictedOutputTriggersARepaintRequest
+// below still exercises attach calling OnClientSize for the attaching
+// client, and TestResizeNotifiesPerClient covers it on resize.
 
 // TestHostReplaysQuitRequestedBeforeOnQuit covers the startup window: the
 // host listens and serves before the program registers OnQuit, so a SIGTERM
@@ -713,36 +484,10 @@ func TestHostReplaysQuitRequestedBeforeOnQuit(t *testing.T) {
 	}
 }
 
-// Once the served program has returned, the host's closing lines must not
-// be followed by overlays: ClearOverlays makes later frames arrive bare.
-func TestHostClearOverlaysStopsReappending(t *testing.T) {
-	h, sock := startHost(t)
-	a := dial(t, sock, "tok", "a", 100, 40)
-	within(t, time.Second, func() bool { return len(h.Clients()) == 1 })
-	h.SetOverlay(h.Clients()[0].ID, "DRAFT")
-	select {
-	case <-a.overlay:
-	case <-time.After(time.Second):
-		t.Fatal("overlay never arrived")
-	}
-	h.ClearOverlays()
-	h.Output().Write([]byte("resume line"))
-	select {
-	case p := <-a.out:
-		if string(p) != "resume line" {
-			t.Fatalf("frame %q", p)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("frame never arrived")
-	}
-	select {
-	case p := <-a.overlay:
-		if len(p) > 0 {
-			t.Fatalf("overlay %q re-appended after ClearOverlays", p)
-		}
-	case <-time.After(300 * time.Millisecond):
-	}
-}
+// The old TestHostClearOverlaysStopsReappending lived here. It covered
+// Host.ClearOverlays and fanout.Write's overlay re-append, both removed in
+// 0.8.0: each client now runs its own program with no shared closing-line
+// frame for a stale overlay to be stamped onto.
 
 // TestSanitizeLabel: a client's label is text it chose, and it lands in
 // every other terminal's transcript, bottom line and /clients list — so the

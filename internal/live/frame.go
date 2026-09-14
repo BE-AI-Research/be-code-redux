@@ -17,10 +17,10 @@ const (
 	FInput
 	FResize
 	FDetach
-	FOverlay // host→client: one client's private input rows
+	FOverlay // unused since 0.8.0: was host→client, one client's private input rows
 	FQuit
 	FOutput
-	FSize
+	FSize // unused since 0.8.0: was host→client, the shared minimum size
 	FClients
 	FBye
 )

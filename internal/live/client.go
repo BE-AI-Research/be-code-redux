@@ -301,12 +301,12 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 				return
 			}
 			switch typ {
-			case FOutput, FOverlay:
-				if typ == FOutput && opt.Joined != nil {
+			case FOutput:
+				if opt.Joined != nil {
 					opt.Joined.Store(true)
 				}
 				opt.Stdout.Write(p)
-			case FSize:
+			case FSize: // unused since 0.8.0; harmless if ever received
 				io.WriteString(opt.Stdout, clearScreen)
 			case FBye:
 				var b Bye
