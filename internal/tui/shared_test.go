@@ -273,9 +273,14 @@ func TestLeftoverQueueEchoesEverySender(t *testing.T) {
 	m.running = true
 	m.ag.EnqueueFrom("from one", 1)
 	m.ag.EnqueueFrom("from two", 2)
-	m.startTurnHook = func(string) {} // stand in for the next turn's run
+	var ran string // stands in for the next turn's run, and records it
+	m.startTurnHook = func(text string) { ran = text }
 	m.finishTurn(nil, nil)
 	flush(m)
+	// One request, in the order the messages were queued.
+	if ran != "from one\nfrom two" {
+		t.Fatalf("the next turn ran %q, want both queued messages as one request", ran)
+	}
 	tr := m.rendered.String()
 	for _, want := range []string{"desk (pid 1)> from one", "tablet (pid 2)> from two"} {
 		if !strings.Contains(tr, want) {

@@ -50,11 +50,22 @@ type askAnswer struct {
 // askMsg is broadcast when an ask opens, askResolvedMsg when it is answered
 // or withdrawn. by names the terminal that answered, or carries a
 // withdrawal note ("answered in VS Code"); "" shows nothing.
+//
+// from is the client id that answered, so a terminal can tell "somebody else
+// decided this" from "I decided this" by identity rather than by comparing
+// labels — two terminals may well share one. A withdrawal has no answering
+// client and carries noClient.
 type askMsg struct{ a *ask }
 
+// noClient is askResolvedMsg.from for a withdrawal: no client answered, so
+// the note is for everyone. It cannot collide with a real client id (0 is
+// the in-process terminal; the host numbers from 1).
+const noClient = -1
+
 type askResolvedMsg struct {
-	gen int
-	by  string
+	gen  int
+	by   string
+	from int
 }
 
 // Ask raises a shared question and blocks until a terminal answers it, it is
@@ -82,7 +93,16 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 		return ans
 	case <-ctx.Done():
 		s.CancelAsk(a.Gen, "")
-		return askAnswer{}
+		// An answer given at the very instant the context ended is already
+		// in the (buffered) channel and is the real verdict: a terminal
+		// approved this write, so reporting a denial would be a lie. If
+		// CancelAsk got there first its own zero answer is what is read.
+		select {
+		case ans := <-a.reply:
+			return ans
+		default:
+			return askAnswer{}
+		}
 	}
 }
 
@@ -102,9 +122,16 @@ func (s *Session) lastGen() int {
 // s.mu — it is a view's Update — and nothing here blocks: the reply channel
 // is buffered and broadcast only queues.
 //
+// v is the view that rendered the ask and is answering it, and from the
+// client id that pressed the key. They are two different things while one
+// program serves a whole roster (RunServed's single view is client 0's while
+// the keys come in tagged 1, 2, …), which is why the view is passed in
+// rather than looked up from the id: onPick's view-local effects have to
+// land on the terminal that is actually rendering.
+//
 // The verdict lines are session entries, not local notes, so every terminal
 // sees what was decided.
-func (s *Session) Answer(gen int, ans askAnswer, from int) (tea.Cmd, bool) {
+func (s *Session) Answer(gen int, ans askAnswer, from int, v *View) (tea.Cmd, bool) {
 	a := s.ask
 	if a == nil || a.Gen != gen {
 		return nil, false
@@ -128,17 +155,13 @@ func (s *Session) Answer(gen int, ans askAnswer, from int) (tea.Cmd, bool) {
 			s.appendEntryLocked(entry{Kind: entryWarn, Text: "plan discarded"})
 		}
 	case askPicker:
-		// A view for the answering client is the normal case; without one
-		// there is nothing local for onPick to act on, so it is skipped.
 		if ans.OK && a.onPick != nil {
-			if v := s.viewByID(from); v != nil {
-				cmd = a.onPick(v, ans.Note, from)
-			}
+			cmd = a.onPick(v, ans.Note, from)
 		}
 	}
 	a.reply <- ans
 	s.ask = nil
-	s.broadcast(askResolvedMsg{gen: gen, by: s.clientLabel(from)})
+	s.broadcast(askResolvedMsg{gen: gen, by: s.clientLabel(from), from: from})
 	return cmd, true
 }
 
@@ -157,7 +180,7 @@ func (s *Session) CancelAsk(gen int, by string) {
 	case a.reply <- askAnswer{}:
 	default:
 	}
-	s.broadcast(askResolvedMsg{gen: gen, by: by})
+	s.broadcast(askResolvedMsg{gen: gen, by: by, from: noClient})
 }
 
 // SetReview hands the session the review coordinator built in cmd, so

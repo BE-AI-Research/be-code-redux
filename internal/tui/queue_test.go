@@ -102,14 +102,18 @@ func TestBottomLineShowsQueuedCount(t *testing.T) {
 // released, and the leftover queue starts the next turn as usual.
 func TestRunFinishingClosesQueuePopup(t *testing.T) {
 	m := busyWithQueue(t, "next thing")
-	m.startTurnHook = func(string) {} // stand in for the next turn's run
+	var ran string // stands in for the next turn's run, and records it
+	m.startTurnHook = func(text string) { ran = text }
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m.finishTurn(nil, nil)
 	flush(m)
 	if m.mode == modeQueue || m.ag.Held() {
 		t.Fatalf("popup survived the run: mode=%v held=%v", m.mode, m.ag.Held())
 	}
+	if ran != "next thing" {
+		t.Fatalf("leftover queue did not start the next turn: ran %q", ran)
+	}
 	if !strings.Contains(m.rendered.String(), "next thing") {
-		t.Fatal("leftover queue did not start the next turn")
+		t.Fatal("the leftover was not echoed into the transcript")
 	}
 }

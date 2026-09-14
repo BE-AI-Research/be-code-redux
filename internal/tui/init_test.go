@@ -42,12 +42,33 @@ func TestInitHintCheckIsLatched(t *testing.T) {
 }
 
 func TestInitCommandRunsTheFlowNotATurn(t *testing.T) {
+	tempHome(t)
 	m := newTestModel(t)
-	started := false
-	m.startTurnHook = func(string) { started = true }
+	var ran string // any model turn this command starts, which must be none
+	m.startTurnHook = func(text string) { ran = text }
 	m.inputFor(0).SetValue("/init")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if started || cmd == nil {
-		t.Fatal("/init must run the init flow as a command, not start a model turn")
+	if cmd == nil {
+		t.Fatal("/init must return the running session's wheel tick")
+	}
+	// The flow runs on its own goroutine and always ends by putting its
+	// outcome on the transcript — with the null provider, a failure. Waiting
+	// for that is what makes the "no turn" assertion below meaningful (and
+	// race-free) rather than a snapshot taken before anything happened.
+	waitFor(t, func() bool {
+		flush(m)
+		if m.mode == modeAsk { // the write approval, if it ever gets that far
+			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		}
+		tr := m.rendered.String()
+		return strings.Contains(tr, "init failed") || strings.Contains(tr, "wrote ")
+	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ran != "" {
+		t.Fatalf("/init started a model turn with %q", ran)
+	}
+	if m.running {
+		t.Fatal("the init flow did not return the session to idle")
 	}
 }

@@ -91,10 +91,14 @@ func TestBusyEnterQueuesMessage(t *testing.T) {
 func TestLeftoverQueueStartsNextTurn(t *testing.T) {
 	m := newTestModel(t)
 	m.mode = modeBusy
-	m.startTurnHook = func(string) {} // stand in for the next turn's run
+	var ran string // stands in for the next turn's run, and records it
+	m.startTurnHook = func(text string) { ran = text }
 	m.ag.Enqueue("next thing please")
 	m.finishTurn(nil, nil)
 	flush(m)
+	if ran != "next thing please" {
+		t.Fatalf("the next turn ran %q, want the queued text", ran)
+	}
 	if m.mode != modeBusy {
 		t.Fatalf("expected a new turn to start, mode=%v", m.mode)
 	}

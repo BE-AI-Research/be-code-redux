@@ -133,6 +133,11 @@ type View struct {
 	// something to draw (and its picker cursor is this terminal's own).
 	shownAsk *ask
 	askShown int
+	// answeredGen is the generation this terminal answered itself. It is
+	// what keeps "answered by …" off the screen of the person who just
+	// pressed the key, in the case where one view renders for a whole
+	// roster and the answering client is not this view's own id.
+	answeredGen int
 
 	width, height int
 	ready         bool
@@ -359,10 +364,11 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showAsk(msg.a)
 	case askResolvedMsg:
 		// Someone answered, or the editor did and the coordinator withdrew
-		// it. The terminal that answered has already closed its own modal.
+		// it. Whoever answered is not told that somebody answered.
 		if m.mode == modeAsk && m.askShown == msg.gen {
+			answeredHere := m.answeredGen == msg.gen || msg.from == m.id
 			m.closeAsk()
-			if note := answeredNote(msg.by, m.label); note != "" {
+			if note := answeredNote(msg.by); !answeredHere && note != "" {
 				m.renderLocalNote(note)
 			}
 		}
@@ -652,10 +658,9 @@ func (m *View) closeAsk() {
 
 // answeredNote is the dimmed line a terminal that did *not* answer shows in
 // its own buffer. A withdrawal passes the note itself ("answered in VS
-// Code"); anything else is a client label. The answering terminal (and an
-// empty by) gets nothing.
-func answeredNote(by, label string) string {
-	if by == "" || by == label {
+// Code"); anything else is a client label. An empty by shows nothing.
+func answeredNote(by string) string {
+	if by == "" {
 		return ""
 	}
 	if strings.HasPrefix(by, "answered") {
@@ -717,11 +722,21 @@ func (m *View) handleAskKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		m.modalVP, cmd = m.modalVP.Update(k)
 		return m, cmd
 	}
-	cmd, ok := m.Answer(m.askShown, ans, from)
+	return m, m.answerAsk(ans, from)
+}
+
+// answerAsk puts this terminal's verdict to the session and, if it was the
+// one that counted, closes this terminal's own modal (the others close on
+// the askResolvedMsg it broadcasts). A stale answer leaves the modal alone:
+// the resolution for the generation that did win is already on its way.
+func (m *View) answerAsk(ans askAnswer, from int) tea.Cmd {
+	gen := m.askShown
+	cmd, ok := m.Answer(gen, ans, from, m)
 	if ok {
+		m.answeredGen = gen
 		m.closeAsk()
 	}
-	return m, cmd
+	return cmd
 }
 
 // handleAskPickerKey drives a shared picker: the cursor and filter are this
@@ -734,10 +749,7 @@ func (m *View) handleAskPickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 	}
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
-		cmd, ok := m.Answer(m.askShown, askAnswer{}, from)
-		if ok {
-			m.closeAsk()
-		}
+		cmd := m.answerAsk(askAnswer{}, from)
 		m.inputFor(from).Focus()
 		return m, cmd
 	case tea.KeyEnter:
@@ -745,11 +757,7 @@ func (m *View) handleAskPickerKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
 		if len(items) == 0 {
 			return m, nil
 		}
-		cmd, ok := m.Answer(m.askShown, askAnswer{OK: true, Note: items[p.cursor].id}, from)
-		if ok {
-			m.closeAsk()
-		}
-		return m, cmd
+		return m, m.answerAsk(askAnswer{OK: true, Note: items[p.cursor].id}, from)
 	}
 	pickerNav(p, k)
 	return m, nil

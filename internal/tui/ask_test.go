@@ -61,10 +61,61 @@ func TestStaleAnswerIsIgnored(t *testing.T) {
 	s, a, b := twoViews(t)
 	go s.approveFromAgent("shell", "ls")
 	waitFor(t, func() bool { flush(a, b); return a.mode == modeAsk && b.mode == modeAsk })
+	// current and Answer are documented as "caller holds s.mu"; a test that
+	// calls them by hand honours that too.
+	s.mu.Lock()
 	gen := s.current().Gen
+	s.mu.Unlock()
 	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
-	if _, ok := s.Answer(gen, askAnswer{OK: true}, 2); ok {
+	s.mu.Lock()
+	_, ok := s.Answer(gen, askAnswer{OK: true}, 2, b)
+	s.mu.Unlock()
+	if ok {
 		t.Fatal("an answer for a resolved generation must be ignored")
+	}
+}
+
+// One program can serve a whole roster: RunServed builds a single view for
+// client 0 while the keys arrive tagged with the real client ids. A picked
+// row must still act — deriving the view from the answering client id would
+// find nothing and silently pick nothing at all.
+func TestSharedPickerAnsweredByAClientWithNoViewOfItsOwn(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	s.served = true
+	m := s.NewView(0, "shared") // the one view, as RunServed makes it
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "desk (pid 1)", UTF8: true}})
+	flush(m)
+
+	picked := make(chan string, 1)
+	go s.Ask(context.Background(), &ask{Kind: askPicker, Title: "Select model",
+		Items: []pickItem{{id: "one", label: "one"}, {id: "two", label: "two"}},
+		onPick: func(v *View, id string, from int) tea.Cmd {
+			if v == nil {
+				t.Error("onPick must be given the view that rendered the ask")
+			}
+			picked <- id
+			return nil
+		}})
+	waitFor(t, func() bool { flush(m); return m.mode == modeAsk })
+	// Client 1 has no view of its own; the shared view is client 0's.
+	m.Update(live.ClientKeyMsg{Client: 1, Key: tea.KeyMsg{Type: tea.KeyEnter}})
+	select {
+	case id := <-picked:
+		if id != "one" {
+			t.Fatalf("picked %q", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a client without a view of its own picked nothing")
+	}
+	flush(m)
+	if m.mode == modeAsk {
+		t.Fatal("the picker is still open")
+	}
+	// The person who pressed Enter is not told that somebody answered.
+	if strings.Contains(m.wrapped, "answered by") {
+		t.Fatalf("the answering terminal was told it answered:\n%s", m.wrapped)
 	}
 }
 
