@@ -124,10 +124,11 @@ func TestOSC52Sequence(t *testing.T) {
 	}
 }
 
-// The repaint request is a WindowSizeMsg at the size the view already has
-// (see runner.onClients). It must redraw the frame and nothing else: a
-// selection survives it, because no column has moved. A genuine resize
-// still drops it.
+// The repaint request is a WindowSizeMsg at the size the view already has:
+// the host asks for one through onClientSize after evicting output for a
+// terminal that had fallen behind (live.Host.writer). It must redraw the
+// frame and nothing else — a selection survives it, because no column has
+// moved. A genuine resize still drops it.
 func TestRepaintAtTheSameSizeKeepsTheSelection(t *testing.T) {
 	m := newTestModel(t)
 	m.appendEntry(entry{Kind: entryPlain, Text: "select me"})

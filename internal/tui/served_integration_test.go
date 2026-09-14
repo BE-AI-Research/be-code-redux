@@ -28,10 +28,36 @@ func TestServedSessionRendersEachClientAtItsOwnSize(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.RunServed(context.Background(), h) }()
 
-	small := dialFake(t, sock, token, "phone (pid 1)", 40, 15)
+	// The desk first, and alone, so that what the phone's arrival costs it
+	// can be measured.
 	large := dialFake(t, sock, token, "desk (pid 2)", 120, 40)
+	waitFor(t, func() bool { return len(h.Clients()) == 1 })
+	largeID := idFor(t, h, "desk (pid 2)")
+	large.collect(t, "BE-Code Redux", 3*time.Second) // its first, full frame
+	time.Sleep(settle)
+	beforeAttach := large.bytesSoFar()
+
+	small := dialFake(t, sock, token, "phone (pid 1)", 40, 15)
 	waitFor(t, func() bool { return len(h.Clients()) == 2 })
-	smallID, largeID := idFor(t, h, "phone (pid 1)"), idFor(t, h, "desk (pid 2)")
+	smallID := idFor(t, h, "phone (pid 1)")
+	large.collect(t, "attached: phone (pid 1)", 3*time.Second)
+	time.Sleep(settle)
+	// Somebody else attaching costs the desk the two rows that genuinely
+	// changed — the new transcript line and the bottom line's ⧉ marker —
+	// and not a redrawn screen. Both halves of that are asserted, because
+	// each catches something the other does not: the header is only ever
+	// written by a full-frame repaint, so a second occurrence of it is proof
+	// of one; and the byte bound catches a repaint that happened to leave
+	// the header off. The bound is a fifth of this terminal's ~4.9 KiB full
+	// frame and three times the ~335 bytes actually written, which is
+	// headroom for the update arriving as two frames rather than one — the
+	// only way this number moves.
+	if n := strings.Count(large.text(), "BE-Code Redux"); n != 1 {
+		t.Fatalf("the desk's header was drawn %d times: the phone attaching repainted it in full", n)
+	}
+	if n := large.bytesSoFar() - beforeAttach; n > 1024 {
+		t.Fatalf("the phone attaching wrote %d bytes to the desk; that is a repaint, not an update", n)
+	}
 
 	s.appendEntry(entry{Kind: entryDim, Text: "shared line"})
 	smallOut := small.collect(t, "shared line", 3*time.Second)
@@ -48,8 +74,12 @@ func TestServedSessionRendersEachClientAtItsOwnSize(t *testing.T) {
 	}
 
 	// One terminal's resize is that terminal's own business: it relays out
-	// for its new size and the other keeps the size it reported. There is
-	// no shared minimum any more, which is the regression this guards.
+	// for its new size, and the other terminal's stream does not grow by a
+	// single byte. Byte-identical, not merely "still 120x40": Bubble Tea
+	// treats any WindowSizeMsg as a full repaint, so a runner that hands a
+	// roster change to every running program rewrites ~5 KiB of unchanged
+	// frame down every other socket. That is what the roster-change repaint
+	// in runner.onClients used to do, and why it is gone.
 	beforeLarge := large.bytesSoFar()
 	small.resize(t, 60, 20)
 	waitFor(t, func() bool { w, h := viewSize(t, s, smallID); return w == 60 && h == 20 })
@@ -62,15 +92,8 @@ func TestServedSessionRendersEachClientAtItsOwnSize(t *testing.T) {
 	if w, hgt := viewSize(t, s, largeID); w != 120 || hgt != 40 {
 		t.Fatalf("the large terminal was relaid out at %dx%d when the small one resized", w, hgt)
 	}
-	// Cost, not correctness, and deliberately only logged: runner.onClients
-	// still re-sends every running program its own WindowSizeMsg on a roster
-	// change, and a resize is one — which makes Bubble Tea's renderer drop
-	// its frame cache and rewrite the large terminal in full even though
-	// nothing on it changed. The clear-on-FSize that used to justify it is
-	// gone (live.FSize is unused since 0.8.0 and only an FSize makes a client
-	// clear), so this number should be 0; see the task 9 report.
-	if n := large.bytesSoFar() - beforeLarge; n > 0 {
-		t.Logf("note: the small terminal's resize rewrote %d bytes on the large one (runner.onClients repaint)", n)
+	if n := large.bytesSoFar() - beforeLarge; n != 0 {
+		t.Fatalf("the small terminal's resize wrote %d byte(s) to the large one", n)
 	}
 
 	// A detach takes down exactly one program — that terminal's view is let

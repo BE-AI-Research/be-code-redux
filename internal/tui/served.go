@@ -180,21 +180,20 @@ func (r *runner) onClients(infos []live.ClientInfo) {
 	seen := map[int]bool{}
 	for _, c := range infos {
 		seen[c.ID] = true
-		pr, ok := r.programs[c.ID]
-		if !ok {
-			if !quitting {
-				r.startLocked(c)
-			}
-			continue
+		// A terminal already running is left alone. It used to be re-sent its
+		// own size here, because the host announced every roster change with
+		// an FSize frame and a client clears its screen on one — so every
+		// terminal had to be made to repaint in full. FSize is gone (a roster
+		// change is an FClients frame now, and no client clears on that), and
+		// the re-send was not free: Bubble Tea treats *any* WindowSizeMsg as a
+		// full repaint, dropping its frame cache, so one terminal attaching or
+		// resizing rewrote every other terminal's whole screen — some 5 KiB
+		// down each socket — for a frame that had not changed. A view still
+		// gets its size when its program starts (startLocked) and whenever it
+		// genuinely changes or the host asks for a repaint (onClientSize).
+		if _, ok := r.programs[c.ID]; !ok && !quitting {
+			r.startLocked(c)
 		}
-		// A roster change is also when every attached terminal may have just
-		// cleared its own screen: the host sends an FSize frame whenever the
-		// size it tracks changes, and a client clears on one. Re-sending each
-		// program its own size costs nothing when that size has not changed
-		// (the view skips the relayout) and forces Bubble Tea's renderer to
-		// repaint in full — otherwise a terminal is left showing nothing but
-		// the lines that happened to change since somebody else attached.
-		pr.send(tea.WindowSizeMsg{Width: c.Cols, Height: c.Rows})
 	}
 	for id, pr := range r.programs {
 		if !seen[id] {

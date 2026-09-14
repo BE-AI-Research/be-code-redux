@@ -332,12 +332,16 @@ func TestDetachDoesNotBlockTheUpdateLoop(t *testing.T) {
 	}
 }
 
-// A client attaching, detaching or resizing makes the host send every
-// attached terminal the size it tracks, and a client clears its screen on
-// one. So every program has to be asked to repaint, not only the one that
-// just attached — otherwise the terminals that were already there are left
-// showing nothing but the lines that changed since.
-func TestRunnerRepaintsEveryProgramOnARosterChange(t *testing.T) {
+// A roster change is somebody else's business. A terminal that is already
+// running must not be sent a size for it: Bubble Tea treats any
+// WindowSizeMsg as a full repaint, so re-sending one rewrote every other
+// terminal's whole screen whenever anyone attached, detached or resized.
+// The host used to announce roster changes with an FSize frame, which made
+// clients clear, which is what the re-send was compensating for; FSize is
+// gone, and with it the reason. (A view still gets its size from
+// startLocked, and from onClientSize when it genuinely changes or the host
+// asks for a repaint after evicting output.)
+func TestRunnerDoesNotResizeRunningProgramsOnARosterChange(t *testing.T) {
 	s := newTestSession(t)
 	s.served = true
 	r := &runner{s: s, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}), noPrograms: true}
@@ -345,17 +349,25 @@ func TestRunnerRepaintsEveryProgramOnARosterChange(t *testing.T) {
 	pr := r.programs[1]
 	queued(pr.ctrl) // discard the size it was started with
 
+	// Somebody else attaches…
 	r.onClients([]live.ClientInfo{
 		{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true},
 		{ID: 2, Label: "b", Cols: 40, Rows: 15, UTF8: true}})
-	var got []tea.WindowSizeMsg
+	// …resizes…
+	r.onClients([]live.ClientInfo{
+		{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true},
+		{ID: 2, Label: "b", Cols: 60, Rows: 20, UTF8: true}})
+	// …and leaves again.
+	r.onClients([]live.ClientInfo{{ID: 1, Label: "a", Cols: 80, Rows: 24, UTF8: true}})
 	for _, msg := range queued(pr.ctrl) {
 		if w, ok := msg.(tea.WindowSizeMsg); ok {
-			got = append(got, w)
+			t.Fatalf("a roster change sent a running program a size (%dx%d): every other terminal repaints in full", w.Width, w.Height)
 		}
 	}
-	if len(got) != 1 || got[0].Width != 80 || got[0].Height != 24 {
-		t.Fatalf("the terminal that was already there was not repainted at its own size: %+v", got)
+	// The roster itself still reaches it — that is what the bottom line
+	// counts — it simply arrives as a clientsMsg on the mailbox.
+	if len(queued(pr.mb.ch)) == 0 {
+		t.Fatal("the roster change never reached the running program at all")
 	}
 }
 
