@@ -64,8 +64,9 @@ type client struct {
 	// block its caller — that is the whole point of routing every frame
 	// through this queue and a single per-client writer goroutine instead of
 	// writing to conn directly.
-	qmu   sync.Mutex
-	queue []qframe
+	qmu        sync.Mutex
+	queue      []qframe
+	lostOutput bool // an FOutput frame was evicted; guarded by qmu
 
 	wake       chan struct{} // size 1: signals writer() there is new work
 	writerDone chan struct{} // closed when writer() returns
@@ -171,6 +172,9 @@ func (c *client) enqueue(t FrameType, payload []byte) {
 					break
 				}
 			}
+			if t == FOutput {
+				c.lostOutput = true
+			}
 		}
 	}
 	c.queue = append(c.queue, qframe{t, payload})
@@ -215,10 +219,11 @@ type Host struct {
 	// recompute for why h.mu alone is not enough).
 	notifyMu sync.Mutex
 
-	onInput   func(client int, b []byte)
-	onSize    func(cols, rows int)
-	onClients func([]ClientInfo)
-	onQuit    func()
+	onInput      func(client int, b []byte)
+	onSize       func(cols, rows int)
+	onClientSize func(id, cols, rows int)
+	onClients    func([]ClientInfo)
+	onQuit       func()
 	// quitPending records a RequestQuit that arrived before OnQuit was
 	// registered — the host listens and serves before the program is
 	// started (see tui.RunServed), so a SIGTERM from `sessions kill`, or a
@@ -270,6 +275,41 @@ func (h *Host) OnInput(f func(client int, b []byte)) {
 func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
 func (h *Host) Output() io.Writer              { return fanout{h} }
+
+// OnClientSize registers the callback for one client's own size: on attach,
+// on every resize frame it sends, and after output to it was evicted (a
+// repaint request; see enqueue).
+func (h *Host) OnClientSize(f func(id, cols, rows int)) {
+	h.mu.Lock()
+	h.onClientSize = f
+	h.mu.Unlock()
+}
+
+// ClientOutput is a writer that reaches one client only. Bytes are queued
+// on that client's own queue exactly like fan-out frames, so a stalled
+// terminal never blocks the writer.
+func (h *Host) ClientOutput(id int) io.Writer { return clientWriter{h, id} }
+
+type clientWriter struct {
+	h  *Host
+	id int
+}
+
+func (w clientWriter) Write(p []byte) (int, error) {
+	cp := append([]byte(nil), p...)
+	w.h.mu.Lock()
+	c := w.h.byIDLocked(w.id)
+	w.h.mu.Unlock()
+	if c == nil {
+		return 0, io.ErrClosedPipe
+	}
+	c.enqueue(FOutput, cp)
+	return len(p), nil
+}
+
+// Logf writes one line to the host log (the served runner uses it for a
+// view that panicked).
+func (h *Host) Logf(format string, args ...any) { h.logf(format, args...) }
 
 // OnQuit registers the program's shutdown hook. A quit requested before this
 // call is replayed into f now (outside h.mu: f is the program's callback and
@@ -369,6 +409,12 @@ func (h *Host) handle(conn net.Conn) {
 				c.cols, c.rows = s.Cols, s.Rows
 				h.mu.Unlock()
 				h.recompute()
+				h.mu.Lock()
+				f := h.onClientSize
+				h.mu.Unlock()
+				if f != nil {
+					f(c.id, s.Cols, s.Rows)
+				}
 			}
 		case FDetach:
 			h.detach(c, ReasonDetached)
@@ -396,6 +442,18 @@ func (h *Host) writer(c *client) {
 			}
 			if f.typ == FBye {
 				return
+			}
+		}
+		c.qmu.Lock()
+		lost := c.lostOutput
+		c.lostOutput = false
+		c.qmu.Unlock()
+		if lost {
+			h.mu.Lock()
+			f, cols, rows := h.onClientSize, c.cols, c.rows
+			h.mu.Unlock()
+			if f != nil {
+				f(c.id, cols, rows)
 			}
 		}
 	}
@@ -472,7 +530,7 @@ func (h *Host) recomputeAttach(attached *client) {
 	changed := cols != h.cols || rows != h.rows
 	h.cols, h.rows = cols, rows
 	infos := h.infosLocked()
-	onSize, onClients := h.onSize, h.onClients
+	onSize, onClients, onClientSize := h.onSize, h.onClients, h.onClientSize
 	clients := append([]*client(nil), h.clients...)
 	h.mu.Unlock()
 
@@ -487,6 +545,9 @@ func (h *Host) recomputeAttach(attached *client) {
 		if onSize != nil {
 			onSize(cols, rows)
 		}
+	}
+	if attached != nil && onClientSize != nil {
+		onClientSize(attached.id, attached.cols, attached.rows)
 	}
 	b, _ := json.Marshal(infos)
 	for _, c := range clients {
@@ -571,6 +632,13 @@ func (h *Host) byID(id int) *client {
 func (h *Host) Detach(id int) {
 	if c := h.byID(id); c != nil {
 		h.detach(c, ReasonDetached)
+	}
+}
+
+// Drop disconnects one client with reason as its bye.
+func (h *Host) Drop(id int, reason string) {
+	if c := h.byID(id); c != nil {
+		h.detach(c, reason)
 	}
 }
 

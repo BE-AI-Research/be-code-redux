@@ -34,6 +34,43 @@ type fakeClient struct {
 	size    chan Size
 	cl      chan []ClientInfo
 	bye     chan string
+
+	// pauseMu guards paused: stopReading installs a gate the reader goroutine
+	// blocks on before its next ReadFrame; resumeReading closes it.
+	pauseMu sync.Mutex
+	paused  chan struct{}
+}
+
+// pauseGate returns the current pause gate, if stopReading has been called
+// and resumeReading has not yet closed it.
+func (fc *fakeClient) pauseGate() chan struct{} {
+	fc.pauseMu.Lock()
+	defer fc.pauseMu.Unlock()
+	return fc.paused
+}
+
+// stopReading makes the reader goroutine block before its next ReadFrame,
+// simulating a stalled terminal whose queue can fill and evict frames.
+func (fc *fakeClient) stopReading() {
+	fc.pauseMu.Lock()
+	fc.paused = make(chan struct{})
+	fc.pauseMu.Unlock()
+}
+
+// resumeReading releases a reader goroutine parked by stopReading.
+func (fc *fakeClient) resumeReading() {
+	fc.pauseMu.Lock()
+	if fc.paused != nil {
+		close(fc.paused)
+		fc.paused = nil
+	}
+	fc.pauseMu.Unlock()
+}
+
+// resize sends an FResize frame as a real client would.
+func (fc *fakeClient) resize(t *testing.T, cols, rows int) {
+	t.Helper()
+	WriteJSON(fc.conn, FResize, Size{Cols: cols, Rows: rows})
 }
 
 func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
@@ -46,6 +83,9 @@ func dial(t *testing.T, sock, token, label string, cols, rows int) *fakeClient {
 	WriteJSON(c, FHello, Hello{Token: token, Cols: cols, Rows: rows, Label: label, UTF8: true})
 	go func() {
 		for {
+			if p := fc.pauseGate(); p != nil {
+				<-p
+			}
 			typ, p, err := ReadFrame(c)
 			if err != nil {
 				return
@@ -755,5 +795,87 @@ func TestHostSanitizesHelloLabel(t *testing.T) {
 	}
 	if !strings.HasPrefix(label, "evilname") {
 		t.Fatalf("roster label = %q, want it to start with evilname", label)
+	}
+}
+
+func TestClientOutputReachesOneClientOnly(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 80, 24)
+	b := dial(t, sock, "tok", "b", 80, 24)
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 2 })
+	<-a.cl // roster frames from the attaches
+	io.WriteString(h.ClientOutput(idByLabel(t, h, "a")), "only-a")
+	select {
+	case p := <-a.out:
+		if !strings.Contains(string(p), "only-a") {
+			t.Fatalf("a got %q", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a never received its private output")
+	}
+	select {
+	case p := <-b.out:
+		t.Fatalf("b received a's private output: %q", p)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestResizeNotifiesPerClient(t *testing.T) {
+	h, sock := startHost(t)
+	sizes := make(chan string, 16)
+	h.OnClientSize(func(id, cols, rows int) { sizes <- fmt.Sprintf("%d:%dx%d", id, cols, rows) })
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 1 })
+	id := idByLabel(t, h, "a")
+	a.resize(t, 40, 15)
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case got := <-sizes:
+			if got == fmt.Sprintf("%d:40x15", id) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("OnClientSize never reported a's new size")
+		}
+	}
+}
+
+func TestDropSaysGoodbyeWithTheReason(t *testing.T) {
+	h, sock := startHost(t)
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 1 })
+	h.Drop(idByLabel(t, h, "a"), "view error")
+	select {
+	case reason := <-a.bye:
+		if reason != "view error" {
+			t.Fatalf("bye reason %q", reason)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no bye")
+	}
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 0 })
+}
+
+func TestEvictedOutputTriggersARepaintRequest(t *testing.T) {
+	h, sock := startHost(t)
+	repaints := make(chan int, 64)
+	h.OnClientSize(func(id, _, _ int) { repaints <- id })
+	a := dial(t, sock, "tok", "a", 80, 24)
+	within(t, 2*time.Second, func() bool { return len(h.Clients()) == 1 })
+	for len(repaints) > 0 { // the attach itself reports the size once
+		<-repaints
+	}
+	a.stopReading()
+	w := h.ClientOutput(idByLabel(t, h, "a"))
+	big := strings.Repeat("x", 256*1024)
+	for i := 0; i < maxQueuedOutput*4; i++ {
+		io.WriteString(w, big)
+	}
+	a.resumeReading()
+	select {
+	case <-repaints:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no repaint request after output frames were evicted")
 	}
 }
