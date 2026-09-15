@@ -4,8 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// stepMarkerRe matches a numbering or bullet marker at the start of a plan
+// step line — "1. ", "2) ", "- ", "* " — but never a bare leading digit, so
+// step text like "2FA setup" or "404 handling" survives intact.
+var stepMarkerRe = regexp.MustCompile(`^\s*(?:\d+[.)]|[-*])\s+`)
 
 // TaskLedger is what the task tool writes to: the engine's store, behind an
 // interface so tools never imports engine.
@@ -46,7 +52,7 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 		if len(steps) == 0 {
 			if s := argString(args, "steps"); s != "" {
 				for _, line := range strings.Split(s, "\n") {
-					if line = strings.TrimSpace(strings.TrimLeft(line, "-*0123456789.) ")); line != "" {
+					if line = strings.TrimSpace(stepMarkerRe.ReplaceAllString(line, "")); line != "" {
 						steps = append(steps, line)
 					}
 				}

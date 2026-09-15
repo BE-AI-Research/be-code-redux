@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,10 @@ func TestTaskToolActionsAndAliases(t *testing.T) {
 	tool.Run(ctx, map[string]any{"action": "plan", "text": "t", "steps": []any{"a", "b", "c"}})
 	if len(f.steps) != 3 {
 		t.Fatal("array steps")
+	}
+	tool.Run(ctx, map[string]any{"action": "plan", "text": "t2", "steps": "1. parse\n2) 2FA setup\n- 404 handling\n3D printer"})
+	if want := []string{"parse", "2FA setup", "404 handling", "3D printer"}; !reflect.DeepEqual(f.steps, want) {
+		t.Fatalf("marker stripping: got %v want %v", f.steps, want)
 	}
 	tool.Run(ctx, map[string]any{"action": "step", "step": 2, "status": "progress"})
 	tool.Run(ctx, map[string]any{"action": "step", "step": "3", "status": "finished"})
