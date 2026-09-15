@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -61,4 +62,63 @@ func TestClientThemesNilSafeWithoutKey(t *testing.T) {
 		t.Fatal("ClientThemes is nil after loading a config file without the key")
 	}
 	cfg.ClientThemes["x"] = "y" // must not panic
+}
+
+func TestCoworkDefaults(t *testing.T) {
+	c := Default()
+	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 3 || c.Cowork.ConsultTurns != 12 {
+		t.Fatalf("cowork defaults = %+v", c.Cowork)
+	}
+	if len(c.Coworkers) != 0 {
+		t.Fatalf("default coworkers = %+v", c.Coworkers)
+	}
+}
+
+func TestValidCoworkersDropsBrokenEntries(t *testing.T) {
+	c := Default()
+	c.Coworkers = []CoworkerConfig{
+		{Name: "claude", Provider: "anthropic", Model: "claude-opus-5", Online: true}, // provider not configured
+		{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"},
+		{Name: "", Provider: "ollama", Model: "x"},
+		{Name: "big", Provider: "ollama", Model: "dup"},
+		{Name: "nomodel", Provider: "ollama"},
+	}
+	ok, warns := c.ValidCoworkers()
+	if len(ok) != 1 || ok[0].Name != "big" || ok[0].Model != "qwen3:32b" {
+		t.Fatalf("valid = %+v", ok)
+	}
+	want := []string{
+		`coworker "claude": provider "anthropic" is not configured`,
+		`coworker "": name is empty`,
+		`coworker "big": duplicate name`,
+		`coworker "nomodel": model is empty`,
+	}
+	if len(warns) != len(want) {
+		t.Fatalf("warnings = %q", warns)
+	}
+	for i := range want {
+		if warns[i] != want[i] {
+			t.Errorf("warning %d = %q, want %q", i, warns[i], want[i])
+		}
+	}
+}
+
+func TestCoworkLoadFillsMissingValues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	p, _ := Path()
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	os.WriteFile(p, []byte(`{"theme":"dark","cowork":{"max_consults_per_run":5}}`), 0o600)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 5 || c.Cowork.ConsultTurns != 12 {
+		t.Fatalf("loaded cowork = %+v", c.Cowork)
+	}
+	os.WriteFile(p, []byte(`{"cowork":{"auto":false}}`), 0o600)
+	c, _ = Load()
+	if c.Cowork.Auto {
+		t.Fatal("explicit auto:false was overridden")
+	}
 }

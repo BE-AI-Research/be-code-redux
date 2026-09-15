@@ -22,6 +22,22 @@ type ReviewerConfig struct {
 	Model    string `json:"model,omitempty"`
 }
 
+// CoworkerConfig names one model the primary can consult mid-task.
+type CoworkerConfig struct {
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Skills   string `json:"skills,omitempty"`
+	Online   bool   `json:"online,omitempty"`
+}
+
+// CoworkConfig tunes co-worker consultations.
+type CoworkConfig struct {
+	Auto              bool `json:"auto"`
+	MaxConsultsPerRun int  `json:"max_consults_per_run"`
+	ConsultTurns      int  `json:"consult_turns"`
+}
+
 // ProviderConfig describes one inference endpoint.
 type ProviderConfig struct {
 	// Type: "openai" (any OpenAI-compatible server) or "ollama"
@@ -113,6 +129,14 @@ type Config struct {
 	// verification passes (small model drafts, bigger model reviews).
 	Reviewer     ReviewerConfig `json:"reviewer"`
 	ReviewOnDone bool           `json:"review_on_done"`
+
+	// Coworkers are models the primary can consult mid-task (see README
+	// "Co-working models"); order matters: the first is the default.
+	Coworkers []CoworkerConfig `json:"coworkers"`
+	// Cowork tunes consultations: Auto enables the harness's own triggers,
+	// MaxConsultsPerRun caps consultations per request, ConsultTurns caps
+	// a co-worker's tool loop.
+	Cowork CoworkConfig `json:"cowork"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
 	// Programmable Search Engine. Off unless CX is set; the API key comes
@@ -216,6 +240,8 @@ func Default() *Config {
 		RepoMap:          true,
 		RepoMapBudget:    6144,
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
+		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12},
+		Coworkers:        nil,
 	}
 }
 
@@ -287,7 +313,51 @@ func Load() (*Config, error) {
 	if cfg.ClientThemes == nil {
 		cfg.ClientThemes = map[string]string{}
 	}
+	// An older file, or one written by hand without the cowork block, must
+	// not zero the tuning: 0 means "default" for the two counts, and auto
+	// stays on unless the file says otherwise.
+	if cfg.Cowork.MaxConsultsPerRun == 0 {
+		cfg.Cowork.MaxConsultsPerRun = 3
+	}
+	if cfg.Cowork.ConsultTurns == 0 {
+		cfg.Cowork.ConsultTurns = 12
+	}
+	var probe struct {
+		Cowork *struct {
+			Auto *bool `json:"auto"`
+		} `json:"cowork"`
+	}
+	if json.Unmarshal(data, &probe) == nil && (probe.Cowork == nil || probe.Cowork.Auto == nil) {
+		cfg.Cowork.Auto = true
+	}
 	return cfg, nil
+}
+
+// ValidCoworkers is the configured co-workers that can actually be used,
+// in order, plus one warning per entry dropped: an empty name or model, a
+// provider that is not in Providers, or a name already taken.
+func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
+	var ok []CoworkerConfig
+	var warns []string
+	seen := map[string]bool{}
+	for _, cw := range c.Coworkers {
+		switch {
+		case cw.Name == "":
+			warns = append(warns, fmt.Sprintf("coworker %q: name is empty", cw.Name))
+		case cw.Model == "":
+			warns = append(warns, fmt.Sprintf("coworker %q: model is empty", cw.Name))
+		case seen[cw.Name]:
+			warns = append(warns, fmt.Sprintf("coworker %q: duplicate name", cw.Name))
+		default:
+			if _, found := c.Providers[cw.Provider]; !found {
+				warns = append(warns, fmt.Sprintf("coworker %q: provider %q is not configured", cw.Name, cw.Provider))
+				continue
+			}
+			seen[cw.Name] = true
+			ok = append(ok, cw)
+		}
+	}
+	return ok, warns
 }
 
 // Save writes the config atomically.
