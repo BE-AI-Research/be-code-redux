@@ -274,6 +274,8 @@ func argInt(args map[string]any, def int, keys ...string) int {
 			switch t := v.(type) {
 			case float64:
 				return int(t)
+			case int:
+				return t
 			case string:
 				var n int
 				if _, err := fmt.Sscanf(t, "%d", &n); err == nil {

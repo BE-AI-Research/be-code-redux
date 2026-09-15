@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -361,5 +362,35 @@ func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 	b := st.Ledger().Baseline
 	if len(b.Head) < 40 || b.Dirty == "" {
 		t.Fatalf("baseline %+v", b)
+	}
+}
+
+// stubTool is a no-op tool with a name, for prompt tests that key on names.
+type stubTool string
+
+func (s stubTool) Name() string                                     { return string(s) }
+func (s stubTool) Description() string                              { return "stub" }
+func (s stubTool) Schema() json.RawMessage                          { return json.RawMessage(`{"type":"object","properties":{}}`) }
+func (s stubTool) Run(context.Context, map[string]any) tools.Result { return tools.Result{Content: "stub"} }
+
+func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	if strings.Contains(ag.History.System.Content, "record a plan with the task tool") {
+		t.Fatal("guidance without the tool")
+	}
+	st := withEngine(t, ag)
+	ag.Tools.AddTool(tools.NewTask(st))
+	ag.RefreshSystem()
+	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") || !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
+		t.Fatal("guidance missing")
+	}
+	if strings.Contains(ag.History.System.Content, "call lookup") {
+		t.Fatal("git guidance without the git tools")
+	}
+	ag.Tools.AddTool(stubTool("lookup")) // Task 6 adds the real one; the prompt keys on the name
+	ag.RefreshSystem()
+	sys := ag.History.System.Content
+	if !strings.Contains(sys, "call lookup") || strings.Contains(sys, "call history") || strings.Contains(sys, "call changes") {
+		t.Fatalf("minimal git guidance wrong:\n%s", sys)
 	}
 }
