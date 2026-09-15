@@ -13,6 +13,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 func withCoworkers(names ...string) func(*config.Config) {
@@ -305,5 +306,38 @@ func TestConsultSeedLabelsFailedReadsAndLeavesGitToTheSystemPrompt(t *testing.T)
 	}
 	if !strings.Contains(sys, "git branch:") {
 		t.Fatal("the scratch agent's system prompt lost the git summary")
+	}
+}
+
+func TestPlanAgentOffersConsult(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, withCoworkers("big"))
+	ag.Tools.AddTool(tools.NewConsult(nil, func(context.Context, tools.ConsultArgs) (string, error) { return "", nil }))
+	names := ag.planAgent().Tools.Names()
+	found := false
+	for _, n := range names {
+		if n == "consult" {
+			found = true
+		}
+		if n == "write_file" || n == "shell" {
+			t.Fatalf("plan agent offers %s", n)
+		}
+	}
+	if !found {
+		t.Fatalf("plan agent lacks consult: %v", names)
+	}
+}
+
+func TestRecentContextCarriesRequestReplyAndFailingTool(t *testing.T) {
+	p := &scriptedProvider{responses: []provider.ChatResponse{
+		{ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{"path":"missing.go"}`}}},
+		{Content: "I could not read it."},
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	ag.Run(context.Background(), "please fix missing.go")
+	rc := ag.RecentContext()
+	for _, want := range []string{"User request", "please fix missing.go", "Your last reply", "I could not read it.", "Failing tool output", "missing.go"} {
+		if !strings.Contains(rc, want) {
+			t.Fatalf("recent context lacks %q:\n%s", want, rc)
+		}
 	}
 }

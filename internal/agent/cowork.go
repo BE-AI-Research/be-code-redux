@@ -245,6 +245,24 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	return res, nil
 }
 
+// RecentContext condenses what the primary was doing for a co-worker: the
+// current request, the primary's newest reply, and the newest failing tool
+// output (recorded by dispatch as it happens, so it is exact rather than
+// guessed at from history). Capped at consultRecentCap.
+func (a *Agent) RecentContext() string {
+	var b strings.Builder
+	if a.lastUserInput != "" {
+		b.WriteString("User request:\n" + a.lastUserInput + "\n\n")
+	}
+	if reply := a.lastAssistantText(); reply != "" {
+		b.WriteString("Your last reply:\n" + reply + "\n\n")
+	}
+	if a.lastFailingTool != "" {
+		b.WriteString("Failing tool output:\n" + a.lastFailingTool + "\n")
+	}
+	return cutTail(b.String(), consultRecentCap)
+}
+
 // consultAgent is the read-only scratch agent for one consultation: the
 // planAgent shape on the co-worker's provider and model, its own history,
 // a pinned frame, and a turn cap from config. It shares nothing mutable

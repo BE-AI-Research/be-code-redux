@@ -87,6 +87,12 @@ type Agent struct {
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
 
+	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
+	// cowork.go): the current request and the newest failing tool result,
+	// both reset at the start of each new turn.
+	lastUserInput   string
+	lastFailingTool string
+
 	inbox Inbox // mid-task user messages (see inbox.go)
 
 	// Backend resilience (see resilience.go).
@@ -308,6 +314,8 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	if newTurn {
 		a.Checkpoints.BeginTurn(store.TitleFrom(userInput))
 		a.reqTouched = false
+		a.lastUserInput = userInput
+		a.lastFailingTool = ""
 	}
 	if a.repoDirty {
 		a.repoDirty = false
@@ -574,6 +582,9 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		a.Events.OnToolStart(call.Name, call.Arguments)
 	}
 	res := a.Tools.Dispatch(ctx, call)
+	if res.IsError {
+		a.lastFailingTool = call.Name + ": " + res.Content
+	}
 	if a.Events.OnToolEnd != nil {
 		a.Events.OnToolEnd(call.Name, res)
 	}

@@ -28,7 +28,7 @@ func (a *Agent) Plan(ctx context.Context, input string) (string, error) {
 // prompt is pinned via systemOverride so the per-turn git refresh in run()
 // cannot swap it for the normal coding prompt.
 func (a *Agent) planAgent() *Agent {
-	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch")
+	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch", "consult")
 	scratch := &Agent{
 		Cfg: a.Cfg, Provider: a.Provider, Model: a.Model, Tools: readOnly,
 		Profile: a.Profile, compat: a.compat, projectNotes: a.projectNotes,
