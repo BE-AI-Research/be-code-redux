@@ -153,9 +153,10 @@ Harness assistance:
   lines (up to 20) seed the steps.
 - `finishSession` reports any step still `doing` in the handoff briefing under
   `Stopped at:`.
-- The system prompt guidance gains: "Before a change that takes several
-  steps, record a plan with the task tool and mark steps as you go. When a
-  file matters for later, note what matters in it."
+- The system prompt gains a guidance paragraph on context use and progress
+  notes, present whenever the `task` tool is registered:
+
+  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit, lookup with symbol=true, show for one range) and use changes to see what you altered instead of re-reading whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
 
 User commands, in `ui.SlashCommandTable`, both UIs, busy-safe, view-local in
 the TUI:

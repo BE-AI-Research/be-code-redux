@@ -2258,10 +2258,10 @@ func argStrings(args map[string]any, keys ...string) []string {
 
 - [ ] **Step 4: Guidance and plan subset**
 
-In `internal/agent/prompt.go`, `BuildSystemPrompt(specs, compat, notes)`: where the tool guidance paragraph is assembled, if any spec's name is `task`, append the sentences:
+In `internal/agent/prompt.go`, `BuildSystemPrompt(specs, compat, notes)`: where the tool guidance paragraph is assembled, if any spec's name is `task`, append this paragraph verbatim as `const taskGuidance`:
 
 ```
-Before a change that takes several steps, record a plan with the task tool and mark steps as you go. When a file matters for later, note what matters in it (task note with file) instead of planning to read it again. Working memory below lists what you have already read; do not read those files again unless they are marked changed.
+Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit, lookup with symbol=true, show for one range) and use changes to see what you altered instead of re-reading whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
 ```
 
 In `internal/agent/extras.go`, `planAgent`'s `Subset` gains `"task", "lookup", "history", "show", "changes"`.
@@ -2277,7 +2277,7 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	st := withEngine(t, ag)
 	ag.Tools.AddTool(tools.NewTask(st))
 	ag.RefreshSystem()
-	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") {
+	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") || !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
 		t.Fatal("guidance missing")
 	}
 }
