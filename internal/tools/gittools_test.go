@@ -205,20 +205,35 @@ func TestPathspecMagicIsRejected(t *testing.T) {
 	cases := []struct {
 		tool string
 		args map[string]any
+		want string
 	}{
-		{"lookup", map[string]any{"query": "TOPMARKER", "path": ":/a.go"}},
-		{"history", map[string]any{"path": ":/a.go", "query": "TopOnly"}},
-		{"changes", map[string]any{"path": ":/a.go"}},
-		{"show", map[string]any{"path": ":(top)a.go"}},
+		{"lookup", map[string]any{"query": "TOPMARKER", "path": ":/a.go"}, "bad path"},
+		{"history", map[string]any{"path": ":/a.go", "query": "TopOnly"}, "bad path"},
+		{"changes", map[string]any{"path": ":/a.go"}, "bad path"},
+		{"show", map[string]any{"path": ":(top)a.go"}, "bad path"},
+		// A revision is pathspec magic just as readily as a path is:
+		// "show" builds "<rev>:./<path>" and "changes" passes since
+		// straight to git diff.
+		{"show", map[string]any{"path": "a.go", "rev": ":(exclude)zzz"}, "bad revision"},
+		{"changes", map[string]any{"since": ":(exclude)zzz"}, "bad revision"},
 	}
 	for _, c := range cases {
 		r := byName(ts, c.tool).Run(ctx, c.args)
-		if !r.IsError || r.Content != "bad path" {
+		if !r.IsError || r.Content != c.want {
 			t.Fatalf("%s took pathspec magic: %+v", c.tool, r)
 		}
 		if strings.Contains(r.Content, "TOPMARKER") || strings.Contains(r.Content, "toplevel") {
 			t.Fatalf("%s leaked a file outside the root: %+v", c.tool, r)
 		}
+	}
+	// The ordinary case still works: the nested workspace's own a.go, not
+	// the repository top's.
+	r := byName(ts, "show").Run(ctx, map[string]any{"path": "a.go", "rev": "HEAD"})
+	if r.IsError || !strings.Contains(r.Content, "SUBMARKER") {
+		t.Fatalf("show HEAD: %+v", r)
+	}
+	if strings.Contains(r.Content, "TOPMARKER") {
+		t.Fatalf("show read the top-level a.go: %+v", r)
 	}
 }
 

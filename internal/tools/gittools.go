@@ -72,6 +72,15 @@ func (r *Registry) relInRoot(p string) (string, error) {
 	return rel, nil
 }
 
+// badRev rejects a revision the model supplied that git would not read as
+// a revision at all. A leading "-" would be taken for an option, and a
+// leading ":" for pathspec magic (":(exclude)…", ":/…"), which escapes the
+// workspace exactly as it does in relInRoot.
+func badRev(rev string) bool {
+	rev = strings.TrimSpace(rev)
+	return strings.HasPrefix(rev, "-") || strings.HasPrefix(rev, ":")
+}
+
 // gitErr reports a failed git call. When git printed something before it
 // failed, the partial output is returned with the cause appended, so a
 // timeout or a killed process is never mistaken for git's own answer.
@@ -243,13 +252,15 @@ func (t *showTool) Run(ctx context.Context, args map[string]any) Result {
 	if rev == "" {
 		rev = "HEAD"
 	}
-	if strings.HasPrefix(rev, "-") {
+	if badRev(rev) {
 		return Result{IsError: true, Content: "bad revision"}
 	}
 	// "rev:path" is resolved against the repository top, not the working
 	// directory, so a workspace nested inside a larger repo would read the
-	// top-level file of the same name. "./" makes it cwd-relative.
-	out, err := t.r.git(ctx, "show", rev+":./"+rel)
+	// top-level file of the same name. "./" makes it cwd-relative. The
+	// terminating "--" stops git reading the argument as a pathspec when
+	// it is not a valid object name.
+	out, err := t.r.git(ctx, "show", rev+":./"+rel, "--")
 	if err != nil {
 		return gitErr(err, out)
 	}
@@ -306,7 +317,7 @@ func (t *changesTool) Run(ctx context.Context, args map[string]any) Result {
 	if since == "" {
 		since = "HEAD"
 	}
-	if strings.HasPrefix(since, "-") {
+	if badRev(since) {
 		return Result{IsError: true, Content: "bad revision"}
 	}
 	var out string
