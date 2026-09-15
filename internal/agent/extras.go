@@ -18,9 +18,7 @@ import (
 func (a *Agent) Plan(ctx context.Context, input string) (string, error) {
 	scratch := a.planAgent()
 	plan, err := scratch.Run(ctx, input)
-	a.Stats.PromptTokens += scratch.Stats.PromptTokens
-	a.Stats.CompletionTokens += scratch.Stats.CompletionTokens
-	a.Stats.Requests += scratch.Stats.Requests
+	a.addStats(scratch.usageTokens())
 	return plan, err
 }
 

@@ -76,11 +76,11 @@ var runCmd = &cobra.Command{
 				"reviewed":          rep != nil && rep.Reviewed,
 				"review_issues":     reviewIssues(rep),
 				"changed_files":     changedFiles(ag),
-				"model_requests":    ag.Stats.Requests,
-				"tool_calls":        ag.Stats.ToolCalls,
-				"prompt_tokens":     ag.Stats.PromptTokens,
-				"completion_tokens": ag.Stats.CompletionTokens,
-				"elapsed_seconds":   ag.Stats.Elapsed.Seconds(),
+				"model_requests":    ag.Usage().Requests,
+				"tool_calls":        ag.Usage().ToolCalls,
+				"prompt_tokens":     ag.Usage().PromptTokens,
+				"completion_tokens": ag.Usage().CompletionTokens,
+				"elapsed_seconds":   ag.Usage().Elapsed.Seconds(),
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")

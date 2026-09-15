@@ -237,9 +237,7 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	scratch := a.consultAgent(cp, cw, &res)
 	seed := a.buildConsultSeed(ctx, scratch.Tools, req)
 	answer, rerr := scratch.Run(ctx, seed)
-	a.Stats.PromptTokens += scratch.Stats.PromptTokens
-	a.Stats.CompletionTokens += scratch.Stats.CompletionTokens
-	a.Stats.Requests += scratch.Stats.Requests
+	a.addStats(scratch.usageTokens())
 	if rerr != nil {
 		// Whatever it had said before failing is worth returning either
 		// way, so a UI can show it.

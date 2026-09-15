@@ -642,7 +642,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Printf("compacted; context now ~%d tokens\n", r.Agent.History.Tokens())
 	case "/stats":
-		s := r.Agent.Stats
+		s := r.Agent.Usage()
 		fmt.Printf("requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d\n",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
 			s.Elapsed.Round(100*time.Millisecond), r.Agent.History.Tokens(), r.Agent.History.Budget)

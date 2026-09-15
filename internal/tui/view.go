@@ -743,6 +743,9 @@ func (m *View) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cancelFn != nil {
 			m.cancelFn()
 		}
+		if m.consultCancel != nil {
+			m.consultCancel()
+		}
 		if n := len(m.ag.DrainInbox()); n > 0 {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("discarded %d queued message(s)", n)})
 		}
@@ -1337,7 +1340,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.finishTurn(nil, nil)
 		}()
 	case "/stats":
-		s := m.ag.Stats
+		s := m.ag.Usage()
 		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
@@ -1451,16 +1454,26 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// orphaning the run in flight (Esc would reach the consultation and
 		// nothing else), and finishTurn would return the session to idle
 		// while the model was still working. So it borrows the session's root
-		// context and leaves the run state alone; Esc still means the run.
+		// context and leaves the run state alone; Esc means the run and, through
+		// consultCancel, the consultation too.
 		sess, label := m.Session, m.clientLabel(m.id)
 		owns := !m.running
-		ctx := m.rootCtx
-		if ctx == nil {
-			ctx = context.Background()
-		}
+		var ctx context.Context
 		if owns {
 			m.setRunStateLocked(true, "consulting")
 			ctx = m.runContextLocked()
+		} else {
+			parent := m.rootCtx
+			if parent == nil {
+				parent = context.Background()
+			}
+			if m.consultCancel != nil {
+				// Consult would refuse a second one anyway; say so here
+				// rather than let its cancel get lost.
+				m.appendEntryLocked(entry{Kind: entryError, Label: "error ", Text: "a consultation is already running"})
+				return m, nil
+			}
+			ctx, m.consultCancel = context.WithCancel(parent)
 		}
 		go func() {
 			// No Recent: RecentContext reads fields only the agent's own
@@ -1474,11 +1487,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 				sess.appendEntry(entry{Kind: entryError, Label: "error ", Text: err.Error()})
 			}
 			if owns {
-				// Only where the agent is quiescent: a consultation nested
-				// inside a run shares its agent with a loop still using it.
 				sess.send(sess.usageSnapshot())
 				sess.finishTurn(nil, nil)
+				return
 			}
+			sess.mu.Lock()
+			if sess.consultCancel != nil {
+				sess.consultCancel()
+				sess.consultCancel = nil
+			}
+			sess.mu.Unlock()
 		}()
 		return m, nil
 	case "/clients":

@@ -50,6 +50,15 @@ type Stats struct {
 	Elapsed          time.Duration
 }
 
+// add folds another usage record into s.
+func (s *Stats) add(d Stats) {
+	s.PromptTokens += d.PromptTokens
+	s.CompletionTokens += d.CompletionTokens
+	s.Requests += d.Requests
+	s.ToolCalls += d.ToolCalls
+	s.Elapsed += d.Elapsed
+}
+
 // Agent binds a provider, tool registry, and conversation history.
 type Agent struct {
 	Cfg      *config.Config
@@ -64,8 +73,13 @@ type Agent struct {
 	Checkpoints *checkpoint.Checkpointer
 	// Profile is the active model-family tuning.
 	Profile profiles.Profile
-	// Stats is cumulative session usage.
-	Stats Stats
+	// Stats is cumulative session usage. The agent goroutine writes it
+	// through addStats; a consultation issued from a UI while a run is in
+	// progress writes it from that UI's goroutine, and every reader that
+	// is not the agent goroutine itself takes Usage() — statsMu keeps the
+	// two apart.
+	Stats   Stats
+	statsMu sync.Mutex
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -330,7 +344,7 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 // undo unit and one changed-files set for the reviewer.
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
 	start := time.Now()
-	defer func() { a.Stats.Elapsed += time.Since(start) }()
+	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 
 	// A streak belongs to one stretch of tool calls; a repair round is a
 	// fresh start, and advice from a previous round has either been
@@ -605,7 +619,7 @@ func (a *Agent) runEmbeddedCalls(ctx context.Context, rawContent, _ string, call
 }
 
 func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Result {
-	a.Stats.ToolCalls++
+	a.addStats(Stats{ToolCalls: 1})
 	switch call.Name {
 	case "write_file", "edit_file":
 		a.reqTouched, a.repoDirty = true, true
@@ -677,19 +691,20 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
-	a.Stats.Requests++
+	used := Stats{Requests: 1}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
-		a.Stats.PromptTokens += resp.Usage.PromptTokens
-		a.Stats.CompletionTokens += resp.Usage.CompletionTokens
+		used.PromptTokens = resp.Usage.PromptTokens
+		used.CompletionTokens = resp.Usage.CompletionTokens
 		// The server's count is ground truth for the prompt we just sent.
 		a.History.Calibrate(resp.Usage.PromptTokens - a.History.Extra)
 	} else {
 		// Backend didn't report usage; estimate.
 		for _, m := range req.Messages {
-			a.Stats.PromptTokens += a.History.MessageTokens(m)
+			used.PromptTokens += a.History.MessageTokens(m)
 		}
-		a.Stats.CompletionTokens += a.History.est(resp.Content)
+		used.CompletionTokens = a.History.est(resp.Content)
 	}
+	a.addStats(used)
 	return resp, nil
 }
 
@@ -904,4 +919,26 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 		}
 	}
 	return answer, rep, nil
+}
+
+// addStats records usage under statsMu.
+func (a *Agent) addStats(d Stats) {
+	a.statsMu.Lock()
+	a.Stats.add(d)
+	a.statsMu.Unlock()
+}
+
+// Usage is a snapshot of Stats safe to read while the agent is working.
+func (a *Agent) Usage() Stats {
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	return a.Stats
+}
+
+// usageTokens is what a scratch agent (plan, consultation) hands back to
+// its parent: its tokens and round-trips, not its tool calls or elapsed
+// time, which the parent's own turn already accounts for.
+func (a *Agent) usageTokens() Stats {
+	u := a.Usage()
+	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests}
 }

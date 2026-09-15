@@ -45,6 +45,10 @@ type Session struct {
 	prov     provider.Provider
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
+	// consultCancel stops a /consult asked while a run was in progress: it
+	// runs on the root context rather than the turn's, so Esc and /quit
+	// reach it here instead of through cancelFn.
+	consultCancel context.CancelFunc
 
 	entries   []entry         // the transcript, as raw entries; see entry.go
 	streaming strings.Builder // current assistant text
@@ -368,10 +372,11 @@ func (s *Session) Entries() []entry {
 // before the program starts, inside agent event callbacks, or after a run
 // returns on its goroutine.
 func (s *Session) usageSnapshot() usageMsg {
+	usage := s.ag.Usage()
 	return usageMsg{
 		ctxTokens: s.ag.History.Tokens(),
 		budget:    s.ag.History.Limit(),
-		total:     s.ag.Stats.PromptTokens + s.ag.Stats.CompletionTokens,
+		total:     usage.PromptTokens + usage.CompletionTokens,
 	}
 }
 
@@ -660,6 +665,9 @@ func (s *Session) QuitLocked() {
 	if !s.quitting {
 		if s.cancelFn != nil {
 			s.cancelFn() // leaving mid-turn: stop the run, then write the briefing
+		}
+		if s.consultCancel != nil {
+			s.consultCancel()
 		}
 		s.quitting = true
 		if s.quitCh == nil {
