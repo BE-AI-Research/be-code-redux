@@ -156,7 +156,7 @@ Harness assistance:
 - The system prompt gains a guidance paragraph on context use and progress
   notes, present whenever the `task` tool is registered:
 
-  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
+  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again. If a git tool answers `not a git repository`, do not retry it: work from read_file ranges and keep your task notes and durable notes (task note with keep) up to date instead, because they are then your only memory across compaction.
 
   and, for each git tool actually registered (all four with `engine.tools:
   full`, only `lookup` with `minimal`), one sentence on when to use it:
