@@ -29,7 +29,7 @@ const (
 )
 
 var numberedLine = regexp.MustCompile(`(?m)^\s*(\d+)\t`)
-var hitLine = regexp.MustCompile(`^([^\s:][^:]*):(\d+)[:-](.*)$`)
+var hitLine = regexp.MustCompile(`^([^\s:][^:]*):(\d+):(.*)$`)
 
 func argStr(args map[string]any, keys ...string) string {
 	for _, k := range keys {
@@ -154,6 +154,7 @@ func (s *Store) observeRead(ev Event) string {
 		nd := &Digest{Path: rel}
 		if exists {
 			nd.Note = d.Note
+			nd.Edited = d.Edited
 		}
 		nd.Hash, nd.Size, nd.ModTime = hash, size, mtime
 		nd.Outline = repomap.Outline(rel, data)
@@ -216,8 +217,10 @@ func LookupKey(tool string, args map[string]any) string {
 	return b.String()
 }
 
-// parseHits reads file:line:text (or file-line-text, git grep's context
-// form) lines out of a search or lookup result.
+// parseHits reads file:line:text lines out of a search or lookup result;
+// context lines (file-line-text, git grep's context form) are deliberately
+// not parsed, since a bare "-" separator is indistinguishable from one
+// inside a filename.
 func parseHits(content string) []Hit {
 	var hits []Hit
 	for _, line := range strings.Split(content, "\n") {
@@ -262,7 +265,15 @@ func (s *Store) observeLookup(ev Event) {
 	if len(s.lookups) > maxLookups {
 		s.lookups = s.lookups[len(s.lookups)-maxLookups:]
 	}
-	s.cache(key, ev.Content)
+	if len(hits) > 0 {
+		// A zero-hit result has no file to invalidate it against, so
+		// caching it would serve "no matches" forever, even after the
+		// model creates a file that would now match. Never cache it, and
+		// drop any earlier (non-empty) cache entry for the same key.
+		s.cache(key, ev.Content)
+	} else {
+		delete(s.cached, key)
+	}
 	s.dirty = true
 }
 
@@ -279,15 +290,17 @@ func (s *Store) cache(key, content string) {
 func (s *Store) Cached(tool string, args map[string]any) (string, bool) {
 	key := LookupKey(tool, args)
 	s.mu.Lock()
-	var lk *Lookup
+	var lk Lookup
+	found := false
 	for i := range s.lookups {
 		if s.lookups[i].Query == key {
-			lk = &s.lookups[i]
+			lk = s.lookups[i] // value copy: observeLookup may replace this slot
+			found = true
 		}
 	}
 	content, have := s.cached[key]
 	s.mu.Unlock()
-	if lk == nil || !have {
+	if !found || !have {
 		return "", false
 	}
 	for file, hash := range lk.Hashes {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Render builds the Working memory block body: notes, task, files read,
@@ -149,18 +150,42 @@ func lookupRow(l Lookup) string {
 	return fmt.Sprintf("%s %s: %s", l.Tool, q, strings.Join(refs, ", "))
 }
 
-// summariseKey turns the canonical key back into a readable "query" for
-// the block: the first quoted string value it finds.
+// summaryKeyPriority is the order of preference for the "query" a lookup
+// row shows: LookupKey sorts arguments alphabetically, so an unqualified
+// pick (the first quoted value) would show "glob" ahead of "pattern" for a
+// search called with both.
+var summaryKeyPriority = []string{"query", "pattern", "regex", "symbol", "text", "term"}
+
+// summariseKey turns the canonical key back into a readable "query" for the
+// block: a named argument from summaryKeyPriority when one is present,
+// else the first quoted string value.
 func summariseKey(k string) string {
+	values := map[string]string{}
+	first := ""
 	for _, part := range strings.Split(k, ";") {
-		if i := strings.Index(part, "=\""); i >= 0 && strings.HasSuffix(part, "\"") {
-			return part[i+1:]
+		i := strings.Index(part, "=\"")
+		if i < 0 || !strings.HasSuffix(part, "\"") {
+			continue
 		}
+		name, val := part[:i], part[i+1:] // val keeps its surrounding quotes
+		values[name] = val
+		if first == "" {
+			first = val
+		}
+	}
+	for _, name := range summaryKeyPriority {
+		if v, ok := values[name]; ok {
+			return v
+		}
+	}
+	if first != "" {
+		return first
 	}
 	return `""`
 }
 
-// trimLines cuts s to at most budget bytes at a line boundary.
+// trimLines cuts s to at most budget bytes at a line boundary, or (when no
+// newline lies inside the budget) at the last full UTF-8 rune.
 func trimLines(s string, budget int) string {
 	if budget <= 0 || len(s) <= budget {
 		return s
@@ -168,6 +193,13 @@ func trimLines(s string, budget int) string {
 	cut := s[:budget]
 	if nl := strings.LastIndexByte(cut, '\n'); nl > 0 {
 		cut = cut[:nl]
+	} else {
+		for len(cut) > 0 {
+			if r, size := utf8.DecodeLastRuneInString(cut); r != utf8.RuneError || size != 1 {
+				break
+			}
+			cut = cut[:len(cut)-1]
+		}
 	}
 	return strings.TrimRight(cut, "\n")
 }

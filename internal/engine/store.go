@@ -235,11 +235,20 @@ func (s *Store) Turn() int {
 	return s.turn
 }
 
-// digestsLocked returns the digests most recently touched first.
+// digestsLocked returns the digests most recently touched first. Ranges and
+// Outline are copied so a caller's snapshot never shares storage with the
+// live digest (mergeRange appends to the live digest's Ranges in place).
 func (s *Store) digestsLocked() []Digest {
 	out := make([]Digest, 0, len(s.digests))
 	for _, d := range s.digests {
-		out = append(out, *d)
+		cp := *d
+		if len(d.Ranges) > 0 {
+			cp.Ranges = append([]Range(nil), d.Ranges...)
+		}
+		if len(d.Outline) > 0 {
+			cp.Outline = append([]string(nil), d.Outline...)
+		}
+		out = append(out, cp)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Turn != out[j].Turn {
@@ -362,13 +371,19 @@ func (s *Store) AddNote(text, file string, decision, keep bool) error {
 		s.ledger.Facts = append(s.ledger.Facts, text)
 	}
 	if file = strings.TrimSpace(file); file != "" {
-		d, ok := s.digests[filepath.ToSlash(filepath.Clean(file))]
+		path := filepath.ToSlash(filepath.Clean(file))
+		d, ok := s.digests[path]
 		if !ok {
-			d = &Digest{Path: filepath.ToSlash(filepath.Clean(file))}
-			s.digests[d.Path] = d
+			d = &Digest{Path: path}
 		}
 		d.Note = text
 		d.Turn = s.turn
+		if ok {
+			s.touchLocked(d)
+		} else {
+			// New digest: route through putDigest so the count cap applies.
+			s.putDigest(d)
+		}
 	}
 	if keep {
 		s.addNoteLineLocked(text)

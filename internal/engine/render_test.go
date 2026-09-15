@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestRenderIsEmptyForAFreshStore(t *testing.T) {
@@ -24,7 +25,9 @@ func TestRenderPriorityMarkersAndBudget(t *testing.T) {
 	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "cmd/root.go"}, Content: numbered("package cmd\nfunc Execute() {}\n", 1)})
 	s.AddNote("flags are parsed here", "cmd/root.go", false, false)
 	writeFile(t, root, "cmd/root.go", "package cmd\nfunc Execute() {}\n// changed\n")
-	s.Observe(Event{Tool: "search", Args: map[string]any{"pattern": "Execute"}, Content: "cmd/root.go:2:func Execute() {}"})
+	// glob sorts before pattern in the canonical key; the row must still
+	// name the pattern, not the glob.
+	s.Observe(Event{Tool: "search", Args: map[string]any{"pattern": "Execute", "glob": "*.go"}, Content: "cmd/root.go:2:func Execute() {}"})
 	out := s.Render(6144, func(p string) bool { return p == "cmd/root.go" })
 	want := []string{
 		"tests need go on PATH",
@@ -77,6 +80,19 @@ func TestLedgerTextStoppedAtAndFileNotes(t *testing.T) {
 	s.ApplyFileNotes("- a.go — entry point\n- unknown.go — ignored\n")
 	if s.Digests()[0].Note != "entry point" || len(s.Digests()) != 1 {
 		t.Fatalf("file notes %+v", s.Digests())
+	}
+}
+
+func TestTrimLinesIsUTF8Safe(t *testing.T) {
+	// No newline anywhere, so trimLines must fall back to a rune-boundary
+	// cut. Each "é" is 2 bytes; a byte-5 cut of 10 of them lands mid-rune.
+	s := strings.Repeat("é", 10)
+	out := trimLines(s, 5)
+	if !utf8.ValidString(out) {
+		t.Fatalf("trimmed string is not valid UTF-8: %q", out)
+	}
+	if len(out) > 5 {
+		t.Fatalf("trimmed string exceeds budget: %q (%d bytes)", out, len(out))
 	}
 }
 

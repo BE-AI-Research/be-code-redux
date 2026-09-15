@@ -96,4 +96,58 @@ func TestLookupCacheServesUnchangedRepeats(t *testing.T) {
 	if len(s.Lookups()) != 1 || s.Lookups()[0].Hits[0].Line != 2 {
 		t.Fatalf("lookups %+v", s.Lookups())
 	}
+	// A zero-hit search is never cached: a repeat is not served from it,
+	// even though nothing invalidates an empty Hashes map.
+	zargs := map[string]any{"pattern": "NoSuchSymbol"}
+	s.Observe(Event{Tool: "search", Args: zargs, Content: "no matches"})
+	if _, ok := s.Cached("search", zargs); ok {
+		t.Fatal("zero-hit search served from cache")
+	}
+}
+
+func TestObserveReadRebuildKeepsEditedFlag(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	writeFile(t, root, "y.go", "package y\n")
+	s.Observe(Event{Tool: "write_file", Args: map[string]any{"path": "y.go", "content": "package y\n"}, Content: "wrote y.go"})
+	if !s.Digests()[0].Edited {
+		t.Fatal("write did not mark edited")
+	}
+	// The file changes again (e.g. a verify/format pass) and is re-read;
+	// the digest is rebuilt but must still remember it was edited.
+	writeFile(t, root, "y.go", "package y\n\nfunc New() {}\n")
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "y.go"}, Content: numbered("package y\n\nfunc New() {}\n", 1)})
+	if !s.Digests()[0].Edited {
+		t.Fatal("rebuilt digest lost the edited flag")
+	}
+}
+
+func TestAddNoteWithFileTouchesAndCapsDigests(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	writeFile(t, root, "old.go", "package old\n")
+	s.NextTurn()
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "old.go"}, Content: numbered("package old\n", 1)})
+	// A note-created digest at the same turn must sort ahead of the read,
+	// since it was touched later.
+	if err := s.AddNote("new fact", "new.go", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Digests()[0].Path; got != "new.go" {
+		t.Fatalf("touch order: got %q first, want new.go", got)
+	}
+	// Note-created digests are routed through putDigest, so the cap applies.
+	for i := 0; i < maxDigests+5; i++ {
+		if err := s.AddNote("f", fmt.Sprintf("n%d.go", i), false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(s.Digests()) != maxDigests {
+		t.Fatalf("digests = %d, want capped at %d", len(s.Digests()), maxDigests)
+	}
+}
+
+func TestParseHitsIgnoresContextLines(t *testing.T) {
+	hits := parseHits("a.go:2:func Hit() {}\na.go-3-// context, not a hit\n")
+	if len(hits) != 1 || hits[0].Line != 2 {
+		t.Fatalf("hits %+v", hits)
+	}
 }

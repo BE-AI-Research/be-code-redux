@@ -156,6 +156,28 @@ func TestTurnRestoredFromLookupsToo(t *testing.T) {
 	}
 }
 
+func TestDigestsSnapshotDoesNotShareStorage(t *testing.T) {
+	s, _ := openTest(t, "s1", false)
+	s.putDigest(&Digest{Path: "a.go", Ranges: []Range{{1, 5}}, Outline: []string{"A"}, Turn: 1})
+
+	snap1 := s.Digests()
+	// Mutating a snapshot must not reach the live digest.
+	snap1[0].Ranges[0].To = 999
+	snap1[0].Outline[0] = "mutated"
+	live := s.digests["a.go"]
+	if live.Ranges[0].To != 5 || live.Outline[0] != "A" {
+		t.Fatalf("live digest changed via snapshot: %+v", live)
+	}
+
+	// Extending the live digest's Ranges in place (mergeRange's style)
+	// must not reach an already-taken snapshot.
+	snap2 := s.Digests()
+	live.Ranges = mergeRange(live.Ranges, Range{6, 10})
+	if len(snap2[0].Ranges) != 1 || snap2[0].Ranges[0] != (Range{1, 5}) {
+		t.Fatalf("snapshot changed via live digest: %+v", snap2[0].Ranges)
+	}
+}
+
 func TestAddNoteLineDedupsWholeLinesOnly(t *testing.T) {
 	s, _ := openTest(t, "s1", false)
 	s.AddNoteLine("increase timeout for tests")
