@@ -31,10 +31,18 @@ state = {"n": 0, "consult_n": 0}
 # Third scenario: the engine (working memory) test. The task asks for
 # main.go to be read three times; the mock scripts three read_file calls,
 # then reports what the fourth request's system/user content looked like so
-# the shell test can confirm the Working memory block survived compaction
-# and the redundant read carried its "already read" footer. It also notes
-# (informationally only) whether a model-written compaction summary was
-# requested, since the harness may compact by cheap collapse alone.
+# the shell test can confirm the Working memory block survived the trimming
+# of the transcript and the redundant read carried its "already read"
+# footer. TRIM reports whether the transcript really was trimmed: without
+# it the WM/FOOTER assertions would pass at any context budget, since
+# nothing would have been dropped for working memory to make up for. It
+# also notes (informationally only) whether a model-written compaction
+# summary was requested, since the harness may compact by cheap collapse
+# alone.
+
+# The stub History.trim/CollapseToolResults leave behind (collapsedStub in
+# internal/agent/history.go: "[old tool result removed to save context]").
+TRIM_STUB = "old tool result removed"
 ENG = {"n": 0, "summarized": False}
 
 def engine_chunks(body):
@@ -48,8 +56,10 @@ def engine_chunks(body):
     last = body["messages"][-1].get("content") or ""
     footer = "FOOTER:yes" if "already read at turn" in last else "FOOTER:no"
     wm = "WM:yes" if "Working memory:" in sys_prompt and "main.go (lines" in sys_prompt else "WM:no"
+    trimmed = any(TRIM_STUB in (m.get("content") or "") for m in body["messages"])
+    trim = "TRIM:yes" if trimmed else "TRIM:no"
     summ = "SUM:yes" if ENG["summarized"] else "SUM:no"
-    return [text_chunk(f"{wm} {footer} {summ}")]
+    return [text_chunk(f"{wm} {footer} {trim} {summ}")]
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass

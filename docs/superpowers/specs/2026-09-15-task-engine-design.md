@@ -40,7 +40,7 @@ Four files:
 | File | Scope | Content |
 |---|---|---|
 | `digests.json` | session | one record per file read: path, content hash (SHA-256 of bytes), size, mtime, symbol outline, line ranges seen, note, `turn` last touched, `edited` flag |
-| `ledger.json` | session | task line, steps `[{text, status}]` with status `todo`/`doing`/`done`/`skip`, decisions `[]string`, facts `[]string`, `baseline` (HEAD hash plus a hash of `git status --porcelain` output, recorded when a `RunFull` starts) |
+| `ledger.json` | session | task line, steps `[{text, status}]` with status `todo`/`doing`/`done`/`skip`, decisions `[]string`, facts `[]string`, `baseline` (HEAD hash plus the `git status --porcelain` text, capped at 8 KiB, recorded when a `RunFull` starts) |
 | `lookups.json` | session | last 20 lookups: query, tool, `[{file, line, text}]` hits, hashes of the files hit |
 | `notes.md` | durable | short facts the model chose to keep across sessions |
 
@@ -258,9 +258,10 @@ The engine is advisory everywhere:
   each mode, the 20 s timeout, no-repo fallbacks, root confinement.
 - UIs: `/task`, `/task clear`, `/notes`, `/notes clear` in plain mode and the
   TUI; busy-safe table entries.
-- E2E: the scripted primary reads a file, the mock forces compaction, the
-  next request's system message carries the digest row, and the second read
-  of the same file gets the `already read` footer.
+- E2E: the scripted primary reads a file three times under a small budget,
+  the older reads are trimmed from the transcript, the next request's system
+  message still carries the digest row, and the third read carried the
+  `already read` footer.
 
 ## 9. Documentation
 

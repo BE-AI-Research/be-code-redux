@@ -375,7 +375,9 @@ compaction summary no longer has to restate what it already knows.
 
 `engine.tools: minimal` registers only `task` and `lookup` (dropping `history`, `show`
 and `changes`) for backends where a smaller embedded tool catalog matters more than
-the extra lookups.
+the extra lookups. A headless `be-code run` and a live host on the same workspace share
+the store directory without a lock: the host's in-memory state is authoritative and is
+rewritten at its next flush, and `notes.md` is never cleared by that.
 
 ## Model profiles
 
