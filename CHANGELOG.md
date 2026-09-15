@@ -1,5 +1,22 @@
 # BE-Code Changelog
 
+## v0.9.0 — co-working models
+
+- **Co-working models.** `coworkers` in config names other models (local or
+  online) the primary can consult mid-task. The primary calls the new
+  `consult` tool when it is stuck; with `cowork.auto` on, the harness also
+  consults the first co-worker when verification is still failing after the
+  last repair round (one extra round with the advice) or a tool has failed
+  three times running (the advice is delivered as a note). A consultation is
+  a read-only scratch agent on the co-worker's model — it reads the
+  repository, never edits — capped by `cowork.consult_turns`, at most
+  `cowork.max_consults_per_run` per request. Answers appear on every terminal
+  as `<name>? question` and `<name>> answer` in the theme's co-worker colour.
+  An `online: true` co-worker asks once per session before any code is sent
+  (`a` allows it for the session); `-y` allows, headless without `-y`
+  declines. `/coworkers` lists them; `/consult [name] <question>` asks one
+  directly. An unreachable co-worker never interrupts the run.
+
 ## v0.8.0 — every terminal renders itself
 
 - **The title and the input field take the theme's own text colour.** Every

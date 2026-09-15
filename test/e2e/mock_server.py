@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Scripted OpenAI-compatible mock: plays a local model that first writes a
-broken Go file, then fixes it when the repair prompt arrives."""
+broken Go file, then fixes it when the repair prompt arrives; also plays a
+co-working model consulted mid-task. Both models are served from the same
+port and routed by the request's "model" field, so routing must happen
+before any per-scenario call counter is consulted."""
 import json, http.server, itertools
 
 counter = itertools.count()
 
 BROKEN = "package main\n\nfunc Add(a, b int) int {\n\treturn a + b\n" # missing }
 FIXED  = "package main\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n"
+ADVICE = "Add the missing return at the end of add.go."
 
 def tool_call_chunk(name, args):
     return {"choices": [{"delta": {"tool_calls": [{
@@ -16,22 +20,43 @@ def tool_call_chunk(name, args):
 def text_chunk(t):
     return {"choices": [{"delta": {"content": t}}]}
 
-state = {"n": 0}
+def first_user_content(body):
+    for m in body["messages"]:
+        if m.get("role") == "user":
+            return m.get("content") or ""
+    return ""
+
+state = {"n": 0, "consult_n": 0}
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        n = state["n"]; state["n"] += 1
+        model = body.get("model", "")
         last = body["messages"][-1]["content"] or ""
-        if n == 0:
-            chunks = [tool_call_chunk("write_file", {"path": "add.go", "content": BROKEN})]
-        elif n == 1:
-            chunks = [text_chunk("Added add.go with an Add function.")]
-        elif "Verification failed" in last or n == 2:
-            chunks = [tool_call_chunk("write_file", {"path": "add.go", "content": FIXED})]
+
+        if model == "coworker-model":
+            # The co-worker's scratch agent gets one scripted reply: plain
+            # text (no tool call), so its own run ends after one turn and
+            # never issues read_file/list_dir/search here.
+            chunks = [text_chunk(ADVICE)]
+        elif "consult scenario" in first_user_content(body):
+            n = state["consult_n"]; state["consult_n"] += 1
+            if n == 0:
+                chunks = [tool_call_chunk("consult", {"question": "why does add.go not compile?"})]
+            else:
+                chunks = [text_chunk(f"The co-worker says: {ADVICE}")]
         else:
-            chunks = [text_chunk("Fixed the missing brace in add.go; build should pass now.")]
+            n = state["n"]; state["n"] += 1
+            if n == 0:
+                chunks = [tool_call_chunk("write_file", {"path": "add.go", "content": BROKEN})]
+            elif n == 1:
+                chunks = [text_chunk("Added add.go with an Add function.")]
+            elif "Verification failed" in last or n == 2:
+                chunks = [tool_call_chunk("write_file", {"path": "add.go", "content": FIXED})]
+            else:
+                chunks = [text_chunk("Fixed the missing brace in add.go; build should pass now.")]
+
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -42,6 +67,6 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"data": [{"id": "mock-model"}]}).encode())
+        self.wfile.write(json.dumps({"data": [{"id": "mock-model"}, {"id": "coworker-model"}]}).encode())
 
 http.server.HTTPServer(("127.0.0.1", 18111), H).serve_forever()
