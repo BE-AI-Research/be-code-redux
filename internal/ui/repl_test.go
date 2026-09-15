@@ -280,3 +280,31 @@ func TestPlainSessionsListsLiveOnes(t *testing.T) {
 		t.Fatalf("no join hint:\n%s", out)
 	}
 }
+
+func TestPlainCoworkersAndConsult(t *testing.T) {
+	r := newTestREPL(t)
+	out := capture(t, func() { r.command(context.Background(), "/coworkers") })
+	if !strings.Contains(out, "no co-working models configured") {
+		t.Fatalf("empty list:\n%s", out)
+	}
+	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"}}
+	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
+	r.Agent.Events = Events()
+	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), nil
+	}
+	t.Cleanup(func() { agent.CoworkerFactory = nil })
+	out = capture(t, func() { r.command(context.Background(), "/coworkers") })
+	if !strings.Contains(out, "big") || !strings.Contains(out, "long reads") {
+		t.Fatalf("list:\n%s", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/consult big which branch?") })
+	for _, want := range []string{"big? which branch?", "big> Try the other branch.", "read 0 files"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("consult output lacks %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(capture(t, func() { r.command(context.Background(), "/consult") }), "usage: /consult") {
+		t.Fatal("no usage line")
+	}
+}
