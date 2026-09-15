@@ -5,3 +5,6 @@
 /vscode/dist/
 /.superpowers/
 *.log
+
+# SSH credentials for the validation VM (never commit)
+.passfile
