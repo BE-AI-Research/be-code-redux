@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -186,5 +189,121 @@ func TestConsultTurnCap(t *testing.T) {
 	ag.Consult(context.Background(), ConsultRequest{Question: "q", Origin: "tool"})
 	if len(p.reqs) != 3 {
 		t.Fatalf("co-worker ran %d turns, want 3", len(p.reqs))
+	}
+}
+
+// A consultation the user abandoned is not a partial answer: whatever the
+// co-worker had said comes back for display, but the error is the
+// cancellation, so no caller can feed the abandoned text to the primary.
+func TestConsultCancelledContextIsNotAPartialAnswer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	p := &funcProvider{}
+	p.fn = func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return &provider.ChatResponse{Content: "Half an answer.", ToolCalls: []provider.ToolCall{{ID: "1", Name: "list_dir", Arguments: `{}`}}}, nil
+		}
+		cancel() // the user pressed Esc while the co-worker was working
+		return nil, context.Canceled
+	}
+	CoworkerFactory = func(cfg *config.Config, cw config.CoworkerConfig) (provider.Provider, error) { return p, nil }
+	t.Cleanup(func() { CoworkerFactory = nil })
+	ag, _ := newTestAgent(t, &scriptedProvider{}, withCoworkers("big"))
+	res, err := ag.Consult(ctx, ConsultRequest{Question: "q", Origin: "tool"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if res.Partial {
+		t.Fatal("an abandoned consultation was reported as a partial answer")
+	}
+	if res.Answer != "Half an answer." {
+		t.Fatalf("the text it had produced was dropped: %q", res.Answer)
+	}
+}
+
+// The counters are read and written by a UI goroutine (/coworkers, the
+// approval modal's "a") while the agent goroutine is inside Consult. Under
+// -race this fails without coworkMu; a concurrent map write would be fatal
+// even without it.
+func TestConsultCountersAreConcurrencySafe(t *testing.T) {
+	coworkerStub(t, provider.ChatResponse{Content: "advice"})
+	ag, _ := newTestAgent(t, &scriptedProvider{}, withCoworkers("online-claude"))
+	release := make(chan struct{})
+	ag.Tools.Approve = func(action, detail string) bool { <-release; return true }
+
+	consulted := make(chan struct{})
+	go func() {
+		defer close(consulted)
+		ag.Consult(context.Background(), ConsultRequest{Question: "q", Origin: "tool"})
+	}()
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = ag.ConsultCount("online-claude")
+			_ = ag.ConsultsThisRun()
+			ag.AllowCoworker("someone-else")
+		}
+	}()
+
+	close(release) // let the consultation past the approval seam and run
+	<-consulted
+	close(stop)
+	wg.Wait()
+
+	if ag.ConsultCount("online-claude") != 1 || ag.ConsultsThisRun() != 1 {
+		t.Fatalf("counters: online-claude=%d run=%d", ag.ConsultCount("online-claude"), ag.ConsultsThisRun())
+	}
+}
+
+// A byte cap must never land inside a multi-byte character: the model
+// would read U+FFFD where the source had a letter.
+func TestConsultSeedCutsAtRuneBoundaries(t *testing.T) {
+	s := "x" + strings.Repeat("é", 10) // two-byte runes starting at odd offsets
+	for n := 0; n <= len(s); n++ {
+		if got := cutHead(s, n); !utf8.ValidString(got) || len(got) > n {
+			t.Fatalf("cutHead(%d) = %q", n, got)
+		}
+		if got := cutTail(s, n); !utf8.ValidString(got) || len(got) > n {
+			t.Fatalf("cutTail(%d) = %q", n, got)
+		}
+	}
+	if cutHead(s, len(s)+1) != s || cutTail(s, len(s)+1) != s {
+		t.Fatal("a cap wider than the string must leave it whole")
+	}
+}
+
+// The seed says so when a named file could not be read, and does not
+// repeat the git summary the scratch agent's own system prompt carries.
+func TestConsultSeedLabelsFailedReadsAndLeavesGitToTheSystemPrompt(t *testing.T) {
+	cw := coworkerStub(t, provider.ChatResponse{Content: "advice"})
+	ag, dir := newTestAgent(t, &scriptedProvider{}, withCoworkers("big"))
+	if out, err := exec.Command("git", "-C", dir, "init").CombinedOutput(); err != nil {
+		t.Skipf("git unavailable: %v %s", err, out)
+	}
+	if _, err := ag.Consult(context.Background(), ConsultRequest{
+		Question: "q", Files: []string{"missing.go"}, Origin: "tool",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sys, seed := cw.lastReq.Messages[0].Content, cw.lastReq.Messages[1].Content
+	if !strings.Contains(seed, "### missing.go\n(could not read: ") {
+		t.Fatalf("a failed read was passed off as file content:\n%s", seed)
+	}
+	if strings.Contains(seed, "## Git") {
+		t.Fatalf("the git summary is in the seed as well as the system prompt:\n%s", seed)
+	}
+	if !strings.Contains(sys, "git branch:") {
+		t.Fatal("the scratch agent's system prompt lost the git summary")
 	}
 }

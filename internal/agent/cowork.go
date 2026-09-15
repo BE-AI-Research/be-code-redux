@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/config"
-	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -59,19 +59,74 @@ const (
 	consultRecentCap = 6 * 1024
 )
 
-// Coworkers is the usable co-worker list, in configured order.
-func (a *Agent) Coworkers() []config.CoworkerConfig { return a.coworkers }
+// Coworkers is the usable co-worker list, in configured order. The slice
+// is copied: a UI listing co-workers must not be able to reorder or
+// overwrite the agent's own.
+func (a *Agent) Coworkers() []config.CoworkerConfig {
+	out := make([]config.CoworkerConfig, len(a.coworkers))
+	copy(out, a.coworkers)
+	return out
+}
 
 // ConsultsThisRun is how many consultations the current RunFull has used
 // (tool-initiated and automatic together; /consult never counts).
-func (a *Agent) ConsultsThisRun() int { return a.consults }
+func (a *Agent) ConsultsThisRun() int {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	return a.consults
+}
 
 // ConsultCount is how many times a co-worker has been consulted this session.
-func (a *Agent) ConsultCount(name string) int { return a.consultCount[name] }
+func (a *Agent) ConsultCount(name string) int {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	return a.consultCount[name]
+}
 
 // AllowCoworker records session-wide consent for an online co-worker: the
 // approval modal's "a".
-func (a *Agent) AllowCoworker(name string) { a.coworkAllowed[name] = true }
+func (a *Agent) AllowCoworker(name string) { a.allow(name) }
+
+// ---- counter access -------------------------------------------------------
+//
+// The three counters are shared between the agent goroutine (inside
+// Consult) and whatever UI goroutine renders /coworkers or answers the
+// approval modal. Every touch goes through these helpers, which hold
+// coworkMu for the duration of a map or int operation and nothing longer:
+// coworkMu is never held while blocked in Tools.Approve or the co-worker's
+// own run.
+
+// bumpConsult records one attempted consultation and returns the run total.
+func (a *Agent) bumpConsult(name string, counts bool) int {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	if counts {
+		a.consults++
+	}
+	a.consultCount[name]++
+	return a.consults
+}
+
+// resetConsults clears the per-run budget (RunFull, once per request).
+func (a *Agent) resetConsults() {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	a.consults = 0
+}
+
+// allowedFor reports session-wide consent for an online co-worker.
+func (a *Agent) allowedFor(name string) bool {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	return a.coworkAllowed[name]
+}
+
+// allow records session-wide consent for an online co-worker.
+func (a *Agent) allow(name string) {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	a.coworkAllowed[name] = true
+}
 
 func (a *Agent) coworkerByName(who string) (config.CoworkerConfig, error) {
 	if len(a.coworkers) == 0 {
@@ -95,11 +150,11 @@ func (a *Agent) coworkerByName(who string) (config.CoworkerConfig, error) {
 // otherwise the approval seam is asked once, and "a" (AllowCoworker) or a
 // previous session-wide yes skips it.
 func (a *Agent) consent(cw config.CoworkerConfig, req ConsultRequest) bool {
-	if !cw.Online || strings.HasPrefix(req.Origin, "user:") || a.coworkAllowed[cw.Name] {
+	if !cw.Online || strings.HasPrefix(req.Origin, "user:") || a.allowedFor(cw.Name) {
 		return true
 	}
 	if a.Cfg.AutoApproveShell { // what -y sets
-		a.coworkAllowed[cw.Name] = true
+		a.allow(cw.Name)
 		return true
 	}
 	if a.Tools.Approve == nil {
@@ -131,8 +186,13 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 		return res, err
 	}
 	res.Coworker = cw.Name
+	// Nothing to ask the user about, and nothing to charge them for, if
+	// there is no way to build the co-worker in the first place.
+	if CoworkerFactory == nil {
+		return res, errors.New("co-working is not wired in this build")
+	}
 	counts := !strings.HasPrefix(req.Origin, "user:")
-	if counts && a.consults >= a.Cfg.Cowork.MaxConsultsPerRun {
+	if counts && a.ConsultsThisRun() >= a.Cfg.Cowork.MaxConsultsPerRun {
 		return res, fmt.Errorf("consultation limit reached for this run (%d)", a.Cfg.Cowork.MaxConsultsPerRun)
 	}
 	if !a.consent(cw, req) {
@@ -140,13 +200,7 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	}
 	// A consultation that was attempted has been paid for, however it
 	// ends: a failing co-worker must not be retried without limit.
-	if counts {
-		a.consults++
-	}
-	a.consultCount[cw.Name]++
-	if CoworkerFactory == nil {
-		return res, errors.New("co-working is not wired in this build")
-	}
+	a.bumpConsult(cw.Name, counts)
 	cp, err := CoworkerFactory(a.Cfg, cw)
 	if err != nil {
 		return res, fmt.Errorf("co-worker %s unavailable: %w", cw.Name, err)
@@ -170,10 +224,19 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	a.Stats.CompletionTokens += scratch.Stats.CompletionTokens
 	a.Stats.Requests += scratch.Stats.Requests
 	if rerr != nil {
-		// Half an answer from a co-worker that died mid-reply still beats
-		// nothing; the caller marks it as partial.
-		if partial := scratch.lastAssistantText(); partial != "" {
-			res.Answer, res.Partial = partial, true
+		// Whatever it had said before failing is worth returning either
+		// way, so a UI can show it.
+		res.Answer = scratch.lastAssistantText()
+		// A cancelled consultation is not a partial answer: the user
+		// walked away from it, and no caller may feed it back to the
+		// primary as advice.
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+		// Half an answer from a co-worker whose backend died mid-reply
+		// still beats nothing; the caller marks it as partial.
+		if res.Answer != "" {
+			res.Partial = true
 			return res, nil
 		}
 		return res, rerr
@@ -205,7 +268,7 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 	scratch := &Agent{
 		Cfg: &cfg, Provider: cp, Model: cw.Model, Tools: readOnly,
 		Profile: prof, compat: compat, projectNotes: a.projectNotes,
-		repoMap: a.repoMap, Window: 0,
+		Window: 0,
 	}
 	name := cw.Name
 	scratch.Events = Events{
@@ -240,8 +303,10 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 }
 
 // buildConsultSeed is the first user message: the question, the named
-// files (read through the confined registry, capped), the caller's recent
-// context, and the git summary.
+// files (read through the confined registry, capped), and the caller's
+// recent context. The git summary is deliberately absent — the scratch
+// agent's own run() composes it into the system prompt, and sending it
+// twice would only spend the co-worker's window.
 func (a *Agent) buildConsultSeed(ctx context.Context, readOnly *tools.Registry, req ConsultRequest) string {
 	var b strings.Builder
 	b.WriteString(req.Question)
@@ -251,23 +316,46 @@ func (a *Agent) buildConsultSeed(ctx context.Context, readOnly *tools.Registry, 
 		for _, f := range req.Files {
 			r := readOnly.Dispatch(ctx, provider.ToolCall{ID: "seed", Name: "read_file", Arguments: fmt.Sprintf(`{"path":%q}`, f)})
 			body := r.Content
-			if len(body) > consultFileCap {
-				body = body[:consultFileCap] + "\n… (truncated; read_file for the rest)"
+			switch {
+			case r.IsError:
+				// Say so, rather than passing the failure off as content.
+				body = "(could not read: " + strings.TrimSpace(r.Content) + ")"
+			case len(body) > consultFileCap:
+				body = cutHead(body, consultFileCap) + "\n… (truncated; read_file for the rest)"
 			}
 			fmt.Fprintf(&b, "\n### %s\n%s\n", f, body)
 		}
 	}
 	if req.Recent != "" {
-		recent := req.Recent
-		if len(recent) > consultRecentCap {
-			recent = recent[len(recent)-consultRecentCap:]
-		}
-		b.WriteString("\n## Recent context\n" + recent + "\n")
-	}
-	if g := gitctx.Summary(ctx, a.Tools.Root); g != "" {
-		b.WriteString("\n## Git\n" + g + "\n")
+		b.WriteString("\n## Recent context\n" + cutTail(req.Recent, consultRecentCap) + "\n")
 	}
 	return b.String()
+}
+
+// cutHead keeps at most n bytes from the front of s, backing off to a rune
+// boundary so a cap never lands inside a multi-byte character (the model
+// would read U+FFFD) — the convention TrimProjectNotes follows.
+func cutHead(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// cutTail keeps at most n bytes from the end of s, moving forward to a
+// rune boundary.
+func cutTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return s[i:]
 }
 
 // lastAssistantText is the newest assistant message content, for a

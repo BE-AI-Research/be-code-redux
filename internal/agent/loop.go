@@ -104,15 +104,23 @@ type Agent struct {
 	compat       bool // current session uses embedded tool calls
 
 	// Co-working state (see cowork.go). coworkers is the usable co-worker
-	// list, resolved once at New; consults is the current run's budget
-	// spend, reset by RunFull; consultCount is per-session usage for
-	// /coworkers; coworkAllowed is session-wide consent for an online
-	// co-worker; consultMu serialises consultations (one at a time).
+	// list, resolved once at New and read-only thereafter; consults is the
+	// current run's budget spend, reset by RunFull; consultCount is
+	// per-session usage for /coworkers; coworkAllowed is session-wide
+	// consent for an online co-worker.
+	//
+	// Two locks, deliberately: consultMu serialises whole consultations
+	// (one at a time, held across the approval prompt and the co-worker's
+	// run), while coworkMu guards only the three counters, which a UI
+	// goroutine reads and writes — /coworkers and the approval modal's
+	// "a" — while the agent goroutine is inside Consult. coworkMu is
+	// never held across a call that can block.
 	coworkers     []config.CoworkerConfig
 	consults      int
 	consultCount  map[string]int
 	coworkAllowed map[string]bool
 	consultMu     sync.Mutex
+	coworkMu      sync.Mutex
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -749,7 +757,7 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
-	a.consults = 0 // the consultation budget is per request
+	a.resetConsults() // the consultation budget is per request
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err
