@@ -77,8 +77,8 @@ func TestSlashOpensPaletteAndEscRestoresText(t *testing.T) {
 		t.Fatal("palette not rendered")
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.mode != modeInput || m.inputFor(0).Value() != "/hel" {
-		t.Fatalf("after Esc: mode=%v input=%q", m.mode, m.inputFor(0).Value())
+	if m.mode != modeInput || m.input.Value() != "/hel" {
+		t.Fatalf("after Esc: mode=%v input=%q", m.mode, m.input.Value())
 	}
 }
 
@@ -91,7 +91,7 @@ func TestPaletteEnterRunsOrFillsInput(t *testing.T) {
 		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mode != modeInput || !strings.Contains(m.transcript.String(), "/sessions") {
+	if m.mode != modeInput || !strings.Contains(m.rendered.String(), "/sessions") {
 		t.Fatalf("help not run from palette: mode=%v", m.mode)
 	}
 
@@ -101,8 +101,8 @@ func TestPaletteEnterRunsOrFillsInput(t *testing.T) {
 	}
 	// first match is /model (takes an argument)
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mode != modeInput || m.inputFor(0).Value() != "/model " {
-		t.Fatalf("argument command not filled into input: mode=%v input=%q", m.mode, m.inputFor(0).Value())
+	if m.mode != modeInput || m.input.Value() != "/model " {
+		t.Fatalf("argument command not filled into input: mode=%v input=%q", m.mode, m.input.Value())
 	}
 }
 
@@ -110,7 +110,7 @@ func TestPaletteEnterRunsOrFillsInput(t *testing.T) {
 func TestMenuOpensAndEscReturns(t *testing.T) {
 	m := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	m.slashCommand("/menu", 0)
+	m.slashCommand("/menu")
 	if m.mode != modeMenu {
 		t.Fatalf("mode = %v, want menu", m.mode)
 	}

@@ -18,12 +18,10 @@ import (
 // this.
 const byeWait = 500 * time.Millisecond
 
-// maxQueuedOutput caps how many frames of a screen-frame type (FOutput,
-// FOverlay) a client's queue may hold before the oldest of that type is
-// evicted — each type independently, so 8 FOutput and 8 FOverlay frames can
-// be queued at once. Each is a full repaint (of the shared view, or of one
-// client's private rows), so only the newest of each matters; control frames
-// (FSize, FClients, FBye) are never dropped.
+// maxQueuedOutput caps how many FOutput frames a client's queue may hold
+// before the oldest is evicted — each is a full repaint of that client's own
+// view, so only the newest matters; control frames (FSize, FClients, FBye)
+// are never dropped.
 const maxQueuedOutput = 8
 
 // maxEarlyInput bounds how many bytes of a client's keystrokes are buffered
@@ -47,16 +45,10 @@ type client struct {
 	utf8  bool
 	conn  net.Conn
 
-	// overlay is this client's private input rows, guarded by Host.mu (not
-	// qmu: it is read and written alongside the client slice in fanout.Write
-	// and SetOverlay, never on its own).
-	overlay string
-
 	// pendingIn buffers this client's FInput bytes, in arrival order, from
-	// before OnInput was registered (guarded by Host.mu, same convention as
-	// overlay). Replayed and cleared the moment OnInput registers; capped at
-	// maxEarlyInput so an attach with nobody listening yet cannot grow
-	// without bound.
+	// before OnInput was registered (guarded by Host.mu). Replayed and
+	// cleared the moment OnInput registers; capped at maxEarlyInput so an
+	// attach with nobody listening yet cannot grow without bound.
 	pendingIn []byte
 
 	// qmu guards queue. Only writer() ever reads/drains it; enqueue is called
@@ -64,8 +56,9 @@ type client struct {
 	// block its caller — that is the whole point of routing every frame
 	// through this queue and a single per-client writer goroutine instead of
 	// writing to conn directly.
-	qmu   sync.Mutex
-	queue []qframe
+	qmu        sync.Mutex
+	queue      []qframe
+	lostOutput bool // an FOutput frame was evicted; guarded by qmu
 
 	wake       chan struct{} // size 1: signals writer() there is new work
 	writerDone chan struct{} // closed when writer() returns
@@ -149,15 +142,13 @@ func newClient(hello Hello, conn net.Conn) *client {
 }
 
 // enqueue appends a frame for the client's writer goroutine to send. It never
-// blocks: a full queue of FOutput or FOverlay frames evicts that type's
-// oldest entry to make room (control frames are never evicted, so this queue
-// can grow beyond maxQueuedOutput only through control traffic, which is
-// bounded by real events — attach/detach/resize — not by output volume).
-// FOutput and FOverlay are both screen bytes for which only the newest
-// matters, so each is capped and evicted independently by its own type.
+// blocks: a full queue of FOutput frames evicts the oldest to make room
+// (control frames are never evicted, so this queue can grow beyond
+// maxQueuedOutput only through control traffic, which is bounded by real
+// events — attach/detach/resize — not by output volume).
 func (c *client) enqueue(t FrameType, payload []byte) {
 	c.qmu.Lock()
-	if t == FOutput || t == FOverlay {
+	if t == FOutput {
 		n := 0
 		for _, f := range c.queue {
 			if f.typ == t {
@@ -171,6 +162,7 @@ func (c *client) enqueue(t FrameType, payload []byte) {
 					break
 				}
 			}
+			c.lostOutput = true
 		}
 	}
 	c.queue = append(c.queue, qframe{t, payload})
@@ -208,17 +200,15 @@ type Host struct {
 	mu      sync.Mutex
 	clients []*client // attach order
 	nextID  int
-	cols    int
-	rows    int
 
-	// notifyMu orders recompute's compute-and-notify as a whole (see
-	// recompute for why h.mu alone is not enough).
+	// notifyMu orders recomputeAttach's compute-and-notify as a whole (see
+	// recomputeAttach for why h.mu alone is not enough).
 	notifyMu sync.Mutex
 
-	onInput   func(client int, b []byte)
-	onSize    func(cols, rows int)
-	onClients func([]ClientInfo)
-	onQuit    func()
+	onInput      func(client int, b []byte)
+	onClientSize func(id, cols, rows int)
+	onClients    func([]ClientInfo)
+	onQuit       func()
 	// quitPending records a RequestQuit that arrived before OnQuit was
 	// registered — the host listens and serves before the program is
 	// started (see tui.RunServed), so a SIGTERM from `sessions kill`, or a
@@ -267,9 +257,45 @@ func (h *Host) OnInput(f func(client int, b []byte)) {
 	}
 }
 
-func (h *Host) OnSize(f func(int, int))        { h.mu.Lock(); h.onSize = f; h.mu.Unlock() }
 func (h *Host) OnClients(f func([]ClientInfo)) { h.mu.Lock(); h.onClients = f; h.mu.Unlock() }
 func (h *Host) Output() io.Writer              { return fanout{h} }
+
+// OnClientSize registers the callback for one client's own size: on attach,
+// on every resize frame it sends, and after output to it was evicted (a
+// repaint request; see enqueue). Called from recomputeAttach it runs under
+// notifyMu, same as onClients: it must return quickly and must not call back
+// into anything that itself calls recompute, or the host deadlocks.
+func (h *Host) OnClientSize(f func(id, cols, rows int)) {
+	h.mu.Lock()
+	h.onClientSize = f
+	h.mu.Unlock()
+}
+
+// ClientOutput is a writer that reaches one client only. Bytes are queued
+// on that client's own queue exactly like fan-out frames, so a stalled
+// terminal never blocks the writer.
+func (h *Host) ClientOutput(id int) io.Writer { return clientWriter{h, id} }
+
+type clientWriter struct {
+	h  *Host
+	id int
+}
+
+func (w clientWriter) Write(p []byte) (int, error) {
+	cp := append([]byte(nil), p...)
+	w.h.mu.Lock()
+	c := w.h.byIDLocked(w.id)
+	w.h.mu.Unlock()
+	if c == nil {
+		return 0, io.ErrClosedPipe
+	}
+	c.enqueue(FOutput, cp)
+	return len(p), nil
+}
+
+// Logf writes one line to the host log (the served runner uses it for a
+// view that panicked).
+func (h *Host) Logf(format string, args ...any) { h.logf(format, args...) }
 
 // OnQuit registers the program's shutdown hook. A quit requested before this
 // call is replayed into f now (outside h.mu: f is the program's callback and
@@ -369,6 +395,12 @@ func (h *Host) handle(conn net.Conn) {
 				c.cols, c.rows = s.Cols, s.Rows
 				h.mu.Unlock()
 				h.recompute()
+				h.mu.Lock()
+				f := h.onClientSize
+				h.mu.Unlock()
+				if f != nil {
+					f(c.id, s.Cols, s.Rows)
+				}
 			}
 		case FDetach:
 			h.detach(c, ReasonDetached)
@@ -398,6 +430,18 @@ func (h *Host) writer(c *client) {
 				return
 			}
 		}
+		c.qmu.Lock()
+		lost := c.lostOutput
+		c.lostOutput = false
+		c.qmu.Unlock()
+		if lost {
+			h.mu.Lock()
+			f, cols, rows := h.onClientSize, c.cols, c.rows
+			h.mu.Unlock()
+			if f != nil {
+				f(c.id, cols, rows)
+			}
+		}
 	}
 }
 
@@ -423,20 +467,28 @@ func (h *Host) detach(c *client, reason string) {
 	})
 }
 
-// recompute derives the shared size, notifies clients and the program.
+// recompute notifies clients and the program of a roster change (attach or
+// detach) via recomputeAttach(nil).
+func (h *Host) recompute() { h.recomputeAttach(nil) }
+
+// recomputeAttach broadcasts the current roster to every client (FClients)
+// and to the program (onClients), and — when attached is non-nil, the client
+// that has just joined — reports that one client's own size via
+// onClientSize. There is no shared size any more: each client's program gets
+// its own dimensions, carried in its own roster row.
 //
 // It is wrapped in notifyMu — a lock distinct from h.mu — for the whole
 // compute-and-notify sequence. h.mu alone is not enough: it only protects the
-// commit of h.cols/h.rows, and notifications go out after it is released, so
-// two overlapping recompute calls could commit in one order but notify in
-// the other, leaving clients (and the program, via onSize/onClients) with a
-// stale view that never resolves until the next change. Serializing the
-// whole function makes "last to commit" and "last to notify" the same call.
+// snapshot of the client list, and notifications go out after it is
+// released, so two overlapping recomputeAttach calls could snapshot in one
+// order but notify in the other, leaving the program (via onClients) with a
+// stale roster that nothing later corrects. Serializing the whole function
+// makes "last to snapshot" and "last to notify" the same call.
 //
-// onSize/onClients are the caller's callbacks; they run here, under
+// onClients/onClientSize are the caller's callbacks; they run here, under
 // notifyMu, not under h.mu — but they still must return quickly and must not
 // call back into anything that itself calls recompute (including via
-// OnSize/OnClients replacing themselves) or the host will deadlock.
+// OnClients/OnClientSize replacing themselves) or the host will deadlock.
 //
 // The same constraint runs the other way, and is easy to miss: the served
 // program must never call into the host from inside its own update loop.
@@ -446,47 +498,22 @@ func (h *Host) detach(c *client, reason string) {
 // goroutine on its own p.Send — with notifyMu held, which then hangs every
 // later attach and detach too. Route such calls through a tea.Cmd (they run
 // on their own goroutine) instead.
-func (h *Host) recompute() { h.recomputeAttach(nil) }
-
-// recomputeAttach is recompute for the attach path: attached is the client
-// that has just joined. It is always sent the current shared size, and the
-// program is always notified of it — even when the shared minimum did not
-// change, because a client that has just cleared its screen (and a Bubble Tea
-// renderer that only repaints in full on a WindowSizeMsg) would otherwise be
-// left with nothing but the next diff lines. A size change still notifies
-// exactly once: the broadcast below already includes the new client.
 func (h *Host) recomputeAttach(attached *client) {
 	h.notifyMu.Lock()
 	defer h.notifyMu.Unlock()
 
 	h.mu.Lock()
-	cols, rows := 0, 0
-	for _, c := range h.clients {
-		if cols == 0 || c.cols < cols {
-			cols = c.cols
-		}
-		if rows == 0 || c.rows < rows {
-			rows = c.rows
-		}
-	}
-	changed := cols != h.cols || rows != h.rows
-	h.cols, h.rows = cols, rows
 	infos := h.infosLocked()
-	onSize, onClients := h.onSize, h.onClients
+	onClients, onClientSize := h.onClients, h.onClientSize
 	clients := append([]*client(nil), h.clients...)
+	var attachedID, attachedCols, attachedRows int
+	if attached != nil {
+		attachedID, attachedCols, attachedRows = attached.id, attached.cols, attached.rows
+	}
 	h.mu.Unlock()
 
-	if cols > 0 && (changed || attached != nil) {
-		if changed {
-			for _, c := range clients {
-				c.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
-			}
-		} else {
-			attached.enqueueJSON(FSize, Size{Cols: cols, Rows: rows})
-		}
-		if onSize != nil {
-			onSize(cols, rows)
-		}
+	if attached != nil && onClientSize != nil {
+		onClientSize(attachedID, attachedCols, attachedRows)
 	}
 	b, _ := json.Marshal(infos)
 	for _, c := range clients {
@@ -512,23 +539,6 @@ func (h *Host) Clients() []ClientInfo {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.infosLocked()
-}
-
-func (h *Host) Size() (int, int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.cols, h.rows
-}
-
-func (h *Host) AnyASCII() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, c := range h.clients {
-		if !c.utf8 {
-			return true
-		}
-	}
-	return false
 }
 
 // RequestQuit asks the served program to end the session, exactly as a
@@ -574,49 +584,18 @@ func (h *Host) Detach(id int) {
 	}
 }
 
+// Drop disconnects one client with reason as its bye.
+func (h *Host) Drop(id int, reason string) {
+	if c := h.byID(id); c != nil {
+		h.detach(c, reason)
+	}
+}
+
 // Switch hands one client over to another live session.
 func (h *Host) Switch(id int, code string) {
 	if c := h.byID(id); c != nil {
 		h.detach(c, ReasonSwitchPrefix+code)
 	}
-}
-
-// ClearOverlays forgets every client's overlay so the fan-out stops
-// re-appending them. The served program calls it on its way into a quit,
-// and the host process again the moment that program returns: the closing
-// lines (leaving the alt screen, the resume line) are ordinary output
-// frames, and an overlay appended after each of them would paint the
-// client's draft onto the main screen and drag the cursor away from
-// column 0.
-func (h *Host) ClearOverlays() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, c := range h.clients {
-		c.overlay = ""
-	}
-}
-
-// SetOverlay records a client's private input rows and sends them. The
-// same rows are appended to every shared frame that client receives, so a
-// full repaint never erases them. An unchanged overlay is not re-sent.
-//
-// h.mu is held across the enqueue (enqueue itself never blocks — it only
-// appends under c.qmu and does a non-blocking wake — and nothing that holds
-// c.qmu ever takes h.mu), so this can never interleave with fanout.Write's
-// own read-then-enqueue of the same client's overlay: without that, a
-// concurrent frame write could snapshot this client's overlay just before
-// this call updates it, then enqueue that stale value after this call's own
-// FOverlay, permanently reverting the client's rendered overlay with no next
-// frame to correct it (a private keystroke need not change the shared view).
-func (h *Host) SetOverlay(id int, s string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c := h.byIDLocked(id)
-	if c == nil || c.overlay == s {
-		return
-	}
-	c.overlay = s
-	c.enqueue(FOverlay, []byte(s))
 }
 
 // Close says goodbye to every client and stops accepting.
@@ -641,25 +620,17 @@ func (h *Host) Close(reason string) {
 	}
 }
 
-// fanout copies program output to every attached client, followed by that
-// client's private overlay (if it has one) so a full repaint never erases
-// it.
+// fanout copies program output to every attached client.
 type fanout struct{ h *Host }
 
-// Write holds h.mu across every client's pair of enqueues (see SetOverlay's
-// doc for why: releasing it between reading c.overlay and enqueueing it
-// would let a concurrent SetOverlay's own newer value be overwritten by this
-// call's now-stale one). enqueue itself never blocks, so this never holds
-// h.mu across anything that could stall.
+// Write holds h.mu across every client's enqueue. enqueue itself never
+// blocks, so this never holds h.mu across anything that could stall.
 func (f fanout) Write(p []byte) (int, error) {
 	cp := append([]byte(nil), p...)
 	f.h.mu.Lock()
 	defer f.h.mu.Unlock()
 	for _, c := range f.h.clients {
 		c.enqueue(FOutput, cp)
-		if c.overlay != "" {
-			c.enqueue(FOverlay, []byte(c.overlay))
-		}
 	}
 	return len(p), nil
 }

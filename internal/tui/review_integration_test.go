@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 // stuckEditor is the editor half of a shared review that never answers — the
 // person is at the phone, not the desk. It records the withdrawal the
-// coordinator sends once the terminal has decided.
+// coordinator sends once a terminal has decided.
 type stuckEditor struct {
 	mu       sync.Mutex
 	reviewed []string
@@ -41,89 +42,63 @@ func (e *stuckEditor) Cancel(rel string) {
 // VS Code's terminal and an SSH terminal attached, ide.review at its default
 // auto, an editor that shows the diff but never answers. The coordinator runs
 // on the agent goroutine (as the write tool does) while this goroutine plays
-// the Bubble Tea event loop, delivering the messages the coordinator sends and
-// the keys the clients press.
+// the Bubble Tea event loop, draining each view's mailbox and pressing the
+// keys the clients press.
 //
 // What it proves: auto resolves to both from the roster labels; the terminal
-// side raises the ordinary approval modal, so it is shared by every attached
-// terminal; the SSH terminal's `y` decides the write even though the editor
-// still has the diff open; and the editor is then told to withdraw it.
+// side raises the shared ask, so *both* attached terminals show it; the
+// second terminal's `y` decides the write even though the editor still has
+// the diff open; the editor is then told to withdraw it; and the terminal
+// that answered is not told that someone answered.
 func TestSharedReviewAnsweredFromTheSecondTerminal(t *testing.T) {
-	m := twoClients(t)
+	s, a, b := twoViews(t)
 	// The roster the host would report: VS Code's own terminal plus one that
 	// is not it, which is exactly what makes auto resolve to both.
 	roster := []live.ClientInfo{
 		{ID: 1, Label: "vscode (pid 1)", UTF8: true},
 		{ID: 2, Label: "ssh from 10.0.0.5 (pid 2)", UTF8: true},
 	}
-	m.Update(clientsMsg(roster))
-
-	// send has no tea.Program to deliver to in a test, so route what the
-	// coordinator's goroutine sends into a channel this goroutine drains.
-	msgs := make(chan tea.Msg, 8)
-	m.sendHook = func(msg tea.Msg) { msgs <- msg }
-
-	editor := &stuckEditor{cancels: make(chan string, 1)}
+	s.SetClients(roster)
+	flush(a, b)
 	// labels is read from the coordinator's goroutine; roster is written
 	// before it starts and never again.
-	coord := review.New(review.ModeAuto, editor, m.ReviewTerminal(), func() []string {
-		out := make([]string, 0, len(roster))
-		for _, c := range roster {
-			out = append(out, c.Label)
-		}
-		return out
-	})
-	m.SetReview(coord)
+	labels := make([]string, 0, len(roster))
+	for _, c := range roster {
+		labels = append(labels, c.Label)
+	}
+
+	editor := &stuckEditor{cancels: make(chan string, 1)}
+	coord := review.New(review.ModeAuto, editor, s.ReviewTerminal(), func() []string { return labels })
+	s.SetReview(coord)
 	if got := coord.Resolve(); got != review.ModeBoth {
 		t.Fatalf("auto resolved to %q with an SSH terminal attached, want both", got)
 	}
 
-	m.mode, m.running = modeBusy, true // a run is in progress, as it would be
+	s.setRunState(true, "thinking") // a run is in progress, as it would be
+	flush(a, b)
 	decided := make(chan tools.ReviewDecision, 1)
 	go func() { // the tool goroutine
 		decided <- coord.Decide(context.Background(), "internal/core/core.go", "old\n", "new\n")
 	}()
 
-	// The terminal side's approval reaches the event loop as the same message
-	// a tool approval uses.
-	var raised bool
-	select {
-	case msg := <-msgs:
-		am, ok := msg.(approvalMsg)
-		if !ok {
-			t.Fatalf("coordinator sent %T, want an approvalMsg", msg)
-		}
-		if am.action != "file_write" {
-			t.Fatalf("approval action = %q", am.action)
-		}
-		if am.detail == "" {
-			t.Fatal("approval carries no diff preview")
-		}
-		m.Update(msg)
-		raised = true
-	case <-time.After(2 * time.Second):
-		t.Fatal("the shared review never raised the terminal prompt")
+	// The terminal side of the race raises the shared ask on every terminal.
+	waitFor(t, func() bool { flush(a, b); return a.mode == modeAsk && b.mode == modeAsk })
+	if !strings.Contains(a.View(), "approval required") || !strings.Contains(b.View(), "approval required") {
+		t.Fatal("the shared review must show on both terminals")
 	}
-	if !raised || m.mode != modeApproval {
-		t.Fatalf("mode = %v, want modeApproval", m.mode)
+	if open := s.current(); open == nil || open.Action != "file_write" || open.Detail == "" {
+		t.Fatalf("the shared ask is not a file-write approval with a diff: %+v", open)
 	}
-	// Both sides of the race start on their own goroutines, so the editor
-	// may be a few microseconds behind the terminal prompt: wait for it.
-	shown := 0
-	for deadline := time.Now().Add(2 * time.Second); shown == 0 && time.Now().Before(deadline); {
+	// Both sides of the race start on their own goroutines, so the editor may
+	// be a few microseconds behind the terminal prompt: wait for it.
+	waitFor(t, func() bool {
 		editor.mu.Lock()
-		shown = len(editor.reviewed)
-		editor.mu.Unlock()
-		if shown == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-	}
-	if shown == 0 {
-		t.Fatal("the editor was never asked to show the diff")
-	}
+		defer editor.mu.Unlock()
+		return len(editor.reviewed) > 0
+	})
 
 	// The person on the SSH terminal answers.
-	m.Update(live.ClientKeyMsg{Client: 2, Key: runes("y")})
+	b.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
 	select {
 	case d := <-decided:
 		if d != tools.ReviewAccept {
@@ -140,7 +115,20 @@ func TestSharedReviewAnsweredFromTheSecondTerminal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the editor diff was never withdrawn")
 	}
-	if m.mode != modeBusy {
-		t.Fatalf("mode after the answer = %v, want modeBusy", m.mode)
+
+	flush(a, b)
+	if a.mode != modeBusy || b.mode != modeBusy {
+		t.Fatalf("modes after the answer: a=%v b=%v, want modeBusy", a.mode, b.mode)
+	}
+	// The terminal that answered is not told that someone answered; the one
+	// that did not is told who.
+	if strings.Contains(b.wrapped, "answered by") {
+		t.Fatalf("the answering terminal was told it answered:\n%s", b.wrapped)
+	}
+	if !strings.Contains(a.wrapped, "answered by ssh from 10.0.0.5 (pid 2)") {
+		t.Fatalf("the watching terminal was not told who answered:\n%s", a.wrapped)
+	}
+	if !strings.Contains(a.wrapped, "approved") || !strings.Contains(b.wrapped, "approved") {
+		t.Fatal("the verdict is a shared entry and must be on both")
 	}
 }

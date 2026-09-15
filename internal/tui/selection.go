@@ -31,13 +31,13 @@ func (s *selection) ordered() (l1, c1, l2, c2 int) {
 }
 
 // plainLines is the wrapped transcript with styling removed.
-func (m *Model) plainLines() []string {
+func (m *View) plainLines() []string {
 	return strings.Split(ansi.Strip(m.wrapped), "\n")
 }
 
 // transcriptCoords maps a mouse position to (line, col) in the wrapped
 // transcript, or ok=false when the pointer is outside the transcript.
-func (m *Model) transcriptCoords(x, y int) (line, col int, ok bool) {
+func (m *View) transcriptCoords(x, y int) (line, col int, ok bool) {
 	row := y - m.headerHeight()
 	if row < 0 || row >= m.vp.Height || x < 0 {
 		return 0, 0, false
@@ -45,15 +45,14 @@ func (m *Model) transcriptCoords(x, y int) (line, col int, ok bool) {
 	return m.vp.YOffset + row, x, true
 }
 
-// handleMouse routes one mouse event, tagged with the client it came from
-// (0 is the local terminal). Selection is shared — everyone sees the same
-// highlight in the same frame — but a paste has to land in the input line of
-// whoever asked for it.
-func (m *Model) handleMouse(msg tea.MouseMsg, from int) (tea.Model, tea.Cmd) {
+// handleMouse routes one mouse event. Like a keystroke it is always this
+// terminal's own: the selection it makes, and the popup it opens, belong to
+// this view alone.
+func (m *View) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Button == tea.MouseButtonRight && msg.Action == tea.MouseActionPress:
 		if m.mode == modeInput || m.mode == modeBusy {
-			return m.openContextMenu(from)
+			return m.openContextMenu()
 		}
 		return m, nil
 	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
@@ -89,7 +88,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg, from int) (tea.Model, tea.Cmd) {
 }
 
 // selectionText extracts the selected text from the plain transcript.
-func (m *Model) selectionText() string {
+func (m *View) selectionText() string {
 	if m.sel == nil {
 		return ""
 	}
@@ -115,7 +114,7 @@ func (m *Model) selectionText() string {
 
 // highlighted renders the wrapped transcript with the selection in reverse
 // video; unselected lines keep their colours.
-func (m *Model) highlighted() string {
+func (m *View) highlighted() string {
 	if m.sel == nil {
 		return m.wrapped
 	}
@@ -140,14 +139,14 @@ func (m *Model) highlighted() string {
 	return strings.Join(colored, "\n")
 }
 
-func (m *Model) clearSelection() {
+func (m *View) clearSelection() {
 	if m.sel != nil {
 		m.sel = nil
 		m.refreshTranscript()
 	}
 }
 
-func (m *Model) selectAll() {
+func (m *View) selectAll() {
 	lines := m.plainLines()
 	last := len(lines) - 1
 	if last < 0 {
@@ -158,20 +157,20 @@ func (m *Model) selectAll() {
 }
 
 // copyText sends text to the clipboard and confirms in the transcript.
-func (m *Model) copyText(text, what string) {
+func (m *View) copyText(text, what string) {
 	if strings.TrimSpace(text) == "" {
-		m.appendLine(stDim.Render("nothing to copy (" + what + ")"))
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "nothing to copy (" + what + ")"})
 		return
 	}
 	if err := m.clipboardWrite(text); err != nil {
-		m.appendLine(stErr.Render("copy failed: ") + err.Error())
+		m.appendEntryLocked(entry{Kind: entryError, Label: "copy failed: ", Text: err.Error()})
 		return
 	}
-	m.appendLine(stDim.Render(fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)))
+	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("copied %d chars (%s)", len([]rune(text)), what)})
 }
 
 // copyTarget implements /copy [selection|reply|tool|all].
-func (m *Model) copyTarget(target string) {
+func (m *View) copyTarget(target string) {
 	switch strings.ToLower(strings.TrimSpace(target)) {
 	case "", "selection", "sel":
 		if m.sel != nil {
@@ -180,7 +179,7 @@ func (m *Model) copyTarget(target string) {
 			return
 		}
 		if target != "" {
-			m.appendLine(stDim.Render("no selection; drag over the transcript first"))
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "no selection; drag over the transcript first"})
 			return
 		}
 		m.copyText(m.lastReply, "last reply")
@@ -191,17 +190,15 @@ func (m *Model) copyTarget(target string) {
 	case "all", "transcript":
 		m.copyText(strings.Join(m.plainLines(), "\n"), "transcript")
 	default:
-		m.appendLine(stDim.Render("usage: /copy [selection|reply|tool|all]"))
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "usage: /copy [selection|reply|tool|all]"})
 	}
 }
 
 // ---- right-click context menu ------------------------------------------------
 
-// openContextMenu opens the right-click copy/paste popup for one terminal:
-// like the menu it acts for its opener (a paste lands in that terminal's
-// draft), so it shares menuOwner.
-func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
-	m.menuOwner = from
+// openContextMenu opens the right-click copy/paste popup. Like the menu it
+// acts for this terminal: a paste lands in this terminal's draft.
+func (m *View) openContextMenu() (tea.Model, tea.Cmd) {
 	var items []pickItem
 	if m.sel != nil {
 		items = append(items, pickItem{id: "sel", label: "Copy selection", desc: fmt.Sprintf("%d chars", len([]rune(m.selectionText())))})
@@ -217,7 +214,7 @@ func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
 	}
 	m.prevMode = m.mode
 	m.picker = &picker{title: "Copy / paste", items: items, inline: true,
-		onPick: func(m *Model, it pickItem) (tea.Model, tea.Cmd) {
+		onPick: func(m *View, it pickItem) (tea.Model, tea.Cmd) {
 			m.mode = m.idleMode()
 			switch it.id {
 			case "sel":
@@ -232,11 +229,10 @@ func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
 			case "paste":
 				text, err := m.clipboardRead()
 				if err != nil {
-					m.appendLine(stErr.Render("paste failed: ") + err.Error())
+					m.appendEntryLocked(entry{Kind: entryError, Label: "paste failed: ", Text: err.Error()})
 				} else {
-					in := m.inputFor(from)
-					in.SetValue(in.Value() + text)
-					in.CursorEnd()
+					m.input.SetValue(m.input.Value() + text)
+					m.input.CursorEnd()
 				}
 			case "clear":
 				m.clearSelection()
@@ -248,33 +244,17 @@ func (m *Model) openContextMenu(from int) (tea.Model, tea.Cmd) {
 }
 
 // idleMode is where to return after a popup: busy if a run is in progress.
-func (m *Model) idleMode() mode {
+func (m *View) idleMode() mode {
 	if m.running {
 		return modeBusy
 	}
 	return modeInput
 }
 
-func (m *Model) handleContextMenuKey(k tea.KeyMsg, from int) (tea.Model, tea.Cmd) {
-	if from != m.menuOwner {
-		// The popup acts for the terminal that opened it; everyone else
-		// keeps typing into their own input line (see handleGuestKey).
-		return m.handleGuestKey(k, from)
-	}
-	if k.Type == tea.KeyEsc || k.Type == tea.KeyCtrlC {
-		m.picker = nil
-		m.mode = m.idleMode()
-		return m, nil
-	}
-	// handlePickerKey (and this popup's own onPick) leave through
-	// m.idleMode(), so a run still in progress keeps modeBusy on its own.
-	return m.handlePickerKey(k, from)
-}
-
-func (m *Model) contextMenuBox() string {
+func (m *View) contextMenuBox() string {
 	p := m.picker
 	var b strings.Builder
-	b.WriteString(stModalTi.Render(p.title) + stDim.Render("  ↑↓ pick · Enter · Esc close") + "\n")
+	b.WriteString(m.st.ModalTi.Render(p.title) + m.st.Dim.Render("  ↑↓ pick · Enter · Esc close") + "\n")
 	b.WriteString(m.renderPickList(p, m.popupRows(8), m.omitPopupDesc()))
-	return stBorder.Width(m.width - 4).Render(b.String())
+	return m.st.Border.Width(m.width - 4).Render(b.String())
 }

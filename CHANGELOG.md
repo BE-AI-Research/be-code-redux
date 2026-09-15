@@ -1,5 +1,52 @@
 # BE-Code Changelog
 
+## v0.8.0 — every terminal renders itself
+
+- **The title and the input field take the theme's own text colour.** Every
+  theme now carries a body-text colour; the `BE-Code Redux` title and the
+  typed text use it, and the input line no longer paints an ANSI-black band
+  under the cursor line. Both used to rely on the terminal's default colours,
+  which under a theme that recolours the window background left Termux
+  showing neither the title nor what was being typed, and left the title in
+  VS Code's own foreground colour whatever theme was chosen.
+
+- **The transcript is anchored to the bottom of its viewport.** A short
+  transcript now sits just above the input line, padded from the top, instead
+  of at the top with blank rows under it. The newest lines are in the same
+  place whether the viewport is full or not, which is what a phone terminal
+  whose pty counts the rows hidden under its keyboard (Termux reports 49 rows
+  while showing about 19) needs to keep showing them.
+
+- **`install.sh` refuses a stale prebuilt binary.** Without a Go toolchain the
+  installer falls back to `dist/` or `bin/`; it now accepts only a binary whose
+  `--version` matches `build.mk`, prints why a candidate was skipped, and fails
+  with instructions instead of silently installing an old build under the new
+  version's name. A packaged tree that still carries old cross-compiles can no
+  longer masquerade as the current release on a machine without Go.
+
+- **Per-terminal rendering in shared sessions.** The host now runs one
+  renderer per attached terminal: each has its own size and layout (a phone
+  gets compact while the desktop keeps the full layout and header), its own
+  scroll position, selection, input line and theme. The transcript, agent,
+  message queue, roster, approvals and pickers are one shared session. The
+  0.6.0 overlay mechanism and the "smallest terminal wins" shared size are
+  gone. (`internal/tui`: `Session` + `View`; `internal/live`:
+  `ClientOutput`, `OnClientSize`, `Drop`.)
+- **Shared prompts, answered once.** Approvals, the plan prompt and the
+  model/provider/session pickers appear on every terminal; the first answer
+  wins and the others close with `answered by <label>`. The shared review
+  prompt uses the same path.
+- **Themes per device.** `/theme <name>` recolours only the terminal that ran
+  it and is remembered in `client_themes` under that device's label;
+  `/theme default <name>` sets the config default for new devices; `/theme`
+  alone opens the picker, whose title reports the theme in use and where it came from.
+- A terminal whose renderer fails is disconnected with `view error`; the
+  session and the other terminals continue.
+- Fixed: `/plan` now runs as a cancellable turn (Esc cancels planning while
+  it is in progress), and `/init`, `/verify`, `/commit` and `/compact` report
+  through the same shared run-state path as an ordinary turn, so every
+  attached terminal sees them start and finish consistently.
+
 ## v0.7.2 — live sessions in the session picker
 
 - **`/sessions`, `/menu` → Resume and `/resume <code>` see live sessions that

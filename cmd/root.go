@@ -508,10 +508,10 @@ func runInteractive(cmd *cobra.Command) error {
 		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 		return repl.Run(ctx)
 	}
-	m := tui.New(cfg, ag, p)
-	coord := review.New(mode, editor, m.ReviewTerminal(), nil)
-	m.SetReview(coord)
+	s := tui.NewSession(cfg, ag, p)
+	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
+	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
-	return m.Run(ctx)
+	return s.RunLocal(ctx)
 }

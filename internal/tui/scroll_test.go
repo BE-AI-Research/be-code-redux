@@ -7,10 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/brown-enterprises/be-code/internal/agent"
-	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
-	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 type nullProvider struct{}
@@ -22,35 +19,15 @@ func (nullProvider) Chat(context.Context, provider.ChatRequest, provider.StreamF
 func (nullProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (nullProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
 
-// newTestModel builds a model and gives it its first WindowSizeMsg. Each
-// prep func runs on the agent before the model is created, for state the
-// UI reads at startup (e.g. an attached editor).
-func newTestModel(t *testing.T, prep ...func(*agent.Agent)) *Model {
-	t.Helper()
-	cfg := config.Default()
-	cfg.RepoMap = false
-	reg, err := tools.NewRegistry(t.TempDir(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
-	for _, f := range prep {
-		f(ag)
-	}
-	m := New(cfg, ag, nullProvider{})
-	m.rootCtx = context.Background()
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	return m
-}
-
 // The transcript viewport must be a real, initialized viewport: PgUp and the
 // mouse wheel scroll it. A zero-valued viewport.Model has an empty KeyMap
 // and mouse wheel disabled, so every scroll key was silently ignored.
 func TestTranscriptScrollsWithPageUpAndWheel(t *testing.T) {
 	m := newTestModel(t)
 	for i := 0; i < 200; i++ {
-		m.appendLine(strings.Repeat("x", 10))
+		m.appendEntry(entry{Kind: entryPlain, Text: strings.Repeat("x", 10)})
 	}
+	flush(m)
 	if !m.vp.AtBottom() {
 		t.Fatal("expected transcript pinned to bottom after append")
 	}
@@ -97,7 +74,7 @@ func TestUsageSnapshotUsesLimit(t *testing.T) {
 func TestBusyEnterQueuesMessage(t *testing.T) {
 	m := newTestModel(t)
 	m.mode = modeBusy
-	m.inputFor(0).SetValue("also add tests")
+	m.input.SetValue("also add tests")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.ag.Pending() != 1 {
 		t.Fatalf("pending = %d, want 1", m.ag.Pending())
@@ -105,7 +82,7 @@ func TestBusyEnterQueuesMessage(t *testing.T) {
 	if m.mode != modeBusy {
 		t.Fatal("queuing must not change mode")
 	}
-	if !strings.Contains(m.transcript.String(), "queued") {
+	if !strings.Contains(m.rendered.String(), "queued") {
 		t.Fatal("transcript does not show the queued message")
 	}
 }
@@ -114,12 +91,18 @@ func TestBusyEnterQueuesMessage(t *testing.T) {
 func TestLeftoverQueueStartsNextTurn(t *testing.T) {
 	m := newTestModel(t)
 	m.mode = modeBusy
+	var ran string // stands in for the next turn's run, and records it
+	m.startTurnHook = func(text string) { ran = text }
 	m.ag.Enqueue("next thing please")
-	m.Update(turnDoneMsg{})
+	m.finishTurn(nil, nil)
+	flush(m)
+	if ran != "next thing please" {
+		t.Fatalf("the next turn ran %q, want the queued text", ran)
+	}
 	if m.mode != modeBusy {
 		t.Fatalf("expected a new turn to start, mode=%v", m.mode)
 	}
-	if !strings.Contains(m.transcript.String(), "next thing please") {
+	if !strings.Contains(m.rendered.String(), "next thing please") {
 		t.Fatal("queued text not echoed as the new turn")
 	}
 }
@@ -134,5 +117,42 @@ func TestEscDiscardsQueue(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.ag.Pending() != 0 {
 		t.Fatalf("queue survived cancel: %d", m.ag.Pending())
+	}
+}
+
+// A short transcript sits at the bottom of its viewport, just above the
+// input line, not at the top with blank rows under it. A terminal that shows
+// only the bottom of a frame taller than its screen (a phone's pty reports
+// the rows under the keyboard) then still sees the newest lines; and a long
+// transcript already reads that way, so the two states look alike.
+func TestShortTranscriptIsAnchoredToTheBottom(t *testing.T) {
+	m := newTestModel(t) // 80x24: header hidden, viewport 24-3-1-1 = 19 rows
+	m.appendEntry(entry{Kind: entryDim, Text: "first line"})
+	m.appendEntry(entry{Kind: entryDim, Text: "second line"})
+	flush(m)
+	rows := strings.Split(m.View(), "\n")
+	vpRows := rows[:m.vp.Height]
+	// The transcript keeps its one blank row between the last line and the
+	// input (every entry ends in a newline), as a full viewport shows it.
+	h := len(vpRows)
+	if strings.TrimSpace(vpRows[h-1]) != "" || !strings.Contains(vpRows[h-2], "second line") || !strings.Contains(vpRows[h-3], "first line") {
+		t.Fatalf("short transcript is not anchored to the bottom of the viewport:\n%s", strings.Join(vpRows, "\n"))
+	}
+	if strings.TrimSpace(vpRows[0]) != "" {
+		t.Fatalf("top viewport row should be padding, got %q", vpRows[0])
+	}
+	// Mouse coordinates still map onto the wrapped lines: the row above the
+	// blank one is the second entry.
+	line, _, ok := m.transcriptCoords(0, m.headerHeight()+m.vp.Height-2)
+	if !ok || !strings.Contains(m.plainLines()[line], "second line") {
+		t.Fatalf("coords: ok=%v line=%d %q", ok, line, m.plainLines()[min(line, len(m.plainLines())-1)])
+	}
+	// Once the transcript outgrows the viewport, no padding remains.
+	for i := 0; i < 40; i++ {
+		m.appendEntry(entry{Kind: entryDim, Text: "more"})
+	}
+	flush(m)
+	if strings.TrimSpace(strings.Split(m.View(), "\n")[0]) == "" {
+		t.Fatal("padding left in a full viewport")
 	}
 }

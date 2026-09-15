@@ -27,7 +27,9 @@ quality.** Every design decision follows from that.
 
 ```bash
 ./install.sh              # user install to ~/.local/bin (builds from source when
-                          # Go >= 1.22 is present, else uses bin/ or dist/ prebuilt);
+                          # Go >= 1.22 is present, else uses a dist/ or bin/ prebuilt
+                          # that reports this tree's build.mk VERSION — a stale one is
+                          # refused, never installed under the new version's name);
                           # installs shell completions, offers the setup wizard
 ./install.sh --system     # system-wide to /usr/local/bin
 PREFIX=/opt/be ./install.sh   # custom prefix
@@ -91,12 +93,14 @@ session total).
 
 Thirteen palettes: `dark` (default), `light`, `mono`, `dracula`, `nord`, `gruvbox`,
 `monokai`, `one-dark`, `solarized-dark`, `solarized-light`, `tokyo-night`, `catppuccin`
-and `github-light`. `/theme` opens a picker, `/theme nord` sets one directly; the choice
-applies at once and is saved as `theme` in the config. The ten named themes also
-recolour the terminal window itself (background, and foreground for light themes) on
-terminals that support it, restored when BE-Code exits; set `theme_terminal_colors`
-to false to keep your terminal's own background. Plain mode uses your terminal's own
-colours, so there `/theme` only records the choice for the TUI.
+and `github-light`. `/theme` opens this terminal's theme picker, whose title reports the current theme and where it came from;
+`/theme nord` applies one for this terminal only, at once, remembered for this device
+in `client_themes`; `/theme default nord` instead sets `theme` — what a new device
+starts from. Pick from a list via `/menu` → Settings → Theme. The ten named themes
+also recolour the terminal window itself (background, and foreground for light
+themes) on terminals that support it, restored when BE-Code exits; set
+`theme_terminal_colors` to false to keep your terminal's own background. Plain mode
+uses your terminal's own colours, so there `/theme` only records the choice for the TUI.
 
 ## Select and copy
 
@@ -209,18 +213,28 @@ overwrite that host's turns (`session file is owned by live host <pid>; autosave
 disabled for this session`). On exit that run is written out under a fresh code
 instead — `saved as a new session: be-code --resume <code>`.
 
-**Every terminal has its own input line.** Any number of terminals can be
-attached at once, and each one types into its own prompt: your half-written
-message stays on your screen and nobody else's, and the palette you opened with
-`/`, the `/menu` you opened, the right-click menu, your command history and your
-queued-message popup all belong to the terminal that opened them. Press Enter
-and the message goes into the one shared transcript, prefixed with the terminal
-that sent it (`local (pid 4321)> …`) whenever more than one terminal is
-attached — with a single terminal the prefix is the usual `you> `. Everything
-else is one shared rendering: the transcript, the header, the context wheel, the
-bottom line, and every modal (approvals, the model/provider/session/theme
-pickers, plan mode) — an approval prompt can be answered from whichever terminal
-is nearest, and Esc from any of them closes it.
+**Every terminal renders itself.** The host runs one program per attached
+terminal, each at its own size and layout (a phone gets the compact layout
+while the desktop keeps its header and full layout), with its own scroll
+position, selection and input line: your half-written message stays on your
+screen and nobody else's, and the palette you opened with `/`, the `/menu` you
+opened, the right-click menu, your command history and your queued-message
+popup all belong to the terminal that opened them. Press Enter and the message
+goes into the one shared transcript, prefixed with the terminal that sent it
+(`local (pid 4321)> …`) whenever more than one terminal is attached — with a
+single terminal the prefix is the usual `you> `. The transcript, the agent, the
+message queue and the roster live on one shared session underneath; each
+terminal's program just renders its own view of it, at its own size and in its
+own theme (see "Themes" for `/theme`'s per-device semantics).
+
+**Shared prompts, answered once.** Approvals, the plan prompt and the
+model/provider/session pickers appear on every attached terminal at once.
+Whichever terminal answers first decides for the whole session — the verdict
+lands on the shared transcript, so everyone sees what was decided — and the
+rest close their own copy with the dimmed note `answered by <label>` (or
+`answered in VS Code` when the editor answered it instead). Esc from any of
+them closes it the same way. A terminal whose renderer fails is disconnected
+(`view error`) without taking the session or any other terminal down with it.
 
 The bottom line shows `⧉ 2` (`# 2` on non-UTF-8 terminals) followed by the
 attached terminals' labels, and `/clients` lists them with their sizes. Chords
@@ -236,14 +250,14 @@ are typed in the attached terminal rather than sent to the session:
 `/quit` ends the session for everybody: every attached terminal prints the
 `resume:` line and drops back to its shell.
 
-**Everyone runs at the smallest size.** One session renders one screen, so the
-shared size is the *minimum* across attached terminals — attach a phone and your
-desktop view shrinks to the phone's size until the phone detaches. That is the
-deliberate trade-off for a single shared rendering (rather than per-client
-re-rendering). Below 70 columns or 20 rows the TUI switches to its **compact
+**Each terminal keeps its own size.** Attach a phone alongside a desktop and
+only the phone relayouts to its own size — the desktop's view is untouched.
+Below 70 columns or 20 rows a terminal's own program switches to its **compact
 layout**: no header, a one-line status, a bare `>` prompt, popups without
-descriptions. `layout: compact`/`full` forces it either way. A phone SSH app is
-therefore a usable second head on a session, not a broken one.
+descriptions; a resize above that threshold brings the header and full layout
+straight back. `layout: compact`/`full` forces it either way, per terminal. A
+phone SSH app is therefore a usable second head on a session without shrinking
+anyone else's view.
 
 Knobs: `--no-host` (or `host_sessions: false`) keeps the session in the launching
 process the old way — nothing to attach to, and `/clients` says so. Plain mode
@@ -491,10 +505,14 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `compat_tool_calls` — `auto` | `always` | `never` (profiles refine `auto` per family)
 - `verify_on_done` (true), `auto_approve_shell` (false), `approve_file_writes` (true)
 - `ui` — `tui` | `plain`; `theme` — `dark` | `light` | `mono`
+- `client_themes` ({}): theme per device, keyed by the attached terminal's label
+  without its pid (`"ssh from 10.0.0.5": "nord"`). Written by `/theme <name>` in a
+  shared session; `/theme default <name>` sets `theme` instead.
 - `layout` — `auto` (default) | `compact` | `full`; `auto` switches the TUI to a
   reduced layout (no header, short prompt, one-line status, popups without
-  descriptions) below 70 columns or 20 rows — the size every attached terminal
-  is clamped to in a served/shared session — `compact`/`full` force it on or off
+  descriptions) below 70 columns or 20 rows. Each attached terminal is judged by
+  its own size, so one can be compact while another keeps the full layout;
+  `compact`/`full` force it on or off
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review

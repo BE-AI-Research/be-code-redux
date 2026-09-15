@@ -10,7 +10,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
-func busyModel(t *testing.T) *Model {
+func busyModel(t *testing.T) *View {
 	t.Helper()
 	m := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -34,15 +34,15 @@ func TestHeaderShowsSessionCode(t *testing.T) {
 
 func TestSafeCommandsRunWhileBusyOthersWait(t *testing.T) {
 	m := busyModel(t)
-	m.inputFor(0).SetValue("/clients")
+	m.input.SetValue("/clients")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.Contains(m.transcript.String(), "not served") {
-		t.Fatalf("/clients did not run during the turn:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "not served") {
+		t.Fatalf("/clients did not run during the turn:\n%s", m.rendered.String())
 	}
-	m.inputFor(0).SetValue("/verify")
+	m.input.SetValue("/verify")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.Contains(m.transcript.String(), "commands wait until the agent is done") {
-		t.Fatalf("/verify must wait:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "commands wait until the agent is done") {
+		t.Fatalf("/verify must wait:\n%s", m.rendered.String())
 	}
 	if m.ag.Pending() != 0 {
 		t.Fatal("a refused command must not be queued as text")
@@ -67,7 +67,7 @@ func TestPaletteAndMenuOpenWhileBusy(t *testing.T) {
 		t.Fatalf("palette must mark waiting commands while busy: %d wait, %d run", waits, runs)
 	}
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m.inputFor(0).SetValue("/menu")
+	m.input.SetValue("/menu")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if m.mode != modeMenu {
 		t.Fatalf("/menu did not open while busy: mode %v", m.mode)
@@ -78,13 +78,19 @@ func TestQuitWhileBusyCancelsTheRun(t *testing.T) {
 	m := busyModel(t)
 	cancelled := false
 	m.cancelFn = func() { cancelled = true }
-	m.inputFor(0).SetValue("/quit")
+	m.input.SetValue("/quit")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !cancelled {
 		t.Fatal("/quit during a run must cancel it first")
 	}
-	if cmd == nil {
+	// /quit ends the session, and this terminal exits on the quitMsg that
+	// broadcasts — which Update's own drain brings back round, so the quit
+	// has to be in the command it returns.
+	if !hasQuit(cmd) {
 		t.Fatal("/quit must quit")
+	}
+	if !m.quitSeen {
+		t.Fatal("the view never saw its own quitMsg")
 	}
 }
 
@@ -98,7 +104,7 @@ func TestTransientNoticeShowsAboveTheInputThenExpires(t *testing.T) {
 	if !strings.Contains(v, "waiting for backend") {
 		t.Fatalf("notice not shown:\n%s", v)
 	}
-	if strings.Contains(m.transcript.String(), "waiting for backend") {
+	if strings.Contains(m.rendered.String(), "waiting for backend") {
 		t.Fatal("transient notices must not enter the transcript")
 	}
 	lines := strings.Split(v, "\n")

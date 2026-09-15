@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func busyWithQueue(t *testing.T, msgs ...string) *Model {
+func busyWithQueue(t *testing.T, msgs ...string) *View {
 	t.Helper()
 	m := newTestModel(t)
 	m.mode = modeBusy
@@ -58,13 +58,13 @@ func TestEnterEditsAndRequeues(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m.Update(tea.KeyMsg{Type: tea.KeyDown}) // highlight the second
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.mode != modeBusy || m.inputFor(0).Value() != "rename output" {
-		t.Fatalf("mode=%v input=%q", m.mode, m.inputFor(0).Value())
+	if m.mode != modeBusy || m.input.Value() != "rename output" {
+		t.Fatalf("mode=%v input=%q", m.mode, m.input.Value())
 	}
 	if m.ag.Pending() != 1 || m.ag.Held() {
 		t.Fatalf("pending=%d held=%v; the edited message must be out of the queue and the hold released", m.ag.Pending(), m.ag.Held())
 	}
-	m.inputFor(0).SetValue("rename output to result.txt")
+	m.input.SetValue("rename output to result.txt")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if got := m.ag.Peek(); len(got) != 2 || got[1] != "rename output to result.txt" {
 		t.Fatalf("re-queue failed: %v", got)
@@ -80,7 +80,7 @@ func TestDropRemovesMessage(t *testing.T) {
 	if got := m.ag.Peek(); len(got) != 1 || got[0] != "keep me" {
 		t.Fatalf("after drop: %v", got)
 	}
-	if !strings.Contains(m.transcript.String(), "dropped") {
+	if !strings.Contains(m.rendered.String(), "dropped") {
 		t.Fatal("no confirmation line")
 	}
 	// Dropping the last one closes the popup.
@@ -102,12 +102,18 @@ func TestBottomLineShowsQueuedCount(t *testing.T) {
 // released, and the leftover queue starts the next turn as usual.
 func TestRunFinishingClosesQueuePopup(t *testing.T) {
 	m := busyWithQueue(t, "next thing")
+	var ran string // stands in for the next turn's run, and records it
+	m.startTurnHook = func(text string) { ran = text }
 	m.Update(tea.KeyMsg{Type: tea.KeyUp})
-	m.Update(turnDoneMsg{})
+	m.finishTurn(nil, nil)
+	flush(m)
 	if m.mode == modeQueue || m.ag.Held() {
 		t.Fatalf("popup survived the run: mode=%v held=%v", m.mode, m.ag.Held())
 	}
-	if !strings.Contains(m.transcript.String(), "next thing") {
-		t.Fatal("leftover queue did not start the next turn")
+	if ran != "next thing" {
+		t.Fatalf("leftover queue did not start the next turn: ran %q", ran)
+	}
+	if !strings.Contains(m.rendered.String(), "next thing") {
+		t.Fatal("the leftover was not echoed into the transcript")
 	}
 }

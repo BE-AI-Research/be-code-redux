@@ -31,12 +31,12 @@ func TestIDEMarkerAndStatusMsg(t *testing.T) {
 // the connection itself, dimmed, once it has the screen.
 func TestIDEConnectedLineInTranscript(t *testing.T) {
 	m := newTestModel(t, func(ag *agent.Agent) { ag.IDEName = "vscode"; ag.IDETools = 16 })
-	if !strings.Contains(m.transcript.String(), "VS Code connected: 16 tools") {
-		t.Fatalf("connection line missing from transcript:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "VS Code connected: 16 tools") {
+		t.Fatalf("connection line missing from transcript:\n%s", m.rendered.String())
 	}
-	before := strings.Count(m.transcript.String(), "VS Code connected")
+	before := strings.Count(m.rendered.String(), "VS Code connected")
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	if got := strings.Count(m.transcript.String(), "VS Code connected"); got != before {
+	if got := strings.Count(m.rendered.String(), "VS Code connected"); got != before {
 		t.Fatalf("line repeated on a later resize: %d occurrences", got)
 	}
 }
@@ -44,7 +44,7 @@ func TestIDEConnectedLineInTranscript(t *testing.T) {
 // With no editor attached nothing is announced.
 func TestNoIDENoConnectedLine(t *testing.T) {
 	m := newTestModel(t)
-	if strings.Contains(m.transcript.String(), "VS Code connected") {
+	if strings.Contains(m.rendered.String(), "VS Code connected") {
 		t.Fatal("connection line shown without an editor")
 	}
 }
@@ -56,7 +56,8 @@ func TestApprovalAllDisablesEditorReviewToo(t *testing.T) {
 	m.ag.Tools.ApproveWrites = true
 	m.cfg.ApproveFileWrites = true
 	resp := make(chan bool, 1)
-	m.Update(approvalMsg{action: "file_write", detail: "a.go", resp: resp})
+	go func() { resp <- m.approveFromAgent("file_write", "a.go") }()
+	waitFor(t, func() bool { flush(m); return m.mode == modeAsk })
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	if !<-resp {
 		t.Fatal("approval not granted")
@@ -74,7 +75,7 @@ func TestApprovalAllDisablesEditorReviewToo(t *testing.T) {
 func TestEditorNoteRendersUnlabelled(t *testing.T) {
 	m := newTestModel(t)
 	m.Update(noticeMsg("[editor: a.go, cursor line 3]"))
-	tr := m.transcript.String()
+	tr := m.rendered.String()
 	if !strings.Contains(tr, "[editor: a.go, cursor line 3]") {
 		t.Fatalf("note missing:\n%s", tr)
 	}
@@ -82,7 +83,7 @@ func TestEditorNoteRendersUnlabelled(t *testing.T) {
 		t.Fatalf("editor note carries the warning label:\n%s", tr)
 	}
 	m.Update(noticeMsg("something else"))
-	if !strings.Contains(m.transcript.String(), "note something else") {
+	if !strings.Contains(m.rendered.String(), "note something else") {
 		t.Fatal("ordinary notices lost their label")
 	}
 }

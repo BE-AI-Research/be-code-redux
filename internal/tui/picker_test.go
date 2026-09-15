@@ -80,11 +80,12 @@ func TestInProcessResumeOfALiveCodePrintsInsteadOfLoading(t *testing.T) {
 	}
 	before := m.ag.Session
 	m.resumeFrom("1", 0)
+	flush(m)
 	if m.ag.Session != before {
 		t.Fatal("an in-process resume of a live code must load nothing")
 	}
-	if !strings.Contains(m.transcript.String(), "ABC123 is live elsewhere; join it with: be-code attach ABC123") {
-		t.Fatalf("in-process resume of a live code:\n%s", m.transcript.String())
+	if !strings.Contains(m.rendered.String(), "ABC123 is live elsewhere; join it with: be-code attach ABC123") {
+		t.Fatalf("in-process resume of a live code:\n%s", m.rendered.String())
 	}
 }
 
@@ -110,14 +111,17 @@ func TestResumingTheSessionThisProgramAlreadyRunsIsANoSwitch(t *testing.T) {
 
 // After a switch, a fresh host with no turns and nobody watching quits
 // rather than lingering; one with turns, or with a client left, keeps
-// running.
+// running. The runner asks the session this on every empty roster (see
+// runner.onClients).
 func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	tempHome(t)
-	// The switch emptied the roster: nothing left to render for.
+	// The switch emptied the roster: nothing left to render for, and no work
+	// worth coming back to.
 	m := twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{}); cmd == nil {
+	m.SetClients(nil)
+	if !m.emptyAfterSwitch() {
 		t.Fatal("an empty fresh host must quit after a switch")
 	}
 
@@ -127,13 +131,12 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{{ID: 1, Label: "desk", UTF8: true}}); cmd != nil {
-		t.Fatal("a host with a client left must keep running")
-	}
+	setClients(m, live.ClientInfo{ID: 1, Label: "desk", UTF8: true})
 	if m.switchPending {
 		t.Fatal("a non-empty roster must clear the pending switch")
 	}
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("the remaining client detaching later must not quit the session")
 	}
 
@@ -142,7 +145,8 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999",
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}}}
 	m.switchPending = true
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("a session with turns must keep running")
 	}
 
@@ -152,14 +156,16 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.switchPending = true
 	m.running = true
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("a host with a run in flight must keep running")
 	}
 
 	// Without a switch, an empty roster is just everyone detaching.
 	m = twoClients(t)
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
-	if cmd := m.updateClients(clientsMsg{}); cmd != nil {
+	m.SetClients(nil)
+	if m.emptyAfterSwitch() {
 		t.Fatal("detaching is not switching; the session keeps running")
 	}
 
@@ -168,7 +174,7 @@ func TestEmptyHostQuitsAfterTheLastClientSwitchesAway(t *testing.T) {
 	m.ag.Session = &store.Session{ID: "1", Code: "ZZZ999"}
 	m.clients = nil
 	m.switchPending = true
-	m.updateClients(clientsMsg{{ID: 3, Label: "new", UTF8: true}})
+	setClients(m, live.ClientInfo{ID: 3, Label: "new", UTF8: true})
 	if m.switchPending {
 		t.Fatal("an attach must clear the pending switch")
 	}
@@ -220,13 +226,13 @@ func TestResumeOfAnUnsavedLiveCodeSwitchesWithoutLoading(t *testing.T) {
 
 	_, cmd := m.resumeFrom("xyz789", 2)
 	if cmd == nil {
-		t.Fatalf("a live code must switch without a saved file:\n%s", m.transcript.String())
+		t.Fatalf("a live code must switch without a saved file:\n%s", m.rendered.String())
 	}
 	cmd()
 	if len(switched) != 1 || switched[0] != "2:XYZ789" {
 		t.Fatalf("switch: %v", switched)
 	}
-	if strings.Contains(m.transcript.String(), "no session") {
-		t.Fatalf("store error surfaced for a live code:\n%s", m.transcript.String())
+	if strings.Contains(m.rendered.String(), "no session") {
+		t.Fatalf("store error surfaced for a live code:\n%s", m.rendered.String())
 	}
 }
