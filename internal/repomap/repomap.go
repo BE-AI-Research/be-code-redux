@@ -96,8 +96,7 @@ func Build(root string, budget int) string {
 		if walked > maxFilesWalked {
 			return fmt.Errorf("cap")
 		}
-		exts, ok := extractors[strings.ToLower(filepath.Ext(d.Name()))]
-		if !ok {
+		if _, ok := extractors[strings.ToLower(filepath.Ext(d.Name()))]; !ok {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -108,25 +107,7 @@ func Build(root string, budget int) string {
 		if rerr != nil {
 			return nil
 		}
-		src := string(data)
-		var syms []string
-		seen := map[string]bool{}
-		for _, ex := range exts {
-			for _, match := range ex.re.FindAllStringSubmatch(src, -1) {
-				name := match[len(match)-1]
-				if name == "" || seen[name] || name == "init" || name == "main" && len(syms) > 0 {
-					continue
-				}
-				seen[name] = true
-				syms = append(syms, name)
-				if len(syms) >= maxSymbolsFile {
-					break
-				}
-			}
-			if len(syms) >= maxSymbolsFile {
-				break
-			}
-		}
+		syms := Outline(d.Name(), data)
 		rel, _ := filepath.Rel(root, p)
 		if len(syms) > 0 {
 			entries = append(entries, entry{rel: rel, syms: syms})
