@@ -169,16 +169,30 @@ func Snapshot(ctx context.Context, root, message string) (string, error) {
 }
 
 // Head is the full HEAD commit hash, or "" outside a repository or before
-// the first commit.
+// the first commit. Any hex hash is accepted, not just a 40-character
+// sha1, so a sha256 repository still records a baseline.
 func Head(ctx context.Context, root string) string {
 	if !IsRepo(ctx, root) {
 		return ""
 	}
 	out, err := git(ctx, root, "rev-parse HEAD")
-	if err != nil || len(out) != 40 {
+	if err != nil || !isHex(out) {
 		return ""
 	}
 	return out
+}
+
+// isHex reports whether s is a non-empty run of hex digits.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 // Porcelain is `git status --porcelain`, or "" outside a repository.

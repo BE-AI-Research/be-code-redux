@@ -190,22 +190,44 @@ func (r *Registry) Dispatch(ctx context.Context, call provider.ToolCall) Result 
 		return Result{IsError: true, Content: fmt.Sprintf(
 			"unknown tool %q; available tools: %s", call.Name, strings.Join(r.Names(), ", "))}
 	}
-	args := map[string]any{}
-	raw := strings.TrimSpace(call.Arguments)
-	if raw != "" && raw != "null" {
-		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			// Local models sometimes double-encode arguments as a JSON string.
-			var s string
-			if err2 := json.Unmarshal([]byte(raw), &s); err2 == nil {
-				if err3 := json.Unmarshal([]byte(s), &args); err3 != nil {
-					return badArgs(call.Name, err)
-				}
-			} else {
-				return badArgs(call.Name, err)
-			}
-		}
+	args, err := parseArgs(call.Arguments)
+	if err != nil {
+		return badArgs(call.Name, err)
 	}
 	return t.Run(ctx, args)
+}
+
+// ParseArgs decodes a tool call's arguments with exactly the tolerance
+// Dispatch applies, so anything that inspects a call before or after it
+// (the working-memory engine's lookup cache and its observer) sees the
+// same arguments the tool itself ran with: empty or "null" is an empty
+// object, and a JSON string that itself holds an object is unwrapped,
+// because local models sometimes double-encode their arguments. ok is
+// false only for arguments no tool could have run.
+func ParseArgs(raw string) (map[string]any, bool) {
+	args, err := parseArgs(raw)
+	return args, err == nil
+}
+
+// parseArgs is ParseArgs keeping the decode error, which Dispatch quotes
+// back to the model.
+func parseArgs(raw string) (map[string]any, error) {
+	args := map[string]any{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "null" {
+		return args, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		// Local models sometimes double-encode arguments as a JSON string.
+		var s string
+		if err2 := json.Unmarshal([]byte(raw), &s); err2 != nil {
+			return nil, err
+		}
+		if err3 := json.Unmarshal([]byte(s), &args); err3 != nil {
+			return nil, err
+		}
+	}
+	return args, nil
 }
 
 func badArgs(name string, err error) Result {

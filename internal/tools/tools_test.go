@@ -152,3 +152,32 @@ func TestRegistryMaxOutputTruncates(t *testing.T) {
 		t.Fatalf("output not bounded by MaxOutput: len=%d", len(res.Content))
 	}
 }
+
+func TestParseArgsMatchesDispatchTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		{"", "", true},
+		{"   ", "", true},
+		{"null", "", true},
+		{`{"path":"a.go"}`, "a.go", true},
+		{`"{\"path\":\"a.go\"}"`, "a.go", true},
+		{`{not json`, "", false},
+		{`"plain string"`, "", false},
+		{`[1,2]`, "", false},
+	} {
+		args, ok := ParseArgs(tc.raw)
+		if ok != tc.ok {
+			t.Fatalf("ParseArgs(%q) ok = %v", tc.raw, ok)
+		}
+		if !ok {
+			continue
+		}
+		got, _ := args["path"].(string)
+		if got != tc.want {
+			t.Fatalf("ParseArgs(%q) path = %q", tc.raw, got)
+		}
+	}
+}

@@ -151,3 +151,62 @@ func TestParseHitsIgnoresContextLines(t *testing.T) {
 		t.Fatalf("hits %+v", hits)
 	}
 }
+
+// A model that passes the absolute path the tools also accept must land on
+// the same digest a relative read would, not a second one under another key.
+func TestAbsolutePathsInsideTheRootFoldOntoTheRelativeDigest(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	src := "package x\n\nfunc A() {}\n"
+	writeFile(t, root, "sub/x.go", src)
+	s.NextTurn()
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "sub/x.go"}, Content: numbered(src, 1)})
+	abs := filepath.Join(root, "sub", "x.go")
+	if f := s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": abs}, Content: numbered(src, 1)}); !strings.Contains(f, "already read") {
+		t.Fatalf("absolute re-read was not recognised: %q", f)
+	}
+	if ds := s.Digests(); len(ds) != 1 || ds[0].Path != "sub/x.go" {
+		t.Fatalf("digests %+v", s.Digests())
+	}
+	// An absolute path outside the workspace is not the model's to digest.
+	outside := filepath.Join(t.TempDir(), "elsewhere.go")
+	os.WriteFile(outside, []byte(src), 0o644)
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": outside}, Content: numbered(src, 1)})
+	if len(s.Digests()) != 1 {
+		t.Fatalf("path outside the root was digested: %+v", s.Digests())
+	}
+	// Writes key the same way.
+	s.Observe(Event{Tool: "write_file", Args: map[string]any{"path": abs}, Content: "wrote"})
+	if ds := s.Digests(); len(ds) != 1 || !ds[0].Edited {
+		t.Fatalf("write under an absolute path: %+v", s.Digests())
+	}
+}
+
+func TestStartTaskReplacesTheLineOnlyBetweenPlans(t *testing.T) {
+	s, _ := openTest(t, "s1", false)
+	s.StartTask("first request")
+	s.StartTask("second request")
+	if s.Ledger().Task != "second request" {
+		t.Fatalf("task %q", s.Ledger().Task)
+	}
+	s.SetPlan("planned work", []string{"one", "two"})
+	s.StartTask("a side question")
+	if s.Ledger().Task != "planned work" {
+		t.Fatalf("todo steps did not hold the task line: %q", s.Ledger().Task)
+	}
+	s.SetStep(1, "done")
+	s.SetStep(2, "doing")
+	s.StartTask("another side question")
+	if s.Ledger().Task != "planned work" {
+		t.Fatalf("a step in progress did not hold the task line: %q", s.Ledger().Task)
+	}
+	s.SetStep(2, "done")
+	s.StartTask("the next request")
+	if s.Ledger().Task != "the next request" {
+		t.Fatalf("finished plan did not release the task line: %q", s.Ledger().Task)
+	}
+	// EnsureTask still only fills an empty line.
+	s.EnsureTask("ignored")
+	if s.Ledger().Task != "the next request" {
+		t.Fatalf("EnsureTask overwrote: %q", s.Ledger().Task)
+	}
+}

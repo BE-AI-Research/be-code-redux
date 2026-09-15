@@ -86,6 +86,10 @@ type Agent struct {
 	// Engine is the working-memory store (nil when disabled): what the
 	// model has read, looked up and decided, kept by the harness and put
 	// back in the system prompt after compaction. See internal/engine.
+	// The field itself is set before a run starts (SetEngine) and read
+	// only on the agent goroutine; the store's own mutex guards its
+	// contents for the UI. Toggling the engine mid-run would have to go
+	// through the run state, not through this field.
 	Engine *engine.Store
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
@@ -318,7 +322,9 @@ func (a *Agent) composeSystem(gitInfo string) string {
 // SetEngine attaches the working-memory store and recomposes the prompt.
 func (a *Agent) SetEngine(s *engine.Store) {
 	a.Engine = s
-	a.History.System.Content = a.composeSystem("")
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem("")
+	}
 }
 
 // inRepoMap reports whether the repository map lists a file's symbols.
@@ -429,12 +435,14 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
+		// Recompose before compacting, not only once per request: the
+		// working-memory block has to reflect the reads made earlier in
+		// this same turn, and compaction has to measure the prompt it is
+		// actually about to send.
+		a.History.System.Content = a.composeSystem(a.lastGitInfo)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
-		// Recompose now, not only once per request: the working-memory
-		// block has to reflect the reads made earlier in this same turn.
-		a.History.System.Content = a.composeSystem(a.lastGitInfo)
 		req := provider.ChatRequest{
 			Model:       a.Model,
 			Messages:    a.History.Prompt(),
@@ -674,7 +682,7 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	var res tools.Result
 	served := false
 	if a.Engine != nil && (call.Name == "search" || call.Name == "lookup" || call.Name == "history") {
-		if args, ok := parseArgs(call.Arguments); ok {
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
 			if cached, hit := a.Engine.Cached(call.Name, args); hit {
 				res, served = tools.Result{Content: cached}, true
 			}
@@ -684,7 +692,10 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		res = a.Tools.Dispatch(ctx, call)
 	}
 	if a.Engine != nil && !served {
-		if args, ok := parseArgs(call.Arguments); ok {
+		// The same tolerant parse Dispatch used, so a double-encoded call
+		// is observed exactly as it ran; arguments no tool could run are
+		// simply not observed.
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
 			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 			}
@@ -729,19 +740,6 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		}
 	}
 	return res
-}
-
-// parseArgs decodes a tool call's arguments for the engine; a call whose
-// arguments are not an object is simply not observed.
-func parseArgs(raw string) (map[string]any, bool) {
-	args := map[string]any{}
-	if strings.TrimSpace(raw) == "" {
-		return args, true
-	}
-	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		return nil, false
-	}
-	return args, true
 }
 
 // observe hands a tool result to the engine; a panic there must not take
@@ -937,7 +935,10 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 	a.resetConsults() // the consultation budget is per request
 	a.autoVerifyUsed = false
 	if a.Engine != nil {
-		a.Engine.EnsureTask(userInput)
+		// A new request gets a fresh task line unless a plan is still in
+		// flight; mid-request repair rounds go through run, which only
+		// fills an empty one.
+		a.Engine.StartTask(userInput)
 		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
 			sum := sha256.Sum256([]byte(gitctx.Porcelain(ctx, a.Tools.Root)))
 			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: hex.EncodeToString(sum[:8])})

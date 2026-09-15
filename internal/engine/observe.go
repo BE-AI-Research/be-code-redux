@@ -44,6 +44,29 @@ func argStr(args map[string]any, keys ...string) string {
 
 func relPath(p string) string { return filepath.ToSlash(filepath.Clean(p)) }
 
+// relTo maps a model-supplied path to the root-relative slash path the
+// digests are keyed by. The tools accept an absolute path inside the
+// workspace, so the engine has to fold one onto the same key a relative
+// read would produce, or the same file is digested twice under two names.
+// An absolute path outside the root returns "" and is ignored.
+func (s *Store) relTo(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	if !filepath.IsAbs(p) {
+		return relPath(p)
+	}
+	root, err := filepath.Abs(s.root)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(root, filepath.Clean(p))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return relPath(rel)
+}
+
 func hashBytes(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -127,7 +150,7 @@ func mergeRange(ranges []Range, r Range) []Range {
 }
 
 func (s *Store) observeRead(ev Event) string {
-	rel := relPath(argStr(ev.Args, "path", "file", "filename"))
+	rel := s.relTo(argStr(ev.Args, "path", "file", "filename"))
 	if rel == "" || rel == "." {
 		return ""
 	}
@@ -171,7 +194,7 @@ func (s *Store) observeRead(ev Event) string {
 }
 
 func (s *Store) observeWrite(ev Event) {
-	rel := relPath(argStr(ev.Args, "path", "file", "filename"))
+	rel := s.relTo(argStr(ev.Args, "path", "file", "filename"))
 	if rel == "" || rel == "." {
 		return
 	}

@@ -2,10 +2,13 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -124,8 +127,129 @@ func TestResumeRebuildsTheBlockAndHandoffCarriesStoppedAt(t *testing.T) {
 	if err != nil || !strings.Contains(h, "Stopped at: two") {
 		t.Fatalf("handoff %v:\n%s", err, h)
 	}
+	// A second exit replaces the line rather than stacking another copy.
+	st.SetStep(2, "done")
+	st.SetStep(1, "doing")
+	h2, err := ag.WriteHandoff(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(h2, "Stopped at: ") != 1 || !strings.Contains(h2, "Stopped at: one") {
+		t.Fatalf("stopped-at lines accumulated:\n%s", h2)
+	}
 	ag.Resume(ag.Session)
-	if !strings.Contains(ag.History.System.Content, "doing: 2. two") {
+	if !strings.Contains(ag.History.System.Content, "doing: 1. one") {
 		t.Fatal("resume did not rebuild the block")
+	}
+}
+
+// A small model that double-encodes its arguments must still be observed:
+// the engine has to see the arguments the tool actually ran with.
+func TestDoubleEncodedArgumentsAreObserved(t *testing.T) {
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls <= 2 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{
+				{ID: fmt.Sprint(calls), Name: "read_file", Arguments: `"{\"path\":\"a.go\"}"`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644)
+	st := withEngine(t, ag)
+	var seen []string
+	ag.Events.OnToolEnd = func(name string, res tools.Result) { seen = append(seen, res.Content) }
+	if _, err := ag.Run(context.Background(), "look at a.go"); err != nil {
+		t.Fatal(err)
+	}
+	if ds := st.Digests(); len(ds) != 1 || ds[0].Path != "a.go" {
+		t.Fatalf("digests %+v", st.Digests())
+	}
+	if len(seen) != 2 || !strings.Contains(seen[1], "already read at turn 1 (unchanged)") {
+		t.Fatalf("tool results: %q", seen)
+	}
+}
+
+// Arguments no tool could run are not observed, and the call still reaches
+// the registry so the model sees the real error.
+func TestMalformedArgumentsSkipObservation(t *testing.T) {
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{
+				{ID: "1", Name: "read_file", Arguments: `{not json`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644)
+	st := withEngine(t, ag)
+	var errored bool
+	ag.Events.OnToolEnd = func(name string, res tools.Result) { errored = res.IsError }
+	if _, err := ag.Run(context.Background(), "look at a.go"); err != nil {
+		t.Fatal(err)
+	}
+	if !errored {
+		t.Fatal("malformed arguments did not reach the registry")
+	}
+	if len(st.Digests()) != 0 {
+		t.Fatalf("digested a call that never ran: %+v", st.Digests())
+	}
+}
+
+func TestRunFullRefreshesTheTaskLineBetweenRequests(t *testing.T) {
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	st := withEngine(t, ag)
+	if _, _, err := ag.RunFull(context.Background(), "first thing"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ag.RunFull(context.Background(), "second thing"); err != nil {
+		t.Fatal(err)
+	}
+	if st.Ledger().Task != "second thing" {
+		t.Fatalf("task %q", st.Ledger().Task)
+	}
+	if !strings.Contains(ag.History.System.Content, "Task: second thing") {
+		t.Fatalf("block did not follow the new request:\n%s", ag.History.System.Content)
+	}
+	// A plan in flight keeps its own task line.
+	st.SetPlan("the plan", []string{"one", "two"})
+	st.SetStep(1, "doing")
+	if _, _, err := ag.RunFull(context.Background(), "a side question"); err != nil {
+		t.Fatal(err)
+	}
+	if st.Ledger().Task != "the plan" {
+		t.Fatalf("plan task line was overwritten: %q", st.Ledger().Task)
+	}
+}
+
+func TestRunFullRecordsTheGitBaseline(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	for _, c := range []string{
+		"git init -q -b main", "git config user.email t@t.local", "git config user.name t",
+		"sh -c 'echo hello > a.txt'", "git add -A", "git commit -qm initial",
+	} {
+		if out, err := tools.RunShell(context.Background(), dir, c, 30*time.Second); err != nil {
+			t.Fatalf("%s: %v %s", c, err, out)
+		}
+	}
+	st := withEngine(t, ag)
+	if _, _, err := ag.RunFull(context.Background(), "do something"); err != nil {
+		t.Fatal(err)
+	}
+	b := st.Ledger().Baseline
+	if len(b.Head) < 40 || b.Dirty == "" {
+		t.Fatalf("baseline %+v", b)
 	}
 }

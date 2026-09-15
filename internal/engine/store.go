@@ -335,6 +335,26 @@ func (s *Store) EnsureTask(text string) {
 	if s.ledger.Task != "" {
 		return
 	}
+	s.setTaskLocked(text)
+}
+
+// StartTask refreshes the task line for a new request: always when the
+// ledger is empty, and otherwise only when no step is in progress and none
+// is still to do. A plan the model is part-way through keeps its own task
+// line, so the block does not start describing a side question as the task.
+func (s *Store) StartTask(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, st := range s.ledger.Steps {
+		if st.Status == "doing" || st.Status == "todo" {
+			return
+		}
+	}
+	s.setTaskLocked(text)
+}
+
+// setTaskLocked stores text's first line, bounded, as the task.
+func (s *Store) setTaskLocked(text string) {
 	line := strings.TrimSpace(strings.SplitN(text, "\n", 2)[0])
 	if len(line) > 200 {
 		line = line[:200]
