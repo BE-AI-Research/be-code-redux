@@ -156,14 +156,30 @@ func globMatch(pattern, s string) bool {
 // RunShell executes a command line under the platform shell, merging
 // stdout/stderr the way a developer sees it. Exported for the verify package.
 func RunShell(ctx context.Context, dir, command string, timeout time.Duration) (string, error) {
+	if runtime.GOOS == "windows" {
+		return runCmd(ctx, dir, timeout, "powershell", "-NoProfile", "-Command", command)
+	}
+	return runCmd(ctx, dir, timeout, "sh", "-c", command)
+}
+
+// RunArgv executes one program directly, with no shell between the caller
+// and the argument vector: nothing in args is ever word-split, globbed,
+// substituted or quoted away, on any platform. Tools that build a command
+// from model-supplied text (the git-backed lookups) must use this rather
+// than composing a shell line, because quoting rules differ between sh and
+// PowerShell and any mismatch is an injection. Timeout, process-group kill
+// and merged stdout/stderr behave exactly as in RunShell.
+func RunArgv(ctx context.Context, dir string, timeout time.Duration, name string, args ...string) (string, error) {
+	return runCmd(ctx, dir, timeout, name, args...)
+}
+
+// runCmd is the shared body of RunShell and RunArgv: the timeout, the
+// process-group teardown and the merged output buffer live here so the two
+// entry points cannot drift apart.
+func runCmd(ctx context.Context, dir string, timeout time.Duration, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout = &buf

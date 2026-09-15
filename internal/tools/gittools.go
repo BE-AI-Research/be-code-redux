@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,14 +34,12 @@ func NewGitTools(r *Registry, baseline BaselineFunc, minimal bool) []Tool {
 	return append(ts, &historyTool{r: r}, &showTool{r: r}, &changesTool{r: r, baseline: baseline})
 }
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
+// git runs one git command as an argument vector, never as a shell line:
+// queries, paths and revisions come from the model, and no quoting scheme
+// is safe across sh and PowerShell. RunArgv hands the arguments to git
+// untouched on every platform.
 func (r *Registry) git(ctx context.Context, args ...string) (string, error) {
-	quoted := make([]string, len(args))
-	for i, a := range args {
-		quoted[i] = shellQuote(a)
-	}
-	out, err := RunShell(ctx, r.Root, "git "+strings.Join(quoted, " "), gitTimeout)
+	out, err := RunArgv(ctx, r.Root, gitTimeout, "git", args...)
 	return strings.TrimRight(out, "\n"), err
 }
 
@@ -50,7 +49,14 @@ func (r *Registry) isRepo(ctx context.Context) bool {
 }
 
 // relInRoot confines a user path to the workspace and returns it relative.
+// A leading ":" is refused outright: git reads such a pathspec as magic
+// (":/a.go" is repo-top-relative, ":(top)" and ":!x" likewise), which would
+// walk straight out of the workspace even though the path itself cleans to
+// something inside it.
 func (r *Registry) relInRoot(p string) (string, error) {
+	if strings.HasPrefix(strings.TrimSpace(p), ":") {
+		return "", fmt.Errorf("bad path")
+	}
 	abs, err := r.resolve(p)
 	if err != nil {
 		return "", err
@@ -59,15 +65,26 @@ func (r *Registry) relInRoot(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.ToSlash(rel), nil
+	rel = filepath.ToSlash(rel)
+	if strings.HasPrefix(rel, ":") {
+		return "", fmt.Errorf("bad path")
+	}
+	return rel, nil
 }
 
+// gitErr reports a failed git call. When git printed something before it
+// failed, the partial output is returned with the cause appended, so a
+// timeout or a killed process is never mistaken for git's own answer.
 func gitErr(err error, out string) Result {
 	msg := strings.TrimSpace(out)
-	if msg == "" {
-		msg = err.Error()
+	switch {
+	case err == nil:
+		return Result{IsError: true, Content: msg}
+	case msg == "":
+		return Result{IsError: true, Content: err.Error()}
+	default:
+		return Result{IsError: true, Content: msg + "\n(" + err.Error() + ")"}
 	}
-	return Result{IsError: true, Content: msg}
 }
 
 // ---- lookup ----------------------------------------------------------------
@@ -95,17 +112,19 @@ func (t *lookupTool) Run(ctx context.Context, args map[string]any) Result {
 		if s, ok := t.r.byName["search"]; ok {
 			pat := q
 			if !argBool(args, false, "regex") {
-				pat = regexpQuote(q)
+				pat = regexp.QuoteMeta(q)
 			}
 			fallback := map[string]any{"pattern": pat}
-			if p := argString(args, "path"); p != "" {
+			if p := argString(args, "path", "dir"); p != "" {
 				fallback["path"] = p
 			}
 			return s.Run(ctx, fallback)
 		}
 		return Result{IsError: true, Content: "not a git repository"}
 	}
-	gargs := []string{"grep", "-n", "-I", "--no-color"}
+	// --untracked so a file the model just created is findable before it
+	// is staged; git still skips anything .gitignore excludes.
+	gargs := []string{"grep", "-n", "-I", "--no-color", "--untracked"}
 	if !argBool(args, false, "regex") {
 		gargs = append(gargs, "-F")
 	} else {
@@ -134,20 +153,12 @@ func (t *lookupTool) Run(ctx context.Context, args map[string]any) Result {
 	return Result{Content: truncate(out, t.r.MaxOutput)}
 }
 
-func regexpQuote(s string) string {
-	var b strings.Builder
-	for _, c := range s {
-		if strings.ContainsRune(`\.+*?()|[]{}^$`, c) {
-			b.WriteByte('\\')
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
-}
-
 // ---- history ---------------------------------------------------------------
 
 type historyTool struct{ r *Registry }
+
+// lineRange is the only shape accepted for a -L line range.
+var lineRange = regexp.MustCompile(`^\d+,\d+$`)
 
 func (t *historyTool) Name() string { return "history" }
 func (t *historyTool) Description() string {
@@ -173,6 +184,14 @@ func (t *historyTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	limit := argInt(args, 10, "limit", "n")
 	symbol, lines, query := argString(args, "symbol", "function"), argString(args, "lines", "range"), argString(args, "query", "text")
+	// Both go inside a -L argument, where git's own syntax would otherwise
+	// let a stray ":" or regex form address a different file or range.
+	if lines != "" && !lineRange.MatchString(lines) {
+		return Result{IsError: true, Content: "lines must be a,b"}
+	}
+	if strings.Contains(symbol, ":") {
+		return Result{IsError: true, Content: "bad symbol"}
+	}
 	var gargs []string
 	switch {
 	case argBool(args, false, "blame") && lines != "":
@@ -227,7 +246,10 @@ func (t *showTool) Run(ctx context.Context, args map[string]any) Result {
 	if strings.HasPrefix(rev, "-") {
 		return Result{IsError: true, Content: "bad revision"}
 	}
-	out, err := t.r.git(ctx, "show", rev+":"+rel)
+	// "rev:path" is resolved against the repository top, not the working
+	// directory, so a workspace nested inside a larger repo would read the
+	// top-level file of the same name. "./" makes it cwd-relative.
+	out, err := t.r.git(ctx, "show", rev+":./"+rel)
 	if err != nil {
 		return gitErr(err, out)
 	}
@@ -296,7 +318,9 @@ func (t *changesTool) Run(ctx context.Context, args map[string]any) Result {
 		}
 		out, err = t.r.git(ctx, "diff", "--no-color", since, "--", rel)
 	} else {
-		out, err = t.r.git(ctx, "diff", "--stat", "--no-color", since, "--")
+		// "." keeps the stat inside the workspace: without a pathspec git
+		// diffs the whole repository, which a nested workspace must not see.
+		out, err = t.r.git(ctx, "diff", "--stat", "--no-color", since, "--", ".")
 	}
 	if err != nil {
 		return gitErr(err, out)

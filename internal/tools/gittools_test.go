@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -120,5 +121,173 @@ func TestGitToolsOutsideARepository(t *testing.T) {
 	}
 	if len(NewGitTools(reg, nil, true)) != 1 {
 		t.Fatal("minimal must register lookup only")
+	}
+}
+
+// ---- fix round 1 -----------------------------------------------------------
+
+// gitSubWorkspace builds a repository whose workspace root is a *subdirectory*,
+// with a same-named file at the repository top, so the confinement fixes
+// (cwd-relative show, pathspec magic, repo-wide diff) have something to escape to.
+func gitSubWorkspace(t *testing.T) *Registry {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	ctx := context.Background()
+	os.MkdirAll(filepath.Join(dir, "sub"), 0o755)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package top\n\n// TOPMARKER\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "toplevel.go"), []byte("package top\n\nfunc TopOnly() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sub", "a.go"), []byte("package sub\n\n// SUBMARKER\nfunc SubOnly() {}\n"), 0o644)
+	for _, c := range []string{"git init -q -b main", "git config user.email t@t", "git config user.name t", "git add -A", "git commit -qm one"} {
+		if out, err := RunShell(ctx, dir, c, 30*time.Second); err != nil {
+			t.Fatalf("%s: %v %s", c, err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(dir, "toplevel.go"), []byte("package top\n\nfunc TopOnly() {}\n\nfunc TopNew() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sub", "a.go"), []byte("package sub\n\n// SUBMARKER\nfunc SubOnly() {}\n\nfunc SubNew() {}\n"), 0o644)
+	for _, c := range []string{"git add -A", "git commit -qm two"} {
+		RunShell(ctx, dir, c, 30*time.Second)
+	}
+	reg, err := NewRegistry(filepath.Join(dir, "sub"), func(string, string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
+
+// Item 1: git is run as an argument vector, so shell metacharacters in a
+// query are data. Nothing is executed and the literal text is found.
+func TestLookupQueryIsNeverShellInterpreted(t *testing.T) {
+	reg := gitWorkspace(t)
+	ctx := context.Background()
+	os.WriteFile(filepath.Join(reg.Root, "q.go"), []byte("package a\n\n// marker it's $(x) `y` end\n"), 0o644)
+	for _, c := range []string{"git add -A", "git commit -qm three"} {
+		RunShell(ctx, reg.Root, c, 30*time.Second)
+	}
+	lookup := byName(NewGitTools(reg, nil, false), "lookup")
+	if r := lookup.Run(ctx, map[string]any{"query": "it's $(x)"}); r.IsError || !strings.Contains(r.Content, "q.go:3") {
+		t.Fatalf("quoted literal: %+v", r)
+	}
+	if r := lookup.Run(ctx, map[string]any{"query": "`y` end"}); r.IsError || !strings.Contains(r.Content, "q.go:3") {
+		t.Fatalf("backticks: %+v", r)
+	}
+	// A query holding a newline must not be split into a second command,
+	// and substitutions must not run: no file may appear.
+	for _, q := range []string{"$(touch pwned)", "`touch pwned2`", "zzq1\nzzq2", "; touch pwned3"} {
+		if r := lookup.Run(ctx, map[string]any{"query": q}); r.IsError {
+			t.Fatalf("query %q errored: %+v", q, r)
+		}
+	}
+	for _, f := range []string{"pwned", "pwned2", "pwned3"} {
+		if _, err := os.Stat(filepath.Join(reg.Root, f)); err == nil {
+			t.Fatalf("%s was created: the query reached a shell", f)
+		}
+	}
+}
+
+// Item 2: "rev:path" is repo-top-relative; show must read the workspace's file.
+func TestShowIsRelativeToTheWorkspaceNotTheRepoTop(t *testing.T) {
+	reg := gitSubWorkspace(t)
+	show := byName(NewGitTools(reg, nil, false), "show")
+	r := show.Run(context.Background(), map[string]any{"path": "a.go"})
+	if r.IsError || !strings.Contains(r.Content, "SUBMARKER") || strings.Contains(r.Content, "TOPMARKER") {
+		t.Fatalf("show read the repo top: %+v", r)
+	}
+}
+
+// Item 3: a pathspec beginning with ":" is git magic and escapes the root.
+func TestPathspecMagicIsRejected(t *testing.T) {
+	reg := gitSubWorkspace(t)
+	ts := NewGitTools(reg, nil, false)
+	ctx := context.Background()
+	cases := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"lookup", map[string]any{"query": "TOPMARKER", "path": ":/a.go"}},
+		{"history", map[string]any{"path": ":/a.go", "query": "TopOnly"}},
+		{"changes", map[string]any{"path": ":/a.go"}},
+		{"show", map[string]any{"path": ":(top)a.go"}},
+	}
+	for _, c := range cases {
+		r := byName(ts, c.tool).Run(ctx, c.args)
+		if !r.IsError || r.Content != "bad path" {
+			t.Fatalf("%s took pathspec magic: %+v", c.tool, r)
+		}
+		if strings.Contains(r.Content, "TOPMARKER") || strings.Contains(r.Content, "toplevel") {
+			t.Fatalf("%s leaked a file outside the root: %+v", c.tool, r)
+		}
+	}
+}
+
+// Item 4: the diff stat is confined to the workspace, not the whole repository.
+func TestChangesStaysInsideTheWorkspace(t *testing.T) {
+	reg := gitSubWorkspace(t)
+	changes := byName(NewGitTools(reg, nil, false), "changes")
+	r := changes.Run(context.Background(), map[string]any{"since": "HEAD~1"})
+	if r.IsError || !strings.Contains(r.Content, "sub/a.go") {
+		t.Fatalf("changes: %+v", r)
+	}
+	if strings.Contains(r.Content, "toplevel.go") {
+		t.Fatalf("changes listed a file outside the workspace: %+v", r)
+	}
+}
+
+// Item 5: a file the model just created is findable before it is staged.
+func TestLookupFindsUntrackedFiles(t *testing.T) {
+	reg := gitWorkspace(t)
+	os.WriteFile(filepath.Join(reg.Root, "fresh.go"), []byte("package a\n\nfunc FreshlyMade() {}\n"), 0o644)
+	r := byName(NewGitTools(reg, nil, false), "lookup").Run(context.Background(), map[string]any{"query": "FreshlyMade"})
+	if r.IsError || !strings.Contains(r.Content, "fresh.go:3") {
+		t.Fatalf("untracked: %+v", r)
+	}
+}
+
+// Item 6: a partial result keeps the cause that cut it short.
+func TestGitErrLabelsPartialOutput(t *testing.T) {
+	r := gitErr(fmt.Errorf("timed out after 20s"), "partial output\n")
+	if !r.IsError || r.Content != "partial output\n(timed out after 20s)" {
+		t.Fatalf("partial: %+v", r)
+	}
+	if r := gitErr(fmt.Errorf("exit status 128"), ""); r.Content != "exit status 128" {
+		t.Fatalf("no output: %+v", r)
+	}
+}
+
+// Item 7: the non-repo fallback quotes a literal query for the regex search,
+// and honours the "dir" alias for the path.
+func TestLookupFallbackQuotesAndForwardsDir(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0o755)
+	os.WriteFile(filepath.Join(dir, "pkg", "x.go"), []byte("package x\nfunc Only() {}\n"), 0o644)
+	reg, _ := NewRegistry(dir, func(string, string) bool { return true })
+	lookup := byName(NewGitTools(reg, nil, true), "lookup")
+	r := lookup.Run(context.Background(), map[string]any{"query": "Only()", "dir": "pkg"})
+	if r.IsError || !strings.Contains(r.Content, "x.go:2") {
+		t.Fatalf("fallback: %+v", r)
+	}
+}
+
+// Item 8: -L arguments are validated before they reach git.
+func TestHistoryValidatesLinesAndSymbol(t *testing.T) {
+	reg := gitWorkspace(t)
+	h := byName(NewGitTools(reg, nil, false), "history")
+	ctx := context.Background()
+	if r := h.Run(ctx, map[string]any{"path": "a.go", "lines": "3-4"}); !r.IsError || r.Content != "lines must be a,b" {
+		t.Fatalf("lines: %+v", r)
+	}
+	if r := h.Run(ctx, map[string]any{"path": "a.go", "symbol": "Alpha:../../etc/passwd"}); !r.IsError || r.Content != "bad symbol" {
+		t.Fatalf("symbol: %+v", r)
+	}
+}
+
+// Item 9: a model that sends 1 for a boolean still gets the behaviour.
+func TestLookupAcceptsNumericBoolean(t *testing.T) {
+	reg := gitWorkspace(t)
+	r := byName(NewGitTools(reg, nil, false), "lookup").Run(context.Background(), map[string]any{"query": "Alpha", "symbol": float64(1)})
+	if r.IsError || !strings.Contains(r.Content, "return 2") {
+		t.Fatalf("numeric symbol: %+v", r)
 	}
 }

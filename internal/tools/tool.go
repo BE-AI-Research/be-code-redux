@@ -295,6 +295,9 @@ func argBool(args map[string]any, def bool, keys ...string) bool {
 				return t
 			case string:
 				return t == "true" || t == "yes" || t == "1"
+			case float64:
+				// Small models often send 1/0 where the schema says boolean.
+				return t != 0
 			}
 		}
 	}
