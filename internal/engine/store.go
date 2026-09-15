@@ -41,6 +41,11 @@ type Digest struct {
 	Note    string   `json:"note,omitempty"`
 	Turn    int      `json:"turn"`
 	Edited  bool     `json:"edited,omitempty"`
+
+	// seq breaks ties between digests touched in the same model turn (Turn
+	// only advances once per model call, not per tool call); it is
+	// in-memory only, reset each process start, and never persisted.
+	seq int64
 }
 
 type Step struct {
@@ -88,6 +93,7 @@ type Store struct {
 	notes    string
 	notesCap int
 	turn     int
+	touchSeq int64
 	dirty    bool
 
 	// cached is filled in by Task 2 (rendering the Working memory block);
@@ -239,6 +245,9 @@ func (s *Store) digestsLocked() []Digest {
 		if out[i].Turn != out[j].Turn {
 			return out[i].Turn > out[j].Turn
 		}
+		if out[i].seq != out[j].seq {
+			return out[i].seq > out[j].seq
+		}
 		return out[i].Path < out[j].Path
 	})
 	return out
@@ -251,9 +260,19 @@ func (s *Store) Digests() []Digest {
 	return s.digestsLocked()
 }
 
+// touchLocked bumps d's in-turn touch order so a digest touched later in
+// the same model turn (Turn only advances once per model call, not once
+// per tool call) still sorts before one touched earlier at the same Turn.
+// Callers hold s.mu.
+func (s *Store) touchLocked(d *Digest) {
+	s.touchSeq++
+	d.seq = s.touchSeq
+}
+
 // putDigest stores d, evicting the least recently touched past the cap.
 func (s *Store) putDigest(d *Digest) {
 	s.digests[d.Path] = d
+	s.touchLocked(d)
 	s.dirty = true
 	if len(s.digests) <= maxDigests {
 		return
