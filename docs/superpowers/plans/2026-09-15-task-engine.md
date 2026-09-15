@@ -2258,17 +2258,34 @@ func argStrings(args map[string]any, keys ...string) []string {
 
 - [ ] **Step 4: Guidance and plan subset**
 
-In `internal/agent/prompt.go`, `BuildSystemPrompt(specs, compat, notes)`: where the tool guidance paragraph is assembled, if any spec's name is `task`, append this paragraph verbatim as `const taskGuidance`:
+In `internal/agent/prompt.go`, `BuildSystemPrompt(specs, compat, notes)`: where the tool guidance paragraph is assembled, append guidance keyed on which engine tools are registered (check the spec names). When `task` is present, append `taskGuidance`; then, for each of `lookup`, `history`, `show`, `changes` present, append its sentence from `gitGuidance`, all in one paragraph:
 
+```go
+const taskGuidance = "Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again."
+
+var gitGuidance = map[string]string{
+	"lookup":  "To find where something is defined or used, call lookup (git grep over tracked files; symbol=true returns the whole enclosing function) before search or read_file.",
+	"history": "Before changing code you do not understand, call history on that file (symbol, lines, query or blame) to learn why it is the way it is.",
+	"show":    "To compare a file with an earlier revision, call show with rev instead of reading and guessing.",
+	"changes": "Before verifying, reviewing or summarising your work, call changes to see exactly what you altered instead of re-reading whole files.",
+}
 ```
-Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit, lookup with symbol=true, show for one range) and use changes to see what you altered instead of re-reading whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
-```
+
+Order: `task` paragraph first, then lookup, history, show, changes. A registry with none of them adds nothing.
 
 In `internal/agent/extras.go`, `planAgent`'s `Subset` gains `"task", "lookup", "history", "show", "changes"`.
 
-Append to `internal/agent/engine_test.go`:
+Append to `internal/agent/engine_test.go` (add `"encoding/json"` to its imports):
 
 ```go
+// stubTool is a no-op tool with a name, for prompt tests that key on names.
+type stubTool string
+
+func (s stubTool) Name() string                                  { return string(s) }
+func (s stubTool) Description() string                           { return "stub" }
+func (s stubTool) Schema() json.RawMessage                       { return json.RawMessage(`{"type":"object","properties":{}}`) }
+func (s stubTool) Run(context.Context, map[string]any) tools.Result { return tools.Result{Content: "stub"} }
+
 func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
 	if strings.Contains(ag.History.System.Content, "record a plan with the task tool") {
@@ -2279,6 +2296,15 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag.RefreshSystem()
 	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") || !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
 		t.Fatal("guidance missing")
+	}
+	if strings.Contains(ag.History.System.Content, "call lookup") {
+		t.Fatal("git guidance without the git tools")
+	}
+	ag.Tools.AddTool(stubTool("lookup")) // Task 6 adds the real one; the prompt keys on the name
+	ag.RefreshSystem()
+	sys := ag.History.System.Content
+	if !strings.Contains(sys, "call lookup") || strings.Contains(sys, "call history") || strings.Contains(sys, "call changes") {
+		t.Fatalf("minimal git guidance wrong:\n%s", sys)
 	}
 }
 ```

@@ -156,7 +156,18 @@ Harness assistance:
 - The system prompt gains a guidance paragraph on context use and progress
   notes, present whenever the `task` tool is registered:
 
-  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit, lookup with symbol=true, show for one range) and use changes to see what you altered instead of re-reading whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
+  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again.
+
+  and, for each git tool actually registered (all four with `engine.tools:
+  full`, only `lookup` with `minimal`), one sentence on when to use it:
+
+  > To find where something is defined or used, call lookup (git grep over tracked files; symbol=true returns the whole enclosing function) before search or read_file.
+  >
+  > Before changing code you do not understand, call history on that file (symbol, lines, query or blame) to learn why it is the way it is.
+  >
+  > To compare a file with an earlier revision, call show with rev instead of reading and guessing.
+  >
+  > Before verifying, reviewing or summarising your work, call changes to see exactly what you altered instead of re-reading whole files.
 
 User commands, in `ui.SlashCommandTable`, both UIs, busy-safe, view-local in
 the TUI:
