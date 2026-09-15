@@ -140,9 +140,10 @@ func TestEngineToolsSurviveAStoreThatWillNotOpen(t *testing.T) {
 	if r.IsError {
 		t.Fatalf("task over noopLedger: %+v", r)
 	}
-	// RefreshSystem ran: the prompt carries the working-memory guidance that
-	// only the registered task tool earns.
-	if !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
-		t.Fatal("system prompt was not recomposed for the registered tools")
+	// RefreshSystem ran: the prompt names the git tools it has, but not the
+	// Working memory block it does not have.
+	sys := ag.History.System.Content
+	if !strings.Contains(sys, "call lookup") || strings.Contains(sys, "Context is limited and does not survive compaction") {
+		t.Fatalf("degraded prompt wrong:\n%s", sys)
 	}
 }

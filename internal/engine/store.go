@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -182,8 +183,12 @@ func (s *Store) markDirtyLocked() {
 	s.mutSeq++
 }
 
+// tmpSeq makes every temp file name unique, so two flushes of one store
+// from different goroutines can never rename each other's file.
+var tmpSeq uint64
+
 func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomic.AddUint64(&tmpSeq, 1))
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}

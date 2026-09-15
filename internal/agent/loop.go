@@ -300,6 +300,16 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride
 	if sys == "" {
 		sys = BuildSystemPrompt(a.Tools.Specs(), a.compat || a.Cfg.CompatToolCalls == "auto", a.projectNotes)
+		if a.Engine == nil {
+			// No store, no Working memory block: keep the git sentences (the
+			// tools exist) but drop the paragraph that points at the block.
+			if full := engineGuidance(a.Tools.Specs()); full != "" {
+				sys = strings.TrimSuffix(sys, "\n\n"+full)
+				if g := guidanceFor(a.Tools.Specs(), false); g != "" {
+					sys += "\n\n" + g
+				}
+			}
+		}
 	}
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap

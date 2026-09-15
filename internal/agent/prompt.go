@@ -78,13 +78,18 @@ func BuildSystemPrompt(specs []provider.ToolSpec, compat bool, projectNotes stri
 // whichever engine tools are registered: taskGuidance when task is present,
 // then one sentence per git tool present, in a fixed order. A registry with
 // none of them adds nothing.
-func engineGuidance(specs []provider.ToolSpec) string {
+func engineGuidance(specs []provider.ToolSpec) string { return guidanceFor(specs, true) }
+
+// guidanceFor is engineGuidance with the task paragraph optional: an agent
+// whose store failed to open still has the tools but no Working memory
+// block, and must not be told to look for one.
+func guidanceFor(specs []provider.ToolSpec, withTask bool) string {
 	present := map[string]bool{}
 	for _, s := range specs {
 		present[s.Name] = true
 	}
 	var parts []string
-	if present["task"] {
+	if withTask && present["task"] {
 		parts = append(parts, taskGuidance)
 	}
 	for _, name := range []string{"lookup", "history", "show", "changes"} {
