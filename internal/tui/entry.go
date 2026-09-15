@@ -27,6 +27,12 @@ const (
 	entryError                      // Label (error style, e.g. "error ") then Text plain
 	entryQueued                     // Label dim (e.g. "queued> ") then Text plain
 	entryVerdict                    // Label (warn, e.g. "file_write") then Text "approved" (OK) or "denied" (Err)
+	// The co-working model's two lines: the question the primary (or the
+	// person) put to it, and the answer it gave. Both carry the co-worker's
+	// name as the Label and are rendered in the theme's Cowork colour, so a
+	// second voice in the transcript is never mistaken for the primary's.
+	entryCoworkAsk // Label = co-worker name ("<name>? "), Text = the question
+	entryCowork    // Label = co-worker name ("<name>> "), Text = the Markdown answer
 )
 
 type entry struct {
@@ -74,6 +80,10 @@ func renderEntry(e entry, st styles, width int, compact, richText bool) string {
 		return st.Err.Render(e.Label) + e.Text
 	case entryQueued:
 		return st.Dim.Render(e.Label) + e.Text
+	case entryCoworkAsk:
+		return st.Cowork.Render(e.Label+"? ") + e.Text
+	case entryCowork:
+		return st.Cowork.Render(e.Label+"> ") + ui.RenderMarkdown(e.Text, richText)
 	case entryVerdict:
 		v := st.Err.Render(e.Text)
 		if e.Text == "approved" {
