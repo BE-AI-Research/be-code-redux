@@ -59,6 +59,10 @@ type ChatRequest struct {
 	// used for auxiliary work (summaries, briefings) where minutes of
 	// deliberation buy nothing. Backends that cannot honor it ignore it.
 	NoThink bool
+	// ReasoningEffort asks a thinking model to think less or more:
+	// "low", "medium" or "high" ("" leaves the backend's default). Sent as
+	// OpenAI's reasoning_effort; backends that do not know it ignore it.
+	ReasoningEffort string
 }
 
 // Usage reports token accounting when the backend supplies it.

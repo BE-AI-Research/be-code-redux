@@ -73,11 +73,16 @@ type Config struct {
 	Providers       map[string]ProviderConfig `json:"providers"`
 
 	// Agent tuning
-	Temperature   float64 `json:"temperature"`
-	MaxTokens     int     `json:"max_tokens"`     // per completion; 0 = backend default
-	ContextTokens int     `json:"context_tokens"` // conversation budget for truncation
-	MaxTurns      int     `json:"max_turns"`      // tool-loop iterations per request
-	MaxRepairs    int     `json:"max_repairs"`    // verification repair attempts
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"` // per completion; 0 = backend default
+	// ReasoningEffort is sent to thinking models on every call: "low",
+	// "medium" or "high"; "" leaves the backend's default (often the
+	// highest). The tool loop drops to "low" for the rest of a request
+	// once reasoning has exhausted the window, whatever this says.
+	ReasoningEffort string `json:"reasoning_effort"`
+	ContextTokens   int    `json:"context_tokens"` // conversation budget for truncation
+	MaxTurns        int    `json:"max_turns"`      // tool-loop iterations per request
+	MaxRepairs      int    `json:"max_repairs"`    // verification repair attempts
 
 	// CompatToolCalls forces prompt-embedded JSON tool calls for models
 	// whose native tool-call support is unreliable. "auto" tries native

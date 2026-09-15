@@ -635,6 +635,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
+- `reasoning_effort` ("") — sent to thinking models on every call: `low`, `medium` or `high`; empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest. When reasoning exhausts the window the tool loop retries once at `low` regardless. On a 32k window with a 27B thinking model, `low` is the setting that keeps runs moving.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
   "Working memory"
 

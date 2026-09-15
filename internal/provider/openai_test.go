@@ -177,3 +177,31 @@ func TestEmptyStreamIsAnError(t *testing.T) {
 		t.Fatal("expected an error for an empty response body")
 	}
 }
+
+// reasoning_effort travels only when asked for: absent by default, so
+// backends that know the field keep their own default.
+func TestChatSendsReasoningEffortOnlyWhenSet(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1<<16)
+		n, _ := r.Body.Read(b)
+		bodies = append(bodies, string(b[:n]))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	p := NewOpenAICompat("test", srv.URL, "")
+	msgs := []Message{{Role: RoleUser, Content: "hi"}}
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: msgs}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: msgs, ReasoningEffort: "low"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bodies[0], "reasoning_effort") {
+		t.Fatalf("effort sent although unset: %s", bodies[0])
+	}
+	if !strings.Contains(bodies[1], `"reasoning_effort":"low"`) {
+		t.Fatalf("effort not sent: %s", bodies[1])
+	}
+}

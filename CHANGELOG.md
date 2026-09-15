@@ -2,6 +2,13 @@
 
 ## v0.10.0 — working memory
 
+- **Reasoning effort.** `reasoning_effort` (config) is sent to thinking models
+  as OpenAI's `reasoning_effort`; Ollama passes it through (verified: `low`
+  cut a Qwen3.8-27B reply's reasoning from 12.6k to 2k characters). A call
+  that spends the whole window reasoning and never answers is retried once
+  with context freed *and* `reasoning_effort=low`, instead of failing after
+  the free alone.
+
 - **Resume replays the transcript.** A resumed session (`--resume`, `attach`
   falling back, or `/resume`) shows what the terminal showed before you left,
   then a `— resumed here —` divider. `resume_replay: false` restores the blank

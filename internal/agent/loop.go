@@ -430,6 +430,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
 
 	emptyRetries, lengthRetries := 0, 0
+	effort := a.Cfg.ReasoningEffort
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
 		if a.Engine != nil {
 			a.Engine.NextTurn()
@@ -456,10 +457,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
 		req := provider.ChatRequest{
-			Model:       a.Model,
-			Messages:    a.History.Prompt(),
-			Temperature: a.temperature(),
-			MaxTokens:   a.Cfg.MaxTokens,
+			Model:           a.Model,
+			Messages:        a.History.Prompt(),
+			Temperature:     a.temperature(),
+			MaxTokens:       a.Cfg.MaxTokens,
+			ReasoningEffort: effort,
 		}
 		a.History.Extra = 0
 		if !a.compat {
@@ -493,13 +495,20 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 				// model, usually while still thinking. Free context and
 				// retry once; if nothing can be freed, explain precisely.
 				if resp.FinishReason == "length" {
-					if lengthRetries == 0 && a.freeContext(ctx) {
+					// Two levers, pulled together on the one retry: free
+					// context, and ask for less thinking — the reasoning is
+					// what ate the window, and a backend that honours
+					// reasoning_effort (Ollama does) cuts it several-fold.
+					freed := lengthRetries == 0 && a.freeContext(ctx)
+					lowered := lengthRetries == 0 && effort != "low"
+					if freed || lowered {
 						lengthRetries++
-						a.notice("model ran out of window while reasoning (%d chars of reasoning, no answer); freed context and retrying", len(resp.Reasoning))
+						effort = "low"
+						a.notice("model ran out of window while reasoning (%d chars of reasoning, no answer); freed context and retrying with reasoning_effort=low", len(resp.Reasoning))
 						continue
 					}
 					a.autosave(userInput)
-					return "", fmt.Errorf("model output was cut off (finish_reason=length) before it produced an answer: it spent the remaining window on reasoning (%d chars). Raise the backend window (OLLAMA_CONTEXT_LENGTH) or lower context_tokens so more of the window is reserved for generation", len(resp.Reasoning))
+					return "", fmt.Errorf("model output was cut off (finish_reason=length) before it produced an answer: it spent the remaining window on reasoning (%d chars), even after a retry with reasoning_effort=low. Raise the backend window (OLLAMA_CONTEXT_LENGTH), set reasoning_effort: low in config, or lower context_tokens so more of the window is reserved for generation", len(resp.Reasoning))
 				}
 				if emptyRetries == 0 {
 					emptyRetries++

@@ -450,3 +450,30 @@ func TestCompactEmptySummaryErrorCarriesTheBackendDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// Reasoning that exhausts the window is retried once with less of it: the
+// retry carries reasoning_effort=low whatever the config asked for, and the
+// configured effort is what every ordinary call sends.
+func TestReasoningExhaustionRetriesWithLowEffort(t *testing.T) {
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return &provider.ChatResponse{Content: "", Reasoning: strings.Repeat("think ", 2000), FinishReason: "length"}, nil
+		}
+		return &provider.ChatResponse{Content: "done", FinishReason: "stop"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.ReasoningEffort = "medium"; c.CompactWithModel = false })
+	var notices []string
+	ag.Events.OnNotice = func(s string) { notices = append(notices, s) }
+	out, err := ag.Run(context.Background(), "do the thing")
+	if err != nil || out != "done" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if len(p.reqs) != 2 || p.reqs[0].ReasoningEffort != "medium" || p.reqs[1].ReasoningEffort != "low" {
+		t.Fatalf("efforts: %v", []string{p.reqs[0].ReasoningEffort, p.reqs[len(p.reqs)-1].ReasoningEffort})
+	}
+	if len(notices) == 0 || !strings.Contains(notices[len(notices)-1], "reasoning_effort=low") {
+		t.Fatalf("notices: %v", notices)
+	}
+}

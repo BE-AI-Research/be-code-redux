@@ -76,7 +76,11 @@ type oaRequest struct {
 	Temperature float64     `json:"temperature"`
 	MaxTokens   int         `json:"max_tokens,omitempty"`
 	Stream      bool        `json:"stream"`
-	StreamOpts  *struct {
+	// ReasoningEffort: OpenAI's field; Ollama's OpenAI endpoint passes it
+	// to thinking models (verified: low cuts a Qwen3 reply's reasoning by
+	// roughly six times), unknown elsewhere and harmlessly ignored.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	StreamOpts      *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
 }
@@ -121,6 +125,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, req ChatRequest, onDelta Stream
 		MaxTokens:   req.MaxTokens,
 		Stream:      true,
 	}
+	wire.ReasoningEffort = req.ReasoningEffort
 	// Ask for usage in the final chunk; servers that don't know the field
 	// ignore it, and the ones that do give us real token counts.
 	wire.StreamOpts = &struct {
