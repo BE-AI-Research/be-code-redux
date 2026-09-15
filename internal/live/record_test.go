@@ -62,3 +62,28 @@ func TestLiveCodeIgnoresRecordsWhoseHostIsGone(t *testing.T) {
 		t.Fatalf("unknown code = %+v, want nil", got)
 	}
 }
+
+// Logs of hosts that are gone are kept for LogMaxAge and then pruned by
+// List; a live host's log is never touched, however old.
+func TestListPrunesOldLogsOfDeadHostsOnly(t *testing.T) {
+	dir := t.TempDir()
+	me := Record{Code: "LIVE01", PID: os.Getpid(), Socket: SocketPath(dir, "LIVE01"), Token: "t"}
+	if err := me.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-LogMaxAge - time.Hour)
+	for _, name := range []string{"LIVE01.log", "DEAD01.log", "DEAD02.log"} {
+		os.WriteFile(filepath.Join(dir, name), []byte("log\n"), 0o600)
+	}
+	os.Chtimes(filepath.Join(dir, "LIVE01.log"), old, old)
+	os.Chtimes(filepath.Join(dir, "DEAD01.log"), old, old)
+	if _, err := List(dir); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"LIVE01.log": true, "DEAD01.log": false, "DEAD02.log": true} {
+		_, err := os.Stat(filepath.Join(dir, name))
+		if (err == nil) != want {
+			t.Fatalf("%s present=%v, want %v", name, err == nil, want)
+		}
+	}
+}

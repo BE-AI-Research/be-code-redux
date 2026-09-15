@@ -612,7 +612,7 @@ func requestQuit(rec *live.Record) error {
 	// reflows the session for the terminals that are really watching it.
 	// Its keystrokes would be delivered tagged like any other client's, but
 	// it sends none: the only frame it writes is "quit".
-	hello := live.Hello{Token: rec.Token, Cols: 9999, Rows: 9999, Label: "sessions kill", UTF8: true}
+	hello := live.Hello{Token: rec.Token, Cols: 9999, Rows: 9999, Label: "sessions kill", UTF8: true, Control: true}
 	if err := live.WriteJSON(conn, live.FHello, hello); err != nil {
 		return err
 	}

@@ -2,6 +2,12 @@
 
 ## v0.10.0 — working memory
 
+- **Session hygiene.** `be-code sessions kill` no longer shows up in the
+  transcript as an attached terminal: its quit request travels on a control
+  connection the host never registers. Host logs (`~/.be-code/live/<code>.log`)
+  of sessions that have ended are pruned after 7 days whenever the live
+  registry is listed; a live host's log is never touched.
+
 - **Working memory.** The harness now remembers what the model has read,
   looked up and decided during a task and puts it back in the system prompt
   after every compaction and on resume, so a long task stops re-reading the
