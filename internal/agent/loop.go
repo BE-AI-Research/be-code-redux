@@ -845,6 +845,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 	task, prior := "", ""
 	var b strings.Builder
+	pending := map[string]string{} // tool call id → path (read_file only)
 	for i, m := range head {
 		if i == 0 && strings.HasPrefix(m.Content, summaryPrefix) {
 			prior = strings.TrimPrefix(m.Content, summaryPrefix)
@@ -852,6 +853,23 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 		if task == "" && m.Role == provider.RoleUser && !isToolResult(m) {
 			task = m.Content
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.Name == "read_file" {
+				if args, ok := tools.ParseArgs(tc.Arguments); ok {
+					if p, _ := args["path"].(string); p != "" {
+						pending[tc.ID] = p
+					}
+				}
+			}
+		}
+		if a.Engine != nil && m.Role == provider.RoleTool {
+			if p, ok := pending[m.ToolCallID]; ok {
+				if r, has := a.Engine.HasDigest(p); has {
+					fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
+					continue
+				}
+			}
 		}
 		fmt.Fprintf(&b, "[%s] %.600s\n", m.Role, m.Content)
 		for _, tc := range m.ToolCalls {
@@ -875,6 +893,11 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if prior != "" {
 		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
 	}
+	if a.Engine != nil {
+		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+			fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
+		}
+	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
@@ -896,6 +919,16 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if strings.TrimSpace(summary) == "" {
 		return fmt.Errorf("empty summary")
 	}
+	if a.Engine != nil {
+		body, files := engine.SplitFilesBlock(summary)
+		if files != "" {
+			a.Engine.ApplyFileNotes(files)
+		}
+		summary = body
+		if err := a.Engine.Flush(); err != nil {
+			a.notice("engine: %v; continuing without working memory", err)
+		}
+	}
 	a.History.Messages = append([]provider.Message{
 		{Role: provider.RoleUser, Content: summaryPrefix + summary},
 	}, tail...)
@@ -908,7 +941,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 const summaryPrefix = "[Conversation summary — earlier turns compacted]\n"
 
-const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text."
+const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text. Do not restate anything already in Working memory. End with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
 
 func looksLikeToolsUnsupported(err error) bool {
 	s := strings.ToLower(err.Error())

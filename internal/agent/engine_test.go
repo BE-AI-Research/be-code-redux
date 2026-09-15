@@ -228,6 +228,44 @@ func TestRunFullRefreshesTheTaskLineBetweenRequests(t *testing.T) {
 	}
 }
 
+func TestCompactUsesDigestsAndFeedsFileNotesBack(t *testing.T) {
+	var summaryReq provider.ChatRequest
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
+			summaryReq = req
+			return &provider.ChatResponse{Content: "The task is x.\n\nfiles:\n- a.go — defines A\n"}, nil
+		}
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc A() {}\n"), 0o644)
+	st := withEngine(t, ag)
+	st.NextTurn()
+	st.Observe(engine.Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "read a.go"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{"path":"a.go"}`}}})
+	ag.History.Add(provider.Message{Role: provider.RoleTool, ToolCallID: "1", Name: "read_file", Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "A is defined."})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "next"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "ok"})
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	u := summaryReq.Messages[1].Content
+	if !strings.Contains(u, "(read a.go lines 1–2; digested)") || strings.Contains(u, "package a") {
+		t.Fatalf("summary transcript still carries the read:\n%s", u)
+	}
+	if !strings.Contains(u, "Working memory:") || !strings.Contains(summaryReq.Messages[0].Content, "Do not restate anything already in Working memory.") {
+		t.Fatalf("summary request lacks the block or the instruction:\n%s\n%s", summaryReq.Messages[0].Content, u)
+	}
+	if st.Digests()[0].Note != "defines A" {
+		t.Fatalf("file note not applied: %+v", st.Digests())
+	}
+	if strings.Contains(ag.History.Messages[0].Content, "files:") {
+		t.Fatalf("files block not stripped from the stored summary:\n%s", ag.History.Messages[0].Content)
+	}
+}
+
 func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
