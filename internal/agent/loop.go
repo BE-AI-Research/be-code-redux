@@ -947,10 +947,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if a.Profile.StripThink {
 		summary = StripThink(summary)
 	}
+	filesOnly := false
 	if a.Engine != nil {
 		body, files := engine.SplitFilesBlock(summary)
 		if files != "" {
 			a.Engine.ApplyFileNotes(files)
+			filesOnly = strings.TrimSpace(body) == ""
 		}
 		summary = body
 		if err := a.Engine.Flush(); err != nil {
@@ -958,7 +960,21 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 	}
 	if strings.TrimSpace(summary) == "" {
-		return fmt.Errorf("empty summary")
+		// An empty summary is the one compaction failure a user actually
+		// sees, and the reply's shape is the only clue to why: say what
+		// the backend reported, and keep the raw head on stderr (the host
+		// log) where it survives the session.
+		why := fmt.Sprintf("finish=%s, %d prompt tokens, %d completion tokens, reasoning %d chars, raw reply %d chars",
+			resp.FinishReason, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, len(resp.Reasoning), len(resp.Content))
+		if filesOnly {
+			why = "files block only; " + why
+		}
+		head := resp.Content
+		if len(head) > 400 {
+			head = head[:400]
+		}
+		fmt.Fprintf(os.Stderr, "compaction: empty summary (%s); reply head: %q\n", why, head)
+		return fmt.Errorf("empty summary: %s", why)
 	}
 	a.History.Messages = append([]provider.Message{
 		{Role: provider.RoleUser, Content: summaryPrefix + summary},

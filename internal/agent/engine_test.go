@@ -426,3 +426,27 @@ func TestPlanPromptDoesNotPromiseWorkingMemory(t *testing.T) {
 		}
 	}
 }
+
+func TestCompactEmptySummaryErrorCarriesTheBackendDiagnostics(t *testing.T) {
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
+			return &provider.ChatResponse{Content: "", Reasoning: strings.Repeat("r", 12), FinishReason: "length",
+				Usage: provider.Usage{PromptTokens: 5000, CompletionTokens: 0}}, nil
+		}
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	for i := 0; i < 3; i++ {
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "q"})
+		ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "a"})
+	}
+	err := ag.Compact(context.Background())
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"empty summary", "finish=length", "5000 prompt tokens", "0 completion tokens", "reasoning 12 chars", "raw reply 0 chars"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q lacks %q", err.Error(), want)
+		}
+	}
+}
