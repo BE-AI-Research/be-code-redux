@@ -162,9 +162,10 @@ the TUI:
 
 - `/task` prints the ledger; `/task clear` clears the session-scoped store for
   the workspace (`ledger`, `digests`, `lookups`; never `notes.md`).
-- `/notes` prints `notes.md`; `/notes edit` opens it in `$EDITOR` in plain
-  mode and in the queue-style popup in the TUI; `/notes clear` empties it
-  after a y/N.
+- `/notes` prints `notes.md` with line numbers; `/notes add <text>` appends a
+  line; `/notes drop N` removes line N; `/notes clear` empties it. (An
+  `$EDITOR` round trip would contend with plain mode's readline goroutine for
+  stdin, and a popup editor is more machinery than a 4 KiB file deserves.)
 
 ## 5. Git-backed lookup tools
 
