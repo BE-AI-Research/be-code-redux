@@ -139,3 +139,30 @@ func TestDigestEvictionKeepsMostRecentlyTouched(t *testing.T) {
 		t.Fatalf("newest first expected, got turn %d", s.Digests()[0].Turn)
 	}
 }
+
+func TestTurnRestoredFromLookupsToo(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	s.lookups = append(s.lookups, Lookup{Tool: "search", Query: "q", Turn: 50})
+	s.dirty = true
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := OpenAt(s.Dir(), root, "s1", true, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Turn() != 50 {
+		t.Fatalf("turn = %d, want 50", again.Turn())
+	}
+}
+
+func TestAddNoteLineDedupsWholeLinesOnly(t *testing.T) {
+	s, _ := openTest(t, "s1", false)
+	s.AddNoteLine("increase timeout for tests")
+	s.AddNoteLine("timeout for tests")
+	n := s.Notes()
+	lines := strings.Split(strings.TrimRight(n, "\n"), "\n")
+	if len(lines) != 2 || lines[0] != "increase timeout for tests" || lines[1] != "timeout for tests" {
+		t.Fatalf("notes: %q", n)
+	}
+}

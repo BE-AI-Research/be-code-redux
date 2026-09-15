@@ -145,6 +145,11 @@ func OpenAt(dir, root, sessionID string, resumed bool, notesCap int) (*Store, er
 			s.turn = d.Turn
 		}
 	}
+	for _, lk := range s.lookups {
+		if lk.Turn > s.turn {
+			s.turn = lk.Turn
+		}
+	}
 	return s, nil
 }
 
@@ -378,8 +383,13 @@ func (s *Store) AddNoteLine(text string) {
 
 func (s *Store) addNoteLineLocked(text string) {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
-	if text == "" || strings.Contains(s.notes, text+"\n") {
+	if text == "" {
 		return
+	}
+	for _, line := range strings.Split(s.notes, "\n") {
+		if line == text {
+			return
+		}
 	}
 	s.notes += text + "\n"
 	for len(s.notes) > s.notesCap {
