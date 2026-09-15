@@ -36,6 +36,9 @@ type CoworkConfig struct {
 	Auto              bool `json:"auto"`
 	MaxConsultsPerRun int  `json:"max_consults_per_run"`
 	ConsultTurns      int  `json:"consult_turns"`
+	// ConsultTimeout bounds one consultation, in seconds. A co-worker whose
+	// backend has stopped answering must not park the primary's run forever.
+	ConsultTimeout int `json:"consult_timeout"`
 }
 
 // ProviderConfig describes one inference endpoint.
@@ -71,6 +74,12 @@ type Config struct {
 
 	// AutoApproveShell skips the y/N prompt for shell commands. Off by default.
 	AutoApproveShell bool `json:"auto_approve_shell"`
+
+	// AutoApproveConsult skips the consent prompt before code is sent to an
+	// online co-worker. Set only by -y; never read from the config file,
+	// because "always run shell commands" is not a standing yes to shipping
+	// the workspace off this machine.
+	AutoApproveConsult bool `json:"-"`
 
 	// ApproveFileWrites shows a diff preview and asks before the agent
 	// writes or edits any file. On by default.
@@ -240,7 +249,7 @@ func Default() *Config {
 		RepoMap:          true,
 		RepoMapBudget:    6144,
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
-		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12},
+		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
 		Coworkers:        nil,
 	}
 }
@@ -314,21 +323,18 @@ func Load() (*Config, error) {
 		cfg.ClientThemes = map[string]string{}
 	}
 	// An older file, or one written by hand without the cowork block, must
-	// not zero the tuning: 0 means "default" for the two counts, and auto
-	// stays on unless the file says otherwise.
+	// not zero the tuning: 0 means "default" for the three counts. Auto
+	// needs no such rescue — Default() sets it true and encoding/json leaves
+	// a field the document does not mention alone, so it survives unless the
+	// file says "auto": false.
 	if cfg.Cowork.MaxConsultsPerRun == 0 {
 		cfg.Cowork.MaxConsultsPerRun = 3
 	}
 	if cfg.Cowork.ConsultTurns == 0 {
 		cfg.Cowork.ConsultTurns = 12
 	}
-	var probe struct {
-		Cowork *struct {
-			Auto *bool `json:"auto"`
-		} `json:"cowork"`
-	}
-	if json.Unmarshal(data, &probe) == nil && (probe.Cowork == nil || probe.Cowork.Auto == nil) {
-		cfg.Cowork.Auto = true
+	if cfg.Cowork.ConsultTimeout == 0 {
+		cfg.Cowork.ConsultTimeout = 300
 	}
 	return cfg, nil
 }

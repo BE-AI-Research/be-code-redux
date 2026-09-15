@@ -314,3 +314,53 @@ func TestPlainCoworkersAndConsult(t *testing.T) {
 		t.Fatal("no usage line")
 	}
 }
+
+// F2: plain mode's "a" on a consult approval records session consent for
+// that co-worker, the way the TUI modal's "a" does — otherwise the only way
+// to stop being asked in plain mode is -y, which allows every co-worker.
+func TestPlainAlwaysAllowsTheCoworkerForTheSession(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.Coworkers = []config.CoworkerConfig{
+		{Name: "claude", Provider: "ollama", Model: "opus", Online: true},
+	}
+	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
+	r.Agent.Tools.Approve = r.approve
+	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), nil
+	}
+	t.Cleanup(func() { agent.CoworkerFactory = nil })
+
+	// approve reads the answer through prompt(), which takes one line off
+	// r.lines while the REPL is idle.
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{line: "a"}
+	var err error
+	out := capture(t, func() {
+		_, err = r.Agent.Consult(context.Background(), agent.ConsultRequest{Question: "q", Origin: "tool"})
+	})
+	if err != nil {
+		t.Fatalf("approved consultation failed: %v", err)
+	}
+	if !strings.Contains(out, "coworker: claude") {
+		t.Fatalf("the consent detail was not shown:\n%s", out)
+	}
+	if !strings.Contains(out, "co-worker claude allowed for this session") {
+		t.Fatalf("the session allow was not reported:\n%s", out)
+	}
+	if r.Cfg.AutoApproveShell || r.Cfg.AutoApproveConsult {
+		t.Fatal("a consult approval flipped a shell/global auto-approve flag")
+	}
+
+	// The second consultation must not ask again: nothing is queued on
+	// r.lines, and a prompt would be a failure rather than a hang.
+	r.Agent.Tools.Approve = func(action, detail string) bool {
+		t.Errorf("prompted again after the session allow (%s)", action)
+		return false
+	}
+	out = capture(t, func() {
+		_, err = r.Agent.Consult(context.Background(), agent.ConsultRequest{Question: "q2", Origin: "tool"})
+	})
+	if err != nil {
+		t.Fatalf("second consultation: %v (%s)", err, out)
+	}
+}

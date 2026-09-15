@@ -129,6 +129,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	if flagYes {
 		cfg.AutoApproveShell = true
 		cfg.ApproveFileWrites = false
+		// Its own flag, not AutoApproveShell: the shell approval's "a" sets
+		// that one too, and choosing to stop being asked about commands is
+		// not consent to send the workspace to an online co-worker.
+		cfg.AutoApproveConsult = true
 	}
 	p, err := provider.FromConfig(cfg, flagProvider)
 	if err != nil {

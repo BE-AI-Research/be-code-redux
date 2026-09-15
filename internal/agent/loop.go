@@ -630,6 +630,9 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		a.Events.OnToolStart(call.Name, call.Arguments)
 	}
 	res := a.Tools.Dispatch(ctx, call)
+	// The automatic tool-failure consultation's question, decided here but
+	// asked below, after OnToolEnd has put the failure on screen.
+	consult := ""
 	if res.IsError {
 		a.lastFailingTool = call.Name + ": " + res.Content
 		// Three failures of the same tool in a row is the signature of a
@@ -646,18 +649,24 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			a.toolFailStreak.last = a.toolFailStreak.last[1:]
 		}
 		if a.toolFailStreak.n == 3 && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && call.Name != "consult" {
-			q := fmt.Sprintf("the tool %s has failed three times in a row with these arguments:\n%s\n\nerrors:\n- %s",
+			consult = fmt.Sprintf("the tool %s has failed three times in a row with these arguments:\n%s\n\nerrors:\n- %s",
 				call.Name, call.Arguments, strings.Join(a.toolFailStreak.last, "\n- "))
-			if name, advice, ok := a.autoConsult(ctx, "auto:tool", q, nil); ok {
-				a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
-					name, call.Name, advice)
-			}
 		}
 	} else {
 		a.toolFailStreak = toolFailStreak{}
 	}
 	if a.Events.OnToolEnd != nil {
 		a.Events.OnToolEnd(call.Name, res)
+	}
+	// After OnToolEnd, not before: the consultation announces itself
+	// ("consulting big…") and renders its question as it goes, and a
+	// question that answers a failure has to appear below that failure
+	// rather than above the line it is about.
+	if consult != "" {
+		if name, advice, ok := a.autoConsult(ctx, "auto:tool", consult, nil); ok {
+			a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
+				name, call.Name, advice)
+		}
 	}
 	return res
 }

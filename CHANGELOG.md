@@ -15,7 +15,19 @@
   An `online: true` co-worker asks once per session before any code is sent
   (`a` allows it for the session); `-y` allows, headless without `-y`
   declines. `/coworkers` lists them; `/consult [name] <question>` asks one
-  directly. An unreachable co-worker never interrupts the run.
+  directly. An unreachable co-worker never interrupts the run, and one that
+  stops answering is abandoned after `cowork.consult_timeout` seconds (300 by
+  default).
+
+- **Consent for an online co-worker has its own key.** `-y` allows a
+  consultation through a flag of its own rather than through
+  `auto_approve_shell`, so a session where the user chose "always run shell
+  commands" — or a config file with `auto_approve_shell` set — still asks
+  before any code leaves the machine. Plain mode's `a` on that prompt now
+  records session-wide consent for that one co-worker, as the TUI modal's
+  already did. The prompt also says what travels with the question. A
+  co-worker's answer is stripped of `<tool_call>`/`<tool_result>` markup
+  before the primary sees it, so advice cannot dispatch itself.
 
 ## v0.8.0 — every terminal renders itself
 

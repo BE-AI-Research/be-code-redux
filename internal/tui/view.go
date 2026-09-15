@@ -613,24 +613,6 @@ func (m *View) renderLocalLines(lines []string) {
 	m.refreshTranscript()
 }
 
-// coworkerFromDetail pulls the co-worker's name out of a consult approval's
-// detail, whose first line is `coworker: <name> (<provider>/<model>)` (see
-// agent.consent). "" for anything else, so a changed detail format degrades
-// to a one-off approval rather than allowing the wrong name for the session.
-func coworkerFromDetail(detail string) string {
-	line := strings.SplitN(detail, "\n", 2)[0]
-	rest, ok := strings.CutPrefix(line, "coworker: ")
-	if !ok {
-		return ""
-	}
-	// The name itself cannot contain " (": the provider/model suffix is the
-	// last one, so trim from there.
-	if i := strings.LastIndex(rest, " ("); i >= 0 {
-		rest = rest[:i]
-	}
-	return strings.TrimSpace(rest)
-}
-
 // handleAskKey answers the shared question, or scrolls its body. The answer
 // is recorded as this terminal's, and this is the only modal it closes
 // directly — the rest close on the askResolvedMsg that Answer broadcasts.
@@ -666,7 +648,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// code off this machine is not something to persist behind the
 			// user's back. A detail with no parsable name approves this one
 			// consultation and nothing more.
-			if name := coworkerFromDetail(a.Detail); name != "" {
+			if name := agent.ConsentCoworker(a.Detail); name != "" {
 				m.ag.AllowCoworker(name)
 				ans = askAnswer{OK: true, Note: "co-worker " + name + " allowed for this session"}
 			} else {
@@ -1056,7 +1038,7 @@ func (m *View) viewAsk() string {
 		// about a co-worker by name, not a class of action, so "a" says
 		// whose it is.
 		title = "Co-working model"
-		hint = "y allow this · n decline · a allow " + coworkerFromDetail(a.Detail) + " for the session · ↑↓ scroll"
+		hint = "y allow this · n decline · a allow " + agent.ConsentCoworker(a.Detail) + " for the session · ↑↓ scroll"
 	}
 	if m.compact() {
 		hint = "y/n/a · ↑↓"

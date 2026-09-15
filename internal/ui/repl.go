@@ -116,10 +116,20 @@ func (r *REPL) approve(action, detail string) bool {
 	case "y", "yes":
 		return true
 	case "a", "always":
-		if action == "shell" {
+		switch action {
+		case "shell":
 			r.Cfg.AutoApproveShell = true
-		} else if action == "file_write" {
+		case "file_write":
 			r.Cfg.ApproveFileWrites = false
+		case "consult":
+			// Session-wide consent for this one co-worker, recorded on the
+			// agent and never in the config file — the same rule the TUI's
+			// modal follows. A detail with no parsable name approves this
+			// one consultation and nothing more.
+			if name := agent.ConsentCoworker(detail); name != "" {
+				r.Agent.AllowCoworker(name)
+				fmt.Println(dim("co-worker " + name + " allowed for this session"))
+			}
 		}
 		return true
 	}

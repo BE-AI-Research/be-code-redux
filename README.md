@@ -112,7 +112,7 @@ one or more under `coworkers`:
 "coworkers": [
   {"name": "big", "provider": "ollama", "model": "qwen3:32b", "skills": "architecture, tricky bugs"}
 ],
-"cowork": {"auto": true, "max_consults_per_run": 3, "consult_turns": 12}
+"cowork": {"auto": true, "max_consults_per_run": 3, "consult_turns": 12, "consult_timeout": 300}
 ```
 
 `provider` names an entry under `providers{}`, same as `default_provider`. An
@@ -127,11 +127,14 @@ failed three times in a row (the advice is delivered as a note before the
 next model call). Either way, a consultation is a read-only scratch agent —
 `read_file`, `list_dir`, `search` only, no writes or shell — running on the
 co-worker's own provider/model with its own turn budget
-(`cowork.consult_turns`), seeded with the question, up to 8 KiB of any named
-files, and the primary's recent context. At most `cowork.max_consults_per_run`
-consultations run per request, one at a time. A co-worker that fails,
-declines or is unreachable never interrupts the run — it is silent or leaves
-a `co-worker unavailable: …` notice.
+(`cowork.consult_turns`), seeded with the question, the named files (at most
+8 of them, 8 KiB each and 32 KiB in all — the rest are listed by name for it
+to read itself), and the primary's recent context. At most `cowork.max_consults_per_run`
+consultations run per request, one at a time, and each is bounded by
+`cowork.consult_timeout` seconds, after which it is abandoned with
+`co-worker <name> timed out after <n>s` and the run carries on. A co-worker
+that fails, declines or is unreachable never interrupts the run — it is
+silent or leaves a `co-worker unavailable: …` notice.
 
 Answers show up on every attached terminal as `<name>? question` then
 `<name>> answer`, in the theme's co-worker colour, followed by a short line
@@ -148,8 +151,10 @@ never ask.
 
 `/coworkers` lists the configured co-workers and how many times each has been
 consulted this session. `/consult [name] <question>` asks one directly —
-busy-safe; asked mid-run it borrows the run's own consultation, and Esc
-cancels both.
+busy-safe; asked mid-run it runs on the session's own root context rather
+than the turn's, so the run is left alone and Esc (or `/quit`) cancels both
+the run and the consultation. A `/consult` never counts against
+`cowork.max_consults_per_run`.
 
 ## Select and copy
 
@@ -577,8 +582,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   terminals can attach (`--no-host` for one run); see "Shared sessions"
 - `coworkers` (`[]`) — `{name, provider, model, skills, online}` entries naming
   other models the primary can consult; `cowork.auto` (true), `cowork.
-  max_consults_per_run` (3), `cowork.consult_turns` (12) tune when and how
-  much; see "Co-working models"
+  max_consults_per_run` (3), `cowork.consult_turns` (12) and
+  `cowork.consult_timeout` (300, seconds one consultation may take) tune when
+  and how much; see "Co-working models"
 
 ## Status
 

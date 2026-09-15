@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,7 +67,7 @@ func TestClientThemesNilSafeWithoutKey(t *testing.T) {
 
 func TestCoworkDefaults(t *testing.T) {
 	c := Default()
-	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 3 || c.Cowork.ConsultTurns != 12 {
+	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 3 || c.Cowork.ConsultTurns != 12 || c.Cowork.ConsultTimeout != 300 {
 		t.Fatalf("cowork defaults = %+v", c.Cowork)
 	}
 	if len(c.Coworkers) != 0 {
@@ -113,12 +114,51 @@ func TestCoworkLoadFillsMissingValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 5 || c.Cowork.ConsultTurns != 12 {
+	if !c.Cowork.Auto || c.Cowork.MaxConsultsPerRun != 5 || c.Cowork.ConsultTurns != 12 || c.Cowork.ConsultTimeout != 300 {
 		t.Fatalf("loaded cowork = %+v", c.Cowork)
 	}
 	os.WriteFile(p, []byte(`{"cowork":{"auto":false}}`), 0o600)
 	c, _ = Load()
 	if c.Cowork.Auto {
 		t.Fatal("explicit auto:false was overridden")
+	}
+	// A file with no cowork block at all leaves Default()'s auto alone:
+	// encoding/json never zeroes a field the document does not mention,
+	// which is why Load needs no probe for it.
+	os.WriteFile(p, []byte(`{"theme":"dark"}`), 0o600)
+	c, _ = Load()
+	if !c.Cowork.Auto || c.Cowork.ConsultTimeout != 300 {
+		t.Fatalf("a file without the cowork block = %+v", c.Cowork)
+	}
+}
+
+// AutoApproveConsult is -y's alone: it must never be settable from the file
+// (and never written into one), or "always run shell commands" would ship
+// code to an online co-worker.
+func TestAutoApproveConsultIsNotAConfigKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	p, _ := Path()
+	os.MkdirAll(filepath.Dir(p), 0o700)
+	os.WriteFile(p, []byte(`{"auto_approve_shell":true,"AutoApproveConsult":true,"auto_approve_consult":true}`), 0o600)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.AutoApproveShell {
+		t.Fatal("auto_approve_shell did not load")
+	}
+	if c.AutoApproveConsult {
+		t.Fatal("the config file set AutoApproveConsult")
+	}
+	c.AutoApproveConsult = true
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	for _, key := range []string{"AutoApproveConsult", "auto_approve_consult"} {
+		if strings.Contains(string(b), key) {
+			t.Fatalf("AutoApproveConsult was persisted as %q:\n%s", key, b)
+		}
 	}
 }

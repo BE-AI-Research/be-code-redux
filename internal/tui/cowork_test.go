@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,4 +140,103 @@ func TestConsultCommandRunsAsATurn(t *testing.T) {
 		t.Fatalf("question missing on the other terminal:\n%s", b.wrapped)
 	}
 	waitFor(t, func() bool { drainLocked(s, a, b); return idle(s) })
+}
+
+// blockingChat parks in Chat until it is released or its context is done,
+// and says which happened. Both the primary and the co-worker use one, so a
+// test can see exactly whose context a cancellation reached.
+type blockingChat struct {
+	nullProvider
+	entered  chan struct{}
+	release  chan struct{}
+	ctxDone  chan struct{}
+	inOnce   sync.Once
+	doneOnce sync.Once
+}
+
+func newBlockingChat() *blockingChat {
+	return &blockingChat{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+		ctxDone: make(chan struct{}),
+	}
+}
+
+func (b *blockingChat) Chat(ctx context.Context, _ provider.ChatRequest, _ provider.StreamFunc) (*provider.ChatResponse, error) {
+	b.inOnce.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+		return &provider.ChatResponse{Content: "done"}, nil
+	case <-ctx.Done():
+		b.doneOnce.Do(func() { close(b.ctxDone) })
+		return nil, ctx.Err()
+	}
+}
+
+func closed(ch chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// F6: /consult asked in the middle of a run does not take the turn over. It
+// runs on the session's root context with its cancel parked in
+// consultCancel, a second one while it is in flight is refused rather than
+// losing that cancel, and Esc stops the consultation *and* the run.
+func TestConsultMidRunRunsBesideTheTurnAndEscCancelsBoth(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b"}}
+	primary := newBlockingChat()
+	s.ag = agent.New(s.cfg, primary, "m", s.ag.Tools, "")
+	s.prov = primary
+	wireEvents(s)
+	coworker := newBlockingChat()
+	agent.CoworkerFactory = func(*config.Config, config.CoworkerConfig) (provider.Provider, error) {
+		return coworker, nil
+	}
+	t.Cleanup(func() {
+		agent.CoworkerFactory = nil
+		close(primary.release)
+	})
+
+	// A real turn, so there is a run context for Esc to cancel.
+	a.Update(runes("do a thing"))
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor(t, func() bool { drainLocked(s, a, b); return !idle(s) && closed(primary.entered) })
+
+	// /consult while the run is in flight: busy-safe, and its own cancel.
+	a.Update(runes("/consult big what now?"))
+	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	s.mu.Lock()
+	haveCancel := s.consultCancel != nil
+	s.mu.Unlock()
+	if !haveCancel {
+		t.Fatal("a mid-run /consult parked no cancel in consultCancel")
+	}
+	waitFor(t, func() bool { drainLocked(s, a, b); return closed(coworker.entered) })
+	if idle(s) {
+		t.Fatal("the mid-run consultation ended the turn")
+	}
+
+	// A second one would lose the first one's cancel, so it is refused.
+	b.Update(runes("/consult big and this?"))
+	b.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	drainLocked(s, a, b)
+	if !strings.Contains(b.wrapped, "a consultation is already running") {
+		t.Fatalf("the second consultation was not refused:\n%s", b.wrapped)
+	}
+
+	// Esc: the run and the consultation both stop.
+	b.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	waitFor(t, func() bool { drainLocked(s, a, b); return closed(coworker.ctxDone) })
+	waitFor(t, func() bool { drainLocked(s, a, b); return closed(primary.ctxDone) })
+	waitFor(t, func() bool {
+		drainLocked(s, a, b)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return !s.running && s.consultCancel == nil
+	})
 }

@@ -63,6 +63,11 @@ Rules:
 const (
 	consultFileCap   = 8 * 1024
 	consultRecentCap = 6 * 1024
+	// The seed is bounded twice over: per file, and across all of them. A
+	// model that asks for forty files would otherwise fill the co-worker's
+	// window with the repository and leave no room for the answer.
+	consultMaxFiles    = 8
+	consultAllFilesCap = 32 * 1024
 )
 
 // errConsultCapped and errConsultDeclined mark the two ordinary refusals:
@@ -162,14 +167,15 @@ func (a *Agent) coworkerByName(who string) (config.CoworkerConfig, error) {
 }
 
 // consent decides whether code may be sent to cw for this request. Local
-// co-workers never ask; a person's own /consult never asks; -y allows;
-// otherwise the approval seam is asked once, and "a" (AllowCoworker) or a
-// previous session-wide yes skips it.
+// co-workers never ask; a person's own /consult never asks; -y allows
+// (through AutoApproveConsult, which only -y sets — never the shell
+// approval's "a" and never the config file); otherwise the approval seam is
+// asked once, and "a" (AllowCoworker) or a previous session-wide yes skips it.
 func (a *Agent) consent(cw config.CoworkerConfig, req ConsultRequest) bool {
 	if !cw.Online || strings.HasPrefix(req.Origin, "user:") || a.allowedFor(cw.Name) {
 		return true
 	}
-	if a.Cfg.AutoApproveShell { // what -y sets
+	if a.Cfg.AutoApproveConsult { // what -y sets; never the config file
 		a.allow(cw.Name)
 		return true
 	}
@@ -180,9 +186,29 @@ func (a *Agent) consent(cw config.CoworkerConfig, req ConsultRequest) bool {
 	if len(req.Files) > 0 {
 		files = strings.Join(req.Files, ", ")
 	}
-	detail := fmt.Sprintf("coworker: %s (%s/%s)\norigin: %s\nquestion: %s\nfiles: %s\nit may read other files in this workspace; nothing is edited",
+	detail := fmt.Sprintf("coworker: %s (%s/%s)\norigin: %s\nquestion: %s\nfiles: %s\nit may read other files in this workspace; your recent request, reply and tool output, the project notes and the git summary go with the question; nothing is edited",
 		cw.Name, cw.Provider, cw.Model, req.Origin, req.Question, files)
 	return a.Tools.Approve("consult", detail)
+}
+
+// ConsentCoworker pulls the co-worker's name out of a consult approval's
+// detail, whose first line is `coworker: <name> (<provider>/<model>)` (see
+// consent, just above). "" for anything else, so a changed detail format
+// degrades to a one-off approval rather than allowing the wrong name for the
+// session. Both UIs use it for the approval's "always": the TUI modal's "a"
+// and the REPL's "a", which is why it lives here rather than in either.
+func ConsentCoworker(detail string) string {
+	line := strings.SplitN(detail, "\n", 2)[0]
+	rest, ok := strings.CutPrefix(line, "coworker: ")
+	if !ok {
+		return ""
+	}
+	// The name itself cannot contain " (": the provider/model suffix is the
+	// last one, so trim from there.
+	if i := strings.LastIndex(rest, " ("); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // Consult runs one consultation. It never affects the primary's own
@@ -234,6 +260,17 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 		}
 	}()
 
+	// A co-worker whose backend has stopped answering must not park the
+	// primary's run for the rest of the day. The deadline is the derived
+	// context's alone: parent stays in hand so a cancellation by the user
+	// is still reported as the user's, not as a timeout.
+	parent := ctx
+	if secs := a.Cfg.Cowork.ConsultTimeout; secs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(secs)*time.Second)
+		defer cancel()
+	}
+
 	scratch := a.consultAgent(cp, cw, &res)
 	seed := a.buildConsultSeed(ctx, scratch.Tools, req)
 	answer, rerr := scratch.Run(ctx, seed)
@@ -241,12 +278,18 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	if rerr != nil {
 		// Whatever it had said before failing is worth returning either
 		// way, so a UI can show it.
-		res.Answer = scratch.lastAssistantText()
+		res.Answer = sanitizeAdvice(scratch.lastAssistantText())
 		// A cancelled consultation is not a partial answer: the user
 		// walked away from it, and no caller may feed it back to the
 		// primary as advice.
-		if ctx.Err() != nil {
-			return res, ctx.Err()
+		if parent.Err() != nil {
+			return res, parent.Err()
+		}
+		// The parent is alive and only the derived deadline fired: the
+		// co-worker hung. Said plainly, so autoConsult's notice names the
+		// wait rather than blaming an unreachable backend.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return res, fmt.Errorf("co-worker %s timed out after %ds", cw.Name, a.Cfg.Cowork.ConsultTimeout)
 		}
 		// Half an answer from a co-worker whose backend died mid-reply
 		// still beats nothing; the caller marks it as partial.
@@ -256,8 +299,36 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 		}
 		return res, rerr
 	}
-	res.Answer = strings.TrimSpace(answer)
+	res.Answer = sanitizeAdvice(strings.TrimSpace(answer))
 	return res, nil
+}
+
+// sanitizeAdvice strips tool-call and tool-result markup from a co-worker's
+// answer before it is fed back to the primary. A compat-mode co-worker
+// emits <tool_call>…</tool_call> in plain text, and its answer can quote
+// the <tool_result> wrappers it was given; pasted into the primary's
+// history that text is indistinguishable from a real call, and
+// ParseEmbeddedCalls would dispatch it — advice that runs itself. Stray
+// half-tags (a reply cut off mid-block) go too, so nothing is left to pair
+// with a later tag.
+func sanitizeAdvice(s string) string {
+	for _, name := range []string{"tool_call", "tool_result"} {
+		openTag, closeTag := "<"+name+">", "</"+name+">"
+		for {
+			i := strings.Index(s, openTag)
+			if i < 0 {
+				break
+			}
+			j := strings.Index(s[i:], closeTag)
+			if j < 0 {
+				break
+			}
+			s = s[:i] + s[i+j+len(closeTag):]
+		}
+		s = strings.ReplaceAll(s, openTag, "")
+		s = strings.ReplaceAll(s, closeTag, "")
+	}
+	return strings.TrimSpace(s)
 }
 
 // autoConsult is the harness's own consultation: the two automatic
@@ -364,6 +435,11 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 		Cfg: &cfg, Provider: cp, Model: cw.Model, Tools: readOnly,
 		Profile: prof, compat: compat, projectNotes: a.projectNotes,
 		Window: 0,
+		// The same retry backoff and stall threshold the primary runs on:
+		// a struct literal starts them at zero, which would retry a failing
+		// co-worker with no delay at all and never say a word about a
+		// backend that has gone quiet.
+		retryBase: a.retryBase, stallAfter: a.stallAfter,
 	}
 	name := cw.Name
 	scratch.Events = Events{
@@ -375,6 +451,9 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 				}
 			}
 		},
+		// "waiting for backend" during a consultation is the user's news
+		// too: the wait they are watching is this one.
+		OnTransient: func(msg string) { a.transient("%s", msg) },
 	}
 	scratch.knownTools = map[string]bool{}
 	for _, n := range readOnly.Names() {
@@ -391,9 +470,12 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 		}
 	}
 	scratch.systemOverride = sys
-	scratch.History = NewHistory(sys, a.History.Budget)
-	scratch.History.Reserve = a.History.Reserve
-	scratch.History.CharsPerToken = a.History.CharsPerToken
+	// Through Scalars, because Consult may be called from a UI goroutine
+	// (/consult) while the agent's own goroutine is in Calibrate.
+	budget, reserve, charsPerToken := a.History.Scalars()
+	scratch.History = NewHistory(sys, budget)
+	scratch.History.Reserve = reserve
+	scratch.History.CharsPerToken = charsPerToken
 	return scratch
 }
 
@@ -408,17 +490,36 @@ func (a *Agent) buildConsultSeed(ctx context.Context, readOnly *tools.Registry, 
 	b.WriteString("\n")
 	if len(req.Files) > 0 {
 		b.WriteString("\n## Files\n")
+		budget, included := consultAllFilesCap, 0
+		var skipped []string
 		for _, f := range req.Files {
+			// Past either cap the file is named, not read: the co-worker
+			// has read_file and can fetch what it decides it needs.
+			if included >= consultMaxFiles || budget <= 0 {
+				skipped = append(skipped, f)
+				continue
+			}
 			r := readOnly.Dispatch(ctx, provider.ToolCall{ID: "seed", Name: "read_file", Arguments: fmt.Sprintf(`{"path":%q}`, f)})
 			body := r.Content
 			switch {
 			case r.IsError:
 				// Say so, rather than passing the failure off as content.
 				body = "(could not read: " + strings.TrimSpace(r.Content) + ")"
-			case len(body) > consultFileCap:
-				body = cutHead(body, consultFileCap) + "\n… (truncated; read_file for the rest)"
+			default:
+				limit := consultFileCap
+				if budget < limit {
+					limit = budget
+				}
+				if len(body) > limit {
+					body = cutHead(body, limit) + "\n… (truncated; read_file for the rest)"
+				}
 			}
+			included++
+			budget -= len(body)
 			fmt.Fprintf(&b, "\n### %s\n%s\n", f, body)
+		}
+		if len(skipped) > 0 {
+			fmt.Fprintf(&b, "\n(not included: %s)\n", strings.Join(skipped, ", "))
 		}
 	}
 	if req.Recent != "" {
