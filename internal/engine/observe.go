@@ -170,7 +170,7 @@ func (s *Store) observeRead(ev Event) string {
 		turn := d.Turn
 		d.Turn = s.turn
 		s.touchLocked(d)
-		s.dirty = true
+		s.markDirtyLocked()
 		return fmt.Sprintf(footerAlreadyRead, turn)
 	}
 	if !exists || d.Hash != hash {
@@ -189,7 +189,7 @@ func (s *Store) observeRead(ev Event) string {
 	d.Ranges = mergeRange(d.Ranges, r)
 	d.Turn = s.turn
 	s.touchLocked(d)
-	s.dirty = true
+	s.markDirtyLocked()
 	return ""
 }
 
@@ -297,7 +297,7 @@ func (s *Store) observeLookup(ev Event) {
 	} else {
 		delete(s.cached, key)
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // The cached contents live in memory only (a session's worth of lookups is
@@ -334,11 +334,18 @@ func (s *Store) Cached(tool string, args map[string]any) (string, bool) {
 	return strings.TrimRight(content, "\n") + "\n" + footerCached, true
 }
 
+// DigestKey is the key a path is digested under: root-relative and
+// slash-separated, with an absolute path inside the workspace folded onto
+// the same key a relative read would produce. "" for a path outside the
+// root, which the store never digests.
+func (s *Store) DigestKey(path string) string { return s.relTo(path) }
+
 // HasDigest reports the union of ranges seen for a path.
 func (s *Store) HasDigest(path string) (Range, bool) {
+	key := s.DigestKey(path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d, ok := s.digests[relPath(path)]
+	d, ok := s.digests[key]
 	if !ok || len(d.Ranges) == 0 {
 		return Range{}, false
 	}

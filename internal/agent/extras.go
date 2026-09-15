@@ -40,6 +40,13 @@ func (a *Agent) planAgent() *Agent {
 	sys := planSystemPrompt
 	if scratch.compat || a.Cfg.CompatToolCalls == "auto" {
 		full := BuildSystemPrompt(readOnly.Specs(), true, "") // tool format guidance
+		// The spliced tail is the compat tool catalog only. The engine
+		// guidance BuildSystemPrompt appends after it talks about a
+		// Working memory block, and plan mode carries none — its prompt
+		// must not describe something the model will not be shown.
+		if g := engineGuidance(readOnly.Specs()); g != "" {
+			full = strings.TrimSuffix(full, "\n\n"+g)
+		}
 		sys = planSystemPrompt + "\n\n" + full[strings.Index(full, "Tool calling format"):]
 	}
 	if a.repoMap != "" {

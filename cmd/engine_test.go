@@ -1,11 +1,18 @@
 package cmd
 
 import (
+	"context"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -34,12 +41,40 @@ func TestEngineToolsFollowTheConfig(t *testing.T) {
 	if !names["task"] || !names["lookup"] || names["history"] {
 		t.Fatalf("minimal: %v", reg2.Names())
 	}
+	// An unknown value warns and is treated as full.
+	reg4, _ := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
+	cfg.Engine.Tools = "some-typo"
+	warning := captureStderr(t, func() { registerEngineTools(cfg, reg4, nil, nil) })
+	if warning != "warn: engine.tools \"some-typo\" is not one of full|minimal; using full\n" {
+		t.Fatalf("warning: %q", warning)
+	}
+	if len(reg4.Names()) != len(reg.Names()) {
+		t.Fatalf("unknown engine.tools did not fall back to full: %v", reg4.Names())
+	}
+
 	reg3, _ := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
 	cfg.Engine.Enabled = false
 	registerEngineTools(cfg, reg3, nil, nil)
 	if len(reg3.Names()) != len(reg.Names())-5 {
 		t.Fatalf("disabled registered tools: %v", reg3.Names())
 	}
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	w.Close()
+	b, _ := io.ReadAll(r)
+	r.Close()
+	return string(b)
 }
 
 // TestBaselineFollowsTheLedger: every task records its own baseline, and the
@@ -60,5 +95,54 @@ func TestBaselineFollowsTheLedger(t *testing.T) {
 	}
 	if dirty2 != " M b.txt\n" {
 		t.Fatalf("second baseline: %q", dirty2)
+	}
+}
+
+// TestEngineToolsSurviveAStoreThatWillNotOpen: the store is advisory, the
+// tools are not. When engine.Open fails the model must still get task (over
+// the no-op ledger) and the git lookups, and the system prompt must be
+// recomposed so it advertises exactly what is registered.
+func TestEngineToolsSurviveAStoreThatWillNotOpen(t *testing.T) {
+	home := t.TempDir()
+	// ~/.be-code is a regular file, so config.Dir()'s MkdirAll fails and
+	// engine.Open can never reach the store directory.
+	if err := os.WriteFile(filepath.Join(home, ".be-code"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	ws := t.TempDir()
+	reg, err := tools.NewRegistry(ws, func(string, string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	ag := agent.New(cfg, nil, "test-model", reg, "")
+	ag.SetSession(&store.Session{ID: "sess-1"})
+
+	attachEngine(cfg, reg, ag, false)
+
+	names := map[string]bool{}
+	for _, n := range reg.Names() {
+		names[n] = true
+	}
+	for _, want := range []string{"task", "lookup", "history", "show", "changes"} {
+		if !names[want] {
+			t.Fatalf("%s missing after a failed engine.Open: %v", want, reg.Names())
+		}
+	}
+	// The task tool still answers, over the no-op ledger.
+	r := reg.Dispatch(context.Background(), provider.ToolCall{
+		ID: "c1", Name: "task",
+		Arguments: `{"action":"plan","task":"do a thing","steps":["one"]}`,
+	})
+	if r.IsError {
+		t.Fatalf("task over noopLedger: %+v", r)
+	}
+	// RefreshSystem ran: the prompt carries the working-memory guidance that
+	// only the registered task tool earns.
+	if !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
+		t.Fatal("system prompt was not recomposed for the registered tools")
 	}
 }

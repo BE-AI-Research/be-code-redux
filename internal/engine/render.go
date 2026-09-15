@@ -17,7 +17,7 @@ import (
 func (s *Store) Render(budget int, inMap func(path string) bool) string {
 	s.mu.Lock()
 	notes := s.notes
-	l := s.ledger
+	l := s.ledgerLocked()
 	digests := s.digestsLocked()
 	lookups := make([]Lookup, len(s.lookups))
 	copy(lookups, s.lookups)
@@ -253,7 +253,7 @@ func (s *Store) ApplyFileNotes(block string) {
 	for _, m := range fileNoteLine.FindAllStringSubmatch(block, -1) {
 		if d, ok := s.digests[relPath(m[1])]; ok {
 			d.Note = strings.TrimSpace(m[2])
-			s.dirty = true
+			s.markDirtyLocked()
 		}
 	}
 }

@@ -95,6 +95,11 @@ type Store struct {
 	turn     int
 	touchSeq int64
 	dirty    bool
+	// mutSeq counts state changes. Flush releases the lock for its file
+	// writes, so it compares the seq it snapshotted with the current one
+	// before clearing dirty: a change made during those writes is never
+	// swallowed by the flush that did not include it.
+	mutSeq int64
 
 	// cached is filled in by Task 2 (rendering the Working memory block);
 	// unused here.
@@ -141,7 +146,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, notesCap int) (*Store, er
 	if !resumed && s.ledger.Session != sessionID {
 		digests, s.lookups = nil, nil
 		s.ledger = Ledger{}
-		s.dirty = true
+		s.markDirtyLocked()
 	}
 	s.ledger.Session = sessionID
 	for i := range digests {
@@ -171,6 +176,12 @@ func loadJSON(path string, v any) {
 	}
 }
 
+// markDirtyLocked records that persisted state changed. Callers hold s.mu.
+func (s *Store) markDirtyLocked() {
+	s.dirty = true
+	s.mutSeq++
+}
+
 func writeAtomic(path string, data []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
@@ -182,23 +193,29 @@ func writeAtomic(path string, data []byte) error {
 // Dir is the store directory.
 func (s *Store) Dir() string { return s.dir }
 
-// Flush writes the session files and notes when anything changed.
+// Flush writes the session files and notes when anything changed. The
+// whole snapshot — including the eviction that brings the digests under
+// the byte cap — is taken under the lock; the four file writes happen with
+// the lock released, so a slow disk never blocks a tool call. dirty is
+// cleared afterwards only if every write succeeded and nothing changed in
+// the meantime.
 func (s *Store) Flush() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.dirty {
+		s.mu.Unlock()
 		return nil
 	}
+	seq := s.mutSeq
+	var db []byte
 	digests := s.digestsLocked()
 	for {
 		b, err := json.Marshal(digests)
 		if err != nil {
+			s.mu.Unlock()
 			return err
 		}
 		if len(b) <= maxDigestBytes || len(digests) == 0 {
-			if err := writeAtomic(filepath.Join(s.dir, "digests.json"), b); err != nil {
-				return err
-			}
+			db = b
 			break
 		}
 		// Over the byte cap: drop the least recently touched (last).
@@ -206,17 +223,30 @@ func (s *Store) Flush() error {
 		digests = digests[:len(digests)-1]
 	}
 	lb, _ := json.Marshal(s.ledger)
-	if err := writeAtomic(filepath.Join(s.dir, "ledger.json"), lb); err != nil {
-		return err
-	}
 	kb, _ := json.Marshal(s.lookups)
-	if err := writeAtomic(filepath.Join(s.dir, "lookups.json"), kb); err != nil {
-		return err
+	nb := []byte(s.notes)
+	dir := s.dir
+	s.mu.Unlock()
+
+	for _, f := range []struct {
+		name string
+		data []byte
+	}{
+		{"digests.json", db},
+		{"ledger.json", lb},
+		{"lookups.json", kb},
+		{"notes.md", nb},
+	} {
+		if err := writeAtomic(filepath.Join(dir, f.name), f.data); err != nil {
+			return err
+		}
 	}
-	if err := writeAtomic(filepath.Join(s.dir, "notes.md"), []byte(s.notes)); err != nil {
-		return err
+
+	s.mu.Lock()
+	if s.mutSeq == seq {
+		s.dirty = false
 	}
-	s.dirty = false
+	s.mu.Unlock()
 	return nil
 }
 
@@ -282,7 +312,7 @@ func (s *Store) touchLocked(d *Digest) {
 func (s *Store) putDigest(d *Digest) {
 	s.digests[d.Path] = d
 	s.touchLocked(d)
-	s.dirty = true
+	s.markDirtyLocked()
 	if len(s.digests) <= maxDigests {
 		return
 	}
@@ -307,6 +337,13 @@ func (s *Store) Lookups() []Lookup {
 func (s *Store) Ledger() Ledger {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ledgerLocked()
+}
+
+// ledgerLocked is Ledger's deep copy for callers that already hold s.mu:
+// the slices are copied so no snapshot shares storage with the live
+// ledger, which grows in place as notes and steps are recorded.
+func (s *Store) ledgerLocked() Ledger {
 	l := s.ledger
 	l.Steps = append([]Step(nil), l.Steps...)
 	l.Decisions = append([]string(nil), l.Decisions...)
@@ -325,7 +362,7 @@ func (s *Store) SetPlan(task string, steps []string) {
 			s.ledger.Steps = append(s.ledger.Steps, Step{Text: st, Status: "todo"})
 		}
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // EnsureTask sets the task line only when the ledger has none.
@@ -360,7 +397,7 @@ func (s *Store) setTaskLocked(text string) {
 		line = line[:200]
 	}
 	s.ledger.Task = line
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // SetStep marks 1-based step i with a status (already normalised by the tool).
@@ -371,7 +408,7 @@ func (s *Store) SetStep(i int, status string) error {
 		return fmt.Errorf("step %d does not exist (%d steps)", i, len(s.ledger.Steps))
 	}
 	s.ledger.Steps[i-1].Status = status
-	s.dirty = true
+	s.markDirtyLocked()
 	return nil
 }
 
@@ -408,7 +445,7 @@ func (s *Store) AddNote(text, file string, decision, keep bool) error {
 	if keep {
 		s.addNoteLineLocked(text)
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 	return nil
 }
 
@@ -417,7 +454,7 @@ func (s *Store) SetBaseline(b Baseline) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ledger.Baseline = b
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // Notes is the durable notes text.
@@ -432,7 +469,7 @@ func (s *Store) AddNoteLine(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addNoteLineLocked(text)
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 func (s *Store) addNoteLineLocked(text string) {
@@ -469,7 +506,7 @@ func (s *Store) DropNote(n int) error {
 	if len(lines) > 0 {
 		s.notes = strings.Join(lines, "\n") + "\n"
 	}
-	s.dirty = true
+	s.markDirtyLocked()
 	return nil
 }
 
@@ -478,7 +515,7 @@ func (s *Store) ClearNotes() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notes = ""
-	s.dirty = true
+	s.markDirtyLocked()
 }
 
 // ClearSession drops digests, lookups and the ledger (never the notes).
@@ -489,5 +526,9 @@ func (s *Store) ClearSession() {
 	s.digests = map[string]*Digest{}
 	s.lookups = nil
 	s.ledger = Ledger{Session: session}
-	s.dirty = true
+	// The in-memory lookup cache is keyed to the lookups just dropped:
+	// leaving it would answer a repeated search from a session the store
+	// no longer remembers having made.
+	s.cached = nil
+	s.markDirtyLocked()
 }

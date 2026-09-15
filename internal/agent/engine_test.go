@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
@@ -400,5 +401,28 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	sys := ag.History.System.Content
 	if !strings.Contains(sys, "call lookup") || strings.Contains(sys, "call history") || strings.Contains(sys, "call changes") {
 		t.Fatalf("minimal git guidance wrong:\n%s", sys)
+	}
+}
+
+// Plan mode carries no Working memory block, so its prompt must not tell
+// the model about one: the compat tail spliced out of BuildSystemPrompt
+// used to drag the engine guidance along with the tool catalog.
+func TestPlanPromptDoesNotPromiseWorkingMemory(t *testing.T) {
+	for _, mode := range []string{"auto", "always"} {
+		ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) {
+			c.CompatToolCalls = mode
+		})
+		st := withEngine(t, ag)
+		ag.Tools.AddTool(tools.NewTask(st))
+		for _, gt := range tools.NewGitTools(ag.Tools, nil, false) {
+			ag.Tools.AddTool(gt)
+		}
+		sys := ag.planAgent().systemOverride
+		if !strings.Contains(sys, "Tool calling format") {
+			t.Fatalf("%s: compat tail missing, test proves nothing:\n%.300s", mode, sys)
+		}
+		if strings.Contains(sys, "Context is limited and does not survive compaction") {
+			t.Fatalf("%s: plan prompt describes a Working memory block it does not carry", mode)
+		}
 	}
 }

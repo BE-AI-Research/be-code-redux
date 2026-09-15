@@ -866,7 +866,16 @@ func (a *Agent) Compact(ctx context.Context) error {
 				path := ""
 				if tc.Name == "read_file" {
 					if args, ok := tools.ParseArgs(tc.Arguments); ok {
-						path, _ = args["path"].(string)
+						// read_file takes any of these spellings, and an
+						// absolute path inside the workspace: DigestKey
+						// folds them onto the key the digest is under, so
+						// the stub is substituted for the read either way.
+						for _, k := range []string{"path", "file", "filename"} {
+							if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
+								path = a.Engine.DigestKey(v)
+								break
+							}
+						}
 					}
 				}
 				pending[tc.ID] = path
