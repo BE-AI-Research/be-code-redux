@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -339,5 +340,115 @@ func TestRecentContextCarriesRequestReplyAndFailingTool(t *testing.T) {
 		if !strings.Contains(rc, want) {
 			t.Fatalf("recent context lacks %q:\n%s", want, rc)
 		}
+	}
+}
+
+func TestAutoToolTriggerAfterThreeConsecutiveFailures(t *testing.T) {
+	cw := coworkerStub(t, provider.ChatResponse{Content: "The path is wrong: use src/main.go."})
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls <= 3 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: fmt.Sprint(calls), Name: "read_file", Arguments: `{"path":"nope.go"}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, withCoworkers("big"))
+	var transient []string
+	ag.Events.OnTransient = func(s string) { transient = append(transient, s) }
+	if _, err := ag.Run(context.Background(), "read nope.go"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cw.lastReq.Messages) == 0 {
+		t.Fatal("the co-worker was never consulted")
+	}
+	if !strings.Contains(cw.lastReq.Messages[1].Content, "failed three times") {
+		t.Fatalf("auto:tool question:\n%s", cw.lastReq.Messages[1].Content)
+	}
+	// The advice reached the primary as a user note before its next call.
+	last := p.reqs[len(p.reqs)-1].Messages
+	found := false
+	for _, m := range last {
+		if m.Role == provider.RoleUser && strings.Contains(m.Content, "A co-worker (big) looked at the repeated read_file failure and advises:") && strings.Contains(m.Content, "src/main.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("advice note not delivered to the primary")
+	}
+	if len(transient) == 0 || transient[0] != "consulting big…" {
+		t.Fatalf("transient notices: %v", transient)
+	}
+	// Once per streak: three more failures of the same tool do not re-fire (the cap would allow it).
+	if ag.ConsultsThisRun() != 1 {
+		t.Fatalf("consults = %d", ag.ConsultsThisRun())
+	}
+}
+
+func TestAutoToolTriggerRespectsAutoOffAndSuccessReset(t *testing.T) {
+	cw := coworkerStub(t, provider.ChatResponse{Content: "advice"})
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		switch {
+		case calls == 1 || calls == 2 || calls == 4 || calls == 5:
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: fmt.Sprint(calls), Name: "read_file", Arguments: `{"path":"nope.go"}`}}}, nil
+		case calls == 3:
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "ok", Name: "list_dir", Arguments: `{}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, withCoworkers("big"))
+	ag.Run(context.Background(), "x")
+	if len(cw.lastReq.Messages) != 0 {
+		t.Fatal("a success in between must reset the streak")
+	}
+	calls = 0
+	p.fn = func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls <= 3 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: fmt.Sprint(calls), Name: "read_file", Arguments: `{"path":"nope.go"}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}
+	ag.Cfg.Cowork.Auto = false
+	ag.Run(context.Background(), "x")
+	if len(cw.lastReq.Messages) != 0 {
+		t.Fatal("auto off must not consult")
+	}
+}
+
+func TestAutoVerifyTriggerGrantsOneExtraRepairRound(t *testing.T) {
+	cw := coworkerStub(t, provider.ChatResponse{Content: "The test expects 3; return 3."})
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.22\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "x.go"), []byte("package x\n\nfunc F() int { return 2 }\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "x_test.go"), []byte("package x\n\nimport \"testing\"\n\nfunc TestF(t *testing.T) { if F() != 3 { t.Fatal(F()) } }\n"), 0o644)
+	reg, _ := tools.NewRegistry(dir, func(a, d string) bool { return true })
+	cfg := config.Default()
+	cfg.VerifyOnDone, cfg.MaxRepairs, cfg.CompatToolCalls, cfg.RepoMap = true, 1, "never", false
+	withCoworkers("big")(cfg)
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		last := req.Messages[len(req.Messages)-1].Content
+		if strings.Contains(last, "A co-worker (big) reviewed the failing check") {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "fix", Name: "write_file", Arguments: `{"path":"x.go","content":"package x\n\nfunc F() int { return 3 }\n"}`}}}, nil
+		}
+		if calls == 1 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "w", Name: "write_file", Arguments: `{"path":"x.go","content":"package x\n\nfunc F() int { return 2 }\n"}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag := New(cfg, p, "test-model", reg, "")
+	_, rep, err := ag.RunFull(context.Background(), "make F return the right value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cw.lastReq.Messages) == 0 || !strings.Contains(cw.lastReq.Messages[1].Content, "still fails this check") {
+		t.Fatal("verify trigger did not consult")
+	}
+	if rep.Verify == nil || !rep.Verify.Passed() {
+		t.Fatalf("the extra repair round did not fix the check: %+v", rep.Verify)
 	}
 }

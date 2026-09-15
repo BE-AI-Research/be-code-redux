@@ -127,6 +127,27 @@ type Agent struct {
 	coworkAllowed map[string]bool
 	consultMu     sync.Mutex
 	coworkMu      sync.Mutex
+
+	// The harness's own consultation triggers (see autoConsult). These
+	// three are touched only on the agent goroutine — inside run,
+	// dispatch and RunFull — and so need no lock, unlike the counters
+	// above. autoVerifyUsed keeps the verify trigger to once per request;
+	// toolFailStreak counts consecutive failures of one tool and fires at
+	// exactly three; pendingAdvice parks the answer until the loop is
+	// back at the top, so advice lands as a user note after the tool
+	// results the model was waiting on rather than in the middle of them.
+	autoVerifyUsed bool
+	toolFailStreak toolFailStreak
+	pendingAdvice  string
+}
+
+// toolFailStreak is one run of consecutive failures of the same tool:
+// its name, how many in a row, and the newest three error texts, which
+// are what the co-worker is actually shown.
+type toolFailStreak struct {
+	name string
+	n    int
+	last []string
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -311,6 +332,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	start := time.Now()
 	defer func() { a.Stats.Elapsed += time.Since(start) }()
 
+	// A streak belongs to one stretch of tool calls; a repair round is a
+	// fresh start, and advice from a previous round has either been
+	// delivered or been overtaken by events.
+	a.toolFailStreak = toolFailStreak{}
+	a.pendingAdvice = ""
+
 	if newTurn {
 		a.Checkpoints.BeginTurn(store.TitleFrom(userInput))
 		a.reqTouched = false
@@ -339,6 +366,13 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
+		// A co-worker's answer to a repeated tool failure goes in the
+		// same way and for the same reason: after the tool results, as
+		// plain user text the model cannot mistake for its own.
+		if a.pendingAdvice != "" {
+			a.History.Add(provider.Message{Role: provider.RoleUser, Content: a.pendingAdvice})
+			a.pendingAdvice = ""
+		}
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
@@ -584,6 +618,29 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	res := a.Tools.Dispatch(ctx, call)
 	if res.IsError {
 		a.lastFailingTool = call.Name + ": " + res.Content
+		// Three failures of the same tool in a row is the signature of a
+		// small model that has stopped reading the error and started
+		// guessing. Ask a co-worker once per streak; a fourth failure is
+		// the same stuck state, not new information.
+		if a.toolFailStreak.name == call.Name {
+			a.toolFailStreak.n++
+		} else {
+			a.toolFailStreak = toolFailStreak{name: call.Name, n: 1}
+		}
+		a.toolFailStreak.last = append(a.toolFailStreak.last, res.Content)
+		if len(a.toolFailStreak.last) > 3 {
+			a.toolFailStreak.last = a.toolFailStreak.last[1:]
+		}
+		if a.toolFailStreak.n == 3 && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && call.Name != "consult" {
+			q := fmt.Sprintf("the tool %s has failed three times in a row with these arguments:\n%s\n\nerrors:\n- %s",
+				call.Name, call.Arguments, strings.Join(a.toolFailStreak.last, "\n- "))
+			if name, advice, ok := a.autoConsult(ctx, "auto:tool", q, nil); ok {
+				a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
+					name, call.Name, advice)
+			}
+		}
+	} else {
+		a.toolFailStreak = toolFailStreak{}
 	}
 	if a.Events.OnToolEnd != nil {
 		a.Events.OnToolEnd(call.Name, res)
@@ -769,6 +826,7 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
+	a.autoVerifyUsed = false
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err
@@ -790,6 +848,24 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 				answer, err = a.run(ctx, repairPrompt, false)
 				if err != nil {
 					return "", rep, err
+				}
+			}
+			// The repair budget is spent and the check still fails: the
+			// primary has run out of ideas, which is exactly when a
+			// co-worker is worth the wait. One extra round, once per
+			// request — if that does not fix it, a second opinion on the
+			// same evidence would not either.
+			if rep.Verify != nil && !rep.Verify.Passed() && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && !a.autoVerifyUsed {
+				a.autoVerifyUsed = true
+				files := a.changedFiles()
+				if name, advice, ok := a.autoConsult(ctx, "auto:verify",
+					"the change still fails this check; what is wrong and what minimal edit fixes it\n\n"+rep.Verify.ModelSummary(), files); ok {
+					a.notice("co-worker %s advised; one more repair round", name)
+					answer, err = a.run(ctx, fmt.Sprintf("A co-worker (%s) reviewed the failing check and advises:\n\n%s\n\nApply the minimal fix, then stop.", name, advice), false)
+					if err != nil {
+						return "", rep, err
+					}
+					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
 				}
 			}
 			if rep.Verify != nil && !rep.Verify.Passed() {

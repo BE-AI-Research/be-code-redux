@@ -59,6 +59,16 @@ const (
 	consultRecentCap = 6 * 1024
 )
 
+// errConsultCapped and errConsultDeclined mark the two ordinary refusals:
+// the per-run budget is spent, or the user said no. Both are outcomes the
+// harness's automatic triggers must accept in silence, so they are
+// sentinels rather than bare strings; the messages they produce are
+// unchanged, and a caller that only prints them sees no difference.
+var (
+	errConsultCapped   = errors.New("consultation limit reached for this run")
+	errConsultDeclined = errors.New("consultation declined")
+)
+
 // Coworkers is the usable co-worker list, in configured order. The slice
 // is copied: a UI listing co-workers must not be able to reorder or
 // overwrite the agent's own.
@@ -193,10 +203,10 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	}
 	counts := !strings.HasPrefix(req.Origin, "user:")
 	if counts && a.ConsultsThisRun() >= a.Cfg.Cowork.MaxConsultsPerRun {
-		return res, fmt.Errorf("consultation limit reached for this run (%d)", a.Cfg.Cowork.MaxConsultsPerRun)
+		return res, fmt.Errorf("%w (%d)", errConsultCapped, a.Cfg.Cowork.MaxConsultsPerRun)
 	}
 	if !a.consent(cw, req) {
-		return res, errors.New("consultation declined")
+		return res, errConsultDeclined
 	}
 	// A consultation that was attempted has been paid for, however it
 	// ends: a failing co-worker must not be retried without limit.
@@ -243,6 +253,58 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	}
 	res.Answer = strings.TrimSpace(answer)
 	return res, nil
+}
+
+// autoConsult is the harness's own consultation: the two automatic
+// triggers — verification exhausted (RunFull) and the same tool failing
+// three times running (dispatch) — both come through here so they share
+// one shape. It names the co-worker before asking, because the notice a
+// user sees ("consulting big…") has to arrive before the wait it explains,
+// and it hands over the primary's recent context so the co-worker sees
+// what went wrong rather than only the question.
+//
+// A consultation that fails never fails the run: the caller gets ok=false
+// and carries on exactly as it would have with no co-workers configured.
+// The per-run cap and a declined consultation are ordinary outcomes and
+// stay silent; anything else earns one line.
+func (a *Agent) autoConsult(ctx context.Context, origin, question string, files []string) (string, string, bool) {
+	// Consult resolves "" to the first configured co-worker, but only
+	// after the notice below has to be written — so resolve it the same
+	// way, here, and let Consult repeat the work harmlessly.
+	name := ""
+	if cw, err := a.coworkerByName(""); err == nil {
+		name = cw.Name
+	}
+	a.transient("consulting %s…", name)
+	res, err := a.Consult(ctx, ConsultRequest{
+		Question: question,
+		Files:    files,
+		Origin:   origin,
+		Recent:   a.RecentContext(),
+	})
+	if err != nil {
+		if !errors.Is(err, errConsultCapped) && !errors.Is(err, errConsultDeclined) {
+			a.notice("co-worker unavailable: %v", err)
+		}
+		return "", "", false
+	}
+	// A co-worker that answered with nothing has nothing to add; feeding
+	// an empty advice note back would spend a repair round on silence.
+	if strings.TrimSpace(res.Answer) == "" {
+		return "", "", false
+	}
+	return res.Coworker, res.Answer, true
+}
+
+// changedFiles is Checkpoints.ChangedLast with a nil checkpointer
+// tolerated: an agent built without one (tests, and any embedder that
+// does not want undo) still gets the automatic triggers, just without the
+// file list to hand the co-worker.
+func (a *Agent) changedFiles() []string {
+	if a.Checkpoints == nil {
+		return nil
+	}
+	return a.Checkpoints.ChangedLast()
 }
 
 // RecentContext condenses what the primary was doing for a co-worker: the
