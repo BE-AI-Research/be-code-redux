@@ -45,6 +45,10 @@ type Session struct {
 	prov     provider.Provider
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
+	// consultCancel stops a /consult asked while a run was in progress: it
+	// runs on the root context rather than the turn's, so Esc and /quit
+	// reach it here instead of through cancelFn.
+	consultCancel context.CancelFunc
 
 	entries   []entry         // the transcript, as raw entries; see entry.go
 	streaming strings.Builder // current assistant text
@@ -148,10 +152,23 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		quitCh:  make(chan struct{}),
 		holders: map[int]bool{},
 	}
+	wireEvents(s)
+	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
+	return s
+}
+
+// wireEvents points s.ag's callbacks and its registry's approval seam at the
+// session. It is separate from NewSession because the agent under a session
+// can be replaced — a test standing in its own, anything that rebuilds the
+// agent for a new provider — and a replacement with no wiring is an agent
+// whose tool calls and consultations reach no terminal at all.
+//
+// Every callback records what happened on the session and broadcasts; none
+// of them touches a view, so N terminals never put N copies of one tool call
+// on the transcript.
+func wireEvents(s *Session) {
+	ag := s.ag
 	ag.Tools.Approve = s.approveFromAgent
-	// Every callback records what happened on the session and broadcasts;
-	// none of them touches a view, so N terminals never put N copies of one
-	// tool call on the transcript.
 	ag.Events = agent.Events{
 		OnDelta:     s.onDelta,
 		OnToolStart: s.onToolStart,
@@ -168,10 +185,11 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 				}
 			}
 		}(),
+		OnConsultStart:    s.onConsultStart,
+		OnConsultProgress: s.onConsultProgress,
+		OnConsultEnd:      s.onConsultEnd,
 	}
 	ag.Tools.OnStatus = s.setStatus
-	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
-	return s
 }
 
 // themeFor resolves the theme for a client label: a remembered per-device
@@ -354,10 +372,11 @@ func (s *Session) Entries() []entry {
 // before the program starts, inside agent event callbacks, or after a run
 // returns on its goroutine.
 func (s *Session) usageSnapshot() usageMsg {
+	usage := s.ag.Usage()
 	return usageMsg{
 		ctxTokens: s.ag.History.Tokens(),
 		budget:    s.ag.History.Limit(),
-		total:     s.ag.Stats.PromptTokens + s.ag.Stats.CompletionTokens,
+		total:     usage.PromptTokens + usage.CompletionTokens,
 	}
 }
 
@@ -509,6 +528,54 @@ func (s *Session) onToolEnd(name string, res tools.Result) {
 	s.broadcast(s.usageSnapshot())
 }
 
+// ---- co-working ---------------------------------------------------------
+//
+// A consultation is a second voice in the one transcript every terminal
+// shares: the question goes up before the wait it explains, the files the
+// co-worker reads are a status line rather than entries, and the answer
+// closes it with what it cost. Like every other event these record on the
+// session and broadcast — a per-view append would print the co-worker once
+// per attached terminal.
+
+// onConsultStart is Events.OnConsultStart: the question, under the
+// co-worker's name, and a status line naming who is being waited on.
+func (s *Session) onConsultStart(name, question, origin string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	s.appendEntryLocked(entry{Kind: entryCoworkAsk, Label: name, Text: question})
+	s.statusNote = "consulting " + name
+	s.broadcast(statusMsg(s.statusNote))
+}
+
+// onConsultProgress is Events.OnConsultProgress: how far the co-worker has
+// got. It is a status line and never an entry — a consultation that reads
+// twenty files would otherwise bury the question it is answering.
+func (s *Session) onConsultProgress(name string, read int) {
+	s.setStatus(fmt.Sprintf("consulting %s · %d files read", name, read))
+}
+
+// onConsultEnd is Events.OnConsultEnd: the answer, or a dimmed note saying
+// why there is none. A declined or capped consultation is an ordinary
+// outcome the harness carries on from, so it is dim rather than an error.
+func (s *Session) onConsultEnd(res agent.ConsultResult, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	if err != nil {
+		s.appendEntryLocked(entry{Kind: entryDim, Text: res.Coworker + ": " + err.Error()})
+	} else {
+		s.appendEntryLocked(entry{Kind: entryCowork, Label: res.Coworker, Text: res.Answer})
+		if res.Partial {
+			s.appendEntryLocked(entry{Kind: entryDim, Text: "(partial)"})
+		}
+		s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s read %d files in %s",
+			res.Coworker, res.Read, res.Elapsed.Round(time.Second))})
+	}
+	s.statusNote = "thinking"
+	s.broadcast(statusMsg(s.statusNote))
+}
+
 // notice puts one note on the shared transcript. It is Events.OnNotice and
 // the way a command's own goroutine reports its outcome; a noticeMsg that
 // reaches a view instead is that terminal's own (its backend ping), and is
@@ -598,6 +665,9 @@ func (s *Session) QuitLocked() {
 	if !s.quitting {
 		if s.cancelFn != nil {
 			s.cancelFn() // leaving mid-turn: stop the run, then write the briefing
+		}
+		if s.consultCancel != nil {
+			s.consultCancel()
 		}
 		s.quitting = true
 		if s.quitCh == nil {

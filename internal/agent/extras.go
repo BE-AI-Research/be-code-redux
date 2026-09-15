@@ -18,9 +18,7 @@ import (
 func (a *Agent) Plan(ctx context.Context, input string) (string, error) {
 	scratch := a.planAgent()
 	plan, err := scratch.Run(ctx, input)
-	a.Stats.PromptTokens += scratch.Stats.PromptTokens
-	a.Stats.CompletionTokens += scratch.Stats.CompletionTokens
-	a.Stats.Requests += scratch.Stats.Requests
+	a.addStats(scratch.usageTokens())
 	return plan, err
 }
 
@@ -28,7 +26,7 @@ func (a *Agent) Plan(ctx context.Context, input string) (string, error) {
 // prompt is pinned via systemOverride so the per-turn git refresh in run()
 // cannot swap it for the normal coding prompt.
 func (a *Agent) planAgent() *Agent {
-	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch")
+	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch", "consult")
 	scratch := &Agent{
 		Cfg: a.Cfg, Provider: a.Provider, Model: a.Model, Tools: readOnly,
 		Profile: a.Profile, compat: a.compat, projectNotes: a.projectNotes,
@@ -47,9 +45,10 @@ func (a *Agent) planAgent() *Agent {
 		sys += "\n\nRepository map:\n" + a.repoMap
 	}
 	scratch.systemOverride = sys
-	scratch.History = NewHistory(sys, a.History.Budget)
-	scratch.History.Reserve = a.History.Reserve
-	scratch.History.CharsPerToken = a.History.CharsPerToken
+	budget, reserve, cpt := a.History.Scalars()
+	scratch.History = NewHistory(sys, budget)
+	scratch.History.Reserve = reserve
+	scratch.History.CharsPerToken = cpt
 	return scratch
 }
 

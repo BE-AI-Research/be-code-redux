@@ -184,8 +184,12 @@ func (a *Agent) ApplyWindow(window int) bool {
 	if a.Cfg.ContextTokens > 0 && target > a.Cfg.ContextTokens {
 		target = a.Cfg.ContextTokens
 	}
+	// Under the history's lock: a consultation started from a UI goroutine
+	// reads these through History.Scalars while this runs.
+	a.History.mu.Lock()
 	clamped := a.History.Budget > window
 	a.History.Budget = target
+	a.History.mu.Unlock()
 	a.applyReserve(window)
 	return clamped
 }
@@ -223,7 +227,10 @@ func (a *Agent) reserveFor(window int) int {
 // forces compaction every couple of calls. Cap at three-quarters of the
 // limit in bytes, between 4KB and the 24KB default.
 func (a *Agent) applyReserve(window int) {
-	a.History.Reserve = a.reserveFor(window)
+	reserve := a.reserveFor(window)
+	a.History.mu.Lock()
+	a.History.Reserve = reserve
+	a.History.mu.Unlock()
 	if a.Tools != nil {
 		capBytes := a.History.Limit() * 3 / 4
 		if capBytes > 24*1024 {

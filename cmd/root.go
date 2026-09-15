@@ -129,6 +129,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	if flagYes {
 		cfg.AutoApproveShell = true
 		cfg.ApproveFileWrites = false
+		// Its own flag, not AutoApproveShell: the shell approval's "a" sets
+		// that one too, and choosing to stop being asked about commands is
+		// not consent to send the workspace to an online co-worker.
+		cfg.AutoApproveConsult = true
 	}
 	p, err := provider.FromConfig(cfg, flagProvider)
 	if err != nil {
@@ -172,6 +176,38 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
+	// Co-working models: the agent has already taken the usable ones from
+	// the config; the warnings for the unusable ones belong here, printed
+	// once, and the consult tool exists only when there is someone to ask.
+	if cws, warns := cfg.ValidCoworkers(); len(cws) > 0 || len(warns) > 0 {
+		for _, w := range warns {
+			fmt.Fprintf(os.Stderr, "warn: %s\n", w)
+		}
+		if len(cws) > 0 {
+			roster := make([]tools.CoworkerInfo, 0, len(cws))
+			for _, cw := range cws {
+				roster = append(roster, tools.CoworkerInfo{Name: cw.Name, Skills: cw.Skills})
+			}
+			reg.AddTool(tools.NewConsult(roster, func(ctx context.Context, a tools.ConsultArgs) (string, error) {
+				// RecentContext reads agent-goroutine-only fields; this
+				// runs inside dispatch, which is that goroutine.
+				res, err := ag.Consult(ctx, agent.ConsultRequest{
+					Who: a.Who, Question: a.Question, Files: a.Files,
+					Origin: "tool", Recent: ag.RecentContext(),
+				})
+				if err != nil {
+					return "", err
+				}
+				out := "co-worker " + res.Coworker + " replied:\n\n" + res.Answer
+				if res.Partial {
+					out += "\n\n(the co-worker was cut short; this is what it had)"
+				}
+				return out, nil
+			}))
+			ag.RefreshSystem() // the known-tool list and the prompt must see consult
+		}
+	}
+
 	if sess := attachIDE(cfg, reg, ag, headless); sess != nil {
 		ideSession = sess // package var; closed in runInteractive/run defers
 	}
@@ -201,6 +237,11 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			return nil, "", err
 		}
 		return rp, c.Reviewer.Model, nil
+	}
+
+	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
+	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
+		return provider.FromConfig(c, cw.Provider)
 	}
 
 	if flagResume != "" {

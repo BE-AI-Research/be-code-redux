@@ -102,6 +102,60 @@ themes) on terminals that support it, restored when BE-Code exits; set
 `theme_terminal_colors` to false to keep your terminal's own background. Plain mode
 uses your terminal's own colours, so there `/theme` only records the choice for the TUI.
 
+## Co-working models
+
+A co-working model is a second model — usually stronger, local or online —
+the primary can consult mid-task without handing over the work. Configure
+one or more under `coworkers`:
+
+```json
+"coworkers": [
+  {"name": "big", "provider": "ollama", "model": "qwen3:32b", "skills": "architecture, tricky bugs"}
+],
+"cowork": {"auto": true, "max_consults_per_run": 3, "consult_turns": 12, "consult_timeout": 300}
+```
+
+`provider` names an entry under `providers{}`, same as `default_provider`. An
+invalid co-worker (empty name/model, unknown provider, duplicate name) is
+dropped with a `warn:` line at startup rather than failing the run.
+
+The primary calls the `consult` tool itself when it is stuck. With
+`cowork.auto` on, the harness also consults the first configured co-worker on
+its own: once when verification is still failing after the last repair round
+(the advice earns one extra repair round), and once when the same tool has
+failed three times in a row (the advice is delivered as a note before the
+next model call). Either way, a consultation is a read-only scratch agent —
+`read_file`, `list_dir`, `search` only, no writes or shell — running on the
+co-worker's own provider/model with its own turn budget
+(`cowork.consult_turns`), seeded with the question, the named files (at most
+8 of them, 8 KiB each and 32 KiB in all — the rest are listed by name for it
+to read itself), and the primary's recent context. At most `cowork.max_consults_per_run`
+consultations run per request, one at a time, and each is bounded by
+`cowork.consult_timeout` seconds, after which it is abandoned with
+`co-worker <name> timed out after <n>s` and the run carries on. A co-worker
+that fails, declines or is unreachable never interrupts the run — it is
+silent or leaves a `co-worker unavailable: …` notice.
+
+Answers show up on every attached terminal as `<name>? question` then
+`<name>> answer`, in the theme's co-worker colour, followed by a short line
+of how many files it read and how long it took; the status line shows
+`consulting <name> · N files read` while one is in flight. Plain mode prints
+the same lines.
+
+A co-worker marked `"online": true` asks for consent once per session before
+any code is sent to it — the TUI's `Co-working model — approval required`
+modal (`a` allows it for the rest of the session), or the same prompt in
+plain mode; `-y` allows it, and a headless run without `-y` declines with
+`consultation declined`. Local co-workers, and a person's own `/consult`,
+never ask.
+
+`/coworkers` lists the configured co-workers and how many times each has been
+consulted this session. `/consult [name] <question>` asks one directly —
+busy-safe; asked mid-run it runs on the session's own root context rather
+than the turn's, so the run is left alone and Esc (or `/quit`) cancels both
+the run and the consultation. A `/consult` never counts against
+`cowork.max_consults_per_run`.
+
 ## Select and copy
 
 Drag with the mouse over the transcript to select text (Shift-drag uses your
@@ -526,6 +580,11 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `host_sessions` (true) — run each interactive TUI session in a detached host
   process this terminal attaches to, so it survives the terminal and other
   terminals can attach (`--no-host` for one run); see "Shared sessions"
+- `coworkers` (`[]`) — `{name, provider, model, skills, online}` entries naming
+  other models the primary can consult; `cowork.auto` (true), `cowork.
+  max_consults_per_run` (3), `cowork.consult_turns` (12) and
+  `cowork.consult_timeout` (300, seconds one consultation may take) tune when
+  and how much; see "Co-working models"
 
 ## Status
 

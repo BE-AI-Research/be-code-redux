@@ -78,6 +78,8 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
+	{"/coworkers", "list co-working models and how often each was consulted", false},
+	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
@@ -105,6 +107,9 @@ var busySafe = map[string]bool{
 	"/menu": true, "/help": true, "/theme": true, "/config": true, "/stats": true, "/tools": true,
 	"/map": true, "/handoff": true, "/copy": true, "/queue": true, "/clients": true, "/detach": true,
 	"/review": true, "/quit": true, "/exit": true, "/q": true,
+	// A consultation is the co-worker's own scratch agent: it never touches
+	// the primary's history, so both may run mid-turn.
+	"/coworkers": true, "/consult": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

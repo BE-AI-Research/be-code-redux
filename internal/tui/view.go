@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -559,6 +560,12 @@ func (m *View) showAsk(a *ask) {
 	m.modalVP = viewport.New(m.width-6, m.modalHeight())
 	switch a.Kind {
 	case askApproval:
+		if a.Action == "consult" {
+			// Not a diff: a question whose first word happens to be "-" is
+			// not a deletion, and colouring it as one would say it was.
+			m.modalVP.SetContent(a.Detail)
+			break
+		}
 		m.modalVP.SetContent(ui.ColorizeDiff(a.Detail, true))
 	case askPlan:
 		m.modalVP.SetContent(a.Detail)
@@ -597,6 +604,15 @@ func (m *View) renderLocalNote(text string) {
 	m.refreshTranscript()
 }
 
+// renderLocalLines writes already-styled lines into this terminal's own
+// buffer, for a listing whose parts carry more than one style (/coworkers).
+func (m *View) renderLocalLines(lines []string) {
+	for _, l := range lines {
+		m.rendered.WriteString(l + "\n")
+	}
+	m.refreshTranscript()
+}
+
 // handleAskKey answers the shared question, or scrolls its body. The answer
 // is recorded as this terminal's, and this is the only modal it closes
 // directly — the rest close on the askResolvedMsg that Answer broadcasts.
@@ -626,6 +642,18 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.Action == "shell" {
 			m.cfg.AutoApproveShell = true
 			ans = askAnswer{OK: true, Note: "shell auto-approve enabled for this session"}
+		} else if a.Action == "consult" {
+			// Session-wide consent for this one co-worker, recorded on the
+			// agent (never in the config file): a standing "yes" to sending
+			// code off this machine is not something to persist behind the
+			// user's back. A detail with no parsable name approves this one
+			// consultation and nothing more.
+			if name := agent.ConsentCoworker(a.Detail); name != "" {
+				m.ag.AllowCoworker(name)
+				ans = askAnswer{OK: true, Note: "co-worker " + name + " allowed for this session"}
+			} else {
+				ans = askAnswer{OK: true}
+			}
 		} else {
 			// Both switches: cfg stops the terminal prompt, the registry
 			// flag stops the editor diff review (see Registry.ApproveWrites).
@@ -696,6 +724,9 @@ func (m *View) handleBusyKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.cancelFn != nil {
 			m.cancelFn()
+		}
+		if m.consultCancel != nil {
+			m.consultCancel()
 		}
 		if n := len(m.ag.DrainInbox()); n > 0 {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("discarded %d queued message(s)", n)})
@@ -998,9 +1029,16 @@ func (m *View) viewAsk() string {
 	}
 	title := "Shell command"
 	hint := "y approve · n deny · a always-approve shell · ↑↓ scroll"
-	if a.Action == "file_write" {
+	switch a.Action {
+	case "file_write":
 		title = "File change"
 		hint = "y approve · n deny · a stop asking for writes · ↑↓ scroll"
+	case "consult":
+		// Sending this workspace's code to an online model is a decision
+		// about a co-worker by name, not a class of action, so "a" says
+		// whose it is.
+		title = "Co-working model"
+		hint = "y allow this · n decline · a allow " + agent.ConsentCoworker(a.Detail) + " for the session · ↑↓ scroll"
 	}
 	if m.compact() {
 		hint = "y/n/a · ↑↓"
@@ -1284,7 +1322,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.finishTurn(nil, nil)
 		}()
 	case "/stats":
-		s := m.ag.Stats
+		s := m.ag.Usage()
 		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
@@ -1346,6 +1384,103 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 	case "/review":
 		m.reviewCommand(fields)
+	case "/coworkers":
+		// A listing, not a shared event: the terminal that asked is the one
+		// that wants to read it.
+		cws := m.ag.Coworkers()
+		if len(cws) == 0 {
+			m.renderLocalNote(`no co-working models configured (see README "Co-working models")`)
+			return m, nil
+		}
+		lines := make([]string, 0, len(cws))
+		for _, cw := range cws {
+			line := "  " + m.st.Cowork.Render(cw.Name) + "  " + m.st.Dim.Render(cw.Provider+"/"+cw.Model)
+			if cw.Skills != "" {
+				line += "  " + cw.Skills
+			}
+			if cw.Online {
+				line += m.st.Warn.Render(" (online)")
+			}
+			if n := m.ag.ConsultCount(cw.Name); n > 0 {
+				line += m.st.Dim.Render(fmt.Sprintf(" · consulted %d", n))
+			}
+			lines = append(lines, line)
+		}
+		m.renderLocalLines(lines)
+		return m, nil
+	case "/consult":
+		who, q := "", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), fields[0]))
+		// The first word is a co-worker name only when it names one that
+		// exists; otherwise it is the first word of the question, so
+		// "/consult why is this failing?" still reaches the default one.
+		if len(fields) > 1 {
+			for _, cw := range m.ag.Coworkers() {
+				if cw.Name == fields[1] {
+					who, q = cw.Name, strings.TrimSpace(strings.TrimPrefix(q, fields[1]))
+					break
+				}
+			}
+		}
+		if q == "" {
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "usage: /consult [name] <question>"})
+			return m, nil
+		}
+		// A turn of its own when the session is idle: every terminal goes
+		// busy, and Esc reaches the consultation through cancelFn. The
+		// question and the answer are the events' to render
+		// (onConsultStart/onConsultEnd), for every terminal at once.
+		//
+		// /consult is busy-safe, though, so it can also be asked *during* a
+		// run — the nesting plain mode allows too. That one must not take the
+		// turn over: runContextLocked would park its own cancel in cancelFn,
+		// orphaning the run in flight (Esc would reach the consultation and
+		// nothing else), and finishTurn would return the session to idle
+		// while the model was still working. So it borrows the session's root
+		// context and leaves the run state alone; Esc means the run and, through
+		// consultCancel, the consultation too.
+		sess, label := m.Session, m.clientLabel(m.id)
+		owns := !m.running
+		var ctx context.Context
+		if owns {
+			m.setRunStateLocked(true, "consulting")
+			ctx = m.runContextLocked()
+		} else {
+			parent := m.rootCtx
+			if parent == nil {
+				parent = context.Background()
+			}
+			if m.consultCancel != nil {
+				// Consult would refuse a second one anyway; say so here
+				// rather than let its cancel get lost.
+				m.appendEntryLocked(entry{Kind: entryError, Label: "error ", Text: "a consultation is already running"})
+				return m, nil
+			}
+			ctx, m.consultCancel = context.WithCancel(parent)
+		}
+		go func() {
+			// No Recent: RecentContext reads fields only the agent's own
+			// goroutine may touch, and this one is a UI goroutine. A person
+			// asking directly says what they mean anyway.
+			res, err := sess.ag.Consult(ctx, agent.ConsultRequest{Who: who, Question: q, Origin: "user:" + label})
+			// A consultation that got as far as running has reported itself
+			// through the events; only the refusals before it started
+			// (unknown name, declined, none configured) reach no event.
+			if err != nil && !res.Started {
+				sess.appendEntry(entry{Kind: entryError, Label: "error ", Text: err.Error()})
+			}
+			if owns {
+				sess.send(sess.usageSnapshot())
+				sess.finishTurn(nil, nil)
+				return
+			}
+			sess.mu.Lock()
+			if sess.consultCancel != nil {
+				sess.consultCancel()
+				sess.consultCancel = nil
+			}
+			sess.mu.Unlock()
+		}()
+		return m, nil
 	case "/clients":
 		if !m.served {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})

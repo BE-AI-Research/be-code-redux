@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -13,6 +14,18 @@ import (
 // the hard limit, so BE-Code trims aggressively: old tool results are
 // collapsed first, then whole old turns are dropped behind a stub.
 type History struct {
+	// mu guards the three scalars below — Budget, Reserve and
+	// CharsPerToken — and nothing else. They are written by the agent
+	// goroutine (Calibrate after every request, Agent.ApplyWindow when the
+	// backend's window moves) and read by whatever goroutine starts a
+	// consultation: /consult comes off a UI goroutine, and consultAgent
+	// copies all three into the scratch history. Readers on the agent's own
+	// goroutine (est, Tokens, Limit, trim) stay lock-free: they cannot race
+	// with a writer that is themselves, and a lock in est would be taken
+	// once per message per turn for nothing. Scalars is the one seam a
+	// foreign goroutine reads them through.
+	mu sync.Mutex
+
 	System   provider.Message
 	Messages []provider.Message
 	Budget   int // total prompt tokens the backend can take (its context window)
@@ -107,6 +120,8 @@ func (h *History) Calibrate(reportedPromptTokens int) {
 	if reportedPromptTokens <= 0 {
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	chars := 0
 	for _, m := range append([]provider.Message{h.System}, h.Messages...) {
 		chars += len(m.Content)
@@ -136,6 +151,15 @@ func (h *History) Calibrate(reportedPromptTokens int) {
 		next = maxCharsPerToken
 	}
 	h.CharsPerToken = next
+}
+
+// Scalars is Budget, Reserve and CharsPerToken read together under mu, for
+// a goroutine that is not the agent's own (consultAgent, building a
+// co-worker's scratch history while the primary may be recalibrating).
+func (h *History) Scalars() (budget, reserve int, charsPerToken float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.Budget, h.Reserve, h.CharsPerToken
 }
 
 // Add appends a message.

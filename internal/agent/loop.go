@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -33,6 +34,11 @@ type Events struct {
 	// keeping in the transcript. When nil they arrive through OnNotice.
 	OnTransient func(msg string)
 	OnReasoning func(text string) // hidden model reasoning deltas (thinking models)
+	// Co-working (see cowork.go): a consultation starting, the co-worker
+	// reading files, and its result. All optional.
+	OnConsultStart    func(name, question, origin string)
+	OnConsultProgress func(name string, filesRead int)
+	OnConsultEnd      func(res ConsultResult, err error)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -42,6 +48,15 @@ type Stats struct {
 	Requests         int // model round-trips
 	ToolCalls        int
 	Elapsed          time.Duration
+}
+
+// add folds another usage record into s.
+func (s *Stats) add(d Stats) {
+	s.PromptTokens += d.PromptTokens
+	s.CompletionTokens += d.CompletionTokens
+	s.Requests += d.Requests
+	s.ToolCalls += d.ToolCalls
+	s.Elapsed += d.Elapsed
 }
 
 // Agent binds a provider, tool registry, and conversation history.
@@ -58,8 +73,13 @@ type Agent struct {
 	Checkpoints *checkpoint.Checkpointer
 	// Profile is the active model-family tuning.
 	Profile profiles.Profile
-	// Stats is cumulative session usage.
-	Stats Stats
+	// Stats is cumulative session usage. The agent goroutine writes it
+	// through addStats; a consultation issued from a UI while a run is in
+	// progress writes it from that UI's goroutine, and every reader that
+	// is not the agent goroutine itself takes Usage() — statsMu keeps the
+	// two apart.
+	Stats   Stats
+	statsMu sync.Mutex
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -81,6 +101,12 @@ type Agent struct {
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
 
+	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
+	// cowork.go): the current request and the newest failing tool result,
+	// both reset at the start of each new turn.
+	lastUserInput   string
+	lastFailingTool string
+
 	inbox Inbox // mid-task user messages (see inbox.go)
 
 	// Backend resilience (see resilience.go).
@@ -96,6 +122,46 @@ type Agent struct {
 	saveWarned   bool
 	knownTools   map[string]bool
 	compat       bool // current session uses embedded tool calls
+
+	// Co-working state (see cowork.go). coworkers is the usable co-worker
+	// list, resolved once at New and read-only thereafter; consults is the
+	// current run's budget spend, reset by RunFull; consultCount is
+	// per-session usage for /coworkers; coworkAllowed is session-wide
+	// consent for an online co-worker.
+	//
+	// Two locks, deliberately: consultMu serialises whole consultations
+	// (one at a time, held across the approval prompt and the co-worker's
+	// run), while coworkMu guards only the three counters, which a UI
+	// goroutine reads and writes — /coworkers and the approval modal's
+	// "a" — while the agent goroutine is inside Consult. coworkMu is
+	// never held across a call that can block.
+	coworkers     []config.CoworkerConfig
+	consults      int
+	consultCount  map[string]int
+	coworkAllowed map[string]bool
+	consultMu     sync.Mutex
+	coworkMu      sync.Mutex
+
+	// The harness's own consultation triggers (see autoConsult). These
+	// three are touched only on the agent goroutine — inside run,
+	// dispatch and RunFull — and so need no lock, unlike the counters
+	// above. autoVerifyUsed keeps the verify trigger to once per request;
+	// toolFailStreak counts consecutive failures of one tool and fires at
+	// exactly three; pendingAdvice parks the answer until the loop is
+	// back at the top, so advice lands as a user note after the tool
+	// results the model was waiting on rather than in the middle of them.
+	autoVerifyUsed bool
+	toolFailStreak toolFailStreak
+	pendingAdvice  string
+}
+
+// toolFailStreak is one run of consecutive failures of the same tool:
+// its name, how many in a row, and the newest three error texts, which
+// are what the co-worker is actually shown.
+type toolFailStreak struct {
+	name string
+	n    int
+	last []string
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -121,6 +187,11 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}
+	// Co-workers: the warnings belong to cmd, which calls ValidCoworkers
+	// itself and prints them once at startup.
+	a.coworkers, _ = cfg.ValidCoworkers()
+	a.consultCount = map[string]int{}
+	a.coworkAllowed = map[string]bool{}
 	return a
 }
 
@@ -273,11 +344,19 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 // undo unit and one changed-files set for the reviewer.
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
 	start := time.Now()
-	defer func() { a.Stats.Elapsed += time.Since(start) }()
+	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
+
+	// A streak belongs to one stretch of tool calls; a repair round is a
+	// fresh start, and advice from a previous round has either been
+	// delivered or been overtaken by events.
+	a.toolFailStreak = toolFailStreak{}
+	a.pendingAdvice = ""
 
 	if newTurn {
 		a.Checkpoints.BeginTurn(store.TitleFrom(userInput))
 		a.reqTouched = false
+		a.lastUserInput = userInput
+		a.lastFailingTool = ""
 	}
 	if a.repoDirty {
 		a.repoDirty = false
@@ -301,6 +380,13 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
+		// A co-worker's answer to a repeated tool failure goes in the
+		// same way and for the same reason: after the tool results, as
+		// plain user text the model cannot mistake for its own.
+		if a.pendingAdvice != "" {
+			a.History.Add(provider.Message{Role: provider.RoleUser, Content: a.pendingAdvice})
+			a.pendingAdvice = ""
+		}
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
@@ -533,7 +619,7 @@ func (a *Agent) runEmbeddedCalls(ctx context.Context, rawContent, _ string, call
 }
 
 func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Result {
-	a.Stats.ToolCalls++
+	a.addStats(Stats{ToolCalls: 1})
 	switch call.Name {
 	case "write_file", "edit_file":
 		a.reqTouched, a.repoDirty = true, true
@@ -544,8 +630,43 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		a.Events.OnToolStart(call.Name, call.Arguments)
 	}
 	res := a.Tools.Dispatch(ctx, call)
+	// The automatic tool-failure consultation's question, decided here but
+	// asked below, after OnToolEnd has put the failure on screen.
+	consult := ""
+	if res.IsError {
+		a.lastFailingTool = call.Name + ": " + res.Content
+		// Three failures of the same tool in a row is the signature of a
+		// small model that has stopped reading the error and started
+		// guessing. Ask a co-worker once per streak; a fourth failure is
+		// the same stuck state, not new information.
+		if a.toolFailStreak.name == call.Name {
+			a.toolFailStreak.n++
+		} else {
+			a.toolFailStreak = toolFailStreak{name: call.Name, n: 1}
+		}
+		a.toolFailStreak.last = append(a.toolFailStreak.last, res.Content)
+		if len(a.toolFailStreak.last) > 3 {
+			a.toolFailStreak.last = a.toolFailStreak.last[1:]
+		}
+		if a.toolFailStreak.n == 3 && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && call.Name != "consult" {
+			consult = fmt.Sprintf("the tool %s has failed three times in a row with these arguments:\n%s\n\nerrors:\n- %s",
+				call.Name, call.Arguments, strings.Join(a.toolFailStreak.last, "\n- "))
+		}
+	} else {
+		a.toolFailStreak = toolFailStreak{}
+	}
 	if a.Events.OnToolEnd != nil {
 		a.Events.OnToolEnd(call.Name, res)
+	}
+	// After OnToolEnd, not before: the consultation announces itself
+	// ("consulting big…") and renders its question as it goes, and a
+	// question that answers a failure has to appear below that failure
+	// rather than above the line it is about.
+	if consult != "" {
+		if name, advice, ok := a.autoConsult(ctx, "auto:tool", consult, nil); ok {
+			a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
+				name, call.Name, advice)
+		}
 	}
 	return res
 }
@@ -579,19 +700,20 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
-	a.Stats.Requests++
+	used := Stats{Requests: 1}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
-		a.Stats.PromptTokens += resp.Usage.PromptTokens
-		a.Stats.CompletionTokens += resp.Usage.CompletionTokens
+		used.PromptTokens = resp.Usage.PromptTokens
+		used.CompletionTokens = resp.Usage.CompletionTokens
 		// The server's count is ground truth for the prompt we just sent.
 		a.History.Calibrate(resp.Usage.PromptTokens - a.History.Extra)
 	} else {
 		// Backend didn't report usage; estimate.
 		for _, m := range req.Messages {
-			a.Stats.PromptTokens += a.History.MessageTokens(m)
+			used.PromptTokens += a.History.MessageTokens(m)
 		}
-		a.Stats.CompletionTokens += a.History.est(resp.Content)
+		used.CompletionTokens = a.History.est(resp.Content)
 	}
+	a.addStats(used)
 	return resp, nil
 }
 
@@ -727,6 +849,8 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
+	a.resetConsults() // the consultation budget is per request
+	a.autoVerifyUsed = false
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err
@@ -748,6 +872,24 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 				answer, err = a.run(ctx, repairPrompt, false)
 				if err != nil {
 					return "", rep, err
+				}
+			}
+			// The repair budget is spent and the check still fails: the
+			// primary has run out of ideas, which is exactly when a
+			// co-worker is worth the wait. One extra round, once per
+			// request — if that does not fix it, a second opinion on the
+			// same evidence would not either.
+			if rep.Verify != nil && !rep.Verify.Passed() && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && !a.autoVerifyUsed {
+				a.autoVerifyUsed = true
+				files := a.changedFiles()
+				if name, advice, ok := a.autoConsult(ctx, "auto:verify",
+					"the change still fails this check; what is wrong and what minimal edit fixes it\n\n"+rep.Verify.ModelSummary(), files); ok {
+					a.notice("co-worker %s advised; one more repair round", name)
+					answer, err = a.run(ctx, fmt.Sprintf("A co-worker (%s) reviewed the failing check and advises:\n\n%s\n\nApply the minimal fix, then stop.", name, advice), false)
+					if err != nil {
+						return "", rep, err
+					}
+					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
 				}
 			}
 			if rep.Verify != nil && !rep.Verify.Passed() {
@@ -786,4 +928,26 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 		}
 	}
 	return answer, rep, nil
+}
+
+// addStats records usage under statsMu.
+func (a *Agent) addStats(d Stats) {
+	a.statsMu.Lock()
+	a.Stats.add(d)
+	a.statsMu.Unlock()
+}
+
+// Usage is a snapshot of Stats safe to read while the agent is working.
+func (a *Agent) Usage() Stats {
+	a.statsMu.Lock()
+	defer a.statsMu.Unlock()
+	return a.Stats
+}
+
+// usageTokens is what a scratch agent (plan, consultation) hands back to
+// its parent: its tokens and round-trips, not its tool calls or elapsed
+// time, which the parent's own turn already accounts for.
+func (a *Agent) usageTokens() Stats {
+	u := a.Usage()
+	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests}
 }

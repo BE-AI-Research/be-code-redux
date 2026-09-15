@@ -116,10 +116,20 @@ func (r *REPL) approve(action, detail string) bool {
 	case "y", "yes":
 		return true
 	case "a", "always":
-		if action == "shell" {
+		switch action {
+		case "shell":
 			r.Cfg.AutoApproveShell = true
-		} else if action == "file_write" {
+		case "file_write":
 			r.Cfg.ApproveFileWrites = false
+		case "consult":
+			// Session-wide consent for this one co-worker, recorded on the
+			// agent and never in the config file — the same rule the TUI's
+			// modal follows. A detail with no parsable name approves this
+			// one consultation and nothing more.
+			if name := agent.ConsentCoworker(detail); name != "" {
+				r.Agent.AllowCoworker(name)
+				fmt.Println(dim("co-worker " + name + " allowed for this session"))
+			}
 		}
 		return true
 	}
@@ -357,10 +367,16 @@ func (r *REPL) queueCommand(input string) {
 func (r *REPL) runBusy(ctx context.Context, fn func(ctx context.Context)) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Restore rather than clear: /consult is busy-safe and runs its own
+	// runBusy, so this nests inside the primary's. Clearing the flag on the
+	// inner one's way out would tell prompt() to read r.lines directly
+	// while the outer loop is still reading it, and an approval would race
+	// the run for the next typed line.
 	r.mu.Lock()
+	wasBusy := r.busy
 	r.busy = true
 	r.mu.Unlock()
-	defer func() { r.mu.Lock(); r.busy = false; r.mu.Unlock() }()
+	defer func() { r.mu.Lock(); r.busy = wasBusy; r.mu.Unlock() }()
 	done := make(chan struct{})
 	go func() { fn(runCtx); close(done) }()
 	var deferred *lineEvent
@@ -549,6 +565,52 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			}
 		}
 		fmt.Printf("review: %s (resolves to %s)\n", r.Review.Mode(), r.Review.Resolve())
+	case "/coworkers":
+		cws := r.Agent.Coworkers()
+		if len(cws) == 0 {
+			fmt.Println(dim(`no co-working models configured (see README "Co-working models")`))
+			break
+		}
+		for _, cw := range cws {
+			line := fmt.Sprintf("  %s  %s/%s  %s", cw.Name, cw.Provider, cw.Model, cw.Skills)
+			if cw.Online {
+				line += " (online)"
+			}
+			if n := r.Agent.ConsultCount(cw.Name); n > 0 {
+				line += dim(fmt.Sprintf(" · consulted %d", n))
+			}
+			fmt.Println(line)
+		}
+	case "/consult":
+		who, q := "", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))
+		// The first word is a co-worker name only when it names one that
+		// exists; otherwise it is the first word of the question, so
+		// "/consult why is this failing?" still reaches the default one.
+		if len(fields) > 1 {
+			for _, cw := range r.Agent.Coworkers() {
+				if cw.Name == fields[1] {
+					who, q = cw.Name, strings.TrimSpace(strings.TrimPrefix(q, fields[1]))
+					break
+				}
+			}
+		}
+		if q == "" {
+			fmt.Println(dim("usage: /consult [name] <question>"))
+			break
+		}
+		r.runBusy(ctx, func(ctx context.Context) {
+			// No Recent: RecentContext reads fields only the agent's own
+			// goroutine may touch, and this one is the UI's. A person
+			// asking directly says what they mean anyway.
+			res, err := r.Agent.Consult(ctx, agent.ConsultRequest{Who: who, Question: q, Origin: "user:local"})
+			// A consultation that got as far as running reports itself
+			// through OnConsultStart/OnConsultEnd; only the refusals before
+			// it started (unknown name, declined, none configured) never
+			// reach an event.
+			if err != nil && !res.Started {
+				fmt.Printf("%s %v\n", red("error>"), err)
+			}
+		})
 	case "/config":
 		p, _ := config.Path()
 		fmt.Printf("config: %s\n  provider=%s model=%s ui=%s context_tokens=%d max_turns=%d max_repairs=%d\n  compat_tool_calls=%s approve_file_writes=%v auto_approve_shell=%v\n",
@@ -590,7 +652,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Printf("compacted; context now ~%d tokens\n", r.Agent.History.Tokens())
 	case "/stats":
-		s := r.Agent.Stats
+		s := r.Agent.Usage()
 		fmt.Printf("requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d\n",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
 			s.Elapsed.Round(100*time.Millisecond), r.Agent.History.Tokens(), r.Agent.History.Budget)
@@ -746,6 +808,26 @@ func Events() agent.Events {
 			}
 		},
 		OnNotice: func(msg string) { endThinking(); fmt.Printf("%s %s\n", yell("note>"), msg) },
+		// A consultation is announced before the wait it explains, and
+		// closed by the co-worker's answer plus what it cost. Progress
+		// (files read so far) is a live status line, which plain mode has
+		// nowhere to put, so it is left to the TUI.
+		OnConsultStart: func(name, question, origin string) {
+			endThinking()
+			fmt.Printf("%s %s\n", cyan(name+"?"), question)
+		},
+		OnConsultEnd: func(res agent.ConsultResult, err error) {
+			endThinking()
+			if err != nil {
+				fmt.Printf("%s %s: %v\n", yell("note>"), res.Coworker, err)
+				return
+			}
+			fmt.Printf("%s %s\n", cyan(res.Coworker+">"), res.Answer)
+			if res.Partial {
+				fmt.Println(dim("(partial)"))
+			}
+			fmt.Println(dim(fmt.Sprintf("%s read %d files in %s", res.Coworker, res.Read, res.Elapsed.Round(time.Second))))
+		},
 		OnReasoning: func(t string) {
 			if thinking == 0 {
 				fmt.Print(dim("thinking"))

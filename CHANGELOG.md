@@ -1,5 +1,34 @@
 # BE-Code Changelog
 
+## v0.9.0 — co-working models
+
+- **Co-working models.** `coworkers` in config names other models (local or
+  online) the primary can consult mid-task. The primary calls the new
+  `consult` tool when it is stuck; with `cowork.auto` on, the harness also
+  consults the first co-worker when verification is still failing after the
+  last repair round (one extra round with the advice) or a tool has failed
+  three times running (the advice is delivered as a note). A consultation is
+  a read-only scratch agent on the co-worker's model — it reads the
+  repository, never edits — capped by `cowork.consult_turns`, at most
+  `cowork.max_consults_per_run` per request. Answers appear on every terminal
+  as `<name>? question` and `<name>> answer` in the theme's co-worker colour.
+  An `online: true` co-worker asks once per session before any code is sent
+  (`a` allows it for the session); `-y` allows, headless without `-y`
+  declines. `/coworkers` lists them; `/consult [name] <question>` asks one
+  directly. An unreachable co-worker never interrupts the run, and one that
+  stops answering is abandoned after `cowork.consult_timeout` seconds (300 by
+  default).
+
+- **Consent for an online co-worker has its own key.** `-y` allows a
+  consultation through a flag of its own rather than through
+  `auto_approve_shell`, so a session where the user chose "always run shell
+  commands" — or a config file with `auto_approve_shell` set — still asks
+  before any code leaves the machine. Plain mode's `a` on that prompt now
+  records session-wide consent for that one co-worker, as the TUI modal's
+  already did. The prompt also says what travels with the question. A
+  co-worker's answer is stripped of `<tool_call>`/`<tool_result>` markup
+  before the primary sees it, so advice cannot dispatch itself.
+
 ## v0.8.0 — every terminal renders itself
 
 - **The title and the input field take the theme's own text colour.** Every
