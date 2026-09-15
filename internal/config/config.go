@@ -41,6 +41,18 @@ type CoworkConfig struct {
 	ConsultTimeout int `json:"consult_timeout"`
 }
 
+// EngineConfig tunes the working-memory engine (internal/engine).
+type EngineConfig struct {
+	Enabled bool `json:"enabled"`
+	// Budget caps the Working memory block in the system prompt, in bytes.
+	Budget int `json:"budget"`
+	// NotesCap caps the durable notes.md, in bytes.
+	NotesCap int `json:"notes_cap"`
+	// Tools is "full" (task, lookup, history, show, changes) or "minimal"
+	// (task and lookup only) for tight compat-mode prompts.
+	Tools string `json:"tools"`
+}
+
 // ProviderConfig describes one inference endpoint.
 type ProviderConfig struct {
 	// Type: "openai" (any OpenAI-compatible server) or "ollama"
@@ -147,6 +159,9 @@ type Config struct {
 	// a co-worker's tool loop.
 	Cowork CoworkConfig `json:"cowork"`
 
+	// Engine tunes the working-memory engine (internal/engine).
+	Engine EngineConfig `json:"engine"`
+
 	// WebSearch enables the web_search (and web_fetch) tools via Google
 	// Programmable Search Engine. Off unless CX is set; the API key comes
 	// only from the env var named in APIKeyEnv.
@@ -251,6 +266,7 @@ func Default() *Config {
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
 		Coworkers:        nil,
+		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, Tools: "full"},
 	}
 }
 
@@ -335,6 +351,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.Cowork.ConsultTimeout == 0 {
 		cfg.Cowork.ConsultTimeout = 300
+	}
+	if cfg.Engine.Budget == 0 {
+		cfg.Engine.Budget = 6144
+	}
+	if cfg.Engine.NotesCap == 0 {
+		cfg.Engine.NotesCap = 4096
+	}
+	if cfg.Engine.Tools == "" {
+		cfg.Engine.Tools = "full"
 	}
 	return cfg, nil
 }

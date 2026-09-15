@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -26,7 +27,7 @@ func (a *Agent) Plan(ctx context.Context, input string) (string, error) {
 // prompt is pinned via systemOverride so the per-turn git refresh in run()
 // cannot swap it for the normal coding prompt.
 func (a *Agent) planAgent() *Agent {
-	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch", "consult")
+	readOnly := a.Tools.Subset("read_file", "list_dir", "search", "web_search", "web_fetch", "consult", "task", "lookup", "history", "show", "changes")
 	scratch := &Agent{
 		Cfg: a.Cfg, Provider: a.Provider, Model: a.Model, Tools: readOnly,
 		Profile: a.Profile, compat: a.compat, projectNotes: a.projectNotes,
@@ -39,6 +40,13 @@ func (a *Agent) planAgent() *Agent {
 	sys := planSystemPrompt
 	if scratch.compat || a.Cfg.CompatToolCalls == "auto" {
 		full := BuildSystemPrompt(readOnly.Specs(), true, "") // tool format guidance
+		// The spliced tail is the compat tool catalog only. The engine
+		// guidance BuildSystemPrompt appends after it talks about a
+		// Working memory block, and plan mode carries none — its prompt
+		// must not describe something the model will not be shown.
+		if g := engineGuidance(readOnly.Specs()); g != "" {
+			full = strings.TrimSuffix(full, "\n\n"+g)
+		}
 		sys = planSystemPrompt + "\n\n" + full[strings.Index(full, "Tool calling format"):]
 	}
 	if a.repoMap != "" {
@@ -54,6 +62,9 @@ func (a *Agent) planAgent() *Agent {
 
 // ExecutePlan runs the approved plan through the normal loop.
 func (a *Agent) ExecutePlan(ctx context.Context, request, plan string) (string, *ReviewedReport, error) {
+	if a.Engine != nil {
+		a.Engine.SetPlan(request, engine.ParsePlanSteps(plan))
+	}
 	return a.RunFull(ctx, fmt.Sprintf(planExecutePrefix, request, plan))
 }
 

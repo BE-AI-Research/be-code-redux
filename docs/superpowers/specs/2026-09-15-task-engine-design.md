@@ -40,7 +40,7 @@ Four files:
 | File | Scope | Content |
 |---|---|---|
 | `digests.json` | session | one record per file read: path, content hash (SHA-256 of bytes), size, mtime, symbol outline, line ranges seen, note, `turn` last touched, `edited` flag |
-| `ledger.json` | session | task line, steps `[{text, status}]` with status `todo`/`doing`/`done`/`skip`, decisions `[]string`, facts `[]string`, `baseline` (HEAD hash plus a hash of `git status --porcelain` output, recorded when a `RunFull` starts) |
+| `ledger.json` | session | task line, steps `[{text, status}]` with status `todo`/`doing`/`done`/`skip`, decisions `[]string`, facts `[]string`, `baseline` (HEAD hash plus the `git status --porcelain` text, capped at 8 KiB, recorded when a `RunFull` starts) |
 | `lookups.json` | session | last 20 lookups: query, tool, `[{file, line, text}]` hits, hashes of the files hit |
 | `notes.md` | durable | short facts the model chose to keep across sessions |
 
@@ -153,9 +153,21 @@ Harness assistance:
   lines (up to 20) seed the steps.
 - `finishSession` reports any step still `doing` in the handoff briefing under
   `Stopped at:`.
-- The system prompt guidance gains: "Before a change that takes several
-  steps, record a plan with the task tool and mark steps as you go. When a
-  file matters for later, note what matters in it."
+- The system prompt gains a guidance paragraph on context use and progress
+  notes, present whenever the `task` tool is registered:
+
+  > Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again. If a git tool answers `not a git repository`, do not retry it: work from read_file ranges and keep your task notes and durable notes (task note with keep) up to date instead, because they are then your only memory across compaction.
+
+  and, for each git tool actually registered (all four with `engine.tools:
+  full`, only `lookup` with `minimal`), one sentence on when to use it:
+
+  > To find where something is defined or used, call lookup (git grep over tracked files; symbol=true returns the whole enclosing function) before search or read_file.
+  >
+  > Before changing code you do not understand, call history on that file (symbol, lines, query or blame) to learn why it is the way it is.
+  >
+  > To compare a file with an earlier revision, call show with rev instead of reading and guessing.
+  >
+  > Before verifying, reviewing or summarising your work, call changes to see exactly what you altered instead of re-reading whole files.
 
 User commands, in `ui.SlashCommandTable`, both UIs, busy-safe, view-local in
 the TUI:
@@ -246,9 +258,10 @@ The engine is advisory everywhere:
   each mode, the 20 s timeout, no-repo fallbacks, root confinement.
 - UIs: `/task`, `/task clear`, `/notes`, `/notes clear` in plain mode and the
   TUI; busy-safe table entries.
-- E2E: the scripted primary reads a file, the mock forces compaction, the
-  next request's system message carries the digest row, and the second read
-  of the same file gets the `already read` footer.
+- E2E: the scripted primary reads a file three times under a small budget,
+  the older reads are trimmed from the transcript, the next request's system
+  message still carries the digest row, and the third read carried the
+  `already read` footer.
 
 ## 9. Documentation
 

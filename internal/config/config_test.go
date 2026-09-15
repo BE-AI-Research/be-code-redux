@@ -162,3 +162,21 @@ func TestAutoApproveConsultIsNotAConfigKey(t *testing.T) {
 		}
 	}
 }
+
+func TestEngineDefaultsAndLoadFill(t *testing.T) {
+	d := Default()
+	if !d.Engine.Enabled || d.Engine.Budget != 6144 || d.Engine.NotesCap != 4096 || d.Engine.Tools != "full" {
+		t.Fatalf("defaults: %+v", d.Engine)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"), []byte(`{"engine":{"enabled":false,"budget":0,"tools":""}}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Engine.Enabled || cfg.Engine.Budget != 6144 || cfg.Engine.NotesCap != 4096 || cfg.Engine.Tools != "full" {
+		t.Fatalf("load fill: %+v", cfg.Engine)
+	}
+}

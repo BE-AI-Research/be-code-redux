@@ -11,6 +11,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
@@ -362,5 +363,48 @@ func TestPlainAlwaysAllowsTheCoworkerForTheSession(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("second consultation: %v (%s)", err, out)
+	}
+}
+
+// TestPlainTaskAndNotesCommands covers /task and /notes in plain mode: both
+// say so when no store is attached, and otherwise read and edit it directly
+// from the UI goroutine (the store has its own lock).
+func TestPlainTaskAndNotesCommands(t *testing.T) {
+	r := newTestREPL(t)
+	out := capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "working memory is off") {
+		t.Fatalf("no engine:\n%s", out)
+	}
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Agent.SetEngine(st)
+	st.SetPlan("add flag", []string{"parse", "wire"})
+	st.SetStep(1, "doing")
+	out = capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "task: add flag") || !strings.Contains(out, "[>] 1. parse") {
+		t.Fatalf("/task:\n%s", out)
+	}
+	capture(t, func() { r.command(context.Background(), "/notes add tests need go") })
+	out = capture(t, func() { r.command(context.Background(), "/notes") })
+	if !strings.Contains(out, "1. tests need go") {
+		t.Fatalf("/notes:\n%s", out)
+	}
+	capture(t, func() { r.command(context.Background(), "/notes drop 1") })
+	if out = capture(t, func() { r.command(context.Background(), "/notes") }); !strings.Contains(out, "no notes") {
+		t.Fatalf("after drop:\n%s", out)
+	}
+	capture(t, func() { r.command(context.Background(), "/task clear") })
+	if st.Ledger().Task != "" {
+		t.Fatal("/task clear did not clear")
+	}
+	// Whatever spacing was typed, the note is the text after the add token.
+	capture(t, func() { r.command(context.Background(), "/notes  add  spaced text") })
+	if out = capture(t, func() { r.command(context.Background(), "/notes") }); !strings.Contains(out, "1. spaced text") {
+		t.Fatalf("spaced add:\n%s", out)
+	}
+	if out = capture(t, func() { r.command(context.Background(), "/notes drop") }); !strings.Contains(out, "usage: /notes drop N") {
+		t.Fatalf("bare drop:\n%s", out)
 	}
 }

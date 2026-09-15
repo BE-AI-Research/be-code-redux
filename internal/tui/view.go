@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/cursor"
@@ -1480,6 +1481,61 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			}
 			sess.mu.Unlock()
 		}()
+		return m, nil
+	case "/task":
+		if m.ag.Engine == nil {
+			m.renderLocalNote("working memory is off (engine.enabled)")
+			return m, nil
+		}
+		if len(fields) > 1 && fields[1] == "clear" {
+			m.ag.Engine.ClearSession()
+			m.renderLocalNote("working memory cleared for this session")
+			return m, nil
+		}
+		m.renderLocalLines(strings.Split(m.ag.Engine.LedgerText(), "\n"))
+		return m, nil
+	case "/notes":
+		if m.ag.Engine == nil {
+			m.renderLocalNote("working memory is off (engine.enabled)")
+			return m, nil
+		}
+		sub := ""
+		if len(fields) > 1 {
+			sub = fields[1]
+		}
+		switch sub {
+		case "add":
+			text := ui.NoteArgument(text)
+			if text == "" {
+				m.renderLocalNote("usage: /notes add <text>")
+				return m, nil
+			}
+			m.ag.Engine.AddNoteLine(text)
+			m.renderLocalNote("noted")
+		case "drop":
+			if len(fields) < 3 {
+				m.renderLocalNote("usage: /notes drop N")
+				break
+			}
+			n, _ := strconv.Atoi(strings.Join(fields[2:], ""))
+			if err := m.ag.Engine.DropNote(n); err != nil {
+				m.renderLocalNote("error: " + err.Error())
+			}
+		case "clear":
+			m.ag.Engine.ClearNotes()
+			m.renderLocalNote("notes cleared")
+		default:
+			notes := strings.TrimRight(m.ag.Engine.Notes(), "\n")
+			if notes == "" {
+				m.renderLocalNote("no notes")
+				return m, nil
+			}
+			var lines []string
+			for i, l := range strings.Split(notes, "\n") {
+				lines = append(lines, fmt.Sprintf("%d. %s", i+1, l))
+			}
+			m.renderLocalLines(lines)
+		}
 		return m, nil
 	case "/clients":
 		if !m.served {

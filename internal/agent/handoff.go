@@ -44,8 +44,31 @@ func (a *Agent) WriteHandoff(ctx context.Context, withModel bool) (string, error
 		}
 		h = a.heuristicHandoff()
 	}
+	if a.Engine != nil {
+		// Drop the previous exit's line first: a resumed briefing carries
+		// one, and appending would stack a copy per exit.
+		h = stripStoppedAt(h)
+		if at := a.Engine.StoppedAt(); at != "" {
+			h += "\n\nStopped at: " + at
+		}
+	}
 	a.Session.Handoff = strings.TrimSpace(h)
 	return a.Session.Handoff, nil
+}
+
+const stoppedAtPrefix = "Stopped at: "
+
+// stripStoppedAt removes a trailing "Stopped at: …" line from a briefing.
+func stripStoppedAt(h string) string {
+	h = strings.TrimRight(h, " \t\n")
+	if strings.HasPrefix(h, stoppedAtPrefix) && !strings.Contains(h, "\n") {
+		return ""
+	}
+	i := strings.LastIndex(h, "\n"+stoppedAtPrefix)
+	if i < 0 || strings.Contains(h[i+1:], "\n") {
+		return h
+	}
+	return strings.TrimRight(h[:i], " \t\n")
 }
 
 // priorBriefing returns the innermost real briefing carried by a handoff,

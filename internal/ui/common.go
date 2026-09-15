@@ -5,6 +5,7 @@ package ui
 import (
 	"os"
 	"strings"
+	"unicode"
 )
 
 // ANSI helpers — plain enough for any terminal, disabled when not a TTY.
@@ -80,6 +81,8 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/coworkers", "list co-working models and how often each was consulted", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
+	{"/task", "show the task ledger, or /task clear to reset this session's working memory", true},
+	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
@@ -110,6 +113,8 @@ var busySafe = map[string]bool{
 	// A consultation is the co-worker's own scratch agent: it never touches
 	// the primary's history, so both may run mid-turn.
 	"/coworkers": true, "/consult": true,
+	// Listings and edits of the store; the agent reads it under its own lock.
+	"/task": true, "/notes": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the
@@ -118,3 +123,19 @@ func BusySafeCommand(line string) bool {
 	f := strings.Fields(line)
 	return len(f) > 0 && busySafe[f[0]]
 }
+
+// dropWord returns what follows the first whitespace-delimited word,
+// trimmed; "" when there is nothing after it.
+func dropWord(s string) string {
+	s = strings.TrimSpace(s)
+	i := strings.IndexFunc(s, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[i:])
+}
+
+// NoteArgument is the text of a "/notes add ..." line: everything after the
+// add token, whatever spacing was typed, so "/notes  add  spaced text"
+// notes "spaced text" and never a stray "add".
+func NoteArgument(line string) string { return dropWord(dropWord(line)) }

@@ -256,6 +256,9 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	} else {
 		ag.SetSession(store.NewSession(p.Name(), model, reg.Root))
 	}
+	// The store is keyed by workspace and needs the session id, so it opens
+	// here rather than with the registry.
+	attachEngine(cfg, reg, ag, flagResume != "")
 	applyBackendWindow(cfg, p, ag, model)
 	return p, ag, nil
 }
@@ -385,6 +388,13 @@ func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	defer stop()
 	if withModel {
 		fmt.Fprintln(os.Stderr, "writing session handoff for resume (Ctrl-C to skip the model summary)...")
+	}
+	// Working memory outlives the process: everything observed this run is
+	// on disk before the briefing is written.
+	if ag.Engine != nil {
+		if err := ag.Engine.Flush(); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: engine: %v\n", err)
+		}
 	}
 	if _, err := ag.WriteHandoff(ctx, withModel); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: handoff: %v\n", err)

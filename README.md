@@ -339,6 +339,46 @@ file's content into context (Tab completes @paths in the TUI). When the conversa
 exceeds its budget, BE-Code has the model summarize older turns (`/compact` to force it)
 instead of dropping them; plain trimming remains the fallback.
 
+## Working memory
+
+BE-Code keeps a per-workspace record of what the model has already read, looked up
+and decided, under `~/.be-code/engine/<key>/`, and puts it back in the system prompt
+as a `Working memory:` block (after the repository map) on every request, including
+after compaction and on resume — so a long task stops re-reading the same files and a
+compaction summary no longer has to restate what it already knows.
+
+- **Reads.** Every `read_file` is digested: an outline of the symbols it touched, the
+  line ranges seen, a content hash, and (once a compaction summary or a `task note
+  file:` mentions it) a short note of what mattered. Asking for lines already covered
+  by an unchanged file is still answered in full, with the footer `already read at
+  turn N (unchanged); outline and notes are in your context` — the tool result is
+  never withheld, only flagged as redundant.
+- **Lookups.** A repeated `search` or `lookup` whose hit files are unchanged is
+  answered from a cache instead of re-running, with the footer `(cached; files
+  unchanged)`.
+- **The `task` tool.** `action: plan` records the task and its steps before a
+  multi-step change; `step` marks one `doing`/`done`/`skip`; `note` records a fact or
+  decision (`file:` ties it to a file so it need not be re-read; `keep: true` also
+  remembers it in the durable notes, which survive across sessions). The ledger and
+  notes are always shown under `Working memory:`. `/task` prints the ledger, `/task
+  clear` resets the session's working memory; `/notes` prints the durable notes,
+  `/notes add <text>` appends one, `/notes drop N` removes one, `/notes clear` empties
+  them. Both are busy-safe in either UI, and in a shared session every attached
+  terminal reads and writes the same store.
+- **Git-backed lookups**, read-only and confined to the workspace, never prompting:
+  `lookup` (git grep over tracked files, plus untracked ones; `symbol: true` returns
+  the whole enclosing function instead of just the matching line); `history` (a
+  function's own log, a line range's log, a pickaxe search, or blame); `show` (a file
+  as it stood at any revision); `changes` (everything altered since the task began,
+  including files that were already dirty when it started). Outside a git repository
+  `lookup` falls back to the ordinary walk-based search and the rest say so plainly.
+
+`engine.tools: minimal` registers only `task` and `lookup` (dropping `history`, `show`
+and `changes`) for backends where a smaller embedded tool catalog matters more than
+the extra lookups. A headless `be-code run` and a live host on the same workspace share
+the store directory without a lock: the host's in-memory state is authoritative and is
+rewritten at its next flush, and `notes.md` is never cleared by that.
+
 ## Model profiles
 
 The model name selects a family profile (qwen3, deepseek-r1, gemma, llama, codellama,
@@ -585,6 +625,11 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   max_consults_per_run` (3), `cowork.consult_turns` (12) and
   `cowork.consult_timeout` (300, seconds one consultation may take) tune when
   and how much; see "Co-working models"
+- `engine.enabled` (true) — the working-memory store, its `task` tool and the git
+  lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
+  block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
+  `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
+  "Working memory"
 
 ## Status
 

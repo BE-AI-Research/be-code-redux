@@ -28,6 +28,39 @@ def first_user_content(body):
 
 state = {"n": 0, "consult_n": 0}
 
+# Third scenario: the engine (working memory) test. The task asks for
+# main.go to be read three times; the mock scripts three read_file calls,
+# then reports what the fourth request's system/user content looked like so
+# the shell test can confirm the Working memory block survived the trimming
+# of the transcript and the redundant read carried its "already read"
+# footer. TRIM reports whether the transcript really was trimmed: without
+# it the WM/FOOTER assertions would pass at any context budget, since
+# nothing would have been dropped for working memory to make up for. It
+# also notes (informationally only) whether a model-written compaction
+# summary was requested, since the harness may compact by cheap collapse
+# alone.
+
+# The stub History.trim/CollapseToolResults leave behind (collapsedStub in
+# internal/agent/history.go: "[old tool result removed to save context]").
+TRIM_STUB = "old tool result removed"
+ENG = {"n": 0, "summarized": False}
+
+def engine_chunks(body):
+    n = ENG["n"]; ENG["n"] += 1
+    sys_prompt = body["messages"][0].get("content") or ""
+    if sys_prompt.startswith("Summarize this coding-agent"):
+        ENG["summarized"] = True
+        return [text_chunk("Task: engine scenario. Read main.go.\n\nfiles:\n- main.go — has main\n")]
+    if n < 3:  # three reads: compaction needs six messages in history
+        return [tool_call_chunk("read_file", {"path": "main.go"})]
+    last = body["messages"][-1].get("content") or ""
+    footer = "FOOTER:yes" if "already read at turn" in last else "FOOTER:no"
+    wm = "WM:yes" if "Working memory:" in sys_prompt and "main.go (lines" in sys_prompt else "WM:no"
+    trimmed = any(TRIM_STUB in (m.get("content") or "") for m in body["messages"])
+    trim = "TRIM:yes" if trimmed else "TRIM:no"
+    summ = "SUM:yes" if ENG["summarized"] else "SUM:no"
+    return [text_chunk(f"{wm} {footer} {trim} {summ}")]
+
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
@@ -40,6 +73,8 @@ class H(http.server.BaseHTTPRequestHandler):
             # text (no tool call), so its own run ends after one turn and
             # never issues read_file/list_dir/search here.
             chunks = [text_chunk(ADVICE)]
+        elif any("engine scenario" in (m.get("content") or "") for m in body["messages"] if m["role"] == "user"):
+            chunks = engine_chunks(body)
         elif "consult scenario" in first_user_content(body):
             n = state["consult_n"]; state["consult_n"] += 1
             if n == 0:

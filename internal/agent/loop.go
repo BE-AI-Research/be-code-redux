@@ -14,6 +14,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -80,6 +81,14 @@ type Agent struct {
 	// two apart.
 	Stats   Stats
 	statsMu sync.Mutex
+	// Engine is the working-memory store (nil when disabled): what the
+	// model has read, looked up and decided, kept by the harness and put
+	// back in the system prompt after compaction. See internal/engine.
+	// The field itself is set before a run starts (SetEngine) and read
+	// only on the agent goroutine; the store's own mutex guards its
+	// contents for the UI. Toggling the engine mid-run would have to go
+	// through the run state, not through this field.
+	Engine *engine.Store
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -100,6 +109,7 @@ type Agent struct {
 	systemOverride string // plan mode: replaces the base coding prompt
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
+	lastGitInfo    string // this request's git summary, for the per-turn prompt recompose
 
 	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
 	// cowork.go): the current request and the newest failing tool result,
@@ -248,11 +258,15 @@ const MaxProjectNotes = 8 * 1024
 // inside a multi-byte character leaves the model reading U+FFFD). Every
 // path that feeds project notes into the prompt goes through here:
 // SetProjectNotes, cmd's loadProjectNotes, and agent.New.
-func TrimProjectNotes(s string) string {
-	if len(s) <= MaxProjectNotes {
+func TrimProjectNotes(s string) string { return trimAtLine(s, MaxProjectNotes) }
+
+// trimAtLine cuts s to max bytes at the last line boundary that fits, and
+// failing that at the last whole rune.
+func trimAtLine(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	cut := s[:MaxProjectNotes]
+	cut := s[:max]
 	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
 		return cut[:i+1]
 	}
@@ -286,9 +300,24 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride
 	if sys == "" {
 		sys = BuildSystemPrompt(a.Tools.Specs(), a.compat || a.Cfg.CompatToolCalls == "auto", a.projectNotes)
+		if a.Engine == nil {
+			// No store, no Working memory block: keep the git sentences (the
+			// tools exist) but drop the paragraph that points at the block.
+			if full := engineGuidance(a.Tools.Specs()); full != "" {
+				sys = strings.TrimSuffix(sys, "\n\n"+full)
+				if g := guidanceFor(a.Tools.Specs(), false); g != "" {
+					sys += "\n\n" + g
+				}
+			}
+		}
 	}
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
+	}
+	if a.Engine != nil && a.systemOverride == "" {
+		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+			sys += "\n\nWorking memory:\n" + wm
+		}
 	}
 	if a.handoff != "" {
 		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
@@ -300,6 +329,19 @@ func (a *Agent) composeSystem(gitInfo string) string {
 		sys += "\n\n" + gitInfo
 	}
 	return sys
+}
+
+// SetEngine attaches the working-memory store and recomposes the prompt.
+func (a *Agent) SetEngine(s *engine.Store) {
+	a.Engine = s
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem("")
+	}
+}
+
+// inRepoMap reports whether the repository map lists a file's symbols.
+func (a *Agent) inRepoMap(path string) bool {
+	return a.repoMap != "" && (strings.HasPrefix(a.repoMap, path+":") || strings.Contains(a.repoMap, "\n"+path+":"))
 }
 
 // RepoMap returns the current outline (for /map).
@@ -345,6 +387,14 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
+	a.lastGitInfo = ""
+	defer func() {
+		if a.Engine != nil {
+			if err := a.Engine.Flush(); err != nil {
+				a.notice("engine: %v; continuing without working memory", err)
+			}
+		}
+	}()
 
 	// A streak belongs to one stretch of tool calls; a repair round is a
 	// fresh start, and advice from a previous round has either been
@@ -358,12 +408,16 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.lastUserInput = userInput
 		a.lastFailingTool = ""
 	}
+	if newTurn && a.Engine != nil {
+		a.Engine.EnsureTask(userInput)
+	}
 	if a.repoDirty {
 		a.repoDirty = false
 		a.RefreshRepoMap()
 		a.History.System.Content = a.composeSystem("")
 	}
 	if gi := gitctx.Summary(ctx, a.Tools.Root); gi != "" {
+		a.lastGitInfo = gi
 		a.History.System.Content = a.composeSystem(gi)
 	}
 	expanded := ExpandMentions(a.Tools.Root, userInput)
@@ -377,6 +431,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 
 	emptyRetries, lengthRetries := 0, 0
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
+		if a.Engine != nil {
+			a.Engine.NextTurn()
+		}
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
@@ -390,6 +447,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
+		// Recompose before compacting, not only once per request: the
+		// working-memory block has to reflect the reads made earlier in
+		// this same turn, and compaction has to measure the prompt it is
+		// actually about to send.
+		a.History.System.Content = a.composeSystem(a.lastGitInfo)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
@@ -629,7 +691,28 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	if a.Events.OnToolStart != nil {
 		a.Events.OnToolStart(call.Name, call.Arguments)
 	}
-	res := a.Tools.Dispatch(ctx, call)
+	var res tools.Result
+	served := false
+	if a.Engine != nil && (call.Name == "search" || call.Name == "lookup" || call.Name == "history") {
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if cached, hit := a.Engine.Cached(call.Name, args); hit {
+				res, served = tools.Result{Content: cached}, true
+			}
+		}
+	}
+	if !served {
+		res = a.Tools.Dispatch(ctx, call)
+	}
+	if a.Engine != nil && !served {
+		// The same tolerant parse Dispatch used, so a double-encoded call
+		// is observed exactly as it ran; arguments no tool could run are
+		// simply not observed.
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
+			}
+		}
+	}
 	// The automatic tool-failure consultation's question, decided here but
 	// asked below, after OnToolEnd has put the failure on screen.
 	consult := ""
@@ -669,6 +752,18 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		}
 	}
 	return res
+}
+
+// observe hands a tool result to the engine; a panic there must not take
+// the run down, so it is fenced.
+func (a *Agent) observe(ev engine.Event) (footer string) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("engine: %v; continuing without working memory", r)
+			footer = ""
+		}
+	}()
+	return a.Engine.Observe(ev)
 }
 
 // chatFiltered runs one completion, applying the think-filter to streamed
@@ -762,6 +857,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 	task, prior := "", ""
 	var b strings.Builder
+	// tool call id → path, read_file calls only; a backend that omits ids
+	// falls back to call_<index>, which is not unique across turns, so
+	// every call (not just read_file) rewrites its id's entry and a result
+	// clears it once consumed — a reused id can then never mis-stub an
+	// unrelated result as a digested read.
+	pending := map[string]string{}
 	for i, m := range head {
 		if i == 0 && strings.HasPrefix(m.Content, summaryPrefix) {
 			prior = strings.TrimPrefix(m.Content, summaryPrefix)
@@ -769,6 +870,37 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 		if task == "" && m.Role == provider.RoleUser && !isToolResult(m) {
 			task = m.Content
+		}
+		if a.Engine != nil {
+			for _, tc := range m.ToolCalls {
+				path := ""
+				if tc.Name == "read_file" {
+					if args, ok := tools.ParseArgs(tc.Arguments); ok {
+						// read_file takes any of these spellings, and an
+						// absolute path inside the workspace: DigestKey
+						// folds them onto the key the digest is under, so
+						// the stub is substituted for the read either way.
+						for _, k := range []string{"path", "file", "filename"} {
+							if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
+								path = a.Engine.DigestKey(v)
+								break
+							}
+						}
+					}
+				}
+				pending[tc.ID] = path
+			}
+		}
+		if a.Engine != nil && m.Role == provider.RoleTool {
+			if p, ok := pending[m.ToolCallID]; ok {
+				delete(pending, m.ToolCallID)
+				if p != "" {
+					if r, has := a.Engine.HasDigest(p); has {
+						fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
+						continue
+					}
+				}
+			}
 		}
 		fmt.Fprintf(&b, "[%s] %.600s\n", m.Role, m.Content)
 		for _, tc := range m.ToolCalls {
@@ -792,6 +924,11 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if prior != "" {
 		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
 	}
+	if a.Engine != nil {
+		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+			fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
+		}
+	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
@@ -810,8 +947,34 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if a.Profile.StripThink {
 		summary = StripThink(summary)
 	}
+	filesOnly := false
+	if a.Engine != nil {
+		body, files := engine.SplitFilesBlock(summary)
+		if files != "" {
+			a.Engine.ApplyFileNotes(files)
+			filesOnly = strings.TrimSpace(body) == ""
+		}
+		summary = body
+		if err := a.Engine.Flush(); err != nil {
+			a.notice("engine: %v; continuing without working memory", err)
+		}
+	}
 	if strings.TrimSpace(summary) == "" {
-		return fmt.Errorf("empty summary")
+		// An empty summary is the one compaction failure a user actually
+		// sees, and the reply's shape is the only clue to why: say what
+		// the backend reported, and keep the raw head on stderr (the host
+		// log) where it survives the session.
+		why := fmt.Sprintf("finish=%s, %d prompt tokens, %d completion tokens, reasoning %d chars, raw reply %d chars",
+			resp.FinishReason, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, len(resp.Reasoning), len(resp.Content))
+		if filesOnly {
+			why = "files block only; " + why
+		}
+		head := resp.Content
+		if len(head) > 400 {
+			head = head[:400]
+		}
+		fmt.Fprintf(os.Stderr, "compaction: empty summary (%s); reply head: %q\n", why, head)
+		return fmt.Errorf("empty summary: %s", why)
 	}
 	a.History.Messages = append([]provider.Message{
 		{Role: provider.RoleUser, Content: summaryPrefix + summary},
@@ -825,7 +988,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 const summaryPrefix = "[Conversation summary — earlier turns compacted]\n"
 
-const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text."
+const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text. Do not restate anything already in Working memory. End with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
 
 func looksLikeToolsUnsupported(err error) bool {
 	s := strings.ToLower(err.Error())
@@ -851,6 +1014,21 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
 	a.autoVerifyUsed = false
+	if a.Engine != nil {
+		// A new request gets a fresh task line unless a plan is still in
+		// flight; mid-request repair rounds go through run, which only
+		// fills an empty one.
+		a.Engine.StartTask(userInput)
+		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
+			// The porcelain text itself, not a hash of it: the changes tool
+			// names the files that were already dirty when the task began,
+			// and this is the only moment that list can be observed. Capped
+			// like project notes so a repository mid-rebase cannot put a
+			// megabyte of status into the ledger.
+			dirty := trimAtLine(gitctx.Porcelain(ctx, a.Tools.Root), MaxProjectNotes)
+			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: dirty})
+		}
+	}
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err
