@@ -2,6 +2,11 @@
 
 ## v0.10.0 — working memory
 
+- **Resume replays the transcript.** A resumed session (`--resume`, `attach`
+  falling back, or `/resume`) shows what the terminal showed before you left,
+  then a `— resumed here —` divider. `resume_replay: false` restores the blank
+  start; `resume_replay_turns` caps the replay to the last N requests.
+
 - **Session hygiene.** `be-code sessions kill` no longer shows up in the
   transcript as an attached terminal: its quit request travels on a control
   connection the host never registers. Host logs (`~/.be-code/live/<code>.log`)

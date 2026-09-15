@@ -408,3 +408,27 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 		t.Fatalf("bare drop:\n%s", out)
 	}
 }
+
+func TestPlainResumeReplaysTheTranscript(t *testing.T) {
+	r := newTestREPL(t)
+	s := store.NewSession("null", "m", r.Agent.Tools.Root)
+	s.Title = "fix the build"
+	s.Messages = []provider.Message{
+		{Role: provider.RoleUser, Content: "read a.go"},
+		{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{"path":"a.go"}`}}},
+		{Role: provider.RoleTool, ToolCallID: "1", Name: "read_file", Content: "open a.go: no such file or directory"},
+		{Role: provider.RoleAssistant, Content: "It is missing."},
+	}
+	r.Agent.Resume(s)
+	out := capture(t, func() { r.printResume(s) })
+	for _, want := range []string{"you> read a.go", "tool> read_file", "err> read_file: open a.go", "It is missing.", ReplayDivider, "resumed "} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("plain replay lacks %q:\n%s", want, out)
+		}
+	}
+	r.Cfg.ResumeReplay = false
+	out = capture(t, func() { r.printResume(s) })
+	if strings.Contains(out, "you> read a.go") || !strings.Contains(out, "resumed ") {
+		t.Fatalf("resume_replay off:\n%s", out)
+	}
+}

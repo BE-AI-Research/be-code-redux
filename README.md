@@ -220,6 +220,12 @@ running session rather than loading a second copy of its file (see "Shared
 sessions"). Headless `run` prints the resume line to stderr and writes a
 quick heuristic briefing (no extra model call). `/clear` starts a fresh session.
 
+Resuming a session replays its saved transcript into the terminal first — what
+you typed, the replies, the tool calls and their first result line, and any
+compaction summary as a dim block — then a `— resumed here —` divider, so you
+pick up where you left off instead of facing a blank prompt. `resume_replay:
+false` turns that off; `resume_replay_turns: N` keeps only the last N requests.
+
 ## Shared sessions
 
 Starting `be-code` on a terminal does not run the session in that terminal: it
@@ -629,6 +635,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
+- `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
   "Working memory"
 
 ## Status

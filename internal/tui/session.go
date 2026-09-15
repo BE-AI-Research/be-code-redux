@@ -154,7 +154,40 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
+	if ag.Session != nil && len(ag.Session.Messages) > 0 {
+		s.seedResumeLocked(ag.Session) // no views yet: single-threaded
+	}
 	return s
+}
+
+// seedResumeLocked puts a resumed session's saved transcript on screen —
+// what the person saw before they left, then a divider, then the resume
+// line — so continuity is visible, not just restored in the model's
+// history. The caller holds mu (or, in NewSession, is alone).
+func (s *Session) seedResumeLocked(sess *store.Session) {
+	if s.cfg.ResumeReplay {
+		for _, l := range ui.Replay(sess.Messages, s.cfg.ResumeReplayTurns) {
+			switch l.Kind {
+			case ui.ReplayUser:
+				s.appendEntryLocked(entry{Kind: entryUser, Label: "you> ", Text: l.Text})
+			case ui.ReplayAssistant:
+				s.appendEntryLocked(entry{Kind: entryAssistant, Text: l.Text})
+			case ui.ReplayTool:
+				s.appendEntryLocked(entry{Kind: entryTool, Label: l.Label, Text: l.Text})
+			case ui.ReplayToolOK:
+				s.appendEntryLocked(entry{Kind: entryToolOK, Text: l.Text})
+			case ui.ReplayToolErr:
+				s.appendEntryLocked(entry{Kind: entryToolErr, Text: l.Text})
+			case ui.ReplaySummary:
+				s.appendEntryLocked(entry{Kind: entryDim, Text: "earlier turns compacted:\n" + l.Text})
+			}
+		}
+		s.appendEntryLocked(entry{Kind: entryDim, Text: ui.ReplayDivider})
+	}
+	s.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("resumed %s — %s (%d messages)", sess.ResumeCode(), sess.Title, len(sess.Messages))})
+	if sess.Handoff != "" {
+		s.appendEntryLocked(entry{Kind: entryDim, Text: "handoff briefing loaded into the system prompt; /handoff shows it"})
+	}
 }
 
 // wireEvents points s.ag's callbacks and its registry's approval seam at the
