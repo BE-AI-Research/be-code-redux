@@ -271,10 +271,17 @@ func (a *Agent) autoConsult(ctx context.Context, origin, question string, files 
 	// Consult resolves "" to the first configured co-worker, but only
 	// after the notice below has to be written — so resolve it the same
 	// way, here, and let Consult repeat the work harmlessly.
-	name := ""
-	if cw, err := a.coworkerByName(""); err == nil {
-		name = cw.Name
+	cw, err := a.coworkerByName("")
+	if err != nil {
+		return "", "", false
 	}
+	// A run that has spent its consultation budget must not announce a
+	// consultation it will never make: the announcement outlives the
+	// run in plain mode, where transient notes are ordinary lines.
+	if a.ConsultsThisRun() >= a.Cfg.Cowork.MaxConsultsPerRun {
+		return "", "", false
+	}
+	name := cw.Name
 	a.transient("consulting %s…", name)
 	res, err := a.Consult(ctx, ConsultRequest{
 		Question: question,
@@ -283,7 +290,10 @@ func (a *Agent) autoConsult(ctx context.Context, origin, question string, files 
 		Recent:   a.RecentContext(),
 	})
 	if err != nil {
-		if !errors.Is(err, errConsultCapped) && !errors.Is(err, errConsultDeclined) {
+		// The cap and a decline are the run's own decisions, and a
+		// cancelled run was the user's; none of them is the co-worker
+		// being unavailable.
+		if !errors.Is(err, errConsultCapped) && !errors.Is(err, errConsultDeclined) && !errors.Is(err, context.Canceled) {
 			a.notice("co-worker unavailable: %v", err)
 		}
 		return "", "", false
