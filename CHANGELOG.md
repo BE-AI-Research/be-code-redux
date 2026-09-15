@@ -1,5 +1,23 @@
 # BE-Code Changelog
 
+## v0.10.0 — working memory
+
+- **Working memory.** The harness now remembers what the model has read,
+  looked up and decided during a task and puts it back in the system prompt
+  after every compaction and on resume, so a long task stops re-reading the
+  same files. Every `read_file` is digested (symbols, lines seen, a note of
+  what mattered, a content hash); a redundant read is answered in full with
+  the footer `already read at turn N (unchanged)`; a repeated search whose
+  files are unchanged is served from a cache. The `task` tool records a plan,
+  marks steps and notes facts (`keep: true` remembers them across sessions);
+  `/task` shows the ledger, `/notes` the durable notes. Compaction summaries
+  no longer restate what working memory holds. Store: `~/.be-code/engine/`.
+- **Git-backed lookups.** `lookup` (git grep, with the enclosing function on
+  `symbol: true`), `history` (a function's own log, a range's log, pickaxe,
+  blame), `show` (a file at any revision) and `changes` (the delta since the
+  task began). Read-only, never prompt, fall back sensibly outside a repo.
+  `engine.tools: minimal` keeps only `task` and `lookup` for tight prompts.
+
 ## v0.9.0 — co-working models
 
 - **Co-working models.** `coworkers` in config names other models (local or

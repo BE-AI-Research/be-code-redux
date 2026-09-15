@@ -372,10 +372,14 @@ func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 // stubTool is a no-op tool with a name, for prompt tests that key on names.
 type stubTool string
 
-func (s stubTool) Name() string                                     { return string(s) }
-func (s stubTool) Description() string                              { return "stub" }
-func (s stubTool) Schema() json.RawMessage                          { return json.RawMessage(`{"type":"object","properties":{}}`) }
-func (s stubTool) Run(context.Context, map[string]any) tools.Result { return tools.Result{Content: "stub"} }
+func (s stubTool) Name() string        { return string(s) }
+func (s stubTool) Description() string { return "stub" }
+func (s stubTool) Schema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{}}`)
+}
+func (s stubTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Content: "stub"}
+}
 
 func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)

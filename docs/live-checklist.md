@@ -71,6 +71,10 @@ model). Walk this once per release, or after touching `internal/live`,
     `/consult <name> <question>`. Expect both terminals to show `<name>? <question>` then
     `<name>> <answer>` in the theme's co-worker colour, and the status note (`consulting
     <name>`, then `consulting <name> · N files read`) on both while it runs.
+16. With two terminals attached, ask the model to read a file twice in one request.
+    Expect both terminals to show the second read ending in `already read at turn N
+    (unchanged)`. `/task` on either terminal lists the seeded task line. `/notes add x`
+    on one terminal, then `/notes` on the other: `x` is there too — same store.
 
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own
 stdout/stderr from startup; `~/.be-code/live/<code>.json` is its record (code, pid,
