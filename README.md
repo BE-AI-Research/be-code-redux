@@ -27,7 +27,9 @@ quality.** Every design decision follows from that.
 
 ```bash
 ./install.sh              # user install to ~/.local/bin (builds from source when
-                          # Go >= 1.22 is present, else uses bin/ or dist/ prebuilt);
+                          # Go >= 1.22 is present, else uses a dist/ or bin/ prebuilt
+                          # that reports this tree's build.mk VERSION — a stale one is
+                          # refused, never installed under the new version's name);
                           # installs shell completions, offers the setup wizard
 ./install.sh --system     # system-wide to /usr/local/bin
 PREFIX=/opt/be ./install.sh   # custom prefix

@@ -2,6 +2,13 @@
 
 ## v0.8.0 — every terminal renders itself
 
+- **`install.sh` refuses a stale prebuilt binary.** Without a Go toolchain the
+  installer falls back to `dist/` or `bin/`; it now accepts only a binary whose
+  `--version` matches `build.mk`, prints why a candidate was skipped, and fails
+  with instructions instead of silently installing an old build under the new
+  version's name. A packaged tree that still carries old cross-compiles can no
+  longer masquerade as the current release on a machine without Go.
+
 - **Per-terminal rendering in shared sessions.** The host now runs one
   renderer per attached terminal: each has its own size and layout (a phone
   gets compact while the desktop keeps the full layout and header), its own

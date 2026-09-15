@@ -7,8 +7,11 @@
 #   ./install.sh --no-setup     skip the first-run setup wizard
 #
 # Prefers building from source when a Go toolchain (>=1.22) is present;
-# otherwise falls back to a prebuilt binary in bin/ matching this platform.
-# Safe to re-run: upgrades in place. Undo everything with ./uninstall.sh.
+# otherwise falls back to a prebuilt binary in dist/ or bin/ matching this
+# platform — but only one that reports the same version as this tree's
+# build.mk, so a stale binary left over from an older checkout is never
+# installed under a newer version's name. Safe to re-run: upgrades in place.
+# Undo everything with ./uninstall.sh.
 set -eu
 
 SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -48,15 +51,25 @@ goversion_ok() {
     [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -ge 22 ] 2>/dev/null
 }
 
+# The version this tree is: what a source build is stamped with, and what a
+# prebuilt binary must report to be accepted in its place.
+ver=$(sed -n 's/^VERSION *:= *//p' "$SRC_DIR/build.mk" 2>/dev/null)
+ver=${ver:-dev}
+
+# binary_version prints the version a binary reports ("0.8.0"), or nothing
+# if it cannot run here (wrong platform, not executable).
+binary_version() {
+    "$1" --version 2>/dev/null | sed -n 's/^be-code version //p' | head -1
+}
+
 built=0
 if command -v go >/dev/null 2>&1 && goversion_ok && [ -f "$SRC_DIR/go.mod" ]; then
     say "building from source with $(go version | awk '{print $3}')..."
-    ver=$(sed -n 's/^VERSION *:= *//p' "$SRC_DIR/build.mk" 2>/dev/null)
-    ver=${ver:-dev}
     if (cd "$SRC_DIR" && go build -ldflags "-s -w -X github.com/brown-enterprises/be-code/cmd.Version=$ver" -o "$TMP_BIN" .); then
         built=1
+        say "built $BINARY $ver from source"
     else
-        say "warning: source build failed; trying prebuilt binary"
+        say "warning: source build failed; trying a prebuilt binary"
     fi
 fi
 
@@ -67,20 +80,38 @@ if [ "$built" = 0 ]; then
         x86_64|amd64) arch=amd64 ;;
         aarch64|arm64) arch=arm64 ;;
     esac
+    stale=""
     for cand in "$SRC_DIR/dist/$BINARY-$os-$arch" "$SRC_DIR/bin/$BINARY"; do
-        if [ -f "$cand" ]; then
-            cp "$cand" "$TMP_BIN"
-            say "using prebuilt binary: ${cand#"$SRC_DIR"/} (verify it matches $os/$arch)"
-            built=1
-            break
+        [ -f "$cand" ] || continue
+        chmod +x "$cand" 2>/dev/null || true
+        got=$(binary_version "$cand")
+        if [ -z "$got" ]; then
+            say "skipping ${cand#"$SRC_DIR"/}: it does not run on this machine ($os/$arch)"
+            continue
         fi
+        if [ "$got" != "$ver" ]; then
+            say "skipping ${cand#"$SRC_DIR"/}: it reports $got but this tree is $ver"
+            stale="$stale ${cand#"$SRC_DIR"/}=$got"
+            continue
+        fi
+        cp "$cand" "$TMP_BIN"
+        say "using prebuilt binary ${cand#"$SRC_DIR"/} ($got, $os/$arch)"
+        built=1
+        break
     done
 fi
 
-[ "$built" = 1 ] || fail "no Go >=1.22 toolchain and no prebuilt binary found (bin/$BINARY or dist/). Install Go from your package manager, or run 'make release' on a machine that has it."
+if [ "$built" = 0 ]; then
+    if [ -n "$stale" ]; then
+        fail "no Go >=1.22 toolchain here, and the prebuilt binaries are from another version ($stale) while this tree is $ver. Install Go on this machine, or run 'make -f build.mk release' where the tree was packaged and copy the fresh dist/ over."
+    fi
+    fail "no Go >=1.22 toolchain and no usable prebuilt binary found (dist/$BINARY-<os>-<arch> or bin/$BINARY). Install Go from your package manager, or run 'make -f build.mk release' on a machine that has it."
+fi
 
 chmod +x "$TMP_BIN"
 "$TMP_BIN" --help >/dev/null 2>&1 || fail "built/prebuilt binary failed a smoke test on this machine"
+got=$(binary_version "$TMP_BIN")
+[ "$got" = "$ver" ] || fail "the binary about to be installed reports version '$got' but this tree is $ver"
 
 # ---- install ---------------------------------------------------------------
 
@@ -95,7 +126,7 @@ if [ ! -w "$BIN_DIR" ]; then
 fi
 
 $SUDO install -m 0755 "$TMP_BIN" "$BIN_DIR/$BINARY"
-say "installed $BIN_DIR/$BINARY ($("$BIN_DIR/$BINARY" --help 2>/dev/null | head -1 | cut -c1-40)...)"
+say "installed $BIN_DIR/$BINARY ($("$BIN_DIR/$BINARY" --version 2>/dev/null))"
 
 # ---- shell completions (best effort) ---------------------------------------
 
