@@ -313,7 +313,9 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 // with a later tag.
 func sanitizeAdvice(s string) string {
 	for _, name := range []string{"tool_call", "tool_result"} {
-		openTag, closeTag := "<"+name+">", "</"+name+">"
+		// The opener may carry attributes (<tool_result name=… status=…>
+		// is the harness's own wrapper), so match it by prefix.
+		openTag, closeTag := "<"+name, "</"+name+">"
 		for {
 			i := strings.Index(s, openTag)
 			if i < 0 {
@@ -325,7 +327,18 @@ func sanitizeAdvice(s string) string {
 			}
 			s = s[:i] + s[i+j+len(closeTag):]
 		}
-		s = strings.ReplaceAll(s, openTag, "")
+		for {
+			i := strings.Index(s, openTag)
+			if i < 0 {
+				break
+			}
+			end := strings.IndexByte(s[i:], '>')
+			if end < 0 {
+				s = s[:i]
+				break
+			}
+			s = s[:i] + s[i+end+1:]
+		}
 		s = strings.ReplaceAll(s, closeTag, "")
 	}
 	return strings.TrimSpace(s)

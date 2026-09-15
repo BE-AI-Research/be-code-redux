@@ -45,9 +45,10 @@ func (a *Agent) planAgent() *Agent {
 		sys += "\n\nRepository map:\n" + a.repoMap
 	}
 	scratch.systemOverride = sys
-	scratch.History = NewHistory(sys, a.History.Budget)
-	scratch.History.Reserve = a.History.Reserve
-	scratch.History.CharsPerToken = a.History.CharsPerToken
+	budget, reserve, cpt := a.History.Scalars()
+	scratch.History = NewHistory(sys, budget)
+	scratch.History.Reserve = reserve
+	scratch.History.CharsPerToken = cpt
 	return scratch
 }
 
