@@ -2,6 +2,13 @@
 
 ## v0.8.0 — every terminal renders itself
 
+- **The transcript is anchored to the bottom of its viewport.** A short
+  transcript now sits just above the input line, padded from the top, instead
+  of at the top with blank rows under it. The newest lines are in the same
+  place whether the viewport is full or not, which is what a phone terminal
+  whose pty counts the rows hidden under its keyboard (Termux reports 49 rows
+  while showing about 19) needs to keep showing them.
+
 - **`install.sh` refuses a stale prebuilt binary.** Without a Go toolchain the
   installer falls back to `dist/` or `bin/`; it now accepts only a binary whose
   `--version` matches `build.mk`, prints why a candidate was skipped, and fails

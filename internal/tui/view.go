@@ -773,6 +773,16 @@ func (m *View) refreshTranscript() {
 	}
 	content := m.rendered.String() + m.streaming
 	m.wrapped = lipgloss.NewStyle().Width(m.vp.Width).Render(content)
+	// A transcript shorter than the viewport is anchored to its bottom, just
+	// above the input line, by padding it from the top: the newest lines are
+	// then always in the same place as they are once the viewport is full,
+	// and a terminal that shows only the bottom of a frame taller than its
+	// screen (a phone whose pty counts the rows under its keyboard) still
+	// sees them. The padding is part of m.wrapped so mouse coordinates and
+	// selection keep mapping onto the same lines the viewport shows.
+	if n := strings.Count(m.wrapped, "\n") + 1; n < m.vp.Height {
+		m.wrapped = strings.Repeat("\n", m.vp.Height-n) + m.wrapped
+	}
 	atBottom := m.vp.AtBottom()
 	m.vp.SetContent(m.highlighted())
 	if atBottom {

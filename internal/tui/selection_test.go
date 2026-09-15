@@ -22,17 +22,32 @@ func captureClipboard(m *View) *[]string {
 	return &got
 }
 
+// screenRow is the terminal row on which the viewport currently shows the
+// first line containing needle (a short transcript is anchored to the
+// bottom of the viewport, so text is not at row 0).
+func screenRow(t *testing.T, m *View, needle string) int {
+	t.Helper()
+	for i, l := range strings.Split(m.vp.View(), "\n") {
+		if strings.Contains(l, needle) {
+			return m.headerHeight() + i
+		}
+	}
+	t.Fatalf("%q not on screen:\n%s", needle, m.vp.View())
+	return 0
+}
+
 // Dragging across the transcript selects exactly the visible text between
 // the anchor and the release point, across lines.
 func TestDragSelectsTextAcrossLines(t *testing.T) {
-	m := newTestModel(t) // 80x24, no header: transcript starts at row 0
+	m := newTestModel(t) // 80x24, no header
 	m.appendEntry(entry{Kind: entryPlain, Text: "alpha beta gamma"})
 	m.appendEntry(entry{Kind: entryPlain, Text: "delta epsilon"})
 	m.appendEntry(entry{Kind: entryPlain, Text: "zeta"})
 	flush(m)
-	m.Update(mouse(6, 0, tea.MouseButtonLeft, tea.MouseActionPress))
-	m.Update(mouse(4, 1, tea.MouseButtonLeft, tea.MouseActionMotion))
-	m.Update(mouse(4, 1, tea.MouseButtonLeft, tea.MouseActionRelease))
+	r0, r1 := screenRow(t, m, "alpha"), screenRow(t, m, "delta")
+	m.Update(mouse(6, r0, tea.MouseButtonLeft, tea.MouseActionPress))
+	m.Update(mouse(4, r1, tea.MouseButtonLeft, tea.MouseActionMotion))
+	m.Update(mouse(4, r1, tea.MouseButtonLeft, tea.MouseActionRelease))
 	if m.sel == nil {
 		t.Fatal("no selection after drag")
 	}
@@ -40,8 +55,9 @@ func TestDragSelectsTextAcrossLines(t *testing.T) {
 		t.Fatalf("selection text = %q", got)
 	}
 	// A plain click (no drag) clears it.
-	m.Update(mouse(1, 2, tea.MouseButtonLeft, tea.MouseActionPress))
-	m.Update(mouse(1, 2, tea.MouseButtonLeft, tea.MouseActionRelease))
+	r2 := screenRow(t, m, "zeta")
+	m.Update(mouse(1, r2, tea.MouseButtonLeft, tea.MouseActionPress))
+	m.Update(mouse(1, r2, tea.MouseButtonLeft, tea.MouseActionRelease))
 	if m.sel != nil {
 		t.Fatal("click without drag did not clear the selection")
 	}
@@ -53,8 +69,9 @@ func TestCtrlCCopiesSelection(t *testing.T) {
 	got := captureClipboard(m)
 	m.appendEntry(entry{Kind: entryPlain, Text: "copy me please"})
 	flush(m)
-	m.Update(mouse(0, 0, tea.MouseButtonLeft, tea.MouseActionPress))
-	m.Update(mouse(6, 0, tea.MouseButtonLeft, tea.MouseActionRelease))
+	r := screenRow(t, m, "copy me")
+	m.Update(mouse(0, r, tea.MouseButtonLeft, tea.MouseActionPress))
+	m.Update(mouse(6, r, tea.MouseButtonLeft, tea.MouseActionRelease))
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd != nil {
 		t.Fatal("Ctrl+C with a selection must not quit")

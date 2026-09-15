@@ -119,3 +119,40 @@ func TestEscDiscardsQueue(t *testing.T) {
 		t.Fatalf("queue survived cancel: %d", m.ag.Pending())
 	}
 }
+
+// A short transcript sits at the bottom of its viewport, just above the
+// input line, not at the top with blank rows under it. A terminal that shows
+// only the bottom of a frame taller than its screen (a phone's pty reports
+// the rows under the keyboard) then still sees the newest lines; and a long
+// transcript already reads that way, so the two states look alike.
+func TestShortTranscriptIsAnchoredToTheBottom(t *testing.T) {
+	m := newTestModel(t) // 80x24: header hidden, viewport 24-3-1-1 = 19 rows
+	m.appendEntry(entry{Kind: entryDim, Text: "first line"})
+	m.appendEntry(entry{Kind: entryDim, Text: "second line"})
+	flush(m)
+	rows := strings.Split(m.View(), "\n")
+	vpRows := rows[:m.vp.Height]
+	// The transcript keeps its one blank row between the last line and the
+	// input (every entry ends in a newline), as a full viewport shows it.
+	h := len(vpRows)
+	if strings.TrimSpace(vpRows[h-1]) != "" || !strings.Contains(vpRows[h-2], "second line") || !strings.Contains(vpRows[h-3], "first line") {
+		t.Fatalf("short transcript is not anchored to the bottom of the viewport:\n%s", strings.Join(vpRows, "\n"))
+	}
+	if strings.TrimSpace(vpRows[0]) != "" {
+		t.Fatalf("top viewport row should be padding, got %q", vpRows[0])
+	}
+	// Mouse coordinates still map onto the wrapped lines: the row above the
+	// blank one is the second entry.
+	line, _, ok := m.transcriptCoords(0, m.headerHeight()+m.vp.Height-2)
+	if !ok || !strings.Contains(m.plainLines()[line], "second line") {
+		t.Fatalf("coords: ok=%v line=%d %q", ok, line, m.plainLines()[min(line, len(m.plainLines())-1)])
+	}
+	// Once the transcript outgrows the viewport, no padding remains.
+	for i := 0; i < 40; i++ {
+		m.appendEntry(entry{Kind: entryDim, Text: "more"})
+	}
+	flush(m)
+	if strings.TrimSpace(strings.Split(m.View(), "\n")[0]) == "" {
+		t.Fatal("padding left in a full viewport")
+	}
+}
