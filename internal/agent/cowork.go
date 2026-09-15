@@ -38,6 +38,12 @@ type ConsultResult struct {
 	Partial  bool
 	Read     int
 	Elapsed  time.Duration
+	// Started is true once the co-worker was actually run: OnConsultStart
+	// has fired and OnConsultEnd will. A refusal before that point (unknown
+	// name, the cap, a decline, no factory) returns only an error, and a
+	// caller that prints its own error line uses this to avoid saying it
+	// twice.
+	Started bool
 }
 
 // CoworkerFactory builds a co-worker's provider. Injected by cmd, like
@@ -220,6 +226,7 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 		a.Events.OnConsultStart(cw.Name, req.Question, req.Origin)
 	}
 	start := time.Now()
+	res.Started = true
 	defer func() {
 		res.Elapsed = time.Since(start)
 		if a.Events.OnConsultEnd != nil {

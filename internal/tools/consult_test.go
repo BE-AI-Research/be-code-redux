@@ -11,7 +11,10 @@ import (
 func TestConsultToolDescribesTheRosterAndDelegates(t *testing.T) {
 	var got ConsultArgs
 	tool := NewConsult([]CoworkerInfo{{"claude", "deep reasoning"}, {"big", "long reads"}},
-		func(ctx context.Context, a ConsultArgs) (string, error) { got = a; return "co-worker claude replied:\n\nanswer", nil })
+		func(ctx context.Context, a ConsultArgs) (string, error) {
+			got = a
+			return "co-worker claude replied:\n\nanswer", nil
+		})
 	if tool.Name() != "consult" {
 		t.Fatal(tool.Name())
 	}

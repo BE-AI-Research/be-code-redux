@@ -287,6 +287,12 @@ func TestPlainCoworkersAndConsult(t *testing.T) {
 	if !strings.Contains(out, "no co-working models configured") {
 		t.Fatalf("empty list:\n%s", out)
 	}
+	// A refusal before the co-worker starts fires no event, so /consult
+	// must print it itself.
+	out = capture(t, func() { r.command(context.Background(), "/consult anything?") })
+	if !strings.Contains(out, "error>") || !strings.Contains(out, "no co-working models") {
+		t.Fatalf("pre-flight refusal not printed:\n%s", out)
+	}
 	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"}}
 	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
 	r.Agent.Events = Events()

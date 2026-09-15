@@ -596,9 +596,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			// A consultation that got as far as running reports itself
 			// through OnConsultStart/OnConsultEnd; only the refusals before
 			// it started (unknown name, declined, none configured) never
-			// reach an event, and Elapsed — set the moment the co-worker
-			// begins — is what tells the two apart.
-			if err != nil && res.Elapsed == 0 {
+			// reach an event.
+			if err != nil && !res.Started {
 				fmt.Printf("%s %v\n", red("error>"), err)
 			}
 		})
