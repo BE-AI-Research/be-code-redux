@@ -461,7 +461,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			Messages:        a.History.Prompt(),
 			Temperature:     a.temperature(),
 			MaxTokens:       a.Cfg.MaxTokens,
-			ReasoningEffort: effort,
+			ReasoningEffort: a.effortFor(effort),
 		}
 		a.History.Extra = 0
 		if !a.compat {
@@ -552,6 +552,27 @@ func (a *Agent) freeContext(ctx context.Context) bool {
 		}
 	}
 	return h.Tokens() < before
+}
+
+// effortFor adapts the reasoning effort to the room left in the window:
+// the configured level while the prompt is small, one level lower once
+// the prompt fills more than half of it, because reasoning has to fit in
+// what remains. "" (backend default) is left alone — there is no level to
+// step down from.
+func (a *Agent) effortFor(configured string) string {
+	if configured == "" {
+		return ""
+	}
+	if a.History.Tokens() <= a.History.Target() {
+		return configured
+	}
+	switch configured {
+	case "high":
+		return "medium"
+	case "medium":
+		return "low"
+	}
+	return configured
 }
 
 // temperature returns the sampling temperature: the model profile's value

@@ -75,10 +75,12 @@ type Config struct {
 	// Agent tuning
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"` // per completion; 0 = backend default
-	// ReasoningEffort is sent to thinking models on every call: "low",
-	// "medium" or "high"; "" leaves the backend's default (often the
-	// highest). The tool loop drops to "low" for the rest of a request
-	// once reasoning has exhausted the window, whatever this says.
+	// ReasoningEffort is the thinking budget asked of a reasoning model:
+	// "low", "medium" (default) or "high"; "" leaves the backend's own
+	// default, which for Qwen3 templates is the highest. The tool loop
+	// adapts it per call: one level down when the prompt already fills
+	// more than half the window, and "low" for the rest of a request once
+	// reasoning has exhausted the window.
 	ReasoningEffort string `json:"reasoning_effort"`
 	ContextTokens   int    `json:"context_tokens"` // conversation budget for truncation
 	MaxTurns        int    `json:"max_turns"`      // tool-loop iterations per request
@@ -277,6 +279,7 @@ func Default() *Config {
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
 		Coworkers:        nil,
+		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
 		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, Tools: "full"},
 	}

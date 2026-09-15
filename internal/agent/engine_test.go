@@ -477,3 +477,20 @@ func TestReasoningExhaustionRetriesWithLowEffort(t *testing.T) {
 		t.Fatalf("notices: %v", notices)
 	}
 }
+
+// Effort follows the room left in the window: configured while the prompt
+// is small, one level down once it fills more than half the limit.
+func TestEffortStepsDownWhenThePromptFillsHalfTheWindow(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 4000 })
+	ag.History.Budget, ag.History.Reserve = 4000, 0
+	for _, tc := range []struct{ in, small, big string }{{"high", "high", "medium"}, {"medium", "medium", "low"}, {"low", "low", "low"}, {"", "", ""}} {
+		ag.History.Messages = nil
+		if got := ag.effortFor(tc.in); got != tc.small {
+			t.Fatalf("%q small prompt: got %q want %q", tc.in, got, tc.small)
+		}
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: strings.Repeat("x", 9000)}) // ~3000 tokens > half of 4000
+		if got := ag.effortFor(tc.in); got != tc.big {
+			t.Fatalf("%q big prompt: got %q want %q", tc.in, got, tc.big)
+		}
+	}
+}
