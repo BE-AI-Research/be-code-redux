@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -33,6 +34,11 @@ type Events struct {
 	// keeping in the transcript. When nil they arrive through OnNotice.
 	OnTransient func(msg string)
 	OnReasoning func(text string) // hidden model reasoning deltas (thinking models)
+	// Co-working (see cowork.go): a consultation starting, the co-worker
+	// reading files, and its result. All optional.
+	OnConsultStart    func(name, question, origin string)
+	OnConsultProgress func(name string, filesRead int)
+	OnConsultEnd      func(res ConsultResult, err error)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -96,6 +102,17 @@ type Agent struct {
 	saveWarned   bool
 	knownTools   map[string]bool
 	compat       bool // current session uses embedded tool calls
+
+	// Co-working state (see cowork.go). coworkers is the usable co-worker
+	// list, resolved once at New; consults is the current run's budget
+	// spend, reset by RunFull; consultCount is per-session usage for
+	// /coworkers; coworkAllowed is session-wide consent for an online
+	// co-worker; consultMu serialises consultations (one at a time).
+	coworkers     []config.CoworkerConfig
+	consults      int
+	consultCount  map[string]int
+	coworkAllowed map[string]bool
+	consultMu     sync.Mutex
 }
 
 // New creates an agent. projectNotes is the optional BECODE.md content.
@@ -121,6 +138,11 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}
+	// Co-workers: the warnings belong to cmd, which calls ValidCoworkers
+	// itself and prints them once at startup.
+	a.coworkers, _ = cfg.ValidCoworkers()
+	a.consultCount = map[string]int{}
+	a.coworkAllowed = map[string]bool{}
 	return a
 }
 
@@ -727,6 +749,7 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
+	a.consults = 0 // the consultation budget is per request
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err
