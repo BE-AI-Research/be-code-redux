@@ -2,6 +2,14 @@
 
 ## v0.8.0 — every terminal renders itself
 
+- **The title and the input field take the theme's own text colour.** Every
+  theme now carries a body-text colour; the `BE-Code Redux` title and the
+  typed text use it, and the input line no longer paints an ANSI-black band
+  under the cursor line. Both used to rely on the terminal's default colours,
+  which under a theme that recolours the window background left Termux
+  showing neither the title nor what was being typed, and left the title in
+  VS Code's own foreground colour whatever theme was chosen.
+
 - **The transcript is anchored to the bottom of its viewport.** A short
   transcript now sits just above the input line, padded from the top, instead
   of at the top with blank rows under it. The newest lines are in the same

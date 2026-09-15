@@ -155,3 +155,39 @@ func TestUnknownRememberedThemeFallsThroughWithAWarning(t *testing.T) {
 		t.Fatalf("no warning:\n%s", v.wrapped)
 	}
 }
+
+// The title and the input field must never depend on the terminal's own
+// default colours: under a theme that recolours the window background,
+// Termux showed neither the title nor the typed text. Every theme carries a
+// body-text colour, the title and the textarea use it, and the textarea's
+// cursor line has no forced ANSI-black background.
+func TestTitleAndInputUseTheThemesTextColour(t *testing.T) {
+	defer pinColorProfile()()
+	for _, name := range ThemeNames() {
+		st, _ := newStyles(name)
+		if name != "mono" && st.Text.GetForeground() == nil {
+			t.Errorf("theme %s has no body-text colour", name)
+		}
+	}
+	m := newTestModel(t)
+	m.applyTheme("solarized-dark", false)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40}) // header visible
+	frame := m.View()
+	title := m.st.Text.Bold(true).Render("BE-Code Redux")
+	if !strings.Contains(frame, title) {
+		t.Fatalf("header title is not rendered in the theme's text colour:\n%q", frame[:200])
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+	frame = m.View()
+	if strings.Contains(frame, "\x1b[40m") {
+		t.Fatal("the input still forces an ANSI-black cursor-line background")
+	}
+	if !strings.Contains(frame, m.st.Text.Render("hello")) {
+		t.Fatalf("typed text is not rendered in the theme's text colour")
+	}
+	// A theme change restyles the input field too.
+	m.applyTheme("nord", false)
+	if !strings.Contains(m.View(), m.st.Text.Render("hello")) {
+		t.Fatal("typed text kept the old theme's colour after /theme")
+	}
+}

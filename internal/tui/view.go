@@ -907,7 +907,7 @@ func (m *View) View() string {
 // headerView draws the branded header: boxed title, logo at the right,
 // attribution, dashed rule.
 func (m *View) headerView() string {
-	box := m.st.Border.Render("BE-Code Redux")
+	box := m.st.Border.Render(m.st.Text.Bold(true).Render("BE-Code Redux"))
 	lines := strings.Split(box, "\n")
 	code := "—"
 	if m.ag.Session != nil {
@@ -1024,6 +1024,7 @@ func (m *View) newInputArea() textarea.Model {
 	setInputPrompt(&ta, m.compact())
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
+	styleInput(&ta, m.st)
 	ta.Focus()
 	ta.KeyMap.InsertNewline.SetKeys("ctrl+j")
 	if m.served {
@@ -1035,6 +1036,35 @@ func (m *View) newInputArea() textarea.Model {
 		ta.SetWidth(w)
 	}
 	return ta
+}
+
+// styleInput colours a textarea from the theme. The bubbles defaults leave
+// the typed text in the terminal's own foreground and paint the cursor line
+// on ANSI black — invisible, respectively, on a terminal whose default
+// foreground is dark and whose background the theme has recoloured
+// (Termux under solarized-dark showed nothing at all), so every part that
+// carries text takes a theme colour and the cursor line carries none.
+func styleInput(ta *textarea.Model, st styles) {
+	plain := lipgloss.NewStyle()
+	for _, s := range []*textarea.Style{&ta.FocusedStyle, &ta.BlurredStyle} {
+		s.Base = plain
+		// The line holding the cursor — every line of a one-row input — is
+		// rendered with CursorLine, not Text, so both carry the colour.
+		s.CursorLine = st.Text
+		s.Text = st.Text
+		s.Prompt = st.Accent
+		s.Placeholder = st.Dim
+		s.EndOfBuffer = plain
+	}
+	// The textarea renders through a pointer to whichever style struct was
+	// current when Focus/Blur last ran — a pointer into a *copy* once the
+	// model has been returned by value — so re-point it at the styles just
+	// set, or the new colours are never read.
+	if ta.Focused() {
+		ta.Focus()
+	} else {
+		ta.Blur()
+	}
 }
 
 // setInputPrompt gives a textarea the prompt of the current layout: the

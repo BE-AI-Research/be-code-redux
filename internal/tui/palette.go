@@ -195,6 +195,7 @@ func (m *View) applyTheme(name string, asDefault bool) (tea.Model, tea.Cmd) {
 	m.spin.Style = st.Accent
 	m.richText = name != "mono"
 	m.theme = name
+	styleInput(&m.input, st)
 	m.rebuild()
 	if m.cfg.ThemeTerminalColors && m.termWrite != nil {
 		m.termWrite(terminalColorSeq(name))
