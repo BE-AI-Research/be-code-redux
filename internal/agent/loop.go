@@ -4,6 +4,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -80,6 +83,10 @@ type Agent struct {
 	// two apart.
 	Stats   Stats
 	statsMu sync.Mutex
+	// Engine is the working-memory store (nil when disabled): what the
+	// model has read, looked up and decided, kept by the harness and put
+	// back in the system prompt after compaction. See internal/engine.
+	Engine *engine.Store
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -100,6 +107,7 @@ type Agent struct {
 	systemOverride string // plan mode: replaces the base coding prompt
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
+	lastGitInfo    string // this request's git summary, for the per-turn prompt recompose
 
 	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
 	// cowork.go): the current request and the newest failing tool result,
@@ -290,6 +298,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
 	}
+	if a.Engine != nil && a.systemOverride == "" {
+		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+			sys += "\n\nWorking memory:\n" + wm
+		}
+	}
 	if a.handoff != "" {
 		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
 	}
@@ -300,6 +313,17 @@ func (a *Agent) composeSystem(gitInfo string) string {
 		sys += "\n\n" + gitInfo
 	}
 	return sys
+}
+
+// SetEngine attaches the working-memory store and recomposes the prompt.
+func (a *Agent) SetEngine(s *engine.Store) {
+	a.Engine = s
+	a.History.System.Content = a.composeSystem("")
+}
+
+// inRepoMap reports whether the repository map lists a file's symbols.
+func (a *Agent) inRepoMap(path string) bool {
+	return a.repoMap != "" && (strings.HasPrefix(a.repoMap, path+":") || strings.Contains(a.repoMap, "\n"+path+":"))
 }
 
 // RepoMap returns the current outline (for /map).
@@ -345,6 +369,14 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
+	a.lastGitInfo = ""
+	defer func() {
+		if a.Engine != nil {
+			if err := a.Engine.Flush(); err != nil {
+				a.notice("engine: %v; continuing without working memory", err)
+			}
+		}
+	}()
 
 	// A streak belongs to one stretch of tool calls; a repair round is a
 	// fresh start, and advice from a previous round has either been
@@ -358,12 +390,16 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.lastUserInput = userInput
 		a.lastFailingTool = ""
 	}
+	if newTurn && a.Engine != nil {
+		a.Engine.EnsureTask(userInput)
+	}
 	if a.repoDirty {
 		a.repoDirty = false
 		a.RefreshRepoMap()
 		a.History.System.Content = a.composeSystem("")
 	}
 	if gi := gitctx.Summary(ctx, a.Tools.Root); gi != "" {
+		a.lastGitInfo = gi
 		a.History.System.Content = a.composeSystem(gi)
 	}
 	expanded := ExpandMentions(a.Tools.Root, userInput)
@@ -377,6 +413,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 
 	emptyRetries, lengthRetries := 0, 0
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
+		if a.Engine != nil {
+			a.Engine.NextTurn()
+		}
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
@@ -393,6 +432,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
+		// Recompose now, not only once per request: the working-memory
+		// block has to reflect the reads made earlier in this same turn.
+		a.History.System.Content = a.composeSystem(a.lastGitInfo)
 		req := provider.ChatRequest{
 			Model:       a.Model,
 			Messages:    a.History.Prompt(),
@@ -629,7 +671,25 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	if a.Events.OnToolStart != nil {
 		a.Events.OnToolStart(call.Name, call.Arguments)
 	}
-	res := a.Tools.Dispatch(ctx, call)
+	var res tools.Result
+	served := false
+	if a.Engine != nil && (call.Name == "search" || call.Name == "lookup" || call.Name == "history") {
+		if args, ok := parseArgs(call.Arguments); ok {
+			if cached, hit := a.Engine.Cached(call.Name, args); hit {
+				res, served = tools.Result{Content: cached}, true
+			}
+		}
+	}
+	if !served {
+		res = a.Tools.Dispatch(ctx, call)
+	}
+	if a.Engine != nil && !served {
+		if args, ok := parseArgs(call.Arguments); ok {
+			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
+			}
+		}
+	}
 	// The automatic tool-failure consultation's question, decided here but
 	// asked below, after OnToolEnd has put the failure on screen.
 	consult := ""
@@ -669,6 +729,31 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		}
 	}
 	return res
+}
+
+// parseArgs decodes a tool call's arguments for the engine; a call whose
+// arguments are not an object is simply not observed.
+func parseArgs(raw string) (map[string]any, bool) {
+	args := map[string]any{}
+	if strings.TrimSpace(raw) == "" {
+		return args, true
+	}
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil, false
+	}
+	return args, true
+}
+
+// observe hands a tool result to the engine; a panic there must not take
+// the run down, so it is fenced.
+func (a *Agent) observe(ev engine.Event) (footer string) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("engine: %v; continuing without working memory", r)
+			footer = ""
+		}
+	}()
+	return a.Engine.Observe(ev)
 }
 
 // chatFiltered runs one completion, applying the think-filter to streamed
@@ -851,6 +936,13 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
 	a.autoVerifyUsed = false
+	if a.Engine != nil {
+		a.Engine.EnsureTask(userInput)
+		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
+			sum := sha256.Sum256([]byte(gitctx.Porcelain(ctx, a.Tools.Root)))
+			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: hex.EncodeToString(sum[:8])})
+		}
+	}
 	answer, err := a.Run(ctx, userInput)
 	if err != nil {
 		return "", nil, err

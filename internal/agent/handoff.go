@@ -44,6 +44,11 @@ func (a *Agent) WriteHandoff(ctx context.Context, withModel bool) (string, error
 		}
 		h = a.heuristicHandoff()
 	}
+	if a.Engine != nil {
+		if at := a.Engine.StoppedAt(); at != "" {
+			h = strings.TrimSpace(h) + "\n\nStopped at: " + at
+		}
+	}
 	a.Session.Handoff = strings.TrimSpace(h)
 	return a.Session.Handoff, nil
 }

@@ -2,7 +2,9 @@ package gitctx
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +177,23 @@ func TestSnapshotInEmptyRepoAndOutsideRepo(t *testing.T) {
 
 	if _, err := Snapshot(ctx, t.TempDir(), "x"); err == nil {
 		t.Fatal("Snapshot outside a repo should fail")
+	}
+}
+
+func TestHeadAndPorcelain(t *testing.T) {
+	dir := gitRepo(t)
+	ctx := context.Background()
+	if h := Head(ctx, dir); len(h) != 40 {
+		t.Fatalf("head %q", h)
+	}
+	if p := Porcelain(ctx, dir); p != "" {
+		t.Fatalf("clean tree porcelain %q", p)
+	}
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("x"), 0o644)
+	if p := Porcelain(ctx, dir); !strings.Contains(p, "b.txt") {
+		t.Fatalf("porcelain %q", p)
+	}
+	if Head(ctx, t.TempDir()) != "" {
+		t.Fatal("head outside a repo must be empty")
 	}
 }

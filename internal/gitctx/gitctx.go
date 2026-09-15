@@ -167,3 +167,25 @@ func Snapshot(ctx context.Context, root, message string) (string, error) {
 	}
 	return branch, nil
 }
+
+// Head is the full HEAD commit hash, or "" outside a repository or before
+// the first commit.
+func Head(ctx context.Context, root string) string {
+	if !IsRepo(ctx, root) {
+		return ""
+	}
+	out, err := git(ctx, root, "rev-parse HEAD")
+	if err != nil || len(out) != 40 {
+		return ""
+	}
+	return out
+}
+
+// Porcelain is `git status --porcelain`, or "" outside a repository.
+func Porcelain(ctx context.Context, root string) string {
+	if !IsRepo(ctx, root) {
+		return ""
+	}
+	out, _ := git(ctx, root, "status --porcelain")
+	return out
+}
