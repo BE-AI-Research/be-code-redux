@@ -33,6 +33,10 @@ type Hello struct {
 	Rows  int    `json:"rows"`
 	Label string `json:"label"`
 	UTF8  bool   `json:"utf8"`
+	// Control marks a connection that only carries a request (a quit from
+	// `be-code sessions kill`) and is never a terminal: the host does not
+	// register it, so it never shows up as attached or detached.
+	Control bool `json:"control,omitempty"`
 }
 
 type Size struct {

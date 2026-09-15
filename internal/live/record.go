@@ -75,6 +75,7 @@ func List(dir string) ([]Record, error) {
 		return nil, err
 	}
 	var out []Record
+	alive := map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
@@ -85,9 +86,35 @@ func List(dir string) ([]Record, error) {
 			_ = Remove(dir, code)
 			continue
 		}
+		alive[code] = true
 		out = append(out, *r)
 	}
+	pruneLogs(dir, entries, alive, time.Now().Add(-LogMaxAge))
 	return out, nil
+}
+
+// LogMaxAge is how long a dead host's log is kept: long enough to read
+// after a bad session, short enough that the directory does not grow
+// without bound.
+const LogMaxAge = 7 * 24 * time.Hour
+
+// pruneLogs removes <code>.log files whose host is gone and whose last
+// write is older than cutoff. A live host's log is never touched.
+func pruneLogs(dir string, entries []os.DirEntry, alive map[string]bool, cutoff time.Time) {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		code := strings.TrimSuffix(e.Name(), ".log")
+		if alive[code] {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
 }
 
 func Remove(dir, code string) error {

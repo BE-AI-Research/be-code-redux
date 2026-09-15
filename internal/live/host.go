@@ -348,6 +348,10 @@ func (h *Host) handle(conn net.Conn) {
 		return
 	}
 
+	if hello.Control {
+		h.handleControl(conn, hello.Label)
+		return
+	}
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
@@ -410,6 +414,29 @@ func (h *Host) handle(conn net.Conn) {
 		}
 	}
 	h.detach(c, "connection closed")
+}
+
+// handleControl serves a control connection: it is never registered as a
+// client, so the roster and the transcript never see it, and it carries at
+// most a quit request. The connection is closed without a bye once the
+// request has been read (or the peer goes away), which the requester reads
+// as "accepted".
+func (h *Host) handleControl(conn net.Conn, label string) {
+	defer conn.Close()
+	for {
+		typ, _, err := ReadFrame(conn)
+		if err != nil {
+			return
+		}
+		switch typ {
+		case FQuit:
+			h.logf("quit requested by %s\n", label)
+			h.RequestQuit()
+			return
+		case FDetach:
+			return
+		}
+	}
 }
 
 // writer is the sole goroutine that writes to c.conn, draining c's queue as

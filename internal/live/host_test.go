@@ -624,3 +624,40 @@ func TestEvictedOutputTriggersARepaintRequest(t *testing.T) {
 		t.Fatal("no repaint request after output frames were evicted")
 	}
 }
+
+// A control connection (what `sessions kill` opens) requests the quit and
+// is never a client: the roster and the transcript must not see it.
+func TestHostControlQuitIsNeverAClient(t *testing.T) {
+	h, sock := startHost(t)
+	quit := make(chan struct{}, 1)
+	h.OnQuit(func() { quit <- struct{}{} })
+	rosterChanges := 0
+	h.OnClients(func([]ClientInfo) { rosterChanges++ })
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := WriteJSON(conn, FHello, Hello{Token: "tok", Cols: 9999, Rows: 9999, Label: "sessions kill", UTF8: true, Control: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(conn, FQuit, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-quit:
+	case <-time.After(time.Second):
+		t.Fatal("OnQuit not called for a control quit")
+	}
+	if n := len(h.Clients()); n != 0 {
+		t.Fatalf("control connection registered as a client (%d)", n)
+	}
+	if rosterChanges != 0 {
+		t.Fatalf("roster notified %d times for a control connection", rosterChanges)
+	}
+	// The host closes the control connection without a bye.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := ReadFrame(conn); err == nil {
+		t.Fatal("expected the control connection to be closed, got a frame")
+	}
+}
