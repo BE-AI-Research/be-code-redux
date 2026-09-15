@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -263,6 +264,77 @@ func TestCompactUsesDigestsAndFeedsFileNotesBack(t *testing.T) {
 	}
 	if strings.Contains(ag.History.Messages[0].Content, "files:") {
 		t.Fatalf("files block not stripped from the stored summary:\n%s", ag.History.Messages[0].Content)
+	}
+}
+
+// A backend that omits tool-call ids falls back to call_<index> per
+// response, so the same id can name a read_file call in one turn and an
+// unrelated tool in the next. The second call's result must not be
+// mis-stubbed as a digested read of the first call's file.
+func TestCompactDoesNotStubAReusedCallID(t *testing.T) {
+	var summaryReq provider.ChatRequest
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
+			summaryReq = req
+			return &provider.ChatResponse{Content: "The task is x."}, nil
+		}
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc A() {}\n"), 0o644)
+	st := withEngine(t, ag)
+	st.NextTurn()
+	st.Observe(engine.Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "read a.go"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call_0", Name: "read_file", Arguments: `{"path":"a.go"}`}}})
+	ag.History.Add(provider.Message{Role: provider.RoleTool, ToolCallID: "call_0", Name: "read_file", Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "now run ls"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "call_0", Name: "shell", Arguments: `{"cmd":"ls"}`}}})
+	ag.History.Add(provider.Message{Role: provider.RoleTool, ToolCallID: "call_0", Name: "shell", Content: "a.go\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "done"})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "next"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "ok"})
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	u := summaryReq.Messages[1].Content
+	if !strings.Contains(u, "(read a.go lines 1–2; digested)") {
+		t.Fatalf("read_file result should still be stubbed as digested:\n%s", u)
+	}
+	if !strings.Contains(u, "[tool] a.go\n") {
+		t.Fatalf("shell result reusing the read's call id must keep its full %%.600s stub, not the digest stub:\n%s", u)
+	}
+}
+
+// A summary that is nothing but a files: block leaves no body to keep, so
+// Compact must report it empty (the caller falls back to trimming) while
+// still applying the file notes and leaving history untouched.
+func TestCompactErrorsOnFilesOnlySummaryButStillAppliesNotes(t *testing.T) {
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
+			return &provider.ChatResponse{Content: "files:\n- a.go — defines A\n"}, nil
+		}
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc A() {}\n"), 0o644)
+	st := withEngine(t, ag)
+	st.NextTurn()
+	st.Observe(engine.Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "read a.go"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "A is defined."})
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "next"})
+	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "ok"})
+	before := append([]provider.Message(nil), ag.History.Messages...)
+	err := ag.Compact(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "empty summary") {
+		t.Fatalf("expected empty summary error, got %v", err)
+	}
+	if !reflect.DeepEqual(ag.History.Messages, before) {
+		t.Fatalf("history changed on an errored compaction:\nbefore: %+v\nafter:  %+v", before, ag.History.Messages)
+	}
+	if st.Digests()[0].Note != "defines A" {
+		t.Fatalf("file note not applied: %+v", st.Digests())
 	}
 }
 

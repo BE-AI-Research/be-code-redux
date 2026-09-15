@@ -845,7 +845,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 	task, prior := "", ""
 	var b strings.Builder
-	pending := map[string]string{} // tool call id → path (read_file only)
+	// tool call id → path, read_file calls only; a backend that omits ids
+	// falls back to call_<index>, which is not unique across turns, so
+	// every call (not just read_file) rewrites its id's entry and a result
+	// clears it once consumed — a reused id can then never mis-stub an
+	// unrelated result as a digested read.
+	pending := map[string]string{}
 	for i, m := range head {
 		if i == 0 && strings.HasPrefix(m.Content, summaryPrefix) {
 			prior = strings.TrimPrefix(m.Content, summaryPrefix)
@@ -854,20 +859,25 @@ func (a *Agent) Compact(ctx context.Context) error {
 		if task == "" && m.Role == provider.RoleUser && !isToolResult(m) {
 			task = m.Content
 		}
-		for _, tc := range m.ToolCalls {
-			if tc.Name == "read_file" {
-				if args, ok := tools.ParseArgs(tc.Arguments); ok {
-					if p, _ := args["path"].(string); p != "" {
-						pending[tc.ID] = p
+		if a.Engine != nil {
+			for _, tc := range m.ToolCalls {
+				path := ""
+				if tc.Name == "read_file" {
+					if args, ok := tools.ParseArgs(tc.Arguments); ok {
+						path, _ = args["path"].(string)
 					}
 				}
+				pending[tc.ID] = path
 			}
 		}
 		if a.Engine != nil && m.Role == provider.RoleTool {
 			if p, ok := pending[m.ToolCallID]; ok {
-				if r, has := a.Engine.HasDigest(p); has {
-					fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
-					continue
+				delete(pending, m.ToolCallID)
+				if p != "" {
+					if r, has := a.Engine.HasDigest(p); has {
+						fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
+						continue
+					}
 				}
 			}
 		}
@@ -916,9 +926,6 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if a.Profile.StripThink {
 		summary = StripThink(summary)
 	}
-	if strings.TrimSpace(summary) == "" {
-		return fmt.Errorf("empty summary")
-	}
 	if a.Engine != nil {
 		body, files := engine.SplitFilesBlock(summary)
 		if files != "" {
@@ -928,6 +935,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 		if err := a.Engine.Flush(); err != nil {
 			a.notice("engine: %v; continuing without working memory", err)
 		}
+	}
+	if strings.TrimSpace(summary) == "" {
+		return fmt.Errorf("empty summary")
 	}
 	a.History.Messages = append([]provider.Message{
 		{Role: provider.RoleUser, Content: summaryPrefix + summary},
