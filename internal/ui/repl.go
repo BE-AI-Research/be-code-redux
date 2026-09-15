@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -611,6 +612,53 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 				fmt.Printf("%s %v\n", red("error>"), err)
 			}
 		})
+	case "/task":
+		if r.Agent.Engine == nil {
+			fmt.Println(dim("working memory is off (engine.enabled)"))
+			break
+		}
+		if len(fields) > 1 && fields[1] == "clear" {
+			r.Agent.Engine.ClearSession()
+			fmt.Println(dim("working memory cleared for this session"))
+			break
+		}
+		fmt.Println(r.Agent.Engine.LedgerText())
+	case "/notes":
+		if r.Agent.Engine == nil {
+			fmt.Println(dim("working memory is off (engine.enabled)"))
+			break
+		}
+		sub := ""
+		if len(fields) > 1 {
+			sub = fields[1]
+		}
+		switch sub {
+		case "add":
+			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(input, "/notes"), " add"))
+			if text == "" {
+				fmt.Println("usage: /notes add <text>")
+				break
+			}
+			r.Agent.Engine.AddNoteLine(text)
+			fmt.Println(dim("noted"))
+		case "drop":
+			n, _ := strconv.Atoi(strings.Join(fields[2:], ""))
+			if err := r.Agent.Engine.DropNote(n); err != nil {
+				fmt.Printf("%s %v\n", red("error>"), err)
+			}
+		case "clear":
+			r.Agent.Engine.ClearNotes()
+			fmt.Println(dim("notes cleared"))
+		default:
+			notes := strings.TrimRight(r.Agent.Engine.Notes(), "\n")
+			if notes == "" {
+				fmt.Println(dim("no notes"))
+				break
+			}
+			for i, l := range strings.Split(notes, "\n") {
+				fmt.Printf("%d. %s\n", i+1, l)
+			}
+		}
 	case "/config":
 		p, _ := config.Path()
 		fmt.Printf("config: %s\n  provider=%s model=%s ui=%s context_tokens=%d max_turns=%d max_repairs=%d\n  compat_tool_calls=%s approve_file_writes=%v auto_approve_shell=%v\n",
