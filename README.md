@@ -136,8 +136,8 @@ a `co-worker unavailable: …` notice.
 Answers show up on every attached terminal as `<name>? question` then
 `<name>> answer`, in the theme's co-worker colour, followed by a short line
 of how many files it read and how long it took; the status line shows
-`consulting <name>…` while one is in flight. Plain mode prints the same
-lines.
+`consulting <name> · N files read` while one is in flight. Plain mode prints
+the same lines.
 
 A co-worker marked `"online": true` asks for consent once per session before
 any code is sent to it — the TUI's `Co-working model — approval required`

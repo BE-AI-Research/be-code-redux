@@ -23,6 +23,7 @@ grep -q '^}' "$WS/add.go"
 OUT="$DIR/consult.out"
 "$(dirname "$0")/../../be-code" run -y -C "$WS" "consult scenario: why does add.go not compile?" > "$OUT"
 cat "$OUT"
-grep -q "mock-cw> Add the missing return" "$OUT" && echo "[PASS] consult"
+grep -q "mock-cw> Add the missing return" "$OUT"
+echo "[PASS] consult"
 
 echo "E2E PASS"

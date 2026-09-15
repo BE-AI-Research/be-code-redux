@@ -70,7 +70,7 @@ model). Walk this once per release, or after touching `internal/live`,
 15. With a co-worker configured (`coworkers` in config) and two terminals attached: on one,
     `/consult <name> <question>`. Expect both terminals to show `<name>? <question>` then
     `<name>> <answer>` in the theme's co-worker colour, and the status note (`consulting
-    <name>…`) on both while it runs.
+    <name>`, then `consulting <name> · N files read`) on both while it runs.
 
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own
 stdout/stderr from startup; `~/.be-code/live/<code>.json` is its record (code, pid,
