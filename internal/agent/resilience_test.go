@@ -258,15 +258,16 @@ func TestRunRecoversFromLengthCutoffDuringReasoning(t *testing.T) {
 	}
 }
 
-// If nothing can be freed, the failure is reported with the real cause
-// (reasoning exhausted the window), not a generic "max_tokens too low".
+// If the low-effort retry is cut off too, the failure is reported with the
+// real cause (reasoning exhausted the window) and says what was tried.
 func TestRunLengthCutoffErrorNamesReasoning(t *testing.T) {
 	p := &scriptedProvider{responses: []provider.ChatResponse{
 		{Content: "", Reasoning: strings.Repeat("x", 5000), FinishReason: "length"},
+		{Content: "", Reasoning: strings.Repeat("x", 4000), FinishReason: "length"},
 	}}
 	ag, _ := newTestAgent(t, p, nil)
 	_, err := ag.Run(context.Background(), "do the thing")
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reasoning") {
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reasoning") || !strings.Contains(err.Error(), "reasoning_effort=low") {
 		t.Fatalf("err = %v", err)
 	}
 }

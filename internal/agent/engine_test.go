@@ -450,3 +450,47 @@ func TestCompactEmptySummaryErrorCarriesTheBackendDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+// Reasoning that exhausts the window is retried once with less of it: the
+// retry carries reasoning_effort=low whatever the config asked for, and the
+// configured effort is what every ordinary call sends.
+func TestReasoningExhaustionRetriesWithLowEffort(t *testing.T) {
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls == 1 {
+			return &provider.ChatResponse{Content: "", Reasoning: strings.Repeat("think ", 2000), FinishReason: "length"}, nil
+		}
+		return &provider.ChatResponse{Content: "done", FinishReason: "stop"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.ReasoningEffort = "medium"; c.CompactWithModel = false })
+	var notices []string
+	ag.Events.OnNotice = func(s string) { notices = append(notices, s) }
+	out, err := ag.Run(context.Background(), "do the thing")
+	if err != nil || out != "done" {
+		t.Fatalf("run: %q %v", out, err)
+	}
+	if len(p.reqs) != 2 || p.reqs[0].ReasoningEffort != "medium" || p.reqs[1].ReasoningEffort != "low" {
+		t.Fatalf("efforts: %v", []string{p.reqs[0].ReasoningEffort, p.reqs[len(p.reqs)-1].ReasoningEffort})
+	}
+	if len(notices) == 0 || !strings.Contains(notices[len(notices)-1], "reasoning_effort=low") {
+		t.Fatalf("notices: %v", notices)
+	}
+}
+
+// Effort follows the room left in the window: configured while the prompt
+// is small, one level down once it fills more than half the limit.
+func TestEffortStepsDownWhenThePromptFillsHalfTheWindow(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 4000 })
+	ag.History.Budget, ag.History.Reserve = 4000, 0
+	for _, tc := range []struct{ in, small, big string }{{"high", "high", "medium"}, {"medium", "medium", "low"}, {"low", "low", "low"}, {"", "", ""}} {
+		ag.History.Messages = nil
+		if got := ag.effortFor(tc.in); got != tc.small {
+			t.Fatalf("%q small prompt: got %q want %q", tc.in, got, tc.small)
+		}
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: strings.Repeat("x", 9000)}) // ~3000 tokens > half of 4000
+		if got := ag.effortFor(tc.in); got != tc.big {
+			t.Fatalf("%q big prompt: got %q want %q", tc.in, got, tc.big)
+		}
+	}
+}

@@ -79,17 +79,17 @@ func TestRunFailsOnRepeatedEmptyReply(t *testing.T) {
 	}
 }
 
-// finish_reason=length with nothing usable means the window is exhausted;
-// retrying cannot help, and the user must be told why.
+// finish_reason=length with nothing usable means the window is exhausted:
+// one retry at low reasoning effort, then the user must be told why.
 func TestRunReportsTruncatedOutput(t *testing.T) {
-	p := &scriptedProvider{responses: []provider.ChatResponse{{Content: "", FinishReason: "length"}}}
+	p := &scriptedProvider{responses: []provider.ChatResponse{{Content: "", FinishReason: "length"}, {Content: "", FinishReason: "length"}}}
 	ag, _ := newTestAgent(t, p, nil)
 	_, err := ag.Run(context.Background(), "do the thing")
 	if err == nil || !strings.Contains(err.Error(), "length") {
 		t.Fatalf("expected output-limit error, got %v", err)
 	}
-	if p.i != 1 {
-		t.Fatalf("should not retry a length cutoff, made %d calls", p.i)
+	if p.i != 2 {
+		t.Fatalf("should retry a length cutoff exactly once, made %d calls", p.i)
 	}
 }
 
