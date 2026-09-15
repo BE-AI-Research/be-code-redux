@@ -188,6 +188,9 @@ func (r *REPL) Run(ctx context.Context) error {
 	if NeedsInitHint(r.Agent.Tools.Root) {
 		fmt.Printf("%s\n", dim(InitHint))
 	}
+	if r.Agent.Session != nil && len(r.Agent.Session.Messages) > 0 {
+		r.printResume(r.Agent.Session)
+	}
 
 	r.lines = make(chan lineEvent)
 	go func() {
@@ -522,10 +525,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			break
 		}
 		r.Agent.Resume(s)
-		fmt.Printf("resumed %s — %s (%d messages)\n", s.ResumeCode(), s.Title, len(s.Messages))
-		if s.Handoff != "" {
-			fmt.Printf("%s\n", dim("handoff briefing loaded into the system prompt; /handoff shows it"))
-		}
+		r.printResume(s)
 	case "/theme":
 		if len(fields) < 2 {
 			fmt.Println("themes: dark, light, mono, dracula, nord, gruvbox, monokai, one-dark, solarized-dark, solarized-light, tokyo-night, catppuccin, github-light")
@@ -890,5 +890,36 @@ func Events() agent.Events {
 				fmt.Print(dim("."))
 			}
 		},
+	}
+}
+
+// printResume replays a resumed session's saved transcript in plain mode's
+// own line styles, then the divider and the resume line, so the person
+// picks up where they left off instead of facing a blank prompt.
+func (r *REPL) printResume(s *store.Session) {
+	if r.Cfg.ResumeReplay {
+		for _, l := range Replay(s.Messages, r.Cfg.ResumeReplayTurns) {
+			switch l.Kind {
+			case ReplayUser:
+				fmt.Printf("%s %s\n", cyan("you>"), l.Text)
+			case ReplayAssistant:
+				fmt.Printf("%s\n", l.Text)
+			case ReplayTool:
+				a := l.Text
+				if len(a) > 160 {
+					a = a[:160] + "..."
+				}
+				fmt.Printf("%s %s %s\n", cyan("tool>"), l.Label, dim(a))
+			case ReplayToolErr:
+				fmt.Printf("%s %s: %s\n", red("err>"), l.Label, dim(l.Text))
+			case ReplaySummary:
+				fmt.Printf("%s\n%s\n", dim("earlier turns compacted:"), dim(l.Text))
+			}
+		}
+		fmt.Printf("%s\n", dim(ReplayDivider))
+	}
+	fmt.Printf("resumed %s — %s (%d messages)\n", s.ResumeCode(), s.Title, len(s.Messages))
+	if s.Handoff != "" {
+		fmt.Printf("%s\n", dim("handoff briefing loaded into the system prompt; /handoff shows it"))
 	}
 }

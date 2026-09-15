@@ -1613,10 +1613,7 @@ func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 		return m.joinLive(code, from)
 	}
 	m.ag.Resume(s)
-	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("resumed %s — %s (%d messages)", s.ResumeCode(), s.Title, len(s.Messages))})
-	if s.Handoff != "" {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "handoff briefing loaded into the system prompt; /handoff shows it"})
-	}
+	m.seedResumeLocked(s)
 	return m, nil
 }
 

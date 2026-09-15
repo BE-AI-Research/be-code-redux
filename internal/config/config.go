@@ -161,6 +161,12 @@ type Config struct {
 
 	// Engine tunes the working-memory engine (internal/engine).
 	Engine EngineConfig `json:"engine"`
+	// ResumeReplay replays the saved transcript into the terminal when a
+	// session is resumed, so the person sees where they left off. On by
+	// default; ResumeReplayTurns caps the replay to the last N user turns
+	// (0 = everything the saved history holds).
+	ResumeReplay      bool `json:"resume_replay"`
+	ResumeReplayTurns int  `json:"resume_replay_turns"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
 	// Programmable Search Engine. Off unless CX is set; the API key comes
@@ -266,6 +272,7 @@ func Default() *Config {
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
 		Coworkers:        nil,
+		ResumeReplay:     true,
 		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, Tools: "full"},
 	}
 }

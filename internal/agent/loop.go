@@ -986,7 +986,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 	return nil
 }
 
-const summaryPrefix = "[Conversation summary — earlier turns compacted]\n"
+// SummaryPrefix marks the user-role message a compaction leaves in place
+// of the turns it summarised; UIs use it to render that message as a
+// summary block rather than as something the person typed.
+const SummaryPrefix = "[Conversation summary — earlier turns compacted]\n"
+
+const summaryPrefix = SummaryPrefix
 
 const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text. Do not restate anything already in Working memory. End with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
 
