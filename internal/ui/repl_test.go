@@ -399,4 +399,12 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	if st.Ledger().Task != "" {
 		t.Fatal("/task clear did not clear")
 	}
+	// Whatever spacing was typed, the note is the text after the add token.
+	capture(t, func() { r.command(context.Background(), "/notes  add  spaced text") })
+	if out = capture(t, func() { r.command(context.Background(), "/notes") }); !strings.Contains(out, "1. spaced text") {
+		t.Fatalf("spaced add:\n%s", out)
+	}
+	if out = capture(t, func() { r.command(context.Background(), "/notes drop") }); !strings.Contains(out, "usage: /notes drop N") {
+		t.Fatalf("bare drop:\n%s", out)
+	}
 }

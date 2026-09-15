@@ -1505,7 +1505,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		switch sub {
 		case "add":
-			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(text, "/notes"), " add"))
+			text := ui.NoteArgument(text)
 			if text == "" {
 				m.renderLocalNote("usage: /notes add <text>")
 				return m, nil
@@ -1513,6 +1513,10 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.ag.Engine.AddNoteLine(text)
 			m.renderLocalNote("noted")
 		case "drop":
+			if len(fields) < 3 {
+				m.renderLocalNote("usage: /notes drop N")
+				break
+			}
 			n, _ := strconv.Atoi(strings.Join(fields[2:], ""))
 			if err := m.ag.Engine.DropNote(n); err != nil {
 				m.renderLocalNote("error: " + err.Error())

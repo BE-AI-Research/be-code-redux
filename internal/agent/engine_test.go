@@ -350,6 +350,9 @@ func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 	for _, c := range []string{
 		"git init -q -b main", "git config user.email t@t.local", "git config user.name t",
 		"sh -c 'echo hello > a.txt'", "git add -A", "git commit -qm initial",
+		// Dirty before the task starts: this is the file the changes tool
+		// must later report as already modified.
+		"sh -c 'echo more >> a.txt'",
 	} {
 		if out, err := tools.RunShell(context.Background(), dir, c, 30*time.Second); err != nil {
 			t.Fatalf("%s: %v %s", c, err, out)
@@ -360,7 +363,8 @@ func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := st.Ledger().Baseline
-	if len(b.Head) < 40 || b.Dirty == "" {
+	// Dirty is the porcelain text itself, not a hash of it.
+	if len(b.Head) < 40 || !strings.Contains(b.Dirty, "a.txt") {
 		t.Fatalf("baseline %+v", b)
 	}
 }

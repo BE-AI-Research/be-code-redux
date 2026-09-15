@@ -4,8 +4,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -260,11 +258,15 @@ const MaxProjectNotes = 8 * 1024
 // inside a multi-byte character leaves the model reading U+FFFD). Every
 // path that feeds project notes into the prompt goes through here:
 // SetProjectNotes, cmd's loadProjectNotes, and agent.New.
-func TrimProjectNotes(s string) string {
-	if len(s) <= MaxProjectNotes {
+func TrimProjectNotes(s string) string { return trimAtLine(s, MaxProjectNotes) }
+
+// trimAtLine cuts s to max bytes at the last line boundary that fits, and
+// failing that at the last whole rune.
+func trimAtLine(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
-	cut := s[:MaxProjectNotes]
+	cut := s[:max]
 	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
 		return cut[:i+1]
 	}
@@ -983,8 +985,13 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 		// fills an empty one.
 		a.Engine.StartTask(userInput)
 		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
-			sum := sha256.Sum256([]byte(gitctx.Porcelain(ctx, a.Tools.Root)))
-			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: hex.EncodeToString(sum[:8])})
+			// The porcelain text itself, not a hash of it: the changes tool
+			// names the files that were already dirty when the task began,
+			// and this is the only moment that list can be observed. Capped
+			// like project notes so a repository mid-rebase cannot put a
+			// megabyte of status into the ledger.
+			dirty := trimAtLine(gitctx.Porcelain(ctx, a.Tools.Root), MaxProjectNotes)
+			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: dirty})
 		}
 	}
 	answer, err := a.Run(ctx, userInput)

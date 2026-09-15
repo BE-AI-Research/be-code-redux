@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -37,5 +39,26 @@ func TestEngineToolsFollowTheConfig(t *testing.T) {
 	registerEngineTools(cfg, reg3, nil, nil)
 	if len(reg3.Names()) != len(reg.Names())-5 {
 		t.Fatalf("disabled registered tools: %v", reg3.Names())
+	}
+}
+
+// TestBaselineFollowsTheLedger: every task records its own baseline, and the
+// closure the changes tool holds must report the current one — a cached
+// dirty list would describe the task before this one.
+func TestBaselineFollowsTheLedger(t *testing.T) {
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), t.TempDir(), "s", false, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := baselineFunc(st)
+	st.SetBaseline(engine.Baseline{Head: "1111111111111111111111111111111111111111", Dirty: " M a.txt\n"})
+	head1, dirty1 := baseline()
+	st.SetBaseline(engine.Baseline{Head: "2222222222222222222222222222222222222222", Dirty: " M b.txt\n"})
+	head2, dirty2 := baseline()
+	if head1 == head2 || dirty1 == dirty2 {
+		t.Fatalf("baseline is stale: %q/%q then %q/%q", head1, dirty1, head2, dirty2)
+	}
+	if dirty2 != " M b.txt\n" {
+		t.Fatalf("second baseline: %q", dirty2)
 	}
 }

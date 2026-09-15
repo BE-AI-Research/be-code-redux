@@ -55,7 +55,7 @@ type Step struct {
 
 type Baseline struct {
 	Head  string `json:"head,omitempty"`
-	Dirty string `json:"dirty,omitempty"` // hash of git status --porcelain
+	Dirty string `json:"dirty,omitempty"` // git status --porcelain text as the task began
 }
 
 type Ledger struct {

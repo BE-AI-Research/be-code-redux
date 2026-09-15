@@ -1,14 +1,12 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
-	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -48,21 +46,17 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 		return
 	}
 	ag.SetEngine(st)
-	// The porcelain text at task start is re-read lazily on the first
-	// changes call; the engine stores only its hash. A documented
-	// approximation: files dirtied during the task but before that first
-	// call are listed as pre-existing. The stat itself is always exact.
-	var dirtyText string
-	baseline := func() (string, string) {
-		b := st.Ledger().Baseline
-		if b.Head == "" {
-			return "", ""
-		}
-		if dirtyText == "" && b.Dirty != "" {
-			dirtyText = gitctx.Porcelain(context.Background(), reg.Root)
-		}
-		return b.Head, dirtyText
-	}
-	registerEngineTools(cfg, reg, st, baseline)
+	registerEngineTools(cfg, reg, st, baselineFunc(st))
 	ag.RefreshSystem()
+}
+
+// baselineFunc reports where the current task began, read straight from the
+// ledger every time. It keeps no state of its own: RunFull records the
+// porcelain text as each task starts, and anything cached here would pair a
+// later task's head with the first task's dirty list.
+func baselineFunc(st *engine.Store) tools.BaselineFunc {
+	return func() (string, string) {
+		b := st.Ledger().Baseline
+		return b.Head, b.Dirty
+	}
 }

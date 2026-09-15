@@ -634,7 +634,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		switch sub {
 		case "add":
-			text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(input, "/notes"), " add"))
+			text := NoteArgument(input)
 			if text == "" {
 				fmt.Println("usage: /notes add <text>")
 				break
@@ -642,6 +642,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Agent.Engine.AddNoteLine(text)
 			fmt.Println(dim("noted"))
 		case "drop":
+			if len(fields) < 3 {
+				fmt.Println("usage: /notes drop N")
+				break
+			}
 			n, _ := strconv.Atoi(strings.Join(fields[2:], ""))
 			if err := r.Agent.Engine.DropNote(n); err != nil {
 				fmt.Printf("%s %v\n", red("error>"), err)

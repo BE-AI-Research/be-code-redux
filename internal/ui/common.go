@@ -5,6 +5,7 @@ package ui
 import (
 	"os"
 	"strings"
+	"unicode"
 )
 
 // ANSI helpers — plain enough for any terminal, disabled when not a TTY.
@@ -122,3 +123,19 @@ func BusySafeCommand(line string) bool {
 	f := strings.Fields(line)
 	return len(f) > 0 && busySafe[f[0]]
 }
+
+// dropWord returns what follows the first whitespace-delimited word,
+// trimmed; "" when there is nothing after it.
+func dropWord(s string) string {
+	s = strings.TrimSpace(s)
+	i := strings.IndexFunc(s, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[i:])
+}
+
+// NoteArgument is the text of a "/notes add ..." line: everything after the
+// add token, whatever spacing was typed, so "/notes  add  spaced text"
+// notes "spaced text" and never a stray "add".
+func NoteArgument(line string) string { return dropWord(dropWord(line)) }
