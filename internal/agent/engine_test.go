@@ -21,7 +21,8 @@ import (
 
 func withEngine(t *testing.T, ag *Agent) *engine.Store {
 	t.Helper()
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "eng"), ag.Tools.Root, "s1", false, engine.Limits{NotesCap: 4096})
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "eng"), ag.Tools.Root, "s1", false,
+		engine.Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +48,8 @@ func TestReadsAreDigestedAndTheBlockReachesTheSystemPrompt(t *testing.T) {
 	if _, err := ag.Run(context.Background(), "look at a.go"); err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Digests()) != 1 || st.Digests()[0].Path != "a.go" {
-		t.Fatalf("digests %+v", st.Digests())
+	if fs := filesOf(st); len(fs) != 1 || fs[0].Path != "a.go" {
+		t.Fatalf("files %+v", fs)
 	}
 	// The second read got the footer; the third request's system prompt has the block.
 	second := p.reqs[2].Messages
@@ -106,13 +107,14 @@ func TestRunFullRecordsBaselineAndExecutePlanSeedsSteps(t *testing.T) {
 	if _, _, err := ag.ExecutePlan(context.Background(), "add a flag", "Plan\n1. parse\n2. wire\n"); err != nil {
 		t.Fatal(err)
 	}
-	l := st.Ledger()
-	if l.Task != "add a flag" || len(l.Steps) != 2 || l.Steps[1].Text != "wire" {
-		t.Fatalf("ledger %+v", l)
+	tr := st.Tree()
+	if len(tr.Roots) != 1 || tr.Roots[0].Text != "add a flag" ||
+		len(tr.Roots[0].Children) != 2 || tr.Roots[0].Children[1].Text != "wire" {
+		t.Fatalf("tree %s", st.TreeText())
 	}
 	// Not a git repo: baseline stays empty rather than erroring.
-	if l.Baseline.Head != "" {
-		t.Fatalf("baseline %+v", l.Baseline)
+	if b := st.Baseline(); b.Head != "" {
+		t.Fatalf("baseline %+v", b)
 	}
 }
 
@@ -122,8 +124,8 @@ func TestResumeRebuildsTheBlockAndHandoffCarriesStoppedAt(t *testing.T) {
 	}}
 	ag, _ := newTestAgent(t, p, nil)
 	st := withEngine(t, ag)
-	st.SetPlan("t", []string{"one", "two"})
-	st.SetStep(2, "doing")
+	id := st.Plan("t", []string{"one", "two"})
+	st.SetStatusText(id+".2", "doing", "")
 	ag.SetSession(store.NewSession("p", "m", ag.Tools.Root))
 	ag.Run(context.Background(), "x")
 	h, err := ag.WriteHandoff(context.Background(), false)
@@ -131,8 +133,8 @@ func TestResumeRebuildsTheBlockAndHandoffCarriesStoppedAt(t *testing.T) {
 		t.Fatalf("handoff %v:\n%s", err, h)
 	}
 	// A second exit replaces the line rather than stacking another copy.
-	st.SetStep(2, "done")
-	st.SetStep(1, "doing")
+	st.SetStatusText(id+".2", "done", "")
+	st.SetStatusText(id+".1", "doing", "")
 	h2, err := ag.WriteHandoff(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -166,8 +168,8 @@ func TestDoubleEncodedArgumentsAreObserved(t *testing.T) {
 	if _, err := ag.Run(context.Background(), "look at a.go"); err != nil {
 		t.Fatal(err)
 	}
-	if ds := st.Digests(); len(ds) != 1 || ds[0].Path != "a.go" {
-		t.Fatalf("digests %+v", st.Digests())
+	if fs := filesOf(st); len(fs) != 1 || fs[0].Path != "a.go" {
+		t.Fatalf("files %+v", fs)
 	}
 	if len(seen) != 2 || !strings.Contains(seen[1], "already read at turn 1 (unchanged)") {
 		t.Fatalf("tool results: %q", seen)
@@ -197,8 +199,8 @@ func TestMalformedArgumentsSkipObservation(t *testing.T) {
 	if !errored {
 		t.Fatal("malformed arguments did not reach the registry")
 	}
-	if len(st.Digests()) != 0 {
-		t.Fatalf("digested a call that never ran: %+v", st.Digests())
+	if fs := filesOf(st); len(fs) != 0 {
+		t.Fatalf("digested a call that never ran: %+v", fs)
 	}
 }
 
@@ -214,20 +216,20 @@ func TestRunFullRefreshesTheTaskLineBetweenRequests(t *testing.T) {
 	if _, _, err := ag.RunFull(context.Background(), "second thing"); err != nil {
 		t.Fatal(err)
 	}
-	if st.Ledger().Task != "second thing" {
-		t.Fatalf("task %q", st.Ledger().Task)
+	if got := activeTask(st); got != "second thing" {
+		t.Fatalf("task %q", got)
 	}
 	if !strings.Contains(ag.History.System.Content, "second thing — todo") {
 		t.Fatalf("block did not follow the new request:\n%s", ag.History.System.Content)
 	}
 	// A plan in flight keeps its own task line.
-	st.SetPlan("the plan", []string{"one", "two"})
-	st.SetStep(1, "doing")
+	planID := st.Plan("the plan", []string{"one", "two"})
+	st.SetStatusText(planID+".1", "doing", "")
 	if _, _, err := ag.RunFull(context.Background(), "a side question"); err != nil {
 		t.Fatal(err)
 	}
-	if st.Ledger().Task != "the plan" {
-		t.Fatalf("plan task line was overwritten: %q", st.Ledger().Task)
+	if got := activeTask(st); got != "the plan" {
+		t.Fatalf("plan task line was overwritten: %q", got)
 	}
 }
 
@@ -272,8 +274,8 @@ func TestCompactUsesDigestsAndFeedsFileNotesBack(t *testing.T) {
 	if !strings.Contains(u, "Working memory:") || !strings.Contains(summaryReq.Messages[0].Content, "Do not restate anything already in Working memory.") {
 		t.Fatalf("summary request lacks the block or the instruction:\n%s\n%s", summaryReq.Messages[0].Content, u)
 	}
-	if st.Digests()[0].Note != "defines A" {
-		t.Fatalf("file note not applied: %+v", st.Digests())
+	if filesOf(st)[0].Note != "defines A" {
+		t.Fatalf("file note not applied: %+v", filesOf(st))
 	}
 	if strings.Contains(ag.History.Messages[0].Content, "files:") {
 		t.Fatalf("files block not stripped from the stored summary:\n%s", ag.History.Messages[0].Content)
@@ -319,10 +321,12 @@ func TestCompactDoesNotStubAReusedCallID(t *testing.T) {
 	}
 }
 
-// A summary that is nothing but a files: block leaves no body to keep, so
-// Compact must report it empty (the caller falls back to trimming) while
-// still applying the file notes and leaving history untouched.
-func TestCompactErrorsOnFilesOnlySummaryButStillAppliesNotes(t *testing.T) {
+// A summary that is nothing but a files: block leaves no body to keep. It
+// used to be reported as an error so the caller fell back to trimming;
+// since the tree became the thing that carries state across a compaction,
+// it is instead the "continue from the task record" path — with the file
+// notes still applied and the newest exchange still in place.
+func TestCompactContinuesFromTheRecordOnAFilesOnlySummary(t *testing.T) {
 	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
 		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
 			return &provider.ChatResponse{Content: "files:\n- a.go — defines A\n"}, nil
@@ -333,21 +337,36 @@ func TestCompactErrorsOnFilesOnlySummaryButStillAppliesNotes(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc A() {}\n"), 0o644)
 	st := withEngine(t, ag)
 	st.NextTurn()
+	st.EnsureRoot("read a.go")
 	st.Observe(engine.Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
 	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "read a.go"})
 	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "A is defined."})
 	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "next"})
 	ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "ok"})
-	before := append([]provider.Message(nil), ag.History.Messages...)
-	err := ag.Compact(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "empty summary") {
-		t.Fatalf("expected empty summary error, got %v", err)
+	tail := append([]provider.Message(nil), ag.History.Messages[len(ag.History.Messages)-2:]...)
+	var notices []string
+	ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatalf("a files-only summary must not fail compaction: %v", err)
 	}
-	if !reflect.DeepEqual(ag.History.Messages, before) {
-		t.Fatalf("history changed on an errored compaction:\nbefore: %+v\nafter:  %+v", before, ag.History.Messages)
+	if !containsAny(notices, "continuing from the task record") {
+		t.Fatalf("no notice explaining the missing summary: %v", notices)
 	}
-	if st.Digests()[0].Note != "defines A" {
-		t.Fatalf("file note not applied: %+v", st.Digests())
+	if n := len(ag.History.Messages); n != len(tail)+1 {
+		t.Fatalf("history should be the note plus the newest exchange: %+v", ag.History.Messages)
+	}
+	if !strings.HasPrefix(ag.History.Messages[0].Content, SummaryPrefix) ||
+		!strings.Contains(ag.History.Messages[0].Content, "Working memory") {
+		t.Fatalf("the stand-in note does not point at the record: %q", ag.History.Messages[0].Content)
+	}
+	if !reflect.DeepEqual(ag.History.Messages[1:], tail) {
+		t.Fatalf("the newest exchange was not kept: %+v", ag.History.Messages)
+	}
+	if !strings.Contains(ag.History.System.Content, "read a.go") {
+		t.Fatalf("the tree did not survive compaction:\n%s", ag.History.System.Content)
+	}
+	if filesOf(st)[0].Note != "defines A" {
+		t.Fatalf("file note not applied: %+v", filesOf(st))
 	}
 }
 
@@ -374,7 +393,7 @@ func TestRunFullRecordsTheGitBaseline(t *testing.T) {
 	if _, _, err := ag.RunFull(context.Background(), "do something"); err != nil {
 		t.Fatal(err)
 	}
-	b := st.Ledger().Baseline
+	b := st.Baseline()
 	// Dirty is the porcelain text itself, not a hash of it.
 	if len(b.Head) < 40 || !strings.Contains(b.Dirty, "a.txt") {
 		t.Fatalf("baseline %+v", b)
@@ -504,4 +523,191 @@ func TestEffortStepsDownWhenThePromptFillsHalfTheWindow(t *testing.T) {
 			t.Fatalf("%q big prompt: got %q want %q", tc.in, got, tc.big)
 		}
 	}
+}
+
+// ---- helpers for the task-record tests -------------------------------------
+
+// filesOf is every file reference in the record, in walk order. It replaces
+// the flat Digests() projection the 0.10.0 compat layer used to offer.
+func filesOf(st *engine.Store) []engine.FileRef {
+	var out []engine.FileRef
+	tr := st.Tree()
+	tr.Walk(func(n *engine.Node, _ int) { out = append(out, n.Evidence.Files...) })
+	return out
+}
+
+// activeTask is the text of the task in flight: the newest root that is not
+// wholly finished, the same definition the block itself uses.
+func activeTask(st *engine.Store) string {
+	tr := st.Tree()
+	for i := len(tr.Roots) - 1; i >= 0; i-- {
+		if !tr.Terminal(tr.Roots[i]) {
+			return tr.Roots[i].Text
+		}
+	}
+	return ""
+}
+
+func containsAny(lines []string, want string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentWithEngine(t *testing.T) (*Agent, *engine.Store) {
+	t.Helper()
+	ag, _ := newTestAgent(t, &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}, nil)
+	return ag, withEngine(t, ag)
+}
+
+// emptySummaryProvider answers every request with nothing at all — the
+// failure the validation VM saw on every compaction after the first.
+func emptySummaryProvider() *funcProvider {
+	return &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "", FinishReason: "stop"}, nil
+	}}
+}
+
+// TestEvidenceIsRecordedAgainstTheDoingNode: the dispatch hook files tool
+// results where the report will later find them.
+func TestEvidenceIsRecordedAgainstTheDoingNode(t *testing.T) {
+	ag, st := agentWithEngine(t)
+	id := st.Plan("fix the parser", []string{"find it"})
+	if err := st.SetStatusText(id+".1", "doing", ""); err != nil {
+		t.Fatal(err)
+	}
+	ag.dispatch(context.Background(), provider.ToolCall{
+		ID: "c1", Name: "shell", Arguments: `{"command":"echo hi"}`,
+	})
+	n := st.Tree().Find(id + ".1")
+	if n == nil || len(n.Evidence.Raw) == 0 {
+		t.Fatalf("nothing recorded against the doing node: %s", st.TreeText())
+	}
+	if err := st.SetStatusText(id+".1", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	got := st.Tree().Find(id + ".1")
+	if len(got.Evidence.Cmds) != 1 || got.Evidence.Cmds[0].Cmd != "echo hi" {
+		t.Fatalf("distilled cmds: %+v", got.Evidence.Cmds)
+	}
+}
+
+// TestEvidenceRecordedBeforeAStepIsAdoptedByIt: the model works first and
+// says what it was doing second, which is the common order. What it did
+// must end up on the step it names, not in a permanent unfiled bucket.
+func TestEvidenceRecordedBeforeAStepIsAdoptedByIt(t *testing.T) {
+	ag, st := agentWithEngine(t)
+	id := st.Plan("fix the parser", []string{"find it"})
+	// Nothing is doing yet.
+	ag.dispatch(context.Background(), provider.ToolCall{
+		ID: "c1", Name: "shell", Arguments: `{"command":"echo hi"}`,
+	})
+	if err := st.SetStatusText(id+".1", "doing", ""); err != nil {
+		t.Fatal(err)
+	}
+	n := st.Tree().Find(id + ".1")
+	if n == nil || len(n.Evidence.Raw) != 1 || n.Evidence.Raw[0].Args != "echo hi" {
+		t.Fatalf("evidence was not adopted by the step: %s", st.TreeText())
+	}
+	if strings.Contains(st.TreeText(), "unfiled") {
+		t.Fatalf("the unfiled node survived adoption:\n%s", st.TreeText())
+	}
+}
+
+// TestCompactionSurvivesAnEmptySummary: the failure seen on the validation
+// VM. An empty summary must leave the session working from the tree, with a
+// notice, rather than falling back to blind trimming.
+func TestCompactionSurvivesAnEmptySummary(t *testing.T) {
+	ag, st := agentWithEngine(t)
+	ag.Provider = emptySummaryProvider()
+	var notices []string
+	ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	id := st.Plan("fix the parser", []string{"find it"})
+	st.SetStatusText(id+".1", "doing", "")
+	st.Observe(engine.Event{Tool: "shell", Args: map[string]any{"command": "go test ./..."},
+		Content: "FAIL: TestLex\n", IsError: true})
+	for i := 0; i < 3; i++ {
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "q"})
+		ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "a"})
+	}
+
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatalf("an empty summary must not fail compaction: %v", err)
+	}
+	sys := ag.History.System.Content
+	if !strings.Contains(sys, "fix the parser") {
+		t.Fatalf("the tree did not survive compaction:\n%s", sys)
+	}
+	if !containsAny(notices, "continuing from the task record") {
+		t.Fatalf("no notice explaining the empty summary: %v", notices)
+	}
+	if got := notices[len(notices)-1]; got != "compaction: the model returned no summary; continuing from the task record" {
+		t.Fatalf("notice wording: %q", got)
+	}
+}
+
+// TestCompactionWithoutARecordStillReportsTheFailure: the new path needs a
+// tree to continue from. Without an engine there is nothing to fall back
+// on, so the old contract stands and the caller trims.
+func TestCompactionWithoutARecordStillReportsTheFailure(t *testing.T) {
+	ag, _ := newTestAgent(t, emptySummaryProvider(), nil)
+	for i := 0; i < 3; i++ {
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "q"})
+		ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "a"})
+	}
+	if err := ag.Compact(context.Background()); err == nil || !strings.Contains(err.Error(), "empty summary") {
+		t.Fatalf("expected the empty-summary error, got %v", err)
+	}
+}
+
+// TestTheEngineCannotFailATurn: advisory discipline, which every task in
+// this plan inherits. A panicking store, a hanging one and one that returns
+// nonsense each leave the turn working.
+func TestTheEngineCannotFailATurn(t *testing.T) {
+	for _, bad := range []string{"panic", "hang", "garbage"} {
+		t.Run(bad, func(t *testing.T) {
+			ag := agentWithBadEngine(t, bad)
+			var notices []string
+			ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+			res := ag.dispatch(context.Background(), provider.ToolCall{
+				ID: "c1", Name: "shell", Arguments: `{"command":"echo hi"}`,
+			})
+			if res.IsError {
+				t.Fatalf("a %s engine failed the tool call: %+v", bad, res)
+			}
+			if !strings.Contains(res.Content, "hi") {
+				t.Fatalf("a %s engine cost the tool its result: %q", bad, res.Content)
+			}
+			if bad == "garbage" && len(res.Content) > 8*1024 {
+				t.Fatalf("a nonsense footer was appended whole: %d bytes", len(res.Content))
+			}
+			if bad != "garbage" && !containsAny(notices, "continuing without working memory") {
+				t.Fatalf("a %s engine said nothing: %v", bad, notices)
+			}
+		})
+	}
+}
+
+// agentWithBadEngine gives the agent a real store and then swaps the
+// recorder seam for one that misbehaves in the named way.
+func agentWithBadEngine(t *testing.T, bad string) *Agent {
+	t.Helper()
+	ag, _ := agentWithEngine(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	ag.observeTimeout = 50 * time.Millisecond
+	switch bad {
+	case "panic":
+		ag.observeFn = func(engine.Event) string { panic("the store exploded") }
+	case "hang":
+		ag.observeFn = func(engine.Event) string { <-release; return "" }
+	case "garbage":
+		ag.observeFn = func(engine.Event) string { return strings.Repeat("\x00garbage", 100000) }
+	}
+	return ag
 }

@@ -343,7 +343,11 @@ A symbol-level repository outline (`/map` to view) is injected into the system p
 small models spend turns editing, not exploring. `@path/to/file` in any message pins that
 file's content into context (Tab completes @paths in the TUI). When the conversation
 exceeds its budget, BE-Code has the model summarize older turns (`/compact` to force it)
-instead of dropping them; plain trimming remains the fallback.
+instead of dropping them. If that summary call fails or comes back empty, the session
+continues from the task record under `Working memory:` — which the harness wrote as the
+work happened, without a model call — and says so: `compaction: the model returned no
+summary; continuing from the task record`. Plain trimming is the fallback only when
+there is no record to continue from.
 
 ## Working memory
 
@@ -362,11 +366,17 @@ compaction summary no longer has to restate what it already knows.
 - **Lookups.** A repeated `search` or `lookup` whose hit files are unchanged is
   answered from a cache instead of re-running, with the footer `(cached; files
   unchanged)`.
-- **The `task` tool.** `action: plan` records the task and its steps before a
-  multi-step change; `step` marks one `doing`/`done`/`skip`; `note` records a fact or
-  decision (`file:` ties it to a file so it need not be re-read; `keep: true` also
-  remembers it in the durable notes, which survive across sessions). The ledger and
-  notes are always shown under `Working memory:`. `/task` prints the ledger, `/task
+- **The `task` tool.** Five verbs over one task tree, whose nodes are addressed by
+  dotted paths like `2.1.3`: `action: plan` records a task and its steps in one call;
+  `add` creates a node (`parent:` its id, omitted for a new top-level task) and
+  returns its id; `status` marks a node `doing`, `done`, `blocked` or `dropped` (with
+  `reason:` for the last two); `note` records a fact or decision against a node
+  (`file:` ties it to a file so it need not be re-read; `keep: true` also remembers it
+  in the durable notes, which survive across sessions); `show` prints a node, a branch
+  or the whole tree. What the model does while a node is `doing` is recorded against
+  that node, and work done before it named one is adopted by the next node it marks
+  `doing`. The tree and the notes are always shown under `Working memory:`. `/task`
+  prints the ledger, `/task
   clear` resets the session's working memory; `/notes` prints the durable notes,
   `/notes add <text>` appends one, `/notes drop N` removes one, `/notes clear` empties
   them. Both are busy-safe in either UI, and in a shared session every attached
@@ -634,6 +644,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
+  `engine.item_cap` (4096) — byte cap on one recorded tool result;
+  `engine.node_cap` (32768) — byte cap on one task node's verbatim buffer, oldest
+  results dropped (and counted) past it;
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.

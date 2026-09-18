@@ -132,13 +132,19 @@ func TestEngineToolsSurviveAStoreThatWillNotOpen(t *testing.T) {
 			t.Fatalf("%s missing after a failed engine.Open: %v", want, reg.Names())
 		}
 	}
-	// The task tool still answers, over the no-op ledger.
-	r := reg.Dispatch(context.Background(), provider.ToolCall{
-		ID: "c1", Name: "task",
-		Arguments: `{"action":"plan","task":"do a thing","steps":["one"]}`,
-	})
-	if r.IsError {
-		t.Fatalf("task over noopLedger: %+v", r)
+	// The task tool still answers, over the no-op ledger — every verb of
+	// it, since a model that gets an error back starts guessing.
+	for _, args := range []string{
+		`{"action":"plan","task":"do a thing","steps":["one"]}`,
+		`{"action":"add","parent":"1","text":"a step"}`,
+		`{"action":"status","id":"1.1","status":"doing"}`,
+		`{"action":"note","text":"a fact","file":"a.go"}`,
+		`{"action":"show","id":"1"}`,
+	} {
+		r := reg.Dispatch(context.Background(), provider.ToolCall{ID: "c1", Name: "task", Arguments: args})
+		if r.IsError {
+			t.Fatalf("task over noopLedger %s: %+v", args, r)
+		}
 	}
 	// RefreshSystem ran: the prompt names the git tools it has, but not the
 	// Working memory block it does not have.

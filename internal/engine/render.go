@@ -244,13 +244,64 @@ func trimLines(s string, budget int) string {
 	return strings.TrimRight(cut, "\n")
 }
 
+// ledgerLocked and legacyStatus are the last of the 0.10.0 flat
+// projection: LedgerText below is the only thing that still reads them,
+// and Task 6 retires that call site along with these.
+func (s *Store) ledgerLocked() Ledger {
+	l := Ledger{Baseline: s.baseline, Session: s.session}
+	// No open task means no task line: with every root finished — or
+	// dropped by "/task clear" — the old block has nothing to describe.
+	r := s.activeRootLocked()
+	if r == nil {
+		return l
+	}
+	l.Task = r.Text
+	for _, c := range r.Children {
+		if c.Text == unfiledText {
+			continue
+		}
+		l.Steps = append(l.Steps, Step{Text: c.Text, Status: legacyStatus(c.Status)})
+	}
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		for _, nt := range n.Evidence.Notes {
+			if nt.Decision {
+				l.Decisions = append(l.Decisions, nt.Text)
+			} else {
+				l.Facts = append(l.Facts, nt.Text)
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(r)
+	return l
+}
+
+// legacyStatus maps a node status onto the four words the old ledger knew.
+// blocked has no old equivalent; it reads as skip, which is at least
+// terminal, and Task 4's report is where the distinction comes back.
+func legacyStatus(st Status) string {
+	switch st {
+	case StatusDoing:
+		return "doing"
+	case StatusDone:
+		return "done"
+	case StatusDropped, StatusBlocked:
+		return "skip"
+	}
+	return "todo"
+}
+
 // LedgerText is the 0.10.0 /task listing, kept only because the TUI and the
 // plain REPL still call it (internal/tui/view.go, internal/ui/repl.go);
 // Task 6 replaces both call sites with TreeText/ShowText via ui.TaskLines,
-// at which point this and the rest of the Ledger surface in compat.go can
-// go.
+// at which point this and the projection above can go.
 func (s *Store) LedgerText() string {
-	l := s.Ledger()
+	s.mu.Lock()
+	l := s.ledgerLocked()
+	s.mu.Unlock()
 	if l.Task == "" && len(l.Steps) == 0 {
 		return "no task recorded"
 	}

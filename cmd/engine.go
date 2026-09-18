@@ -15,9 +15,11 @@ import (
 // and still answers, it simply remembers nothing.
 type noopLedger struct{}
 
-func (noopLedger) SetPlan(string, []string)                 {}
-func (noopLedger) SetStep(int, string) error                { return nil }
-func (noopLedger) AddNote(string, string, bool, bool) error { return nil }
+func (noopLedger) Plan(string, []string) string                  { return "" }
+func (noopLedger) Add(string, string) (string, error)            { return "", nil }
+func (noopLedger) SetStatusText(string, string, string) error    { return nil }
+func (noopLedger) Note(string, string, string, bool, bool) error { return nil }
+func (noopLedger) ShowText(string) string                        { return "" }
 
 // registerEngineTools adds task and the git lookups per cfg.Engine. An
 // engine.tools value that is neither full nor minimal warns once and is
@@ -46,7 +48,8 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 	if !cfg.Engine.Enabled || ag.Session == nil {
 		return
 	}
-	st, err := engine.Open(reg.Root, ag.Session.ID, resumed, engine.Limits{NotesCap: cfg.Engine.NotesCap})
+	st, err := engine.Open(reg.Root, ag.Session.ID, resumed,
+		engine.Limits{NotesCap: cfg.Engine.NotesCap, ItemCap: cfg.Engine.ItemCap, NodeCap: cfg.Engine.NodeCap})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warn: engine: %v; continuing without working memory\n", err)
 		// The store is what remembers; the tools are what the model can

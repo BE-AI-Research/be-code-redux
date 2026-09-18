@@ -22,7 +22,7 @@ func TestTaskAndNotesAreViewLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.ag.SetEngine(st)
-	st.SetPlan("add flag", []string{"parse"})
+	st.Plan("add flag", []string{"parse"})
 	a.slashCommand("/task")
 	a.slashCommand("/notes add remember me")
 	a.slashCommand("/notes")

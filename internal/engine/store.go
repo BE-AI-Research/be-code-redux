@@ -72,9 +72,9 @@ type Lookup struct {
 	Turn   int               `json:"turn"`
 }
 
-// Step and Ledger are the 0.10.0 flat shapes. They survive for two reasons:
-// migration reads them off disk, and the 0.10.0 prompt block and command
-// surface still render through them until Tasks 4 and 5 replace both.
+// Step and Ledger are the 0.10.0 flat shapes, kept because migration reads
+// them off disk (migrate.go) and LedgerText still projects the tree back
+// into them for the 0.10.0 /task listing. Nothing else writes them.
 type Step struct {
 	Text   string `json:"text"`
 	Status string `json:"status"` // todo | doing | done | skip
@@ -89,8 +89,8 @@ type Ledger struct {
 	Session   string   `json:"session"`
 }
 
-// Digest is one file as the record knows it, flattened out of the tree's
-// FileRefs for the 0.10.0 block. Task 4 renders from the tree directly.
+// Digest is one file as a 0.10.0 store recorded it. Only migration reads
+// it now; the tree's own FileRef is what the record uses.
 type Digest struct {
 	Path    string   `json:"path"`
 	Hash    string   `json:"hash"`
@@ -996,6 +996,11 @@ func (s *Store) SetStatus(id string, status Status, reason string) error {
 		return fmt.Errorf("no node %s", id)
 	}
 	if status == StatusDoing {
+		// Spec 4.2: what the model did before it named a step belongs to
+		// the step it then named. Adoption runs before the distill below
+		// so the evidence arrives verbatim — the unfiled node is not
+		// "previous work", it is this node's own first minutes.
+		s.adoptUnfiledLocked(n)
 		if prev := s.tree.Doing(); prev != nil && prev != n {
 			s.rec.distill(prev)
 		}
@@ -1158,6 +1163,85 @@ func (s *Store) nodeForLocked(id string) *Node {
 	return s.tree.Find(id)
 }
 
+// adoptUnfiledLocked moves everything an unfiled node collected while
+// nothing was doing onto n, and takes the unfiled node out of the tree.
+// Spec 4.2 creates that node so evidence always has a home; this is the
+// other half of it, the moment the model finally says what it was doing.
+//
+// Only a node still open is adopted: one that has already closed has been
+// distilled into a Task Report, and a report that silently loses its
+// contents is worse than an "unfiled" line in it.
+func (s *Store) adoptUnfiledLocked(n *Node) {
+	if n == nil || n.Text == unfiledText {
+		return
+	}
+	var unfiled []*Node
+	s.tree.Walk(func(m *Node, _ int) {
+		if m != n && m.Text == unfiledText && !m.Status.terminal() {
+			unfiled = append(unfiled, m)
+		}
+	})
+	for _, u := range unfiled {
+		mergeEvidence(&n.Evidence, u.Evidence)
+		u.Evidence = Evidence{}
+		// Nothing ever adds a child under "unfiled", but a model that
+		// named its id as a parent could. Removing it would take them
+		// with it, so such a node is emptied and closed instead of
+		// deleted — the evidence still moves, the children still exist.
+		if len(u.Children) == 0 {
+			s.tree.Remove(u)
+		} else {
+			u.Status = StatusDropped
+			u.Reason = "adopted by " + n.ID
+		}
+		s.markDirtyLocked()
+	}
+	if len(unfiled) > 0 {
+		s.rec.capNode(n)
+	}
+}
+
+// mergeEvidence folds src into dst. The raw buffer goes in front, because
+// what the unfiled node saw happened before anything dst has seen, and the
+// verbatim block is read in order.
+func mergeEvidence(dst *Evidence, src Evidence) {
+	for _, f := range src.Files {
+		var ref *FileRef
+		for i := range dst.Files {
+			if dst.Files[i].Path == f.Path {
+				ref = &dst.Files[i]
+				break
+			}
+		}
+		if ref == nil {
+			dst.Files = append(dst.Files, f)
+			continue
+		}
+		for _, r := range f.Ranges {
+			ref.Ranges = mergeRange(ref.Ranges, r)
+		}
+		ref.Edited = ref.Edited || f.Edited
+		if f.Turn > ref.Turn {
+			ref.Turn = f.Turn
+			if f.Hash != "" {
+				ref.Hash = f.Hash
+			}
+			if len(f.Outline) > 0 {
+				ref.Outline = append([]string(nil), f.Outline...)
+			}
+			if f.Note != "" {
+				ref.Note = f.Note
+			}
+		}
+	}
+	dst.Cmds = append(append([]CmdRef(nil), src.Cmds...), dst.Cmds...)
+	dst.Lookups = append(append([]LookupRef(nil), src.Lookups...), dst.Lookups...)
+	dst.Notes = append(append([]NoteRef(nil), src.Notes...), dst.Notes...)
+	dst.Errors = append(append([]string(nil), src.Errors...), dst.Errors...)
+	dst.Raw = append(append([]RawItem(nil), src.Raw...), dst.Raw...)
+	dst.Dropped += src.Dropped
+}
+
 func (s *Store) closeDoingLocked() {
 	if prev := s.tree.Doing(); prev != nil {
 		s.rec.distill(prev)
@@ -1223,6 +1307,68 @@ func firstLine(text string, max int) string {
 		}
 	}
 	return line
+}
+
+// --------------------------------------------------- the request-level seam
+
+// StartTask refreshes the task line for a new request: always when no task
+// is open, and otherwise only when no step is in progress and none is still
+// to do. A plan the model is part-way through keeps its own task line, so
+// the block does not start describing a side question as the task.
+func (s *Store) StartTask(text string) {
+	line := firstLine(text, 200)
+	if line == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.activeRootLocked(); r != nil {
+		for _, c := range r.Children {
+			if c.Text == unfiledText {
+				continue
+			}
+			if c.Status == StatusDoing || c.Status == StatusTodo {
+				return
+			}
+		}
+		if r.Text != line {
+			r.Text = line
+			s.markDirtyLocked()
+		}
+		return
+	}
+	s.tree.Add("", line)
+	s.markDirtyLocked()
+}
+
+// StoppedAt is the text of the node in progress, or "".
+func (s *Store) StoppedAt() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.tree.Doing()
+	if d == nil || d.Text == unfiledText {
+		return ""
+	}
+	return d.Text
+}
+
+// ApplyFileNotes stores "path — note" lines from a compaction summary's
+// files: block against files the record already knows.
+func (s *Store) ApplyFileNotes(block string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range fileNoteLine.FindAllStringSubmatch(block, -1) {
+		path := relPath(m[1])
+		note := strings.TrimSpace(m[2])
+		s.tree.Walk(func(n *Node, _ int) {
+			for i := range n.Evidence.Files {
+				if n.Evidence.Files[i].Path == path {
+					n.Evidence.Files[i].Note = note
+					s.markDirtyLocked()
+				}
+			}
+		})
+	}
 }
 
 // --------------------------------------------------------- the recorder seam

@@ -380,8 +380,8 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Agent.SetEngine(st)
-	st.SetPlan("add flag", []string{"parse", "wire"})
-	st.SetStep(1, "doing")
+	id := st.Plan("add flag", []string{"parse", "wire"})
+	st.SetStatusText(id+".1", "doing", "")
 	out = capture(t, func() { r.command(context.Background(), "/task") })
 	if !strings.Contains(out, "task: add flag") || !strings.Contains(out, "[>] 1. parse") {
 		t.Fatalf("/task:\n%s", out)
@@ -396,7 +396,7 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 		t.Fatalf("after drop:\n%s", out)
 	}
 	capture(t, func() { r.command(context.Background(), "/task clear") })
-	if st.Ledger().Task != "" {
+	if strings.Contains(st.LedgerText(), "add flag") {
 		t.Fatal("/task clear did not clear")
 	}
 	// Whatever spacing was typed, the note is the text after the add token.

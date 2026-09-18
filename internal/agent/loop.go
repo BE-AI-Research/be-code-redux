@@ -89,6 +89,12 @@ type Agent struct {
 	// contents for the UI. Toggling the engine mid-run would have to go
 	// through the run state, not through this field.
 	Engine *engine.Store
+	// observeFn and observeTimeout are the recorder seam, swappable so the
+	// advisory discipline above can be exercised against a store that
+	// panics, hangs or answers nonsense without inventing one on disk.
+	// Nil/zero means "the real store, the real bound".
+	observeFn      func(engine.Event) string
+	observeTimeout time.Duration
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -409,7 +415,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.lastFailingTool = ""
 	}
 	if newTurn && a.Engine != nil {
-		a.Engine.EnsureTask(userInput)
+		// Evidence always has a home: if nothing is doing and no task is
+		// open, the user's own message opens one. Everything a tool
+		// returns from here on is recorded against a node the report can
+		// later find it under.
+		a.Engine.EnsureRoot(userInput)
 	}
 	if a.repoDirty {
 		a.repoDirty = false
@@ -784,17 +794,65 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	return res
 }
 
-// observe hands a tool result to the engine; a panic there must not take
-// the run down, so it is fenced.
-func (a *Agent) observe(ev engine.Event) (footer string) {
-	defer func() {
-		if r := recover(); r != nil {
-			a.notice("engine: %v; continuing without working memory", r)
-			footer = ""
-		}
+// observe hands a tool result to the engine. The engine is advisory: a
+// panic, a hang or nonsense coming back out of it must cost the working
+// memory, never the turn. So the call is fenced against panics, bounded in
+// time, and its answer is capped before it is appended to a tool result.
+//
+// The bound is why this runs on its own goroutine: a store wedged on its
+// own mutex or on a filesystem that has stopped answering would otherwise
+// park the tool loop indefinitely. A call that overruns is abandoned —
+// it still holds the store's lock, so every later observation times out
+// too and the session simply continues without working memory.
+func (a *Agent) observe(ev engine.Event) string {
+	fn := a.observeFn
+	if fn == nil {
+		fn = a.Engine.Observe
+	}
+	type result struct {
+		footer string
+		panicV any
+	}
+	done := make(chan result, 1)
+	go func() {
+		var out result
+		defer func() {
+			if r := recover(); r != nil {
+				out = result{panicV: r}
+			}
+			done <- out
+		}()
+		out.footer = fn(ev)
 	}()
-	return a.Engine.Observe(ev)
+	timeout := a.observeTimeout
+	if timeout <= 0 {
+		timeout = observeTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		if r.panicV != nil {
+			a.notice("engine: %v; continuing without working memory", r.panicV)
+			return ""
+		}
+		return trimAtLine(r.footer, maxObserveFooter)
+	case <-timer.C:
+		a.notice("engine: did not answer in %s; continuing without working memory", timeout)
+		return ""
+	}
 }
+
+const (
+	// observeTimeout bounds one call into the engine's recorder. Generous:
+	// the recorder reads the file an event names, and a cold cache on a
+	// network filesystem is slow, not broken.
+	observeTimeout = 15 * time.Second
+	// maxObserveFooter caps what the recorder may append to a tool result.
+	// The footer is one sentence by design; anything larger is a bug in the
+	// store, and the model should not pay for it in context.
+	maxObserveFooter = 4096
+)
 
 // chatFiltered runs one completion, applying the think-filter to streamed
 // deltas and stored content when the model family emits reasoning blocks,
@@ -971,6 +1029,13 @@ func (a *Agent) Compact(ctx context.Context) error {
 		NoThink:     true, // a summary does not need minutes of deliberation
 	}, nil)
 	if err != nil {
+		// A summary that never arrived is the same situation as one that
+		// arrived empty: the tree is still current, so the session keeps
+		// working from it rather than falling through to blind trimming.
+		fmt.Fprintf(os.Stderr, "compaction: summary request failed: %v\n", err)
+		if a.fromTaskRecord(tail) {
+			return nil
+		}
 		return err
 	}
 	summary := resp.Content
@@ -1004,6 +1069,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 			head = head[:400]
 		}
 		fmt.Fprintf(os.Stderr, "compaction: empty summary (%s); reply head: %q\n", why, head)
+		if a.fromTaskRecord(tail) {
+			return nil
+		}
 		return fmt.Errorf("empty summary: %s", why)
 	}
 	a.History.Messages = append([]provider.Message{
@@ -1015,6 +1083,41 @@ func (a *Agent) Compact(ctx context.Context) error {
 	a.History.CollapseToolResults(0)
 	return nil
 }
+
+// fromTaskRecord is the branch this whole design turns on. When the model's
+// summary call fails or comes back empty, the session continues from the
+// task record instead of falling back to blind trimming: the tree is
+// already current — the recorder wrote it as the work happened, without a
+// model call — so the transcript is the only thing that needs cutting.
+//
+// It returns false when there is no record to continue from (no engine, or
+// an empty block), which is the only case that still reports an error.
+func (a *Agent) fromTaskRecord(tail []provider.Message) bool {
+	if a.Engine == nil {
+		return false
+	}
+	if strings.TrimSpace(a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap)) == "" {
+		return false
+	}
+	a.notice("compaction: the model returned no summary; continuing from the task record")
+	// The block lives in the system prompt, so recomposing it is what puts
+	// the current tree in front of the model in place of the turns being
+	// dropped here.
+	a.History.System.Content = a.composeSystem(a.lastGitInfo)
+	a.History.Messages = append([]provider.Message{
+		{Role: provider.RoleUser, Content: summaryPrefix + noSummaryNote},
+	}, tail...)
+	a.History.RepairOrphans()
+	a.History.CollapseToolResults(0)
+	return true
+}
+
+// noSummaryNote stands in for the summary in the transcript, and says where
+// the state actually is so the model does not go looking for it in turns
+// that are no longer there.
+const noSummaryNote = "No summary of the earlier turns was produced. " +
+	"The task record under \"Working memory:\" in the system prompt is current: " +
+	"it is what those turns amounted to, and it is what to work from."
 
 // SummaryPrefix marks the user-role message a compaction leaves in place
 // of the turns it summarised; UIs use it to render that message as a

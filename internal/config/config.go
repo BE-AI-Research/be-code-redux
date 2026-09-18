@@ -48,6 +48,11 @@ type EngineConfig struct {
 	Budget int `json:"budget"`
 	// NotesCap caps the durable notes.md, in bytes.
 	NotesCap int `json:"notes_cap"`
+	// ItemCap caps one recorded tool result in the verbatim buffer, and
+	// NodeCap caps that buffer for a whole node. Both in bytes; the
+	// oldest items are dropped (and counted) when a node goes over.
+	ItemCap int `json:"item_cap"`
+	NodeCap int `json:"node_cap"`
 	// Tools is "full" (task, lookup, history, show, changes) or "minimal"
 	// (task and lookup only) for tight compat-mode prompts.
 	Tools string `json:"tools"`
@@ -281,7 +286,7 @@ func Default() *Config {
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
-		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, Tools: "full"},
+		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, ItemCap: 4096, NodeCap: 32768, Tools: "full"},
 	}
 }
 
@@ -372,6 +377,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Engine.NotesCap == 0 {
 		cfg.Engine.NotesCap = 4096
+	}
+	if cfg.Engine.ItemCap == 0 {
+		cfg.Engine.ItemCap = 4096
+	}
+	if cfg.Engine.NodeCap == 0 {
+		cfg.Engine.NodeCap = 32768
 	}
 	if cfg.Engine.Tools == "" {
 		cfg.Engine.Tools = "full"

@@ -55,12 +55,63 @@ func (t *Tree) Add(parent, text string) *Node {
 		t.Roots = append(t.Roots, n)
 		return n
 	}
-	n.ID = p.ID + "." + strconv.Itoa(len(p.Children)+1)
+	n.ID = p.ID + "." + strconv.Itoa(nextChildIndex(p))
 	p.Children = append(p.Children, n)
 	return n
 }
 
-func (t *Tree) Find(id string) *Node {
+// nextChildIndex is one past the highest index p has ever handed out, not
+// one past its current child count. They are the same until a child is
+// removed — which adoption does to the unfiled node — and after that only
+// this answer avoids handing a live sibling's id to a new node.
+func nextChildIndex(p *Node) int {
+	max := 0
+	for _, c := range p.Children {
+		i := 0
+		if dot := strings.LastIndexByte(c.ID, '.'); dot >= 0 {
+			i, _ = strconv.Atoi(c.ID[dot+1:])
+		}
+		if i > max {
+			max = i
+		}
+	}
+	return max + 1
+}
+
+// Remove detaches one node (and anything under it) from its parent or from
+// the roots. Surviving siblings keep their ids, which is why Add counts
+// past the highest index rather than the child count.
+func (t *Tree) Remove(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	for i, r := range t.Roots {
+		if r == n {
+			t.Roots = append(t.Roots[:i], t.Roots[i+1:]...)
+			return true
+		}
+	}
+	var rec func(ns []*Node) bool
+	rec = func(ns []*Node) bool {
+		for _, p := range ns {
+			for i, c := range p.Children {
+				if c == n {
+					p.Children = append(p.Children[:i], p.Children[i+1:]...)
+					return true
+				}
+			}
+			if rec(p.Children) {
+				return true
+			}
+		}
+		return false
+	}
+	return rec(t.Roots)
+}
+
+// Find is a value receiver so a copy handed out by Store.Tree() can be
+// searched directly: tree.Find(id) reads the same either way.
+func (t Tree) Find(id string) *Node {
 	var found *Node
 	t.Walk(func(n *Node, _ int) {
 		if n.ID == id {

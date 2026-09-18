@@ -185,10 +185,10 @@ func TestClearKeepsTheDocumentsAndDropsTheTasks(t *testing.T) {
 	if tr.Find(id+".1").Status != StatusDropped {
 		t.Fatalf("step after clear: %+v", tr.Find(id+".1"))
 	}
-	// The old block has nothing left to describe, which is what the UI
-	// asserts when the user types "/task clear".
-	if s.Ledger().Task != "" {
-		t.Fatalf("clear left a task line: %q", s.Ledger().Task)
+	// Nothing is left open, which is what the block and the UI listing
+	// both key on when the user types "/task clear".
+	if strings.Contains(s.Render(4096, nil), "Active task:") {
+		t.Fatalf("clear left an active task:\n%s", s.Render(4096, nil))
 	}
 	// And the record is still there to read tomorrow.
 	again, err := OpenAt(dir, root, "s2", false, testLimits())
@@ -314,8 +314,8 @@ func TestTheRedundantReadFooterSurvivesAReopen(t *testing.T) {
 	if !strings.Contains(f, "already read at turn 1") {
 		t.Fatalf("footer lost across the reopen: %q", f)
 	}
-	if ds := again.Digests(); len(ds) != 1 || len(ds[0].Outline) == 0 {
-		t.Fatalf("outline lost across the reopen: %+v", ds)
+	if fs := filesIn(again); len(fs) != 1 || len(fs[0].Outline) == 0 {
+		t.Fatalf("outline lost across the reopen: %+v", fs)
 	}
 }
 
@@ -537,5 +537,83 @@ func TestAHandDeletedStepDoesNotInheritAnothersHash(t *testing.T) {
 		Content: numbered("package a\n", 1)})
 	if f != "" {
 		t.Fatalf("a shifted step inherited another's hash: %q", f)
+	}
+}
+
+// filesIn is every file reference in the tree, in walk order. It replaces
+// the flat Digests() projection compat.go used to offer.
+func filesIn(s *Store) []FileRef {
+	var out []FileRef
+	tr := s.Tree()
+	tr.Walk(func(n *Node, _ int) { out = append(out, n.Evidence.Files...) })
+	return out
+}
+
+// TestUnfiledEvidenceIsAdoptedByTheNextDoingNode: spec 4.2's other half.
+// Work done before the model said what it was doing belongs to the step it
+// then named, verbatim — not to a permanent "unfiled" bucket.
+func TestUnfiledEvidenceIsAdoptedByTheNextDoingNode(t *testing.T) {
+	s, err := OpenAt(t.TempDir(), t.TempDir(), "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("fix the parser", []string{"find it", "fix it"})
+	s.NextTurn()
+	// Nothing is doing yet, so this lands on the unfiled node.
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "go test ./..."},
+		Content: "FAIL: TestLex\n", IsError: true})
+	if !strings.Contains(s.TreeText(), unfiledText) {
+		t.Fatalf("no unfiled node to adopt:\n%s", s.TreeText())
+	}
+	if err := s.SetStatusText(id+".1", "doing", ""); err != nil {
+		t.Fatal(err)
+	}
+	n := s.Tree().Find(id + ".1")
+	if len(n.Evidence.Raw) != 1 || n.Evidence.Raw[0].Args != "go test ./..." {
+		t.Fatalf("evidence was not adopted: %+v", n.Evidence)
+	}
+	if strings.Contains(s.TreeText(), unfiledText) {
+		t.Fatalf("the unfiled node survived adoption:\n%s", s.TreeText())
+	}
+	// And it distills with its new owner, into that step's report.
+	if err := s.SetStatusText(id+".1", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Tree().Find(id + ".1")
+	if len(got.Evidence.Cmds) != 1 || got.Evidence.Cmds[0].Cmd != "go test ./..." {
+		t.Fatalf("distilled cmds: %+v", got.Evidence.Cmds)
+	}
+	if len(got.Evidence.Errors) != 1 {
+		t.Fatalf("the failure came with it: %+v", got.Evidence.Errors)
+	}
+}
+
+// TestAdoptionNeverHandsOutALiveSiblingsID: the unfiled node is removed
+// from the middle of its parent's children, so the next add must count
+// past the highest index, not past the child count.
+func TestAdoptionNeverHandsOutALiveSiblingsID(t *testing.T) {
+	s, err := OpenAt(t.TempDir(), t.TempDir(), "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("a task", []string{"one"})
+	s.NextTurn()
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "ls"}, Content: "a\n"}) // unfiled -> 1.2
+	later, err := s.Add(id, "two")                                                         // 1.3
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetStatusText(later, "doing", ""); err != nil { // removes 1.2
+		t.Fatal(err)
+	}
+	next, err := s.Add(id, "three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == later {
+		t.Fatalf("a new node took a live sibling's id: %q", next)
+	}
+	if s.Tree().Find(later) == nil || s.Tree().Find(next) == nil {
+		t.Fatalf("both nodes must exist: %q %q\n%s", later, next, s.TreeText())
 	}
 }
