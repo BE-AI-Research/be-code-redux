@@ -43,34 +43,36 @@ type Tree struct {
 // one branch cannot renumber another.
 func (t *Tree) Add(parent, text string) *Node {
 	n := &Node{Text: strings.TrimSpace(text), Status: StatusTodo, Opened: time.Now()}
-	if parent == "" {
-		n.ID = strconv.Itoa(len(t.Roots) + 1)
-		t.Roots = append(t.Roots, n)
-		return n
+	var p *Node
+	if parent != "" {
+		p = t.Find(parent)
 	}
-	p := t.Find(parent)
+	// An unknown parent must not lose the node: file it as a root.
 	if p == nil {
-		// An unknown parent must not lose the node: file it as a root.
-		n.ID = strconv.Itoa(len(t.Roots) + 1)
+		n.ID = strconv.Itoa(nextIndex(t.Roots))
 		t.Roots = append(t.Roots, n)
 		return n
 	}
-	n.ID = p.ID + "." + strconv.Itoa(nextChildIndex(p))
+	n.ID = p.ID + "." + strconv.Itoa(nextIndex(p.Children))
 	p.Children = append(p.Children, n)
 	return n
 }
 
-// nextChildIndex is one past the highest index p has ever handed out, not
-// one past its current child count. They are the same until a child is
-// removed — which adoption does to the unfiled node — and after that only
-// this answer avoids handing a live sibling's id to a new node.
-func nextChildIndex(p *Node) int {
+// nextIndex is one past the highest index this generation has ever handed
+// out, not one past its current size. They are the same until a node is
+// removed — which adoption does to an unfiled step — and after that only
+// this answer avoids handing a live sibling's id to a new node. It applies
+// to roots as well as children: a root id that already names a live task
+// would make Find resolve the wrong one, so a status change would close it.
+func nextIndex(ns []*Node) int {
 	max := 0
-	for _, c := range p.Children {
+	for _, n := range ns {
 		i := 0
-		if dot := strings.LastIndexByte(c.ID, '.'); dot >= 0 {
-			i, _ = strconv.Atoi(c.ID[dot+1:])
+		last := n.ID
+		if dot := strings.LastIndexByte(last, '.'); dot >= 0 {
+			last = last[dot+1:]
 		}
+		i, _ = strconv.Atoi(last)
 		if i > max {
 			max = i
 		}

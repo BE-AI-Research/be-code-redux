@@ -347,7 +347,8 @@ instead of dropping them. If that summary call fails or comes back empty, the se
 continues from the task record under `Working memory:` — which the harness wrote as the
 work happened, without a model call — and says so: `compaction: the model returned no
 summary; continuing from the task record`. Plain trimming is the fallback only when
-there is no record to continue from.
+there is no record to continue from, and a compaction you cancel still stops rather
+than rewriting the transcript you were keeping.
 
 ## Working memory
 

@@ -1087,6 +1087,19 @@ func (s *Store) EnsureRoot(text string) string {
 	return n.ID
 }
 
+// ActiveRootID is the id of the task in flight — the newest root that is
+// not wholly finished — or "" when none is open. It exists for the task
+// tool's optional taskRoots capability: resolving a 0.10.0 step number
+// against the right task rather than against a root of the same number.
+func (s *Store) ActiveRootID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.activeRootLocked(); r != nil {
+		return r.ID
+	}
+	return ""
+}
+
 // Tree is a deep copy of the whole record.
 func (s *Store) Tree() Tree {
 	s.mu.Lock()
@@ -1184,11 +1197,17 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 	for _, u := range unfiled {
 		mergeEvidence(&n.Evidence, u.Evidence)
 		u.Evidence = Evidence{}
-		// Nothing ever adds a child under "unfiled", but a model that
-		// named its id as a parent could. Removing it would take them
-		// with it, so such a node is emptied and closed instead of
-		// deleted — the evidence still moves, the children still exist.
-		if len(u.Children) == 0 {
+		// Two nodes must be emptied and dropped rather than removed:
+		//
+		//   a root, because s.files and s.extra are index-parallel to
+		//   Roots — taking one out shifts every later task onto the
+		//   previous one's document and orphans its own, which on the
+		//   next load reads as a duplicated task;
+		//
+		//   one with children, which nothing creates but a model naming
+		//   its id as a parent could, because removing it would take
+		//   them with it.
+		if len(u.Children) == 0 && !s.isRootLocked(u) {
 			s.tree.Remove(u)
 		} else {
 			u.Status = StatusDropped
@@ -1199,6 +1218,17 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 	if len(unfiled) > 0 {
 		s.rec.capNode(n)
 	}
+}
+
+// isRootLocked reports whether n is a top-level task. A root owns a
+// document, and its position owns that document's place in s.files.
+func (s *Store) isRootLocked(n *Node) bool {
+	for _, r := range s.tree.Roots {
+		if r == n {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeEvidence folds src into dst. The raw buffer goes in front, because

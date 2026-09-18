@@ -19,8 +19,11 @@ type recTree struct {
 	status  [][3]string
 	notes   []string
 	showArg string
+	root    string // the task in flight, for the optional ActiveRootID seam
 	err     error
 }
+
+func (r *recTree) ActiveRootID() string { return r.root }
 
 func (r *recTree) Plan(text string, steps []string) string {
 	r.plans = append(r.plans, text)
@@ -207,5 +210,37 @@ func TestTaskDescriptionAndSchema(t *testing.T) {
 	}
 	if !reflect.DeepEqual(sch.Required, []string{"action"}) {
 		t.Fatalf("required: %v", sch.Required)
+	}
+}
+
+// TestLegacyStepNumbersResolveUnderTheActiveTask: 0.10.0 emitted
+// {"action":"step","step":2,"status":"done"}, where 2 meant the second
+// step of the current task. To the tree "2" is root 2 — some other task
+// entirely — so a step-shaped call resolves its bare number under the task
+// in flight.
+func TestLegacyStepNumbersResolveUnderTheActiveTask(t *testing.T) {
+	r := &recTree{root: "1"}
+	tool := NewTask(r)
+	runTask(t, tool, `{"action":"step","step":2,"status":"done"}`)
+	if got := r.status[len(r.status)-1]; got[0] != "1.2" {
+		t.Fatalf("a legacy step number addressed %q, want %q", got[0], "1.2")
+	}
+	// A dotted id in the same shape is already an address; leave it alone.
+	runTask(t, tool, `{"action":"step","step":"1.3","status":"done"}`)
+	if got := r.status[len(r.status)-1]; got[0] != "1.3" {
+		t.Fatalf("a dotted id was rewritten to %q", got[0])
+	}
+	// The current verb is never rewritten: "2" there is the id the model
+	// chose, and root 2 is a real address.
+	runTask(t, tool, `{"action":"status","id":"2","status":"done"}`)
+	if got := r.status[len(r.status)-1]; got[0] != "2" {
+		t.Fatalf("action=status rewrote an explicit id to %q", got[0])
+	}
+	// No task in flight (or a ledger without the capability at all, as the
+	// no-op one is): the number is left as written rather than guessed at.
+	plain := &recTree{}
+	runTask(t, NewTask(plain), `{"action":"step","step":2,"status":"done"}`)
+	if got := plain.status[0]; got[0] != "2" {
+		t.Fatalf("with no active task the number became %q", got[0])
 	}
 }

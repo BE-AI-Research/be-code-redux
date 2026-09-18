@@ -89,12 +89,10 @@ type Agent struct {
 	// contents for the UI. Toggling the engine mid-run would have to go
 	// through the run state, not through this field.
 	Engine *engine.Store
-	// observeFn and observeTimeout are the recorder seam, swappable so the
-	// advisory discipline above can be exercised against a store that
-	// panics, hangs or answers nonsense without inventing one on disk.
-	// Nil/zero means "the real store, the real bound".
-	observeFn      func(engine.Event) string
-	observeTimeout time.Duration
+	// observeFn is the recorder seam, swappable so the advisory discipline
+	// above can be exercised against a store that panics or answers
+	// nonsense without inventing one on disk. Nil means the real store.
+	observeFn func(engine.Event) string
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -794,65 +792,34 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	return res
 }
 
-// observe hands a tool result to the engine. The engine is advisory: a
-// panic, a hang or nonsense coming back out of it must cost the working
-// memory, never the turn. So the call is fenced against panics, bounded in
-// time, and its answer is capped before it is appended to a tool result.
+// observe hands a tool result to the engine; a panic there must not take
+// the run down, so it is fenced, and what comes back is capped before it is
+// appended to a tool result.
 //
-// The bound is why this runs on its own goroutine: a store wedged on its
-// own mutex or on a filesystem that has stopped answering would otherwise
-// park the tool loop indefinitely. A call that overruns is abandoned —
-// it still holds the store's lock, so every later observation times out
-// too and the session simply continues without working memory.
-func (a *Agent) observe(ev engine.Event) string {
+// Ruling T5-b: it is deliberately *not* bounded in time. A store wedged on
+// its own mutex would make the very next composeSystem block inside Render
+// anyway, so a timeout here saves nothing while costing a parked goroutine,
+// a stall and a notice on every tool call. A bound that cannot hold is
+// worse than none; bounding the store properly means timing every call
+// behind one interface, which is later work.
+func (a *Agent) observe(ev engine.Event) (footer string) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("engine: %v; continuing without working memory", r)
+			footer = ""
+		}
+	}()
 	fn := a.observeFn
 	if fn == nil {
 		fn = a.Engine.Observe
 	}
-	type result struct {
-		footer string
-		panicV any
-	}
-	done := make(chan result, 1)
-	go func() {
-		var out result
-		defer func() {
-			if r := recover(); r != nil {
-				out = result{panicV: r}
-			}
-			done <- out
-		}()
-		out.footer = fn(ev)
-	}()
-	timeout := a.observeTimeout
-	if timeout <= 0 {
-		timeout = observeTimeout
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		if r.panicV != nil {
-			a.notice("engine: %v; continuing without working memory", r.panicV)
-			return ""
-		}
-		return trimAtLine(r.footer, maxObserveFooter)
-	case <-timer.C:
-		a.notice("engine: did not answer in %s; continuing without working memory", timeout)
-		return ""
-	}
+	return trimAtLine(fn(ev), maxObserveFooter)
 }
 
-const (
-	// observeTimeout bounds one call into the engine's recorder. Generous:
-	// the recorder reads the file an event names, and a cold cache on a
-	// network filesystem is slow, not broken.
-	observeTimeout = 15 * time.Second
-	// maxObserveFooter caps what the recorder may append to a tool result.
-	// The footer is one sentence by design; anything larger is a bug in the
-	// store, and the model should not pay for it in context.
-	maxObserveFooter = 4096
-)
+// maxObserveFooter caps what the recorder may append to a tool result. The
+// footer is one sentence by design; anything larger is a bug in the store,
+// and the model should not pay for it in context.
+const maxObserveFooter = 4096
 
 // chatFiltered runs one completion, applying the think-filter to streamed
 // deltas and stored content when the model family emits reasoning blocks,
@@ -1032,8 +999,15 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// A summary that never arrived is the same situation as one that
 		// arrived empty: the tree is still current, so the session keeps
 		// working from it rather than falling through to blind trimming.
+		// Except when the user cancelled — Esc, or an interrupted
+		// /compact. That is not a backend failing to answer, it is a
+		// person asking to stop, and rewriting history under them is the
+		// opposite of what they asked for.
+		if cerr := ctx.Err(); cerr != nil {
+			return err
+		}
 		fmt.Fprintf(os.Stderr, "compaction: summary request failed: %v\n", err)
-		if a.fromTaskRecord(tail) {
+		if a.fromTaskRecord(ctx, tail) {
 			return nil
 		}
 		return err
@@ -1069,7 +1043,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 			head = head[:400]
 		}
 		fmt.Fprintf(os.Stderr, "compaction: empty summary (%s); reply head: %q\n", why, head)
-		if a.fromTaskRecord(tail) {
+		if a.fromTaskRecord(ctx, tail) {
 			return nil
 		}
 		return fmt.Errorf("empty summary: %s", why)
@@ -1090,10 +1064,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 // already current — the recorder wrote it as the work happened, without a
 // model call — so the transcript is the only thing that needs cutting.
 //
-// It returns false when there is no record to continue from (no engine, or
-// an empty block), which is the only case that still reports an error.
-func (a *Agent) fromTaskRecord(tail []provider.Message) bool {
-	if a.Engine == nil {
+// It returns false when the request was cancelled, or when there is no
+// record to continue from (no engine, or an empty block); those are the
+// cases that still report an error.
+func (a *Agent) fromTaskRecord(ctx context.Context, tail []provider.Message) bool {
+	// A cancelled request is the user asking to stop, not a backend
+	// failing to answer: rewriting history under them is the opposite of
+	// what they asked for, so the caller's error stands.
+	if ctx.Err() != nil || a.Engine == nil {
 		return false
 	}
 	if strings.TrimSpace(a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap)) == "" {

@@ -140,6 +140,8 @@ func TestEngineToolsSurviveAStoreThatWillNotOpen(t *testing.T) {
 		`{"action":"status","id":"1.1","status":"doing"}`,
 		`{"action":"note","text":"a fact","file":"a.go"}`,
 		`{"action":"show","id":"1"}`,
+		// The 0.10.0 shape, over a ledger with no ActiveRootID capability.
+		`{"action":"step","step":2,"status":"done"}`,
 	} {
 		r := reg.Dispatch(context.Background(), provider.ToolCall{ID: "c1", Name: "task", Arguments: args})
 		if r.IsError {

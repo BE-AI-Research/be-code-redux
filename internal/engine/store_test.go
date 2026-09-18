@@ -616,4 +616,73 @@ func TestAdoptionNeverHandsOutALiveSiblingsID(t *testing.T) {
 	if s.Tree().Find(later) == nil || s.Tree().Find(next) == nil {
 		t.Fatalf("both nodes must exist: %q %q\n%s", later, next, s.TreeText())
 	}
+	// The same rule has to hold for roots, or a later Plan would return an
+	// id that already names a live task and Find would resolve the wrong
+	// one. The store no longer removes a root, but Tree.Remove is general.
+	var tr Tree
+	tr.Add("", "one")
+	gone := tr.Add("", "two")
+	three := tr.Add("", "three")
+	tr.Remove(gone)
+	fresh := tr.Add("", "four")
+	if fresh.ID == three.ID {
+		t.Fatalf("a new root took live root %q's id", three.ID)
+	}
+	if got := tr.Find(three.ID); got != three {
+		t.Fatalf("Find(%q) resolved to %q, not the live root", three.ID, got.Text)
+	}
+}
+
+// TestAdoptionNeverRemovesARoot: s.files and s.extra are index-parallel to
+// Roots, so taking a root out of the middle shifts every later task onto
+// the previous one's document. A root-level unfiled node is therefore
+// emptied and dropped, never removed.
+func TestAdoptionNeverRemovesARoot(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := s.Plan("first thing", []string{"a"})
+	s.SetStatusText(first+".1", "done", "")
+	s.SetStatusText(first, "done", "")
+	s.NextTurn()
+	// Every root is terminal, so this opens a root-level unfiled node.
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "ls"}, Content: "a\n"})
+	// A flush while that root exists is what pins s.files/s.extra to the
+	// root positions a removal would then shift.
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	second := s.Plan("second thing", []string{"b"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Adoption here used to take root 2 out, shifting "second thing" onto
+	// the unfiled node's document and orphaning its own.
+	if err := s.SetStatusText(second+".1", "doing", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := OpenAt(dir, root, "s2", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, r := range again.Tree().Roots {
+		texts = append(texts, r.Text)
+	}
+	seen := map[string]bool{}
+	for _, tx := range texts {
+		if seen[tx] {
+			t.Fatalf("a task was duplicated across the reload: %v", texts)
+		}
+		seen[tx] = true
+	}
+	if !seen["first thing"] || !seen["second thing"] {
+		t.Fatalf("roots after the reload: %v", texts)
+	}
 }

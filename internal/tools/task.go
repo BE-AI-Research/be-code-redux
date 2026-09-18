@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,14 @@ type TaskLedger interface {
 	Note(id, text, file string, decision, keep bool) error
 	ShowText(id string) string
 }
+
+// taskRoots is an optional capability on a ledger: naming the task in
+// flight is what lets the tool resolve a 0.10.0 step number against the
+// right task. The engine's store provides it; a ledger that does not (the
+// no-op one) simply leaves such a number as the model wrote it. Optional
+// capabilities are declared as small interfaces and type-asserted, the way
+// the agent treats a backend's extras.
+type taskRoots interface{ ActiveRootID() string }
 
 type taskTool struct{ l TaskLedger }
 
@@ -54,7 +63,8 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 	// "step" was 0.10.0's verb for both halves of what add and status now
 	// do. Which one it meant is legible from the arguments: a status word
 	// makes it a status change, anything else is a new node.
-	if action == "step" {
+	legacyStep := action == "step"
+	if legacyStep {
 		if argString(args, "status", "state") != "" {
 			action = "status"
 		} else {
@@ -77,6 +87,9 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 			return Result{IsError: true, Content: "status must be doing, done, blocked or dropped"}
 		}
 		id := argString(args, "id", "node", "step", "task")
+		if legacyStep {
+			id = t.resolveStepNumber(id)
+		}
 		if strings.TrimSpace(id) == "" {
 			return Result{IsError: true, Content: "status needs an id (a dotted path like 2.1.3)"}
 		}
@@ -101,6 +114,31 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 		return Result{Content: t.l.ShowText(argString(args, "id", "node", "step", "task"))}
 	}
 	return Result{IsError: true, Content: "task needs an action (plan, add, status, note, show)"}
+}
+
+// resolveStepNumber turns a 0.10.0 step number into the dotted id of that
+// step under the task in flight. It only ever fires for a step-shaped call
+// carrying a bare number: to the tree "2" is root 2, which is some other
+// task entirely, so marking it done would close the wrong work. Without a
+// task in flight — or a ledger that can name one — the number is left as
+// written rather than guessed at.
+func (t *taskTool) resolveStepNumber(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsRune(id, '.') {
+		return id
+	}
+	if _, err := strconv.Atoi(id); err != nil {
+		return id
+	}
+	r, ok := t.l.(taskRoots)
+	if !ok {
+		return id
+	}
+	root := r.ActiveRootID()
+	if root == "" {
+		return id
+	}
+	return root + "." + id
 }
 
 // normalizeStatus folds what a small model actually emits onto the words

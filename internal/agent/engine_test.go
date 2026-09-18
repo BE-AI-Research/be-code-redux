@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -665,11 +666,39 @@ func TestCompactionWithoutARecordStillReportsTheFailure(t *testing.T) {
 	}
 }
 
+// TestCompactionDoesNotSwallowACancellation: Esc during /compact, or a
+// cancelled run, must surface as the context's error. Rewriting history
+// from the task record there would destroy the transcript the user was
+// trying to keep.
+func TestCompactionDoesNotSwallowACancellation(t *testing.T) {
+	ag, st := agentWithEngine(t)
+	ag.Provider = &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return nil, context.Canceled
+	}}
+	id := st.Plan("fix the parser", []string{"find it"})
+	st.SetStatusText(id+".1", "doing", "")
+	for i := 0; i < 3; i++ {
+		ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "q"})
+		ag.History.Add(provider.Message{Role: provider.RoleAssistant, Content: "a"})
+	}
+	before := append([]provider.Message(nil), ag.History.Messages...)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := ag.Compact(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled compaction must return the cancellation, got %v", err)
+	}
+	if !reflect.DeepEqual(ag.History.Messages, before) {
+		t.Fatalf("a cancelled compaction rewrote history:\n%+v", ag.History.Messages)
+	}
+}
+
 // TestTheEngineCannotFailATurn: advisory discipline, which every task in
-// this plan inherits. A panicking store, a hanging one and one that returns
-// nonsense each leave the turn working.
+// this plan inherits. A panicking store and one that returns nonsense each
+// leave the turn working. A *hanging* store is deliberately not covered:
+// ruling T5-b, there is no timeout to test, because one here could not
+// hold (composeSystem would block in Render on the very next turn).
 func TestTheEngineCannotFailATurn(t *testing.T) {
-	for _, bad := range []string{"panic", "hang", "garbage"} {
+	for _, bad := range []string{"panic", "garbage"} {
 		t.Run(bad, func(t *testing.T) {
 			ag := agentWithBadEngine(t, bad)
 			var notices []string
@@ -686,7 +715,7 @@ func TestTheEngineCannotFailATurn(t *testing.T) {
 			if bad == "garbage" && len(res.Content) > 8*1024 {
 				t.Fatalf("a nonsense footer was appended whole: %d bytes", len(res.Content))
 			}
-			if bad != "garbage" && !containsAny(notices, "continuing without working memory") {
+			if bad == "panic" && !containsAny(notices, "continuing without working memory") {
 				t.Fatalf("a %s engine said nothing: %v", bad, notices)
 			}
 		})
@@ -698,14 +727,9 @@ func TestTheEngineCannotFailATurn(t *testing.T) {
 func agentWithBadEngine(t *testing.T, bad string) *Agent {
 	t.Helper()
 	ag, _ := agentWithEngine(t)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
-	ag.observeTimeout = 50 * time.Millisecond
 	switch bad {
 	case "panic":
 		ag.observeFn = func(engine.Event) string { panic("the store exploded") }
-	case "hang":
-		ag.observeFn = func(engine.Event) string { <-release; return "" }
 	case "garbage":
 		ag.observeFn = func(engine.Event) string { return strings.Repeat("\x00garbage", 100000) }
 	}
