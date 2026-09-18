@@ -167,6 +167,9 @@ type FileRef struct {
 	Edited  bool     `json:"edited,omitempty"`
 	Note    string   `json:"note,omitempty"`
 	Outline []string `json:"outline,omitempty"`
+	// Turn is when this file was last seen. It is what the redundant-read
+	// footer names, so it has to outlive the node being distilled.
+	Turn int `json:"turn,omitempty"`
 }
 
 // CmdRef is the durable record of one shell/process invocation.
@@ -196,6 +199,10 @@ type NoteRef struct {
 // document, because it is large and transient.
 type RawItem struct {
 	Tool string `json:"tool"`
+	// Path is the root-relative file this call named, resolved from the
+	// original event rather than from the excerpted Args, so a long path
+	// still matches itself when the buffer is replayed.
+	Path string `json:"path,omitempty"`
 	Args string `json:"args,omitempty"`
 	Out  string `json:"out,omitempty"`
 	OK   bool   `json:"ok"`

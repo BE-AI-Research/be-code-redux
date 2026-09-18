@@ -46,7 +46,7 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 	if !cfg.Engine.Enabled || ag.Session == nil {
 		return
 	}
-	st, err := engine.Open(reg.Root, ag.Session.ID, resumed, cfg.Engine.NotesCap)
+	st, err := engine.Open(reg.Root, ag.Session.ID, resumed, engine.Limits{NotesCap: cfg.Engine.NotesCap})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warn: engine: %v; continuing without working memory\n", err)
 		// The store is what remembers; the tools are what the model can
@@ -63,12 +63,12 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 }
 
 // baselineFunc reports where the current task began, read straight from the
-// ledger every time. It keeps no state of its own: RunFull records the
+// store every time. It keeps no state of its own: RunFull records the
 // porcelain text as each task starts, and anything cached here would pair a
 // later task's head with the first task's dirty list.
 func baselineFunc(st *engine.Store) tools.BaselineFunc {
 	return func() (string, string) {
-		b := st.Ledger().Baseline
+		b := st.Baseline()
 		return b.Head, b.Dirty
 	}
 }

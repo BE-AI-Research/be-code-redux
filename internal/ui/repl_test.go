@@ -375,7 +375,7 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	if !strings.Contains(out, "working memory is off") {
 		t.Fatalf("no engine:\n%s", out)
 	}
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}

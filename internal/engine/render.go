@@ -233,30 +233,7 @@ func (s *Store) LedgerText() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// StoppedAt is the text of the step in progress, or "".
-func (s *Store) StoppedAt() string {
-	for _, st := range s.Ledger().Steps {
-		if st.Status == "doing" {
-			return st.Text
-		}
-	}
-	return ""
-}
-
 var fileNoteLine = regexp.MustCompile(`(?m)^\s*(?:-\s*)?([^\s—]+)\s+—\s+(.+)$`)
-
-// ApplyFileNotes stores "path — note" lines from a compaction summary's
-// files: block for paths that already have a digest.
-func (s *Store) ApplyFileNotes(block string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, m := range fileNoteLine.FindAllStringSubmatch(block, -1) {
-		if d, ok := s.digests[relPath(m[1])]; ok {
-			d.Note = strings.TrimSpace(m[2])
-			s.markDirtyLocked()
-		}
-	}
-}
 
 // SplitFilesBlock separates a summary's trailing "files:" block from its body.
 func SplitFilesBlock(summary string) (body, files string) {

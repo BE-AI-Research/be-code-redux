@@ -21,7 +21,7 @@ import (
 
 func withEngine(t *testing.T, ag *Agent) *engine.Store {
 	t.Helper()
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "eng"), ag.Tools.Root, "s1", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "eng"), ag.Tools.Root, "s1", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestReadsAreDigestedAndTheBlockReachesTheSystemPrompt(t *testing.T) {
 		t.Fatalf("RunFull/Run did not seed the task line:\n%s", sys)
 	}
 	// Flushed at turn end.
-	if _, err := os.Stat(filepath.Join(st.Dir(), "digests.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(st.Dir(), "state.json")); err != nil {
 		t.Fatal("store not flushed at turn end")
 	}
 }

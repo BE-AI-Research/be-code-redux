@@ -17,7 +17,7 @@ func TestTaskAndNotesAreViewLocal(t *testing.T) {
 	if !strings.Contains(a.rendered.String(), "working memory is off") {
 		t.Fatalf("no engine:\n%s", a.rendered.String())
 	}
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), s.ag.Tools.Root, "s", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), s.ag.Tools.Root, "s", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}

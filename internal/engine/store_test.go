@@ -8,15 +8,39 @@ import (
 	"testing"
 )
 
+// testLimits is what every store test opens with: generous enough that no
+// cap bites unless the test is about a cap.
+func testLimits() Limits { return Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768} }
+
 func openTest(t *testing.T, session string, resumed bool) (*Store, string) {
 	t.Helper()
 	root := t.TempDir()
 	dir := filepath.Join(t.TempDir(), "engine")
-	s, err := OpenAt(dir, root, session, resumed, 4096)
+	s, err := OpenAt(dir, root, session, resumed, testLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s, root
+}
+
+// writeFile puts a file in the workspace the store is watching.
+func writeFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	p := filepath.Join(root, rel)
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// numbered renders content the way read_file does, so seenRange sees the
+// line numbers the model was actually shown.
+func numbered(content string, from int) string {
+	var b strings.Builder
+	for i, l := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
+		fmt.Fprintf(&b, "%5d\t%s\n", from+i, l)
+	}
+	return b.String()
 }
 
 func TestKeyIsStableAndShort(t *testing.T) {
@@ -26,69 +50,9 @@ func TestKeyIsStableAndShort(t *testing.T) {
 	}
 }
 
-func TestLedgerAndNotesRoundTrip(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	s.SetPlan("add a flag", []string{"parse", "wire", "test"})
-	if err := s.SetStep(2, "doing"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetStep(4, "done"); err == nil || err.Error() != "step 4 does not exist (3 steps)" {
-		t.Fatalf("bad step error: %v", err)
-	}
-	if err := s.AddNote("config lives in internal/config", "", false, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AddNote("", "", false, false); err == nil || err.Error() != "note needs text" {
-		t.Fatalf("empty note: %v", err)
-	}
-	s.AddNote("use cobra", "", true, false)
-	s.SetBaseline(Baseline{Head: "abc", Dirty: "d1"})
-	if err := s.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	again, err := OpenAt(s.Dir(), root, "s1", true, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	l := again.Ledger()
-	if l.Task != "add a flag" || len(l.Steps) != 3 || l.Steps[1].Status != "doing" || l.Steps[0].Status != "todo" {
-		t.Fatalf("ledger: %+v", l)
-	}
-	if len(l.Decisions) != 1 || l.Decisions[0] != "use cobra" || len(l.Facts) != 1 || l.Baseline.Head != "abc" {
-		t.Fatalf("ledger: %+v", l)
-	}
-	if !strings.Contains(again.Notes(), "config lives in internal/config") {
-		t.Fatalf("notes: %q", again.Notes())
-	}
-}
-
-func TestSessionScopeClearsOnNewSessionButKeepsNotes(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	s.SetPlan("t", []string{"a"})
-	s.AddNoteLine("durable fact")
-	s.Flush()
-	fresh, err := OpenAt(s.Dir(), root, "s2", false, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh.Ledger().Task != "" || len(fresh.Digests()) != 0 {
-		t.Fatal("session files survived a new session")
-	}
-	if fresh.Notes() != "durable fact\n" {
-		t.Fatalf("notes lost: %q", fresh.Notes())
-	}
-	// A resume of the same session keeps everything.
-	s.SetPlan("t2", nil)
-	s.Flush()
-	kept, _ := OpenAt(s.Dir(), root, "s1", true, 4096)
-	if kept.Ledger().Task != "t2" {
-		t.Fatal("resume lost the ledger")
-	}
-}
-
 func TestNotesCapTrimsOldestLines(t *testing.T) {
 	s, _ := openTest(t, "s1", false)
-	s.notesCap = 40
+	s.lim.NotesCap = 40
 	s.AddNoteLine("first line that is long enough")
 	s.AddNoteLine("second line that is long enough")
 	n := s.Notes()
@@ -103,81 +67,6 @@ func TestNotesCapTrimsOldestLines(t *testing.T) {
 	}
 }
 
-func TestCorruptFileIsRenamedAndStartedFresh(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	s.SetPlan("t", nil)
-	s.Flush()
-	os.WriteFile(filepath.Join(s.Dir(), "ledger.json"), []byte("{not json"), 0o600)
-	again, err := OpenAt(s.Dir(), root, "s1", true, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Ledger().Task != "" {
-		t.Fatal("corrupt ledger was not reset")
-	}
-	entries, _ := os.ReadDir(s.Dir())
-	found := false
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "ledger.json.broken-") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("corrupt file not preserved")
-	}
-}
-
-func TestDigestEvictionKeepsMostRecentlyTouched(t *testing.T) {
-	s, _ := openTest(t, "s1", false)
-	for i := 0; i < maxDigests+5; i++ {
-		s.putDigest(&Digest{Path: fmt.Sprintf("f%d.go", i), Turn: i})
-	}
-	if len(s.Digests()) != maxDigests {
-		t.Fatalf("digests = %d", len(s.Digests()))
-	}
-	if s.Digests()[0].Turn != maxDigests+4 {
-		t.Fatalf("newest first expected, got turn %d", s.Digests()[0].Turn)
-	}
-}
-
-func TestTurnRestoredFromLookupsToo(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	s.lookups = append(s.lookups, Lookup{Tool: "search", Query: "q", Turn: 50})
-	s.dirty = true
-	if err := s.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	again, err := OpenAt(s.Dir(), root, "s1", true, 4096)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.Turn() != 50 {
-		t.Fatalf("turn = %d, want 50", again.Turn())
-	}
-}
-
-func TestDigestsSnapshotDoesNotShareStorage(t *testing.T) {
-	s, _ := openTest(t, "s1", false)
-	s.putDigest(&Digest{Path: "a.go", Ranges: []Range{{1, 5}}, Outline: []string{"A"}, Turn: 1})
-
-	snap1 := s.Digests()
-	// Mutating a snapshot must not reach the live digest.
-	snap1[0].Ranges[0].To = 999
-	snap1[0].Outline[0] = "mutated"
-	live := s.digests["a.go"]
-	if live.Ranges[0].To != 5 || live.Outline[0] != "A" {
-		t.Fatalf("live digest changed via snapshot: %+v", live)
-	}
-
-	// Extending the live digest's Ranges in place (mergeRange's style)
-	// must not reach an already-taken snapshot.
-	snap2 := s.Digests()
-	live.Ranges = mergeRange(live.Ranges, Range{6, 10})
-	if len(snap2[0].Ranges) != 1 || snap2[0].Ranges[0] != (Range{1, 5}) {
-		t.Fatalf("snapshot changed via live digest: %+v", snap2[0].Ranges)
-	}
-}
-
 func TestAddNoteLineDedupsWholeLinesOnly(t *testing.T) {
 	s, _ := openTest(t, "s1", false)
 	s.AddNoteLine("increase timeout for tests")
@@ -186,5 +75,77 @@ func TestAddNoteLineDedupsWholeLinesOnly(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(n, "\n"), "\n")
 	if len(lines) != 2 || lines[0] != "increase timeout for tests" || lines[1] != "timeout for tests" {
 		t.Fatalf("notes: %q", n)
+	}
+}
+
+// TestTreeSurvivesReopen: the workspace document is the source of truth, so
+// a fresh Store on the same root sees the same tree.
+func TestTreeSurvivesReopen(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, err := OpenAt(dir, root, "s1", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("fix the parser", []string{"find the bug", "fix and verify"})
+	if err := s.SetStatus(id+".1", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := OpenAt(dir, root, "s2", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := s2.Tree()
+	if len(tr.Roots) != 1 || len(tr.Roots[0].Children) != 2 {
+		t.Fatalf("tree: %+v", tr.Roots)
+	}
+	if tr.Find(id+".1").Status != StatusDoing {
+		t.Fatal("status did not survive")
+	}
+}
+
+// TestQuarantineRatherThanOverwrite: a document edited into nonsense is
+// moved aside with its content intact, and the session continues.
+func TestQuarantineRatherThanOverwrite(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	s.Plan("a task", []string{"one"})
+	s.Flush()
+	path := filepath.Join(root, ".be-code", "tasks", "001-a-task.md")
+	os.WriteFile(path, []byte("# 001 — a task\n\n- [?] not a status\n"), 0o644)
+	if _, err := OpenAt(dir, root, "s2", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768}); err != nil {
+		t.Fatalf("a broken document must not fail the open: %v", err)
+	}
+	glob, _ := filepath.Glob(filepath.Join(root, ".be-code", "tasks", "*.broken-*.md"))
+	if len(glob) != 1 {
+		t.Fatalf("quarantine files: %v", glob)
+	}
+	b, _ := os.ReadFile(glob[0])
+	if !strings.Contains(string(b), "not a status") {
+		t.Fatal("quarantined content was not preserved")
+	}
+}
+
+// TestGitignoreGetsTheToolFolderOnce: the record stays out of the user's
+// commits unless they choose otherwise, and we never write the line twice.
+func TestGitignoreGetsTheToolFolderOnce(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, ".gitignore"), []byte("node_modules/\n"), 0o644)
+	dir := t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	s.Plan("a task", nil)
+	s.Flush()
+	s.Plan("another", nil)
+	s.Flush()
+	b, _ := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if strings.Count(string(b), ".be-code/") != 1 {
+		t.Fatalf(".gitignore: %q", b)
+	}
+	if !strings.Contains(string(b), "node_modules/") {
+		t.Fatal("existing .gitignore content was lost")
 	}
 }

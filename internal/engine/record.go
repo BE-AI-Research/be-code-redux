@@ -3,26 +3,47 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/repomap"
 )
 
+// Event is one tool call and its result, as dispatch saw them.
+type Event struct {
+	Tool    string
+	Args    map[string]any
+	Content string
+	IsError bool
+}
+
+const (
+	footerAlreadyRead = "already read at turn %d (unchanged); outline and notes are in your context"
+	footerCached      = "(cached; files unchanged)"
+)
+
+var numberedLine = regexp.MustCompile(`(?m)^\s*(\d+)\t`)
+var hitLine = regexp.MustCompile(`^([^\s:][^:]*):(\d+):(.*)$`)
+
 // Limits bounds the recorder's raw buffer: ItemCap per tool result, NodeCap
-// per node in total. Both in bytes.
+// per node in total, NotesCap the durable notes. All in bytes.
 type Limits struct{ NotesCap, ItemCap, NodeCap int }
 
 // recorder is the continuous half of a node's evidence: it keeps every tool
-// result verbatim (capped) while a node is doing, and distills that buffer
-// into the durable record when the node closes. Task 3 embeds it in Store,
-// which is where its root and lim fields come from in production; here it
-// stands alone so this task compiles and tests without one.
+// result verbatim (capped) while a node is doing, refreshes the durable
+// file record as it goes, and distills the buffer into the rest of the
+// durable record when the node closes.
+//
+// tree is the Store's own tree when the recorder is embedded in one, and
+// nil when it stands alone (its unit tests). It is what makes the
+// redundant-read check store-wide rather than per-node.
 type recorder struct {
 	lim  Limits
 	root string // workspace root, for path resolution
+	tree *Tree
 }
 
 // record files one tool result against the node that is doing. It returns
@@ -31,10 +52,28 @@ type recorder struct {
 // The raw item is what makes the recent work lossless: it is exactly what
 // the tool returned, capped so one large read cannot swallow the buffer.
 func (r *recorder) record(n *Node, ev Event, turn int) string {
+	return r.recordWith(n, ev, turn, snapFor(r.root, ev))
+}
+
+// recordWith is record over a snapshot of the file the event names, taken
+// by the caller. The Store takes it before it locks, so the one piece of
+// I/O the record needs never happens under the mutex.
+func (r *recorder) recordWith(n *Node, ev Event, turn int, snap fileSnap) string {
 	if n == nil {
 		return ""
 	}
-	item := RawItem{Tool: ev.Tool, Args: excerpt(argsLine(ev.Args), r.lim.ItemCap), Out: excerpt(ev.Content, r.lim.ItemCap), OK: !ev.IsError, Turn: turn}
+	// The path is resolved from the event, not from the raw item's Args:
+	// Args is excerpted to the item cap, so a long enough path would
+	// silently stop matching itself.
+	rel := r.rel(argStr(ev.Args, "path", "file", "filename"))
+	item := RawItem{
+		Tool: ev.Tool,
+		Path: rel,
+		Args: excerpt(argsLine(ev.Args), r.lim.ItemCap),
+		Out:  excerpt(ev.Content, r.lim.ItemCap),
+		OK:   !ev.IsError,
+		Turn: turn,
+	}
 	n.Evidence.Raw = append(n.Evidence.Raw, item)
 	r.capNode(n)
 
@@ -43,9 +82,13 @@ func (r *recorder) record(n *Node, ev Event, turn int) string {
 	}
 	switch ev.Tool {
 	case "read_file":
-		return r.readFooter(n, ev, turn)
+		// The footer is decided before the read is merged in, or every read
+		// would look like a repeat of itself.
+		footer := r.readFooter(n, rel, seenRange(ev, countLines(ev.Content)), snap)
+		r.mergeFile(n, item, snap)
+		return footer
 	case "write_file", "edit_file":
-		r.markEdited(n, ev)
+		r.mergeFile(n, item, snap)
 	}
 	return ""
 }
@@ -70,26 +113,44 @@ func (r *recorder) capNode(n *Node) {
 	}
 }
 
-// readFooter answers a redundant read the same way 0.10.0 did: when the
-// range just returned is already covered by an earlier read of this node's
-// own raw buffer (the doing node has not been distilled yet, so there is no
-// FileRef to consult), it names the turn that first covered it. The buffer
-// is the source of truth here, not the file on disk: what matters is what
-// the model has already been shown in this stretch of work.
-func (r *recorder) readFooter(n *Node, ev Event, turn int) string {
-	path := argStr(ev.Args, "path", "file", "filename")
-	rel := r.rel(path)
+// readFooter answers a redundant read the way 0.10.0 did: when the range
+// just returned is already covered by an earlier read of the same,
+// unchanged file, it names the turn that covered it.
+//
+// Ruling T2-b: with a tree attached the check is store-wide and outlives
+// the session, because the footer exists to stop the model re-reading what
+// it has already been shown, and a node closing is no reason to forget
+// that. It is also hash-aware: a file that changed on disk is never
+// redundant. Standing alone, the recorder falls back to this node's own
+// verbatim buffer, which is all it has.
+func (r *recorder) readFooter(n *Node, rel string, want Range, snap fileSnap) string {
 	if rel == "" {
 		return ""
 	}
-	want := seenRange(ev, countLines(ev.Content))
+	if r.tree != nil {
+		turn, found := 0, false
+		r.tree.Walk(func(m *Node, _ int) {
+			for _, f := range m.Evidence.Files {
+				if f.Path != rel || f.Hash == "" || f.Hash != snap.hash {
+					continue
+				}
+				if covered(f.Ranges, want) {
+					turn, found = f.Turn, true
+				}
+			}
+		})
+		if found {
+			return fmt.Sprintf(footerAlreadyRead, turn)
+		}
+		return ""
+	}
 	raw := n.Evidence.Raw
 	var have []Range
 	found := false
 	prevTurn := 0
-	for i := 0; i < len(raw)-1; i++ { // exclude the item record() just appended
+	for i := 0; i < len(raw)-1; i++ { // exclude the item recordWith just appended
 		it := raw[i]
-		if it.Tool != "read_file" || r.rel(it.Args) != rel {
+		if it.Tool != "read_file" || it.Path != rel {
 			continue
 		}
 		have = mergeRange(have, seenRange(Event{Content: it.Out}, countLines(it.Out)))
@@ -102,11 +163,6 @@ func (r *recorder) readFooter(n *Node, ev Event, turn int) string {
 	return ""
 }
 
-// markEdited is a placeholder for the doing phase: the durable Edited flag
-// is set by mergeFile at distill time, from the raw item's tool name, since
-// Files itself is only built then.
-func (r *recorder) markEdited(n *Node, ev Event) {}
-
 // distill turns the raw buffer into the durable record and empties it. It
 // reads only the buffer, never the transcript, so it does not depend on the
 // transcript still existing — which after a compaction it does not.
@@ -117,7 +173,10 @@ func (r *recorder) distill(n *Node) {
 	for _, it := range n.Evidence.Raw {
 		switch it.Tool {
 		case "read_file", "write_file", "edit_file":
-			r.mergeFile(n, it)
+			// Idempotent with the merge recordWith already did, so a node
+			// distilled twice — or one whose store merged as it went — is
+			// the same record either way.
+			r.mergeFile(n, it, snapFile(r.root, it.Path))
 		case "shell", "process":
 			n.Evidence.Cmds = append(n.Evidence.Cmds, CmdRef{
 				Cmd: it.Args, OK: it.OK, Excerpt: excerpt(it.Out, 240),
@@ -128,7 +187,7 @@ func (r *recorder) distill(n *Node) {
 			})
 		}
 		if !it.OK {
-			line := firstLine(it.Out)
+			line := firstOutputLine(it.Out)
 			if line == "" {
 				line = "(no output)"
 			}
@@ -142,12 +201,12 @@ func (r *recorder) distill(n *Node) {
 }
 
 // mergeFile folds one read/write/edit raw item into the node's FileRef
-// list: resolve the path, hash the current workspace content, and either
-// replace the outline (hash changed, or unreadable) or merge the seen
-// range (hash unchanged). This is the digest logic the old observeRead
-// carried, aimed at a node's FileRef instead of the store's Digest.
-func (r *recorder) mergeFile(n *Node, it RawItem) {
-	rel := r.rel(it.Args)
+// list: either replace the outline (the content changed, or was unreadable
+// last time) or merge the seen range. It is the durable half of what the
+// old observeRead/observeWrite pair did, aimed at a node's FileRef instead
+// of a store-wide digest.
+func (r *recorder) mergeFile(n *Node, it RawItem, snap fileSnap) {
+	rel := it.Path
 	if rel == "" {
 		return
 	}
@@ -157,62 +216,109 @@ func (r *recorder) mergeFile(n *Node, it RawItem) {
 	if !it.OK {
 		return
 	}
-	var ref *FileRef
-	for i := range n.Evidence.Files {
-		if n.Evidence.Files[i].Path == rel {
-			ref = &n.Evidence.Files[i]
-			break
-		}
-	}
-	if ref == nil {
-		n.Evidence.Files = append(n.Evidence.Files, FileRef{Path: rel})
-		ref = &n.Evidence.Files[len(n.Evidence.Files)-1]
-	}
+	ref := fileRefFor(n, rel)
 	if it.Tool == "write_file" || it.Tool == "edit_file" {
 		ref.Edited = true
 	}
+	if it.Turn > ref.Turn {
+		ref.Turn = it.Turn
+	}
 	rng := seenRange(Event{Content: it.Out}, countLines(it.Out))
-	data, hash, ok := r.readWorkspaceFile(rel)
-	if ok && ref.Hash != hash {
-		ref.Hash = hash
-		ref.Outline = repomap.Outline(rel, data)
+	if it.Tool != "read_file" && snap.ok {
+		// A write or an edit leaves the model knowing the whole file, not
+		// the handful of lines the tool echoed back.
+		rng = Range{From: 1, To: countLines(string(snap.data))}
+	}
+	if snap.ok && ref.Hash != snap.hash {
+		ref.Hash = snap.hash
+		ref.Outline = repomap.Outline(rel, snap.data)
 		ref.Ranges = []Range{rng}
 		return
 	}
 	ref.Ranges = mergeRange(ref.Ranges, rng)
 }
 
-// rel maps a model-supplied path to the root-relative slash path evidence
-// is keyed by, the same fold a relative read would produce for an absolute
-// path inside the workspace. An absolute path outside the root returns "".
-func (r *recorder) rel(p string) string {
-	if strings.TrimSpace(p) == "" {
-		return ""
+// rel folds a model-supplied path onto the root-relative key evidence is
+// filed under. One resolver, shared with the Store.
+func (r *recorder) rel(p string) string { return foldPath(r.root, p) }
+
+// seenRange works out which lines a read_file result covered.
+func seenRange(ev Event, total int) Range {
+	nums := numberedLine.FindAllStringSubmatch(ev.Content, -1)
+	if len(nums) == 0 {
+		return Range{1, total}
 	}
-	if !filepath.IsAbs(p) {
-		return relPath(p)
+	from, _ := strconv.Atoi(nums[0][1])
+	to, _ := strconv.Atoi(nums[len(nums)-1][1])
+	if from < 1 {
+		from = 1
 	}
-	root, err := filepath.Abs(r.root)
-	if err != nil {
-		return ""
+	if to < from {
+		to = from
 	}
-	out, err := filepath.Rel(root, filepath.Clean(p))
-	if err != nil || out == ".." || strings.HasPrefix(out, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	return relPath(out)
+	return Range{from, to}
 }
 
-// readWorkspaceFile reads a root-relative path off disk; ok is false when
-// it cannot be read (deleted, outside the sandbox visible to this process,
-// or simply not on disk, which distill must tolerate rather than fail).
-func (r *recorder) readWorkspaceFile(rel string) (data []byte, hash string, ok bool) {
-	abs := filepath.Join(r.root, filepath.FromSlash(rel))
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, "", false
+func covered(ranges []Range, r Range) bool {
+	// Ranges are merged on insert, so one of them must contain r entirely.
+	for _, have := range ranges {
+		if have.From <= r.From && have.To >= r.To {
+			return true
+		}
 	}
-	return data, hashBytes(data), true
+	return false
+}
+
+func mergeRange(ranges []Range, r Range) []Range {
+	ranges = append(ranges, r)
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].From < ranges[j].From })
+	out := ranges[:1]
+	for _, n := range ranges[1:] {
+		last := &out[len(out)-1]
+		if n.From <= last.To+1 {
+			if n.To > last.To {
+				last.To = n.To
+			}
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// parseHits reads file:line:text lines out of a search or lookup result;
+// context lines (file-line-text, git grep's context form) are deliberately
+// not parsed, since a bare "-" separator is indistinguishable from one
+// inside a filename.
+func parseHits(content string) []Hit {
+	var hits []Hit
+	for _, line := range strings.Split(content, "\n") {
+		m := hitLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[2])
+		text := strings.TrimSpace(m[3])
+		if len(text) > 120 {
+			text = text[:120]
+		}
+		hits = append(hits, Hit{File: relPath(m[1]), Line: n, Text: text})
+		if len(hits) >= 50 {
+			break
+		}
+	}
+	return hits
+}
+
+func argStr(args map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := args[k]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
 
 // argsLine renders the argument that identifies a call, for the raw item
@@ -245,7 +351,7 @@ func countLines(s string) int {
 	return n
 }
 
-func firstLine(s string) string {
+func firstOutputLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return strings.TrimSpace(s[:i])
 	}

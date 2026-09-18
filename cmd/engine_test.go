@@ -81,7 +81,7 @@ func captureStderr(t *testing.T, fn func()) string {
 // closure the changes tool holds must report the current one — a cached
 // dirty list would describe the task before this one.
 func TestBaselineFollowsTheLedger(t *testing.T) {
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), t.TempDir(), "s", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), t.TempDir(), "s", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}
