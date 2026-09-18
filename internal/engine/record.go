@@ -223,19 +223,35 @@ func (r *recorder) mergeFile(n *Node, it RawItem, snap fileSnap) {
 	if it.Turn > ref.Turn {
 		ref.Turn = it.Turn
 	}
-	rng := seenRange(Event{Content: it.Out}, countLines(it.Out))
-	if it.Tool != "read_file" && snap.ok {
-		// A write or an edit leaves the model knowing the whole file, not
-		// the handful of lines the tool echoed back.
-		rng = Range{From: 1, To: countLines(string(snap.data))}
+	// What each tool tells us about what the model has actually seen:
+	//   read_file  — the lines it echoed back.
+	//   write_file — the whole file; the model authored every line of it.
+	//   edit_file  — nothing. It replaced a fragment of a file it may never
+	//                have read, so the echo is not content and claiming the
+	//                whole file would answer a later read with "already read
+	//                at turn N" for lines nobody has seen.
+	rng, known := seenRange(Event{Content: it.Out}, countLines(it.Out)), true
+	switch it.Tool {
+	case "write_file":
+		if snap.ok {
+			rng = Range{From: 1, To: countLines(string(snap.data))}
+		}
+	case "edit_file":
+		known = false
 	}
 	if snap.ok && ref.Hash != snap.hash {
 		ref.Hash = snap.hash
 		ref.Outline = repomap.Outline(rel, snap.data)
-		ref.Ranges = []Range{rng}
+		// The content moved, so the ranges seen before it moved are stale.
+		ref.Ranges = nil
+		if known {
+			ref.Ranges = []Range{rng}
+		}
 		return
 	}
-	ref.Ranges = mergeRange(ref.Ranges, rng)
+	if known {
+		ref.Ranges = mergeRange(ref.Ranges, rng)
+	}
 }
 
 // rel folds a model-supplied path onto the root-relative key evidence is

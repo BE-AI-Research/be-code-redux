@@ -239,6 +239,10 @@ func ParseDoc(text string) (*Tree, []string, error) {
 	var last *Node
 	lastDepth := -1
 	sawHeading := false
+	// skipping is set once a top-level bullet has been declined as a task;
+	// everything indented under it is the user's too, and goes to extra with
+	// it rather than being adopted by the task above.
+	skipping := false
 	seen := map[string]bool{}
 	now := time.Now()
 
@@ -264,6 +268,22 @@ func ParseDoc(text string) (*Tree, []string, error) {
 				return nil, nil, fmt.Errorf("line %d: unknown status mark %q", i+1, m[2])
 			}
 			depth := indentWidth(m[1]) / indentStep
+			got := strings.TrimSuffix(m[3], ".")
+			// A top-level bullet is only a task when it carries an id, or
+			// when it is the first root of a document that has none. A
+			// checklist someone keeps at the bottom of the file — "- [ ] buy
+			// milk" — is their writing, not a task, and the README promises
+			// as much (ruling T3-c).
+			if depth == 0 && got == "" && len(tr.Roots) > 0 {
+				extra = append(extra, line)
+				skipping = true
+				continue
+			}
+			if depth > 0 && skipping {
+				extra = append(extra, line)
+				continue
+			}
+			skipping = false
 			if depth > lastDepth+1 {
 				return nil, nil, fmt.Errorf("line %d: a step is indented under nothing", i+1)
 			}
@@ -275,7 +295,15 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			var want string
 			if depth == 0 {
 				tr.Roots = append(tr.Roots, n)
+				// A root's id is its position in the whole tree, which one
+				// document cannot see: 002-….md's root is legitimately "2".
+				// Trust a bare number here and let the Store's repairRootIDs
+				// be the one authority on global position, or every load of
+				// a second document would "repair" it and its whole subtree.
 				want = strconv.Itoa(len(tr.Roots))
+				if isBareNumber(got) && !seen[got] {
+					want = got
+				}
 			} else {
 				p := stack[depth-1]
 				p.Children = append(p.Children, n)
@@ -285,7 +313,6 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			// is built on: a missing, wrong or duplicate id is repaired to
 			// the node's own position, and the repair is noted so the user
 			// can see the engine disagreed with them.
-			got := strings.TrimSuffix(m[3], ".")
 			if got != "" && (got != want || seen[got]) {
 				n.Evidence.Notes = append(n.Evidence.Notes,
 					NoteRef{Text: fmt.Sprintf("id repaired from %s to %s", got, want)})
@@ -303,6 +330,20 @@ func ParseDoc(text string) (*Tree, []string, error) {
 		extra = append(extra, line)
 	}
 	return tr, extra, nil
+}
+
+// isBareNumber reports whether s is a top-level id like "2" rather than a
+// dotted path or nothing at all.
+func isBareNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // indentWidth counts a tab as one indent step, so a tab-indented document

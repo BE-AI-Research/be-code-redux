@@ -87,11 +87,20 @@ func (s *Store) migrateLedger(path string) error {
 	}
 
 	s.markDirtyLocked()
+	// Write the lifted tree out before removing anything. Until this
+	// succeeds the migration exists only in memory, and the first Flush of a
+	// normal session does not happen until a request completes — so a Ctrl-C
+	// at the prompt would have taken the old store with it. On failure the
+	// originals are still there for the caller to rename aside.
+	if err := s.Flush(); err != nil {
+		return err
+	}
 	return s.dropLegacy(path)
 }
 
-// dropLegacy removes the three 0.10.0 files. Only the ledger's removal can
-// fail the migration: it is what decides whether this runs again.
+// dropLegacy removes the three 0.10.0 files, once the lifted tree is safely
+// on disk. Only the ledger's removal can fail the migration: it is what
+// decides whether this runs again.
 func (s *Store) dropLegacy(ledger string) error {
 	os.Remove(filepath.Join(s.dir, "digests.json"))
 	os.Remove(filepath.Join(s.dir, "lookups.json"))

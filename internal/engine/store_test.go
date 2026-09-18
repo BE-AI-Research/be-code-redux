@@ -149,3 +149,216 @@ func TestGitignoreGetsTheToolFolderOnce(t *testing.T) {
 		t.Fatal("existing .gitignore content was lost")
 	}
 }
+
+// TestClearKeepsTheDocumentsAndDropsTheTasks: ruling T3-a. "/task clear"
+// closes the work; it does not delete files in the user's project.
+func TestClearKeepsTheDocumentsAndDropsTheTasks(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("a task", []string{"one"})
+	if err := s.SetStatus(id+".1", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".be-code", "tasks", "001-a-task.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("document not written: %v", err)
+	}
+
+	s.ClearSession()
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("/task clear deleted the document: %v", err)
+	}
+	tr := s.Tree()
+	if len(tr.Roots) != 1 || tr.Roots[0].Status != StatusDropped || tr.Roots[0].Reason != "cleared" {
+		t.Fatalf("roots after clear: %+v", tr.Roots)
+	}
+	if tr.Find(id+".1").Status != StatusDropped {
+		t.Fatalf("step after clear: %+v", tr.Find(id+".1"))
+	}
+	// The old block has nothing left to describe, which is what the UI
+	// asserts when the user types "/task clear".
+	if s.Ledger().Task != "" {
+		t.Fatalf("clear left a task line: %q", s.Ledger().Task)
+	}
+	// And the record is still there to read tomorrow.
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Tree().Roots) != 1 {
+		t.Fatalf("cleared record did not survive a reopen: %+v", again.Tree().Roots)
+	}
+}
+
+// TestASecondTaskAddedByHandKeepsTheFirstsDocument: two roots arriving from
+// one document must not end up writing over each other.
+func TestASecondTaskAddedByHandKeepsTheFirstsDocument(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	tasks := filepath.Join(root, ".be-code", "tasks")
+	os.MkdirAll(tasks, 0o755)
+	os.WriteFile(filepath.Join(tasks, "001-alpha.md"),
+		[]byte("# 001 — alpha\n\n- [ ] 1. alpha\n- [ ] 2. beta\n"), 0o644)
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tree().Roots) != 2 {
+		t.Fatalf("roots: %+v", s.Tree().Roots)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := again.Tree()
+	if len(tr.Roots) != 2 || tr.Roots[0].Text != "alpha" || tr.Roots[1].Text != "beta" {
+		t.Fatalf("a task was lost writing its sibling: %+v", tr.Roots)
+	}
+}
+
+// TestATaskKeepsItsDocumentWhenItsTitleChanges: the engine never renames or
+// removes a document, so a retitled task cannot leave a second file behind
+// to reload as a duplicate.
+func TestATaskKeepsItsDocumentWhenItsTitleChanges(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	s.StartTask("first thing")
+	s.Flush()
+	s.StartTask("second thing")
+	s.Flush()
+
+	ents, _ := os.ReadDir(filepath.Join(root, ".be-code", "tasks"))
+	var docs []string
+	for _, e := range ents {
+		if e.Name() != "README.md" {
+			docs = append(docs, e.Name())
+		}
+	}
+	if len(docs) != 1 || docs[0] != "001-first-thing.md" {
+		t.Fatalf("documents: %v", docs)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, ".be-code", "tasks", docs[0]))
+	if !strings.Contains(string(b), "# 001 — second thing") {
+		t.Fatalf("heading did not follow the title:\n%s", b)
+	}
+	again, _ := OpenAt(dir, root, "s2", false, testLimits())
+	if tr := again.Tree(); len(tr.Roots) != 1 || tr.Roots[0].Text != "second thing" {
+		t.Fatalf("roots: %+v", tr.Roots)
+	}
+}
+
+// TestAnEditedFileIsNotReportedAsAlreadyRead: edit_file replaces a fragment
+// of a file the model may never have read, so it must not answer a later
+// read with a footer. write_file does imply the whole file.
+func TestAnEditedFileIsNotReportedAsAlreadyRead(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	src := "package a\nvar X = 1\n"
+	writeFile(t, root, "a.go", src)
+	writeFile(t, root, "b.go", src)
+	s.EnsureRoot("touch some files")
+	s.NextTurn()
+
+	s.Observe(Event{Tool: "edit_file", Args: map[string]any{"path": "a.go"}, Content: "edited a.go"})
+	s.NextTurn()
+	if f := s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered(src, 1)}); f != "" {
+		t.Fatalf("a file that was only edited was reported as already read: %q", f)
+	}
+	s.Observe(Event{Tool: "write_file", Args: map[string]any{"path": "b.go"}, Content: "wrote b.go"})
+	s.NextTurn()
+	if f := s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "b.go"}, Content: numbered(src, 1)}); f == "" {
+		t.Fatal("a file the model wrote itself should read as already known")
+	}
+}
+
+// TestTheRedundantReadFooterSurvivesAReopen: ruling T3-b is what makes
+// ruling T2-b's cross-session promise true — the hash and the outline a
+// Markdown document cannot carry come back from state.json.
+func TestTheRedundantReadFooterSurvivesAReopen(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	src := "package a\nfunc A() {}\n"
+	writeFile(t, root, "a.go", src)
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	s.EnsureRoot("look at a.go")
+	s.NextTurn()
+	if f := s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered(src, 1)}); f != "" {
+		t.Fatalf("first read footer: %q", f)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.NextTurn()
+	f := again.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered(src, 1)})
+	if !strings.Contains(f, "already read at turn 1") {
+		t.Fatalf("footer lost across the reopen: %q", f)
+	}
+	if ds := again.Digests(); len(ds) != 1 || len(ds[0].Outline) == 0 {
+		t.Fatalf("outline lost across the reopen: %+v", ds)
+	}
+}
+
+// TestGitignoreEdgeCases: the line we add must not join theirs, we never
+// invent a .gitignore outside a repository, and another spelling of the
+// same entry is recognised rather than duplicated.
+func TestGitignoreEdgeCases(t *testing.T) {
+	planAndFlush := func(root string) {
+		t.Helper()
+		s, err := OpenAt(t.TempDir(), root, "s1", false, testLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Plan("a task", nil)
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	noNewline := t.TempDir()
+	os.WriteFile(filepath.Join(noNewline, ".gitignore"), []byte("node_modules/"), 0o644)
+	planAndFlush(noNewline)
+	if b, _ := os.ReadFile(filepath.Join(noNewline, ".gitignore")); string(b) != "node_modules/\n.be-code/\n" {
+		t.Fatalf("no trailing newline: %q", b)
+	}
+
+	notARepo := t.TempDir()
+	planAndFlush(notARepo)
+	if _, err := os.Stat(filepath.Join(notARepo, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatal("a .gitignore was invented in a folder that is not a repository")
+	}
+
+	repo := t.TempDir()
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o755)
+	planAndFlush(repo)
+	if b, err := os.ReadFile(filepath.Join(repo, ".gitignore")); err != nil || string(b) != ".be-code/\n" {
+		t.Fatalf("repository without a .gitignore: %q %v", b, err)
+	}
+
+	otherSpelling := t.TempDir()
+	os.WriteFile(filepath.Join(otherSpelling, ".gitignore"), []byte("/.be-code\n"), 0o644)
+	planAndFlush(otherSpelling)
+	if b, _ := os.ReadFile(filepath.Join(otherSpelling, ".gitignore")); string(b) != "/.be-code\n" {
+		t.Fatalf("an existing entry was duplicated: %q", b)
+	}
+}

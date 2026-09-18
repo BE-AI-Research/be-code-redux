@@ -33,6 +33,8 @@ const (
 	defaultNotesCap = 4096
 	defaultItemCap  = 4 * 1024
 	defaultNodeCap  = 32 * 1024
+	// maxFileMemos caps the per-file hashes and outlines state.json keeps.
+	maxFileMemos = 200
 
 	// workspaceDir is the engine's folder inside the user's project.
 	workspaceDir = ".be-code"
@@ -113,6 +115,18 @@ type state struct {
 	Session   string               `json:"session,omitempty"`
 	Baseline  Baseline             `json:"baseline,omitempty"`
 	NotesHash string               `json:"notes_hash,omitempty"`
+	// Files is what a Markdown document has no business carrying: the
+	// content hash and the outline of each file the record names. Without
+	// it the cross-session redundant-read check cannot fire at all (it
+	// refuses to answer without a hash to compare) and every resume loses
+	// its outlines — ruling T3-b.
+	Files map[string]fileMemo `json:"files,omitempty"`
+}
+
+type fileMemo struct {
+	Hash    string   `json:"hash,omitempty"`
+	Outline []string `json:"outline,omitempty"`
+	Turn    int      `json:"turn,omitempty"`
 }
 
 // Store is one workspace's working memory. One mutex guards everything;
@@ -207,6 +221,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 		s.docs[name] = h
 	}
 	s.loadDocs()
+	s.restoreFileMemos(st.Files)
 	if resumed || st.Session == sessionID {
 		s.restoreRaw(st.Raw)
 	} else {
@@ -275,8 +290,11 @@ func (s *Store) loadDocs() {
 		}
 		tr, extra, perr := ParseDoc(string(b))
 		if perr != nil {
-			base := strings.TrimSuffix(name, ".md")
-			os.Rename(filepath.Join(dir, name), filepath.Join(dir, base+".broken-"+stamp()+".md"))
+			aside := strings.TrimSuffix(name, ".md") + ".broken-" + stamp() + ".md"
+			os.Rename(filepath.Join(dir, name), filepath.Join(dir, aside))
+			// Losing a task must never be silent: the model will not
+			// mention what it cannot see, so the user has to hear it here.
+			fmt.Fprintf(os.Stderr, "warn: engine: %s could not be read (%v); moved aside as %s and its task is not loaded\n", name, perr, aside)
 			delete(s.docs, name)
 			s.markDirtyLocked()
 			continue
@@ -318,6 +336,70 @@ func renumber(n *Node, id string) {
 	for i, c := range n.Children {
 		renumber(c, id+"."+strconv.Itoa(i+1))
 	}
+}
+
+// restoreFileMemos puts back what the documents do not carry: each file's
+// content hash, outline and turn. Only fields the document left empty are
+// filled, so a note or a range the user edited by hand still wins.
+func (s *Store) restoreFileMemos(memos map[string]fileMemo) {
+	if len(memos) == 0 {
+		return
+	}
+	s.tree.Walk(func(n *Node, _ int) {
+		for i := range n.Evidence.Files {
+			f := &n.Evidence.Files[i]
+			m, ok := memos[f.Path]
+			if !ok {
+				continue
+			}
+			if f.Hash == "" {
+				f.Hash = m.Hash
+			}
+			if len(f.Outline) == 0 {
+				f.Outline = append([]string(nil), m.Outline...)
+			}
+			if f.Turn == 0 {
+				f.Turn = m.Turn
+			}
+		}
+	})
+}
+
+// fileMemosLocked is what stateLocked persists: one entry per file the
+// record names, newest first and capped, since an outline per file across
+// a long-lived workspace is the one part of state.json that grows.
+func (s *Store) fileMemosLocked() map[string]fileMemo {
+	type entry struct {
+		path string
+		memo fileMemo
+	}
+	var all []entry
+	seen := map[string]int{}
+	s.tree.Walk(func(n *Node, _ int) {
+		for _, f := range n.Evidence.Files {
+			if f.Path == "" || (f.Hash == "" && len(f.Outline) == 0) {
+				continue
+			}
+			m := fileMemo{Hash: f.Hash, Outline: f.Outline, Turn: f.Turn}
+			if at, ok := seen[f.Path]; ok {
+				if f.Turn >= all[at].memo.Turn {
+					all[at].memo = m
+				}
+				continue
+			}
+			seen[f.Path] = len(all)
+			all = append(all, entry{f.Path, m})
+		}
+	})
+	sort.SliceStable(all, func(i, j int) bool { return all[i].memo.Turn > all[j].memo.Turn })
+	if len(all) > maxFileMemos {
+		all = all[:maxFileMemos]
+	}
+	out := make(map[string]fileMemo, len(all))
+	for _, e := range all {
+		out[e.path] = e.memo
+	}
+	return out
 }
 
 // restoreRaw puts the verbatim buffers back on the nodes they belong to.
@@ -455,19 +537,14 @@ func (s *Store) Flush() error {
 	seq := s.mutSeq
 	dir, root := s.dir, s.root
 
-	type docWrite struct{ name, prev, body string }
-	var writes []docWrite
+	type docWrite struct{ name, body string }
+	names := s.docNamesLocked()
+	writes := make([]docWrite, 0, len(names))
 	docs := map[string]string{}
 	for i, r := range s.tree.Roots {
-		num := fmt.Sprintf("%03d", i+1)
-		name := num + "-" + slug(r.Text) + ".md"
-		prev := ""
-		if i < len(s.files) {
-			prev = s.files[i]
-		}
-		body := RenderDocWithExtra(num, r.Text, r, s.extraAt(i))
-		writes = append(writes, docWrite{name: name, prev: prev, body: body})
-		docs[name] = hashBytes([]byte(body))
+		body := RenderDocWithExtra(docNumber(names[i], i), r.Text, r, s.extraAt(i))
+		writes = append(writes, docWrite{name: names[i], body: body})
+		docs[names[i]] = hashBytes([]byte(body))
 	}
 	stateBytes, err := json.Marshal(s.stateLocked(docs))
 	if err != nil {
@@ -475,31 +552,21 @@ func (s *Store) Flush() error {
 		return err
 	}
 	notes := []byte(s.notes)
-	stale := map[string]string{}
-	for name, h := range s.docs {
-		if _, keep := docs[name]; !keep {
-			stale[name] = h
-		}
-	}
 	s.mu.Unlock()
 
-	tasks := filepath.Join(root, workspaceDir, "tasks")
 	if len(writes) > 0 {
+		tasks := filepath.Join(root, workspaceDir, "tasks")
 		if err := os.MkdirAll(tasks, 0o755); err != nil {
 			return err
 		}
 		ensureReadme(tasks)
 		for _, w := range writes {
-			if w.prev != "" && w.prev != w.name {
-				os.Rename(filepath.Join(tasks, w.prev), filepath.Join(tasks, w.name))
-			}
 			if err := writeAtomic(filepath.Join(tasks, w.name), []byte(w.body), 0o644); err != nil {
 				return err
 			}
 		}
 		ensureGitignore(root)
 	}
-	dropStaleDocs(tasks, stale)
 	if err := writeAtomic(filepath.Join(dir, "state.json"), stateBytes, 0o600); err != nil {
 		return err
 	}
@@ -509,10 +576,7 @@ func (s *Store) Flush() error {
 
 	s.mu.Lock()
 	s.docs = docs
-	s.files = s.files[:0]
-	for _, w := range writes {
-		s.files = append(s.files, w.name)
-	}
+	s.files = names
 	if s.mutSeq == seq {
 		s.dirty = false
 	}
@@ -520,19 +584,55 @@ func (s *Store) Flush() error {
 	return nil
 }
 
-// dropStaleDocs removes the documents the engine wrote for tasks that no
-// longer exist. A file whose content no longer matches the hash we recorded
-// has been edited by hand since, so it is left alone: the engine may forget
-// its own record, never someone else's writing.
-func dropStaleDocs(tasks string, stale map[string]string) {
-	for name, want := range stale {
-		path := filepath.Join(tasks, name)
-		b, err := os.ReadFile(path)
-		if err != nil || hashBytes(b) != want {
+// docNamesLocked decides which file each root is written to. Two rules, and
+// between them the engine never renames or removes a document:
+//
+//   - a root that already has a file keeps it for life, even when its text
+//     changes. The name goes stale against the title; the heading inside is
+//     regenerated and is what anyone actually reads. Renaming would mean
+//     leaving the old file to reload as a duplicate task, or deleting a file
+//     in the user's project, and neither is worth a tidier name.
+//   - a name is claimed by exactly one root. A document the user has added a
+//     second top-level task to arrives as two roots pointing at one file;
+//     the first keeps it and the second gets a new one, so writing the
+//     second cannot destroy the first.
+//
+// Callers hold s.mu.
+func (s *Store) docNamesLocked() []string {
+	names := make([]string, len(s.tree.Roots))
+	used := map[string]bool{}
+	for i := range s.tree.Roots {
+		if i < len(s.files) && s.files[i] != "" && !used[s.files[i]] {
+			names[i] = s.files[i]
+			used[names[i]] = true
+		}
+	}
+	for i, r := range s.tree.Roots {
+		if names[i] != "" {
 			continue
 		}
-		os.Remove(path)
+		for n := i + 1; ; n++ {
+			cand := fmt.Sprintf("%03d-%s.md", n, slug(r.Text))
+			if !used[cand] {
+				names[i], used[cand] = cand, true
+				break
+			}
+		}
 	}
+	return names
+}
+
+// docNumber is the NNN a document's heading carries: the one in its file
+// name, so the two never disagree, falling back to the root's position.
+func docNumber(name string, i int) string {
+	digits := 0
+	for digits < len(name) && name[digits] >= '0' && name[digits] <= '9' {
+		digits++
+	}
+	if digits > 0 {
+		return name[:digits]
+	}
+	return fmt.Sprintf("%03d", i+1)
 }
 
 func (s *Store) extraAt(i int) []string {
@@ -550,6 +650,7 @@ func (s *Store) stateLocked(docs map[string]string) state {
 		Session:   s.session,
 		Baseline:  s.baseline,
 		NotesHash: hashBytes([]byte(s.notes)),
+		Files:     s.fileMemosLocked(),
 	}
 	if d := s.tree.Doing(); d != nil {
 		st.Active = d.ID
@@ -612,7 +713,10 @@ func ensureGitignore(root string) {
 		mode = info.Mode().Perm()
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.TrimSpace(line) == workspaceDir+"/" {
+		// ".be-code/", "/.be-code/", ".be-code" and "/.be-code" all already
+		// ignore the folder; appending another spelling would just be noise
+		// in someone's file.
+		if strings.TrimRight(strings.TrimPrefix(strings.TrimSpace(line), "/"), "/") == workspaceDir {
 			return
 		}
 	}
@@ -620,7 +724,7 @@ func ensureGitignore(root string) {
 	if out != "" && !strings.HasSuffix(out, "\n") {
 		out += "\n"
 	}
-	os.WriteFile(path, []byte(out+workspaceDir+"/\n"), mode)
+	writeAtomic(path, []byte(out+workspaceDir+"/\n"), mode)
 }
 
 // readmeText documents the format for both readers, human and model,
@@ -658,6 +762,14 @@ Safe to change: any node's text, its status mark, its reason, and any note
 or decision line. Any line the engine does not recognise — prose, a heading
 of your own, a checklist — is preserved exactly and written back untouched.
 
+A top-level line is only a task when it carries an id, so a checklist you
+keep in the file (` + "`- [ ] buy milk`" + `) stays your own text. Give it a
+number — ` + "`- [ ] 2. buy milk`" + ` — and it becomes a task.
+
+The engine never renames or deletes a document. A task keeps its file for
+life, so a file name can fall out of step with a retitled task; the heading
+inside is regenerated and is the one to read.
+
 The engine repairs an id that disagrees with a node's position, and says so
 in a note on that node. A document it cannot parse at all is renamed
 ` + "`NNN-<slug>.broken-<stamp>.md`" + ` with its content intact, and never
@@ -672,7 +784,7 @@ func ensureReadme(dir string) {
 	if _, err := os.Stat(path); err == nil {
 		return
 	}
-	os.WriteFile(path, []byte(readmeText), 0o644)
+	writeAtomic(path, []byte(readmeText), 0o644)
 }
 
 // NextTurn advances the turn counter (one per model call) and returns it.
@@ -705,19 +817,25 @@ func (s *Store) Baseline() Baseline {
 	return s.baseline
 }
 
-// ClearSession forgets the task record — the tree, the verbatim buffers,
-// the lookup cache and the baseline — and keeps only the durable notes,
-// exactly as 0.10.0 did. It is only ever reached from the user's own
-// "/task clear". The next Flush removes the documents this store wrote for
-// the tasks that are gone; a document the user has edited since we wrote it
-// is left where it is, because forgetting our own record is not licence to
-// delete their writing.
+// ClearSession is the user's "/task clear": it closes the work, it does not
+// erase it. Every node still open is dropped with the reason "cleared", the
+// buffers are distilled into the record on the way, and the lookup cache and
+// the baseline are reset. The tree stays and so do the documents — a reset
+// that deletes files in someone's project on one keystroke is not a reset
+// (ruling T3-a). Nothing here touches the durable notes.
 func (s *Store) ClearSession() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tree = Tree{}
-	s.files = nil
-	s.extra = nil
+	now := time.Now()
+	s.tree.Walk(func(n *Node, _ int) {
+		if len(n.Evidence.Raw) > 0 {
+			s.rec.distill(n)
+		}
+		if n.Status.terminal() {
+			return
+		}
+		n.Status, n.Reason, n.Closed = StatusDropped, "cleared", now
+	})
 	s.lookups = nil
 	s.cached = nil
 	s.baseline = Baseline{}

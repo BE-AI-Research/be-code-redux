@@ -78,3 +78,28 @@ func TestMalformedDocumentIsAnError(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+// TestAHandWrittenChecklistIsNotATask: ruling T3-c. Only a top-level line
+// carrying an id, or the first root of a document with none, is a task;
+// a checklist someone keeps in the file is their text, preserved.
+func TestAHandWrittenChecklistIsNotATask(t *testing.T) {
+	tr, extra, err := ParseDoc(doc + "\n- [ ] buy milk\n  - [ ] and bread\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.Roots) != 1 {
+		t.Fatalf("a checklist became a task: %d roots", len(tr.Roots))
+	}
+	out := RenderDocWithExtra("001", "fix the parser", tr.Roots[0], extra)
+	if !strings.Contains(out, "- [ ] buy milk") || !strings.Contains(out, "- [ ] and bread") {
+		t.Fatalf("the checklist was lost:\n%s", out)
+	}
+	// A top-level line that does carry an id is a task.
+	tr2, _, err := ParseDoc("# 001 — x\n\n- [ ] 1. alpha\n- [ ] 2. beta\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr2.Roots) != 2 || tr2.Roots[1].ID != "2" {
+		t.Fatalf("an id-carrying top-level line must be a task: %+v", tr2.Roots)
+	}
+}

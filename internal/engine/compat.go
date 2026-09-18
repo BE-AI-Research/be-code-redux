@@ -23,12 +23,11 @@ func (s *Store) Ledger() Ledger {
 
 func (s *Store) ledgerLocked() Ledger {
 	l := Ledger{Baseline: s.baseline, Session: s.session}
+	// No open task means no task line: with every root finished — or
+	// dropped by "/task clear" — the old block has nothing to describe.
 	r := s.activeRootLocked()
 	if r == nil {
-		if len(s.tree.Roots) == 0 {
-			return l
-		}
-		r = s.tree.Roots[len(s.tree.Roots)-1]
+		return l
 	}
 	l.Task = r.Text
 	for _, c := range r.Children {
