@@ -190,12 +190,53 @@ func TestFallsBackToOpenAIOnceWhenNativeIsUnsupported(t *testing.T) {
 	defer srv.Close()
 	p := NewOllama("t", srv.URL, "")
 	for i := 0; i < 3; i++ {
-		if _, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err != nil {
+		resp, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if resp.Content != "ok" || resp.FinishReason != "stop" {
+			t.Fatalf("the fallback must answer, not just not fail: %+v", resp)
 		}
 	}
 	if native != 1 || compat != 3 {
 		t.Fatalf("native %d, compat %d; the fallback must latch", native, compat)
+	}
+	if !p.NativeFallback() {
+		t.Fatal("a downgraded session must be able to say so")
+	}
+}
+
+// The critical distinction the status code alone cannot make: a current
+// Ollama answers a model it has not pulled with 404 too. A mistyped model
+// name must not cost the session its native path — and with it num_ctx,
+// the whole point of using /api/chat — for the rest of the run.
+func TestModelNotFoundIsNotAnOldServer(t *testing.T) {
+	var native, compat int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			native++
+			http.Error(w, `{"error":"model \"m\" not found, try pulling it first"}`, http.StatusNotFound)
+		case "/v1/chat/completions":
+			compat++
+		}
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	for i := 0; i < 2; i++ {
+		_, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil)
+		if err == nil {
+			t.Fatal("a missing model must be reported, not worked around")
+		}
+		if !strings.Contains(err.Error(), "try pulling it first") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if native != 2 || compat != 0 {
+		t.Fatalf("native %d, compat %d; a missing model is not a missing endpoint", native, compat)
+	}
+	if p.NativeFallback() {
+		t.Fatal("the session must not be downgraded by a typo")
 	}
 }
 
@@ -272,7 +313,7 @@ func TestNativeBadRequestDoesNotDowngradeTheSession(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/chat":
 			native++
-			http.Error(w, `{"error":"model \"m\" not found"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid options: num_ctx must be a positive integer"}`, http.StatusBadRequest)
 		case "/v1/chat/completions":
 			compat++
 		}
@@ -282,12 +323,69 @@ func TestNativeBadRequestDoesNotDowngradeTheSession(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if _, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil {
 			t.Fatal("a failing request must be reported")
-		} else if !strings.Contains(err.Error(), "not found") {
+		} else if !strings.Contains(err.Error(), "num_ctx") {
 			t.Fatalf("err = %v", err)
 		}
 	}
 	if native != 2 || compat != 0 {
 		t.Fatalf("native %d, compat %d; a 400 is not an old server", native, compat)
+	}
+}
+
+// A 400 that happens to name think when the request sent no think key is
+// somebody else's error: retrying it identically would only double it.
+func TestThinkRetryOnlyWhenAThinkKeyWasSent(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, `{"error":"the think template for this model is broken"}`, http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err == nil {
+		t.Fatal("want an error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d; nothing was refused, so there is nothing to retry without", calls)
+	}
+}
+
+// A server that takes think only as a boolean rejects a level. That costs
+// the level and nothing else: think:false must keep being sent, or every
+// NoThink call (compaction, handoff, init) silently starts reasoning again
+// — which is the one thing those calls exist to prevent.
+func TestThinkLevelRefusalKeepsNoThinkWorking(t *testing.T) {
+	var sent []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		sent = append(sent, b["think"])
+		if _, ok := b["think"].(string); ok {
+			http.Error(w, `{"error":"json: cannot unmarshal string into Go struct field ChatRequest.think of type bool"}`, http.StatusBadRequest)
+			return
+		}
+		w.Write([]byte(`{"message":{"content":"x"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", ReasoningEffort: "low"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", ReasoningEffort: "low"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", NoThink: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// level (refused) -> retry without it -> no level again -> think:false.
+	want := []any{"low", nil, nil, false}
+	if len(sent) != len(want) {
+		t.Fatalf("think keys sent: %v, want %v", sent, want)
+	}
+	for i := range want {
+		if sent[i] != want[i] {
+			t.Fatalf("think keys sent: %v, want %v", sent, want)
+		}
 	}
 }
 

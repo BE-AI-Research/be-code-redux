@@ -127,6 +127,9 @@ type Agent struct {
 	retryBase        time.Duration // first retry delay; doubles per attempt
 	stallAfter       time.Duration // silence before a "waiting for backend" notice
 	unloadedNotified bool          // one notice per eviction, not per turn
+	// nativeFallbackNotified keeps the native-endpoint downgrade to one
+	// notice per session (see noteNativeFallback).
+	nativeFallbackNotified bool
 	repoMap          string
 	// saveDisabled latches on when another live process is found to own the
 	// session file; saveOwner is its pid and saveWarned keeps the warning to

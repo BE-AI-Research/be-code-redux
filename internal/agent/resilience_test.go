@@ -271,3 +271,44 @@ func TestRunLengthCutoffErrorNamesReasoning(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// fallbackProvider is a backend that has given up its native endpoint.
+type fallbackProvider struct {
+	funcProvider
+	fellBack bool
+}
+
+func (f *fallbackProvider) NativeFallback() bool { return f.fellBack }
+
+// A session running on the fallback endpoint cannot set the model's context
+// window, so it must not look identical to a healthy one — but it is also
+// not an error, so it is said once and only once.
+func TestNativeFallbackIsNoticedOnce(t *testing.T) {
+	p := &fallbackProvider{}
+	p.fn = func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	ag, _ := newTestAgent(t, p, nil)
+	notices := collectNotices(ag)
+	if _, err := ag.Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if hasNotice(*notices, "openai-compatible path") {
+		t.Fatalf("nothing was downgraded: %v", *notices)
+	}
+	p.fellBack = true
+	for i := 0; i < 2; i++ {
+		if _, err := ag.Run(context.Background(), "again"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, s := range *notices {
+		if strings.Contains(strings.ToLower(s), "openai-compatible path") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly one downgrade notice, got %d: %v", n, *notices)
+	}
+}

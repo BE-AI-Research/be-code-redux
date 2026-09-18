@@ -103,6 +103,14 @@ type BackendStatus interface {
 	Status(ctx context.Context, model string) (window int, loaded bool, err error)
 }
 
+// NativeFallbacker is implemented by providers that prefer a native
+// endpoint but can fall back to the OpenAI-compatible one against a server
+// that does not serve it (Ollama). The agent reports the downgrade once,
+// because the fallback silently loses what the native path was for.
+type NativeFallbacker interface {
+	NativeFallback() bool
+}
+
 // KeepAliver is implemented by providers that can extend a model's
 // residency (Ollama keep_alive), so idle expiry between prompts does not
 // evict it and force a slow reload plus prompt re-processing.

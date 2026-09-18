@@ -30,6 +30,7 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 	var lastErr error
 	for attempt := 0; attempt <= maxBackendRetries; attempt++ {
 		resp, err := a.chatFiltered(ctx, req)
+		a.noteNativeFallback()
 		if err == nil {
 			return resp, nil
 		}
@@ -86,6 +87,19 @@ func compactErr(err error) string {
 		s = s[:160] + "..."
 	}
 	return s
+}
+
+// noteNativeFallback tells the user, once, when a backend has given up its
+// native endpoint for an OpenAI-compatible one. It is a quieter session,
+// not a broken one — but it is also a session that can no longer set the
+// model's context window, so it must not look identical to a healthy one.
+func (a *Agent) noteNativeFallback() {
+	nf, ok := a.Provider.(provider.NativeFallbacker)
+	if !ok || a.nativeFallbackNotified || !nf.NativeFallback() {
+		return
+	}
+	a.nativeFallbackNotified = true
+	a.notice("backend does not serve its native chat endpoint; using the OpenAI-compatible path for this session (the context window cannot be set from here)")
 }
 
 // checkBackend asks a status-capable provider whether the model is still

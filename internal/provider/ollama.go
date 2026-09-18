@@ -30,6 +30,11 @@ type Ollama struct {
 	// so the think key is dropped for them rather than failing every
 	// request. Keyed by model, because a session can switch models.
 	noThink map[string]bool
+	// noThinkLevels names the models whose server takes think only as a
+	// boolean. That is a different fact from "cannot think": these models
+	// lose the reasoning_effort level but must keep think:false, which is
+	// the whole point of the NoThink calls (compaction, handoff, init).
+	noThinkLevels map[string]bool
 
 	// nativeBroken latches once a server has told us /api/chat is not there,
 	// so an old server is probed once per session rather than every request.
@@ -46,10 +51,14 @@ type Options struct {
 }
 
 // NewOllama derives the native API base from the configured base URL, which
-// may be given either way round (http://host:11434 or http://host:11434/v1):
-// the native calls use the bare host and the OpenAI fallback uses /v1.
+// may be given either way round (http://host:11434 or http://host:11434/v1)
+// and in any case (/V1 is a URL path a person types, not a constant): the
+// native calls use the bare host and the OpenAI fallback uses /v1.
 func NewOllama(name, baseURL, apiKey string) *Ollama {
-	api := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/v1")
+	api := strings.TrimRight(baseURL, "/")
+	if n := len(api) - len("/v1"); n >= 0 && strings.EqualFold(api[n:], "/v1") {
+		api = api[:n]
+	}
 	return &Ollama{
 		OpenAICompat: NewOpenAICompat(name, api+"/v1", apiKey),
 		APIBase:      api,
@@ -107,10 +116,11 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	if o.NumCtx > 0 {
 		m["num_ctx"] = o.NumCtx
 	}
-	switch {
-	case req.Temperature != 0:
-		m["temperature"] = req.Temperature
-	case o.Temperature != 0:
+	// Temperature is always on the wire, as it is on the OpenAI path: a
+	// deliberate 0 is a real setting (determinism), not an absent one. The
+	// configured value only fills in for a request that named none.
+	m["temperature"] = req.Temperature
+	if req.Temperature == 0 && o.Temperature != 0 {
 		m["temperature"] = o.Temperature
 	}
 	switch {
@@ -204,34 +214,64 @@ func (e *httpError) Error() string {
 
 // isNativeUnsupported reports whether err means the server has no /api/chat
 // at all, which is the one reason to spend the rest of the session on the
-// OpenAI path. Only the status codes that mean "no such endpoint" count: a
-// 400, a 500 or a transport failure is an ordinary error — a bad request or
-// a model that genuinely failed — and downgrading the session over one would
-// hide it and quietly cost the user their num_ctx for the rest of the run.
+// OpenAI path. A 400, a 500 or a transport failure is an ordinary error — a
+// bad request or a model that genuinely failed — and downgrading over one
+// would hide it and quietly cost the user their num_ctx for the rest of the
+// run.
+//
+// The status code alone is not enough, because a current Ollama answers a
+// model it has not pulled with 404 {"error":"model \"m\" not found, try
+// pulling it first"}: a mistyped model name would otherwise turn the native
+// path off for the whole session, and back on for nothing. So the body must
+// look like a router's, not an application's — Go's own mux says "404 page
+// not found", a proxy or a bare server may say nothing at all.
 func isNativeUnsupported(err error) bool {
 	var he *httpError
 	if !errors.As(err, &he) {
 		return false
 	}
 	switch he.Code {
-	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+	case http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		// No application answers a POST it understands with either of
+		// these; both mean the route is not wired up.
 		return true
+	case http.StatusNotFound:
+		body := strings.ToLower(strings.TrimSpace(he.Body))
+		return body == "" || strings.Contains(body, "page not found")
 	}
 	return false
 }
 
-// isThinkUnsupported reports whether err is Ollama refusing the think key —
-// because the model has no reasoning ("<model> does not support thinking")
-// or because an older server does not know the level form. That is about
-// the key, not the endpoint, so it costs the key rather than the native
-// path. Any 400 that names think qualifies: the only thing it buys is one
-// retry without a key that request did not need.
-func isThinkUnsupported(err error) bool {
+// thinkRefusal classifies a rejection of the think key. Ollama refuses it
+// for two different reasons and they must not share a latch: a model with
+// no reasoning at all can never take the key, while a server that knows
+// only the boolean form still honours think:false, which is exactly what
+// the NoThink calls (compaction, handoff, init) need. sentLevel says which
+// form this request used.
+func thinkRefusal(err error, sentLevel bool) (cannotThink, noLevels bool) {
 	var he *httpError
 	if !errors.As(err, &he) || he.Code != http.StatusBadRequest {
-		return false
+		return false, false
 	}
-	return strings.Contains(strings.ToLower(he.Body), "think")
+	body := strings.ToLower(he.Body)
+	if !strings.Contains(body, "think") {
+		return false, false
+	}
+	switch {
+	case !sentLevel:
+		// The request sent think:false and was refused: nothing but the
+		// model's own lack of reasoning can explain that.
+		return true, false
+	case strings.Contains(body, "level"):
+		return false, true
+	case strings.Contains(body, "support thinking"):
+		return true, false
+	default:
+		// An older server that cannot parse a string think. Assume the
+		// narrower fact; a model that truly cannot think will refuse the
+		// boolean too, and be latched then.
+		return false, true
+	}
 }
 
 // Chat runs one completion over native /api/chat, falling back to the
@@ -242,33 +282,67 @@ func (p *Ollama) Chat(ctx context.Context, req ChatRequest, onDelta StreamFunc) 
 		return p.OpenAICompat.Chat(ctx, req, onDelta)
 	}
 	resp, err := p.nativeChat(ctx, req, onDelta)
-	switch {
-	case err != nil && isNativeUnsupported(err):
+	if err == nil {
+		return resp, nil
+	}
+	if isNativeUnsupported(err) {
 		// An older server is a reason to degrade, not to fail.
 		p.nativeBroken.Store(true)
 		return p.OpenAICompat.Chat(ctx, req, onDelta)
-	case err != nil && isThinkUnsupported(err) && !p.thinkRefused(req.Model):
-		// This model cannot think; ask again without the key, once, and
-		// remember it for the rest of the session.
-		p.refuseThink(req.Model)
-		return p.nativeChat(ctx, req, onDelta)
+	}
+	// Only a request that actually sent a think key can be a think refusal.
+	if sent, level := p.thinkFor(req); sent {
+		cannot, noLevels := thinkRefusal(err, level)
+		if cannot || noLevels {
+			p.refuseThink(req.Model, cannot, noLevels)
+			return p.nativeChat(ctx, req, onDelta) // once, without what was refused
+		}
 	}
 	return resp, err
 }
 
-func (p *Ollama) thinkRefused(model string) bool {
+// NativeFallback reports whether this session has given up on /api/chat and
+// is running on the OpenAI-compatible endpoint, where num_ctx cannot be set.
+// The agent turns it into one notice: a degraded session must not look
+// exactly like a healthy one.
+func (p *Ollama) NativeFallback() bool { return p.nativeBroken.Load() }
+
+func (p *Ollama) thinkState(model string) (cannotThink, noLevels bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.noThink[model]
+	return p.noThink[model], p.noThinkLevels[model]
 }
 
-func (p *Ollama) refuseThink(model string) {
+func (p *Ollama) refuseThink(model string, cannotThink, noLevels bool) {
 	p.mu.Lock()
-	if p.noThink == nil {
-		p.noThink = map[string]bool{}
+	defer p.mu.Unlock()
+	if cannotThink {
+		if p.noThink == nil {
+			p.noThink = map[string]bool{}
+		}
+		p.noThink[model] = true
 	}
-	p.noThink[model] = true
-	p.mu.Unlock()
+	if noLevels {
+		if p.noThinkLevels == nil {
+			p.noThinkLevels = map[string]bool{}
+		}
+		p.noThinkLevels[model] = true
+	}
+}
+
+// thinkFor decides the think key for one request: whether to send it at
+// all, and whether as a level rather than a bare false.
+func (p *Ollama) thinkFor(req ChatRequest) (send, level bool) {
+	cannotThink, noLevels := p.thinkState(req.Model)
+	switch {
+	case cannotThink:
+		return false, false
+	case req.NoThink:
+		return true, false
+	case req.ReasoningEffort != "" && !noLevels:
+		return true, true
+	}
+	return false, false
 }
 
 func (p *Ollama) nativeChat(ctx context.Context, req ChatRequest, onDelta StreamFunc) (*ChatResponse, error) {
@@ -282,14 +356,13 @@ func (p *Ollama) nativeChat(ctx context.Context, req ChatRequest, onDelta Stream
 	// own compatibility layer translates one into the other), so the native
 	// path must carry it or a thinking model loses the harness's control of
 	// its reasoning budget. It is never sent as a bare true: leaving the key
-	// out gives every model its own default, and a model that cannot think
-	// at all is remembered below rather than asked twice.
-	if !p.thinkRefused(req.Model) {
-		switch {
-		case req.NoThink:
-			body["think"] = false
-		case req.ReasoningEffort != "":
+	// out gives every model its own default, and a model or server that has
+	// refused the key is remembered rather than asked twice.
+	if send, level := p.thinkFor(req); send {
+		if level {
 			body["think"] = req.ReasoningEffort
+		} else {
+			body["think"] = false
 		}
 	}
 	if len(req.Tools) > 0 {
