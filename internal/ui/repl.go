@@ -110,6 +110,9 @@ func (r *REPL) approve(action, detail string) bool {
 		}
 		fmt.Println(yell("file change:"))
 		fmt.Println(ColorizeDiff(detail, useColor))
+	case "model_reload":
+		// Not this workspace: a server other people may be using.
+		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
@@ -122,6 +125,15 @@ func (r *REPL) approve(action, detail string) bool {
 			r.Cfg.AutoApproveShell = true
 		case "file_write":
 			r.Cfg.ApproveFileWrites = false
+		case "model_reload":
+			// Standing consent for this machine's server, persisted: it is a
+			// statement about the server, not about one run.
+			r.Cfg.ReloadOnMismatch = "always"
+			if err := r.Cfg.Save(); err != nil {
+				fmt.Println(dim("could not save reload_on_mismatch: " + err.Error()))
+			} else {
+				fmt.Println(dim("reload_on_mismatch: always (config saved)"))
+			}
 		case "consult":
 			// Session-wide consent for this one co-worker, recorded on the
 			// agent and never in the config file — the same rule the TUI's
@@ -497,7 +509,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			break
 		}
 		r.Provider = p
-		r.Agent.Provider = p
+		r.Agent.SetProvider(p)
 		r.Agent.SetModel(provider.ResolveModel(r.Cfg, fields[1], ""))
 		fmt.Printf("provider set to %s (model %s)\n", p.Name(), r.Agent.Model)
 	case "/sessions":

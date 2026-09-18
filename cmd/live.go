@@ -27,11 +27,13 @@ import (
 )
 
 // hostStartTimeout bounds how long the launcher waits for the spawned host
-// to open its socket. It has to cover buildAgent, whose slowest step is
-// asking an Ollama backend for the model's context window — that loads the
-// model when it is not resident, under a four-minute deadline of its own
-// (see applyBackendWindow) — so this must be longer than that. The wait is
-// not silent: the host's log is streamed while it starts.
+// to open its socket. It has to cover buildAgent, which since the loader
+// landed no longer loads a model to read its window (see applyModelParams):
+// the slowest steps left are spawning MCP servers and scanning the
+// workspace. The generous bound stays because a cold NFS checkout or a
+// stalled MCP server is still slow, and failing a session start for
+// impatience is worse than waiting. The wait is not silent: the host's log
+// is streamed while it starts.
 const hostStartTimeout = 5 * time.Minute
 
 // quitWait is how long `sessions kill` waits quietly for a host to shut

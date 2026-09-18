@@ -43,11 +43,17 @@ type Ollama struct {
 
 // Options carries what the harness controls on the native path. Zero fields
 // are omitted, so a zero Options sends {} and the server's defaults stand.
+// There is deliberately no Temperature here. A request always names one
+// (the agent resolves config and profile into ChatRequest.Temperature before
+// the call), so a provider-level default could only ever fight it — and the
+// one request that most needs to win, a deliberate 0 for determinism, is
+// exactly the one an "is it set?" test on a float64 cannot tell from an
+// absent value. A config that really wants to pin temperature per endpoint
+// says so in Extra, which is merged last and overrides everything.
 type Options struct {
-	NumCtx      int            `json:"num_ctx,omitempty"`
-	Temperature float64        `json:"temperature,omitempty"`
-	NumPredict  int            `json:"num_predict,omitempty"`
-	Extra       map[string]any `json:"-"` // merged in last, from config
+	NumCtx     int            `json:"num_ctx,omitempty"`
+	NumPredict int            `json:"num_predict,omitempty"`
+	Extra      map[string]any `json:"-"` // merged in last, from config
 }
 
 // NewOllama derives the native API base from the configured base URL, which
@@ -118,11 +124,10 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	}
 	// Temperature is always on the wire, as it is on the OpenAI path: a
 	// deliberate 0 is a real setting (determinism), not an absent one. The
-	// configured value only fills in for a request that named none.
+	// request is the authority — nothing configured fills in over it, or the
+	// harness's own low-temperature calls (compaction, handoff, review)
+	// would silently run at someone's chat setting.
 	m["temperature"] = req.Temperature
-	if req.Temperature == 0 && o.Temperature != 0 {
-		m["temperature"] = o.Temperature
-	}
 	switch {
 	case req.MaxTokens > 0:
 		m["num_predict"] = req.MaxTokens
@@ -222,9 +227,14 @@ func (e *httpError) Error() string {
 // The status code alone is not enough, because a current Ollama answers a
 // model it has not pulled with 404 {"error":"model \"m\" not found, try
 // pulling it first"}: a mistyped model name would otherwise turn the native
-// path off for the whole session, and back on for nothing. So the body must
-// look like a router's, not an application's — Go's own mux says "404 page
-// not found", a proxy or a bare server may say nothing at all.
+// path off for the whole session, and back on for nothing.
+//
+// So the test is the other way round: a 404 is the application's only when
+// the body is JSON carrying an "error". Everything else — an empty body, Go's
+// own "404 page not found", and above all the HTML error page an nginx or
+// Apache in front of a genuinely old Ollama returns — is a router saying the
+// route is not there, and downgrading is the only way such a session ever
+// works at all.
 func isNativeUnsupported(err error) bool {
 	var he *httpError
 	if !errors.As(err, &he) {
@@ -236,8 +246,14 @@ func isNativeUnsupported(err error) bool {
 		// these; both mean the route is not wired up.
 		return true
 	case http.StatusNotFound:
-		body := strings.ToLower(strings.TrimSpace(he.Body))
-		return body == "" || strings.Contains(body, "page not found")
+		body := strings.TrimSpace(he.Body)
+		var payload struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(body), &payload) == nil && strings.TrimSpace(payload.Error) != "" {
+			return false // Ollama itself, refusing this request
+		}
+		return true
 	}
 	return false
 }

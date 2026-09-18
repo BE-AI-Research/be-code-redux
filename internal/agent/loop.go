@@ -230,6 +230,20 @@ func (a *Agent) applyModel(model string) {
 	}
 }
 
+// SetProvider switches the backend mid-session. It exists so the notices
+// that describe *a* backend cannot outlive the backend they described: a
+// session that downgraded to the OpenAI path, or lost its model to an
+// eviction, has said so once — and if the user then picks a different
+// provider, the same thing happening there is news again. Assigning
+// a.Provider directly leaves those latches set and the second downgrade
+// silent, which is how a session ends up quietly unable to set its context
+// window with nothing on screen to say so.
+func (a *Agent) SetProvider(p provider.Provider) {
+	a.Provider = p
+	a.nativeFallbackNotified = false
+	a.unloadedNotified = false
+}
+
 // SetModel switches models mid-session, refreshing the profile.
 func (a *Agent) SetModel(model string) {
 	a.applyModel(model)

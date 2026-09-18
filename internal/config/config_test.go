@@ -180,3 +180,87 @@ func TestEngineDefaultsAndLoadFill(t *testing.T) {
 		t.Fatalf("load fill: %+v", cfg.Engine)
 	}
 }
+
+func TestEngineCapsDefaultAndLoadFill(t *testing.T) {
+	d := Default()
+	if d.Engine.ItemCap != 4096 || d.Engine.NodeCap != 32768 {
+		t.Fatalf("defaults: %+v", d.Engine)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"),
+		[]byte(`{"engine":{"item_cap":0,"node_cap":0}}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Engine.ItemCap != 4096 || cfg.Engine.NodeCap != 32768 {
+		t.Fatalf("load fill: %+v", cfg.Engine)
+	}
+}
+
+// TestReloadOnMismatchDefaultsToAsk: the gate that protects a shared server
+// must never come up missing. An older config file has no such key, and the
+// absent value has to mean "ask", not "do it".
+func TestReloadOnMismatchDefaultsToAsk(t *testing.T) {
+	if got := Default().ReloadOnMismatch; got != "ask" {
+		t.Fatalf("default %q", got)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"),
+		[]byte(`{"model":"m","reload_on_mismatch":""}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReloadOnMismatch != "ask" {
+		t.Fatalf("load fill: %q", cfg.ReloadOnMismatch)
+	}
+}
+
+// TestModelAndProviderParametersRoundTrip: the shapes the loader reads must
+// survive a save/load cycle, keys and all.
+func TestModelAndProviderParametersRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := Default()
+	cfg.Providers["lan"] = ProviderConfig{
+		Type: "ollama", BaseURL: "http://192.168.1.150:11434",
+		ContextWindow: 32768, KeepAlive: "30m",
+		Options: map[string]any{"temperature": 0.6},
+	}
+	cfg.Models = map[string]ModelConfig{
+		"qwen3:8b": {ContextWindow: 16384, KeepAlive: "10m", Options: map[string]any{"top_k": float64(40)}},
+	}
+	cfg.ReloadOnMismatch = "always"
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := got.Providers["lan"]
+	if pc.ContextWindow != 32768 || pc.KeepAlive != "30m" || pc.Options["temperature"] != 0.6 {
+		t.Fatalf("provider block: %+v", pc)
+	}
+	mc := got.Models["qwen3:8b"]
+	if mc.ContextWindow != 16384 || mc.KeepAlive != "10m" || mc.Options["top_k"] != float64(40) {
+		t.Fatalf("model block: %+v", mc)
+	}
+	if got.ReloadOnMismatch != "always" {
+		t.Fatalf("reload_on_mismatch: %q", got.ReloadOnMismatch)
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".be-code", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"context_window", "keep_alive", "options", "models", "reload_on_mismatch"} {
+		if !strings.Contains(string(b), key) {
+			t.Fatalf("%q missing from the written config:\n%s", key, b)
+		}
+	}
+}

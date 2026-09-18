@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MCPServer configures one stdio MCP tool server.
@@ -69,6 +70,29 @@ type ProviderConfig struct {
 	APIKeyEnv string `json:"api_key_env,omitempty"`
 	// DefaultModel used when the top-level model is unset for this provider.
 	DefaultModel string `json:"default_model,omitempty"`
+	// ContextWindow is the num_ctx the harness sends on the native Ollama
+	// path for every model on this endpoint. Set, it means no probe: the
+	// user has told us the answer, and asking the server can cost minutes
+	// when it has to load the model to find out. Overridden per model by a
+	// Models entry. Ignored for type "openai", which has no such knob.
+	ContextWindow int `json:"context_window,omitempty"`
+	// KeepAlive overrides the top-level keep_alive for this endpoint (a Go
+	// duration string; "0" disables residency).
+	KeepAlive string `json:"keep_alive,omitempty"`
+	// Options are passed through to Ollama's options block untouched, so a
+	// config can reach keys the harness knows nothing about (top_k, top_p,
+	// repeat_penalty...). A Models entry's Options override these key by key.
+	Options map[string]any `json:"options,omitempty"`
+}
+
+// ModelConfig carries one model's runtime parameters. Parameters belong to
+// the model rather than to the endpoint serving it, so these win over the
+// provider block. The key is the model name exactly as the backend spells
+// it (tag included).
+type ModelConfig struct {
+	ContextWindow int            `json:"context_window,omitempty"`
+	KeepAlive     string         `json:"keep_alive,omitempty"`
+	Options       map[string]any `json:"options,omitempty"`
 }
 
 // Config is the persisted tool configuration.
@@ -76,6 +100,21 @@ type Config struct {
 	DefaultProvider string                    `json:"default_provider"`
 	Model           string                    `json:"model"`
 	Providers       map[string]ProviderConfig `json:"providers"`
+
+	// Models holds per-model runtime parameters (context window, keep-alive,
+	// passthrough options), keyed by model name. Resolution order for one
+	// model is: this map, else the provider block, else a probe of the
+	// backend. See internal/loader.
+	Models map[string]ModelConfig `json:"models,omitempty"`
+
+	// ReloadOnMismatch decides what happens when a model is already resident
+	// with a window other than the configured one. Sending a different
+	// num_ctx makes Ollama reload the model, evicting whatever else on that
+	// box was using it, so this is a server change and not ours to make
+	// unasked: "ask" (the default) puts it through the approval seam,
+	// "never" runs inside the window the server already has, "always" is
+	// standing consent for this machine's server.
+	ReloadOnMismatch string `json:"reload_on_mismatch,omitempty"` // ask | always | never
 
 	// Agent tuning
 	Temperature float64 `json:"temperature"`
@@ -278,6 +317,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		KeepAlive:        "30m",
+		ReloadOnMismatch: "ask",
 		CompactWithModel: true,
 		RepoMap:          true,
 		RepoMapBudget:    6144,
@@ -386,6 +426,11 @@ func Load() (*Config, error) {
 	}
 	if cfg.Engine.Tools == "" {
 		cfg.Engine.Tools = "full"
+	}
+	// An older file, or one written by hand, has no reload_on_mismatch. The
+	// absent value must mean "ask": a missing consent gate is not a yes.
+	if strings.TrimSpace(cfg.ReloadOnMismatch) == "" {
+		cfg.ReloadOnMismatch = "ask"
 	}
 	return cfg, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/loader"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
@@ -259,7 +260,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
-	applyBackendWindow(cfg, p, ag, model)
+	applyModelParams(cfg, p, reg, ag, model)
 	return p, ag, nil
 }
 
@@ -337,42 +338,60 @@ func usePlainUI(cfg *config.Config) bool {
 	return flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 }
 
-// applyBackendWindow asks an Ollama backend what context window it will
-// really use for the model and clamps the history budget to it. Ollama's
-// OpenAI endpoint cannot set num_ctx per request and silently truncates
-// oversized prompts, so a budget larger than the window means the model
-// quietly loses its instructions and history.
-func applyBackendWindow(cfg *config.Config, p provider.Provider, ag *agent.Agent, model string) {
-	o, ok := p.(*provider.Ollama)
-	if !ok {
+// sessionLoader is this session's model-parameter loader: the one place a
+// model's context window, keep-alive and options block are decided, and the
+// one place num_ctx reaches the wire. Later callers (a model switch, a
+// recovery after the backend-status check trips) reach it here.
+var sessionLoader *loader.Loader
+
+// applyModelParams resolves the model's parameters through the loader and
+// budgets the session against the window it actually gets.
+//
+// This replaces the startup probe that used to live here, which asked an
+// Ollama backend what window it would use and, when nothing could answer,
+// *loaded the model* to find out — a multi-minute stall before the first
+// prompt, under a four-minute deadline. A configured context_window now
+// means no probe at all; an unconfigured one costs two cheap reads.
+//
+// Consent is read through the registry at the moment it is needed, not
+// captured now. Nothing has wired an approver during buildAgent, which is
+// deliberate: reloading a model on a shared server evicts whatever else is
+// using it, and a session must not be able to do that before anyone is
+// watching. Startup therefore keeps whatever window the server already has.
+func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Registry, ag *agent.Agent, model string) {
+	ld := loader.New(p, cfg, nil, func(s string) { fmt.Fprintf(os.Stderr, "warn: %s\n", s) })
+	ld.Approver = func() tools.ApproveFunc { return reg.Approve }
+	sessionLoader = ld
+
+	n, err := ld.Apply(context.Background(), model)
+	if _, isOllama := p.(*provider.Ollama); !isOllama {
+		return // nothing to set and nothing to read: no window to report
+	}
+	configured := ld.Params(model).Window > 0
+	if err != nil || n == 0 {
+		// Only news when nothing was configured; with a window in config the
+		// loader has already said why it could not be used.
+		if !configured {
+			budget := cfg.ContextTokens
+			if budget <= 0 {
+				budget = ag.History.Budget
+			}
+			fmt.Fprintf(os.Stderr, "warn: could not determine the backend context window; using a budget of %d tokens.\n"+
+				"      Set \"context_window\" for this model in config to say what it really is.\n", budget)
+		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-	n, err := o.ContextLength(ctx, model)
-	if err != nil {
-		return // unreachable backend: the first request will report it
-	}
-	if n == 0 {
-		// Not loaded and no Modelfile num_ctx: load it now (the first
-		// request would anyway) so /api/ps can report the live window.
-		fmt.Fprintf(os.Stderr, "loading %s to read its context window...\n", model)
-		keep := 30 * time.Minute
-		if d, err := time.ParseDuration(cfg.KeepAlive); err == nil && d > 0 {
-			keep = d
+	// The clamp warning is only news when the server won. A window the user
+	// configured is the answer they chose, and the loader has already said
+	// so if the server refused to give it up.
+	if ag.ApplyWindow(n) && !configured {
+		want := cfg.ContextTokens
+		if want <= 0 {
+			want = n
 		}
-		if werr := o.Warm(ctx, model, keep); werr == nil {
-			n, _ = o.ContextLength(ctx, model)
-		}
-	}
-	if n == 0 {
-		fmt.Fprintf(os.Stderr, "warn: could not determine the backend context window; using context_tokens=%d\n", cfg.ContextTokens)
-		return
-	}
-	if ag.ApplyWindow(n) {
-		fmt.Fprintf(os.Stderr, "warn: backend context window is %d tokens, below context_tokens=%d; budget clamped to %d.\n"+
-			"      Raise the window on the server (OLLAMA_CONTEXT_LENGTH=%d, or a Modelfile with PARAMETER num_ctx %d).\n",
-			n, cfg.ContextTokens, n, cfg.ContextTokens, cfg.ContextTokens)
+		fmt.Fprintf(os.Stderr, "warn: model %s runs with a %d-token window; budget clamped to %d.\n"+
+			"      Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.\n",
+			model, n, n, want)
 	}
 }
 

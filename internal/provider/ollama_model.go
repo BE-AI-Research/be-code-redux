@@ -193,17 +193,30 @@ func (p *Ollama) Running(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
+// Resident reports whether the model is held in memory right now and, if so,
+// the window it was loaded with. It reads /api/ps and nothing else: a caller
+// that already knows the window it wants must be able to ask who is holding
+// the model without the Modelfile probe — or, worse, a load — that answering
+// "what window should I use?" can cost.
+func (p *Ollama) Resident(ctx context.Context, model string) (int, bool, error) {
+	ps, err := p.running(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, m := range ps {
+		if m.Name == model || m.Model == model {
+			return m.ContextLength, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
 // Status reports the live window and residency of model: loaded=true with
 // the /api/ps window when resident, else loaded=false with the Modelfile
 // num_ctx (0 if unknown).
 func (p *Ollama) Status(ctx context.Context, model string) (int, bool, error) {
-	ps, err := p.running(ctx)
-	if err == nil {
-		for _, m := range ps {
-			if m.Name == model || m.Model == model {
-				return m.ContextLength, true, nil
-			}
-		}
+	if n, resident, err := p.Resident(ctx, model); err == nil && resident {
+		return n, true, nil
 	}
 	n, err := p.ContextLength(ctx, model)
 	return n, false, err

@@ -561,7 +561,7 @@ func (m *View) showAsk(a *ask) {
 	m.modalVP = viewport.New(m.width-6, m.modalHeight())
 	switch a.Kind {
 	case askApproval:
-		if a.Action == "consult" {
+		if a.Action == "consult" || a.Action == "model_reload" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -643,6 +643,17 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.Action == "shell" {
 			m.cfg.AutoApproveShell = true
 			ans = askAnswer{OK: true, Note: "shell auto-approve enabled for this session"}
+		} else if a.Action == "model_reload" {
+			// Standing consent for this machine's server, persisted because
+			// it is a statement about the server rather than about one run:
+			// "this box is mine to reshape". It is not consent to send code
+			// anywhere, which is why it is a key of its own.
+			m.cfg.ReloadOnMismatch = "always"
+			if err := m.cfg.Save(); err != nil {
+				ans = askAnswer{OK: true, Note: "reloading; could not save reload_on_mismatch: " + err.Error()}
+			} else {
+				ans = askAnswer{OK: true, Note: "reload_on_mismatch: always (config saved)"}
+			}
 		} else if a.Action == "consult" {
 			// Session-wide consent for this one co-worker, recorded on the
 			// agent (never in the config file): a standing "yes" to sending
@@ -1040,6 +1051,12 @@ func (m *View) viewAsk() string {
 		// whose it is.
 		title = "Co-working model"
 		hint = "y allow this · n decline · a allow " + agent.ConsentCoworker(a.Detail) + " for the session · ↑↓ scroll"
+	case "model_reload":
+		// This one is not about this workspace at all: it reloads a model on
+		// a server other people may be using, so the words have to say whose
+		// machine is being changed rather than whose file.
+		title = "Reload the model on the server"
+		hint = "y reload · n keep the loaded window · a always reload on this server · ↑↓ scroll"
 	}
 	if m.compact() {
 		hint = "y/n/a · ↑↓"
@@ -1596,7 +1613,7 @@ func (m *View) setProvider(name string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.prov = p
-	m.ag.Provider = p
+	m.ag.SetProvider(p)
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
 	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
 	return m, m.pingCmd()

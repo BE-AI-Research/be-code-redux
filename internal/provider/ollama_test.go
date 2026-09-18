@@ -409,3 +409,96 @@ func TestDetailsMergeTagsAndResident(t *testing.T) {
 		t.Fatalf("row: %+v", d[0])
 	}
 }
+
+// TestRequestTemperatureIsNeverOverriddenByConfig: a deliberate 0 is a real
+// setting — determinism — and the harness's own calls pick their temperature
+// on purpose. Nothing on the provider may fill in over them.
+func TestRequestTemperatureIsNeverOverriddenByConfig(t *testing.T) {
+	var opts []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		o, _ := b["options"].(map[string]any)
+		opts = append(opts, o)
+		w.Write([]byte(`{"message":{"content":"ok"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	p.SetOptions(Options{NumCtx: 8192, Extra: map[string]any{"top_k": 40}})
+
+	for _, want := range []float64{0, 0.1, 0.7} {
+		if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Temperature: want}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, want := range []float64{0, 0.1, 0.7} {
+		if got := opts[i]["temperature"]; got != want {
+			t.Fatalf("request %d asked for %v, sent %v", i, want, got)
+		}
+	}
+	if opts[0]["top_k"] != float64(40) {
+		t.Fatalf("passthrough options lost: %v", opts[0])
+	}
+}
+
+// TestPassthroughOptionsWinOverTheHarness: a config that really does want to
+// pin a value per endpoint says so in the options map, which is merged last.
+func TestPassthroughOptionsWinOverTheHarness(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		got, _ = b["options"].(map[string]any)
+		w.Write([]byte(`{"message":{"content":"ok"},"done":true,"done_reason":"stop"}` + "\n"))
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	p.SetOptions(Options{Extra: map[string]any{"temperature": 0.6}})
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Temperature: 0.2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got["temperature"] != 0.6 {
+		t.Fatalf("temperature = %v; the passthrough map is merged last", got["temperature"])
+	}
+}
+
+// TestProxyErrorPageDowngradesTheSession: an nginx or Apache in front of a
+// genuinely old Ollama answers /api/chat with an HTML 404. Refusing to
+// downgrade on it means the session never works at all — and the body is the
+// one thing that distinguishes it from Ollama's own JSON 404.
+func TestProxyErrorPageDowngradesTheSession(t *testing.T) {
+	for _, body := range []string{
+		"<html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx/1.24.0</center></body></html>",
+		"<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML 2.0//EN\">\n<html><head>\n<title>404 Not Found</title>\n</head></html>",
+		"Not Found",
+		"{}",
+	} {
+		var native, compat int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/chat":
+				native++
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusNotFound)
+				w.Write([]byte(body))
+			case "/v1/chat/completions":
+				compat++
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+			}
+		}))
+		p := NewOllama("t", srv.URL, "")
+		for i := 0; i < 2; i++ {
+			if _, err := p.Chat(context.Background(), ChatRequest{Model: "m"}, nil); err != nil {
+				t.Fatalf("%q: %v", body, err)
+			}
+		}
+		if native != 1 || compat != 2 {
+			t.Fatalf("%q: native %d, compat %d; the old server must be probed once", body, native, compat)
+		}
+		if !p.NativeFallback() {
+			t.Fatalf("%q: session not downgraded", body)
+		}
+		srv.Close()
+	}
+}

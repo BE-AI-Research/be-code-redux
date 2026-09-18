@@ -1,0 +1,381 @@
+package loader
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/tools"
+)
+
+// stub serves /api/ps and /api/show and counts what was asked of it.
+func stub(t *testing.T, ps, show string) (*httptest.Server, *int32) {
+	t.Helper()
+	var shows int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			w.Write([]byte(ps))
+		case "/api/show":
+			atomic.AddInt32(&shows, 1)
+			w.Write([]byte(show))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &shows
+}
+
+const psLoaded8k = `{"models":[{"name":"m","model":"m","context_length":8192}]}`
+const psEmpty = `{"models":[]}`
+
+// TestExplicitWindowSkipsTheProbe: the user configured a window, so the
+// loader must not ask the server what it should be — probing costs minutes
+// when it has to load the model to find out.
+func TestExplicitWindowSkipsTheProbe(t *testing.T) {
+	srv, shows := stub(t, psEmpty, `{"parameters":"num_ctx 4096"}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, refuse(t), func(string) {})
+	w, err := l.Apply(context.Background(), "m")
+	if err != nil || w != 32768 {
+		t.Fatalf("window %d err %v", w, err)
+	}
+	if atomic.LoadInt32(shows) != 0 {
+		t.Fatalf("probed %d times with an explicit window", *shows)
+	}
+}
+
+// TestNotResidentNeedsNoConsent: nothing is holding the model, so loading it
+// at our window evicts nobody and must not interrupt the user.
+func TestNotResidentNeedsNoConsent(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 32768 {
+		t.Fatalf("window %d", w)
+	}
+}
+
+// TestMismatchAsksBeforeChangingASharedServer: the model is loaded at 8192
+// and config wants 32768. Reloading would evict other applications, so the
+// loader asks; a refusal keeps the server's window.
+func TestMismatchAsksBeforeChangingASharedServer(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	var asked string
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg,
+		func(action, detail string) bool { asked = action + "|" + detail; return false },
+		func(string) {})
+	w, _ := l.Apply(context.Background(), "m")
+	if !strings.HasPrefix(asked, "model_reload|") {
+		t.Fatalf("did not ask: %q", asked)
+	}
+	if !strings.Contains(asked, "evicts") {
+		t.Fatalf("the prompt must say what it costs: %q", asked)
+	}
+	if w != 8192 {
+		t.Fatalf("a refusal must keep the server's window, got %d", w)
+	}
+}
+
+// TestNonInteractiveNeverPrompts: a headless run has no one to ask, and a
+// missing approver is a refusal, never a silent yes.
+func TestNonInteractiveNeverPrompts(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("window %d; a nil approver must mean no change", w)
+	}
+}
+
+// TestUnsetWindowFitsTheServer: with nothing configured the server is the
+// authority, which is 0.10.0's behaviour, now in one place.
+func TestUnsetWindowFitsTheServer(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	l := New(provider.NewOllama("t", srv.URL, ""), config.Default(), refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("window %d", w)
+	}
+}
+
+// TestPerModelOverridesTheProvider: the models map wins over the provider
+// block, because parameters belong to the model.
+func TestPerModelOverridesTheProvider(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: srv.URL, ContextWindow: 16384}
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 32768 {
+		t.Fatalf("window %d", w)
+	}
+}
+
+// TestWindowChangedByAnotherClientIsAdaptedTo: another client reloaded the
+// model. We re-derive our budget and leave theirs alone — a reload war
+// between two clients is the worst outcome available.
+func TestWindowChangedByAnotherClientIsAdaptedTo(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	var reloads int
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg,
+		func(string, string) bool { reloads++; return true }, func(string) {})
+	l.OnWindowChanged("m", 4096)
+	if reloads != 0 {
+		t.Fatalf("asked to reload %d times after someone else changed the window", reloads)
+	}
+}
+
+// refuse fails the test if consent is ever requested.
+func refuse(t *testing.T) tools.ApproveFunc {
+	return func(action, detail string) bool {
+		t.Fatalf("consent asked for when none was needed: %s %s", action, detail)
+		return false
+	}
+}
+
+// ---- beyond the brief ------------------------------------------------------
+
+// TestProviderBlockWindowIsUsedWhenNoModelEntry: the provider block is the
+// fallback, looked up by the provider's configured name.
+func TestProviderBlockWindowIsUsedWhenNoModelEntry(t *testing.T) {
+	srv, shows := stub(t, psEmpty, `{"parameters":"num_ctx 4096"}`)
+	cfg := config.Default()
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: srv.URL, ContextWindow: 16384}
+	l := New(provider.NewOllama("lan", srv.URL, ""), cfg, refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 16384 {
+		t.Fatalf("window %d", w)
+	}
+	if atomic.LoadInt32(shows) != 0 {
+		t.Fatalf("probed with an explicit provider window")
+	}
+}
+
+// TestAlwaysReloadsWithoutAsking: the user has already given standing
+// consent for this server, so a mismatch is simply applied.
+func TestAlwaysReloadsWithoutAsking(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.ReloadOnMismatch = "always"
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 32768 {
+		t.Fatalf("window %d", w)
+	}
+	if p.Options().NumCtx != 32768 {
+		t.Fatalf("num_ctx %d", p.Options().NumCtx)
+	}
+}
+
+// TestNeverKeepsTheServerWindowWithoutAsking: "never" is a standing no.
+func TestNeverKeepsTheServerWindowWithoutAsking(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.ReloadOnMismatch = "never"
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+	var notes []string
+	l := New(p, cfg, refuse(t), func(s string) { notes = append(notes, s) })
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("window %d", w)
+	}
+	// Our requests must ask for the window the model already has, or every
+	// one of them would reload it behind the user's back.
+	if p.Options().NumCtx != 8192 {
+		t.Fatalf("num_ctx %d; a declined reload must not be smuggled onto the wire", p.Options().NumCtx)
+	}
+	if len(notes) == 0 {
+		t.Fatalf("a silently clamped session is not acceptable")
+	}
+}
+
+// TestConsentIsRememberedForTheSession: saying yes once is not a reason to
+// ask again for the same model.
+func TestConsentIsRememberedForTheSession(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	asks := 0
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg,
+		func(string, string) bool { asks++; return true }, func(string) {})
+	for i := 0; i < 3; i++ {
+		if w, _ := l.Apply(context.Background(), "m"); w != 32768 {
+			t.Fatalf("window %d", w)
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("asked %d times for one model", asks)
+	}
+}
+
+// TestRefusalIsRememberedForTheSession: so is saying no.
+func TestRefusalIsRememberedForTheSession(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	asks := 0
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg,
+		func(string, string) bool { asks++; return false }, func(string) {})
+	for i := 0; i < 3; i++ {
+		if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+			t.Fatalf("window %d", w)
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("asked %d times after a no", asks)
+	}
+}
+
+// TestKeepAliveAndOptionsReachTheProvider: the loader is the one place a
+// model's parameters are decided, so keep_alive and the passthrough map
+// travel with the window.
+func TestKeepAliveAndOptionsReachTheProvider(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Providers["lan"] = config.ProviderConfig{
+		Type: "ollama", BaseURL: srv.URL,
+		KeepAlive: "10m", Options: map[string]any{"top_k": 40, "top_p": 0.9},
+	}
+	cfg.Models = map[string]config.ModelConfig{"m": {
+		ContextWindow: 32768, KeepAlive: "30m", Options: map[string]any{"top_p": 0.95},
+	}}
+	p := provider.NewOllama("lan", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	if _, err := l.Apply(context.Background(), "m"); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.Params("m").KeepAlive; got != 30*time.Minute {
+		t.Fatalf("keep_alive %v; the model entry must win", got)
+	}
+	o := p.Options()
+	if o.Extra["top_k"] != 40 {
+		t.Fatalf("provider option lost: %v", o.Extra)
+	}
+	if o.Extra["top_p"] != 0.95 {
+		t.Fatalf("model option must override the provider's: %v", o.Extra)
+	}
+}
+
+// TestNonOllamaProviderIsLeftAlone: only Ollama has a window to set.
+func TestNonOllamaProviderIsLeftAlone(t *testing.T) {
+	cfg := config.Default()
+	l := New(provider.NewOpenAICompat("x", "http://127.0.0.1:1/v1", ""), cfg, refuse(t), func(string) {})
+	if w, err := l.Apply(context.Background(), "m"); w != 0 || err != nil {
+		t.Fatalf("window %d err %v", w, err)
+	}
+}
+
+// TestEvictionNeedsNoConsent: nothing is holding the model, so the reload
+// the next request causes anyway carries our window.
+func TestEvictionNeedsNoConsent(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	l.OnEvicted(context.Background(), "m")
+	if p.Options().NumCtx != 32768 {
+		t.Fatalf("num_ctx %d after an eviction", p.Options().NumCtx)
+	}
+}
+
+// TestWindowChangedAdaptsOurOwnRequests: after another client's reload our
+// requests must carry their window, not ours, or every request reloads the
+// model back and the two clients fight.
+func TestWindowChangedAdaptsOurOwnRequests(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	l.OnWindowChanged("m", 4096)
+	if p.Options().NumCtx != 4096 {
+		t.Fatalf("num_ctx %d; we must run inside the window they chose", p.Options().NumCtx)
+	}
+}
+
+// TestWindowChangedWithStandingConsentReapplies: "always" is the one place
+// consent already exists, so our window goes back on the wire.
+func TestWindowChangedWithStandingConsentReapplies(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.ReloadOnMismatch = "always"
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	l.OnWindowChanged("m", 4096)
+	if p.Options().NumCtx != 32768 {
+		t.Fatalf("num_ctx %d", p.Options().NumCtx)
+	}
+}
+
+// TestUnreachableServerIsNotFatal: a backend that is not there yet leaves
+// the window unknown; the first real request reports the failure.
+func TestUnreachableServerIsNotFatal(t *testing.T) {
+	cfg := config.Default()
+	p := provider.NewOllama("t", "http://127.0.0.1:1", "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if w, _ := l.Apply(ctx, "m"); w != 0 {
+		t.Fatalf("window %d from an unreachable server", w)
+	}
+}
+
+// TestResidentWithAnUnreportedWindowIsNotReloaded: an older /api/ps lists
+// the model without a context_length. We cannot tell whether our num_ctx
+// would reload it, and guessing wrong evicts somebody, so nothing is sent
+// and nothing is asked.
+func TestResidentWithAnUnreportedWindowIsNotReloaded(t *testing.T) {
+	srv, _ := stub(t, `{"models":[{"name":"m","model":"m"}]}`, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768, Options: map[string]any{"top_k": 40}}}
+	p := provider.NewOllama("t", srv.URL, "")
+	var notes []string
+	l := New(p, cfg, refuse(t), func(s string) { notes = append(notes, s) })
+	w, err := l.Apply(context.Background(), "m")
+	if w != 0 || err != nil {
+		t.Fatalf("window %d err %v; an unknown window is unknown, not ours to set", w, err)
+	}
+	if p.Options().NumCtx != 0 {
+		t.Fatalf("num_ctx %d; sending one could reload a model somebody else is using", p.Options().NumCtx)
+	}
+	if p.Options().Extra["top_k"] != 40 {
+		t.Fatalf("passthrough options lost: %v", p.Options().Extra)
+	}
+	if len(notes) == 0 {
+		t.Fatal("no notice")
+	}
+}
+
+// TestPassthroughOptionsSurviveAnUnknownWindow: the window may be the
+// server's business, but the options map is ours either way.
+func TestPassthroughOptionsSurviveAnUnknownWindow(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Providers["lan"] = config.ProviderConfig{
+		Type: "ollama", BaseURL: srv.URL, Options: map[string]any{"top_k": 40},
+	}
+	p := provider.NewOllama("lan", srv.URL, "")
+	l := New(p, cfg, refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 0 {
+		t.Fatalf("window %d", w)
+	}
+	if p.Options().Extra["top_k"] != 40 {
+		t.Fatalf("passthrough options lost: %v", p.Options().Extra)
+	}
+}

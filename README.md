@@ -597,11 +597,41 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Config reference (`~/.be-code/config.json`)
 
-- `default_provider`, `model`, `providers{}` — backend selection
+- `default_provider`, `model`, `providers{}` — backend selection. A provider
+  block also carries the parameters every model on that endpoint runs with:
+  `providers.<name>.context_window` (the `num_ctx` BE-Code sends on Ollama's
+  native path), `providers.<name>.keep_alive` (overrides the top-level
+  `keep_alive` for this endpoint) and `providers.<name>.options` ({}), a map
+  passed through to Ollama's options block untouched, so config can reach keys
+  the harness knows nothing about (`top_k`, `top_p`, `repeat_penalty`...).
+  Ignored for `type: openai`, which has no such knob.
+- `models{}` ({}) — the same three keys per model, keyed by the model name
+  exactly as the backend spells it (tag included), e.g.
+  `"models": {"qwen3:8b": {"context_window": 32768, "keep_alive": "30m",
+  "options": {"top_k": 40}}}`. Parameters belong to the model, so these win
+  over the provider block; the `options` maps are merged key by key rather
+  than replaced. Resolution order for one model is: this map, else the
+  provider block, else a probe of the backend. **A configured
+  `context_window` means no probe at all** — no `/api/ps` read, no Modelfile
+  parse, and above all no loading the model to find out, which on a large
+  local model is minutes of startup for a number you already know.
+- `reload_on_mismatch` (`ask`) — `ask` | `always` | `never`. Sending a
+  `num_ctx` that differs from how a model is currently loaded makes Ollama
+  **reload it, evicting whatever else on that machine was using it**. That is
+  a change to a shared service, so `ask` (the default) puts it through the
+  same approval prompt as a shell command, under the action `model_reload`;
+  `a` at that prompt sets this key to `always`. `never` runs inside whatever
+  window the server already has. A headless or non-interactive run never
+  prompts: it keeps the loaded window, clamps its budget and says why.
+  When another client reloads the model underneath a running session,
+  BE-Code adapts to *their* window rather than reloading it back — a reload
+  war between two clients on a shared box is the worst outcome available.
 - `temperature` (0.2), `max_tokens`, `context_tokens` (16384) — generation/budget.
   `context_tokens` is the total prompt budget (system prompt, tools schema and
-  history) and is clamped to the backend's real window when BE-Code can read
-  it (Ollama: `/api/ps`, Modelfile `num_ctx`). Generation headroom is reserved
+  history) and is clamped to the window the session actually gets — the
+  configured `context_window` when there is one, otherwise what the backend
+  reports (Ollama: `/api/ps`, Modelfile `num_ctx`). Left at 0 it is simply the
+  window; set, it still wins, so existing configs keep behaving. Generation headroom is reserved
   from it: `max_tokens` if set, else a quarter of the window (1k–4k) for plain
   models or a third (4k–16k) for reasoning models, which think before they
   answer. The
