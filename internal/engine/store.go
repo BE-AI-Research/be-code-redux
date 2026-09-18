@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,11 +116,6 @@ type state struct {
 	Session   string               `json:"session,omitempty"`
 	Baseline  Baseline             `json:"baseline,omitempty"`
 	NotesHash string               `json:"notes_hash,omitempty"`
-	// Migrated records that the 0.10.0 ledger has been lifted and written
-	// out. It is set in the state before the flush that writes it, so an
-	// interrupt between that flush and the removal of the legacy files
-	// cannot migrate the same ledger a second time into a second task.
-	Migrated bool `json:"migrated,omitempty"`
 	// Files is what a Markdown document has no business carrying: the
 	// content hash and the outline of each file the record names. Without
 	// it the cross-session redundant-read check cannot fire at all (it
@@ -132,12 +128,29 @@ type fileMemo struct {
 	Hash    string   `json:"hash,omitempty"`
 	Outline []string `json:"outline,omitempty"`
 	Turn    int      `json:"turn,omitempty"`
-	// Node is the id of the node whose reference this hash belongs to. A
-	// hash says "these ranges describe this content"; handing the newest one
-	// to an older node's reference would make ranges that describe text
-	// since edited away read as current, which is precisely the false
-	// "already read" ruling T2-b exists to prevent.
-	Node string `json:"node,omitempty"`
+	// Node and Ranges together identify the reference this hash belongs to.
+	// A hash says "these ranges describe this content", so handing it to any
+	// other reference would make ranges measured against text since edited
+	// away read as current — the false "already read" ruling T2-b exists to
+	// prevent. An id alone is not enough: ids are positional, so a step
+	// deleted by hand shifts them and a stale reference can land on the
+	// owner's id. The ranges have to match too.
+	Node   string  `json:"node,omitempty"`
+	Ranges []Range `json:"ranges,omitempty"`
+}
+
+// sameRanges reports whether two range lists are identical. Both are kept
+// merged and sorted, so equality is elementwise.
+func sameRanges(a, b []Range) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Store is one workspace's working memory. One mutex guards everything;
@@ -169,7 +182,6 @@ type Store struct {
 	baseline Baseline
 	session  string
 	turn     int
-	migrated bool
 
 	lookups []Lookup // newest last; in memory only
 	cached  map[string]string
@@ -232,7 +244,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	if b, err := os.ReadFile(filepath.Join(dir, "notes.md")); err == nil {
 		s.notes = string(b)
 	}
-	s.turn, s.baseline, s.migrated = st.Turn, st.Baseline, st.Migrated
+	s.turn, s.baseline = st.Turn, st.Baseline
 	for name, h := range st.Docs {
 		s.docs[name] = h
 	}
@@ -244,13 +256,20 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 		s.markDirtyLocked()
 	}
 
+	// A ledger.json present is the whole test for "not migrated yet": the
+	// migration renames it aside rather than deleting it, so this is a fact
+	// about the filesystem and not a flag that could lag behind the tree.
 	ledger := filepath.Join(dir, "ledger.json")
 	if _, err := os.Stat(ledger); err == nil {
-		if s.migrated {
-			// Already lifted and written out; the process died before it
-			// could tidy up. Finish the tidying, never migrate again.
-			s.dropLegacy(ledger)
-		} else if err := s.migrateLedger(ledger); err != nil {
+		if err := s.migrateLedger(ledger); err != nil {
+			var retry retryableError
+			if errors.As(err, &retry) {
+				// The store was put back exactly as it was, so there is
+				// nothing half-converted to rename aside and the next open
+				// simply tries again.
+				fmt.Fprintf(os.Stderr, "warn: engine: could not migrate the working memory (%v); the 0.10.0 store is untouched and will be tried again\n", retry.err)
+				return s, nil
+			}
 			aside := dir + ".broken-" + stamp()
 			if rerr := os.Rename(dir, aside); rerr != nil {
 				return nil, err
@@ -384,7 +403,7 @@ func (s *Store) restoreFileMemos(memos map[string]fileMemo) {
 			if !ok {
 				continue
 			}
-			if f.Hash == "" && m.Node == n.ID {
+			if f.Hash == "" && m.Node == n.ID && sameRanges(f.Ranges, m.Ranges) {
 				f.Hash = m.Hash
 			}
 			if len(f.Outline) == 0 {
@@ -412,7 +431,7 @@ func (s *Store) fileMemosLocked() map[string]fileMemo {
 			if f.Path == "" || (f.Hash == "" && len(f.Outline) == 0) {
 				continue
 			}
-			m := fileMemo{Hash: f.Hash, Outline: f.Outline, Turn: f.Turn, Node: n.ID}
+			m := fileMemo{Hash: f.Hash, Outline: f.Outline, Turn: f.Turn, Node: n.ID, Ranges: f.Ranges}
 			if at, ok := seen[f.Path]; ok {
 				if f.Turn >= all[at].memo.Turn {
 					all[at].memo = m
@@ -706,7 +725,6 @@ func (s *Store) stateLocked(docs map[string]string) state {
 		Baseline:  s.baseline,
 		NotesHash: hashBytes([]byte(s.notes)),
 		Files:     s.fileMemosLocked(),
-		Migrated:  s.migrated,
 	}
 	if d := s.tree.Doing(); d != nil {
 		st.Active = d.ID

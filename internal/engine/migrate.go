@@ -2,19 +2,40 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
+// legacyFiles are the three 0.10.0 store files, in the order they are moved.
+var legacyFiles = []string{"ledger.json", "digests.json", "lookups.json"}
+
+// movedFile is one legacy file and where it was moved to, so a failed
+// migration can put it back exactly where it was.
+type movedFile struct{ from, to string }
+
+// retryableError marks a migration that failed after the store had been put
+// back exactly as it was. Nothing was converted, so the next open simply
+// tries again and the caller does not need its blunt rename-the-whole-store
+// net.
+type retryableError struct{ err error }
+
+func (e retryableError) Error() string { return e.err.Error() }
+func (e retryableError) Unwrap() error { return e.err }
+
 // migrateLedger lifts a 0.10.0 flat ledger into one task. Steps become
-// children, decisions and facts become notes on the task, digests and
-// lookups become its evidence, and the three legacy files are removed so
-// this runs exactly once. Nothing is discarded.
+// children, decisions and facts become notes on the task, and digests and
+// lookups become its evidence. Nothing is discarded.
 //
-// A failure here is handled by the caller, which renames the whole store
-// directory aside and starts fresh: a half-converted store is worse than
-// none, because it reads as complete.
+// The legacy files are renamed aside *before* anything is written, which is
+// what makes this run once: "has this been migrated?" becomes a fact about
+// the filesystem — no ledger.json, no migration — rather than a flag written
+// after the documents, which a kill in between could leave lagging behind
+// the tree it describes. And they are renamed, never removed (ruling T3-d),
+// so a ledger.json that turns up later — a downgrade, a restored backup — is
+// simply one that has not been migrated yet, and is lifted like any other
+// instead of being deleted unread.
 func (s *Store) migrateLedger(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -24,11 +45,31 @@ func (s *Store) migrateLedger(path string) error {
 	if err := json.Unmarshal(b, &l); err != nil {
 		return err
 	}
+	var digests []Digest
+	loadJSON(filepath.Join(s.dir, "digests.json"), &digests)
+	var lookups []Lookup
+	loadJSON(filepath.Join(s.dir, "lookups.json"), &lookups)
+
+	moved, err := s.setLegacyAside()
+	if err != nil {
+		return retryableError{err}
+	}
+
+	// Everything that follows is undone on a failed flush, so the store is
+	// left exactly as it was found.
+	roots, turn, baseline := len(s.tree.Roots), s.turn, s.baseline
+	undo := func(err error) error {
+		s.tree.Roots = s.tree.Roots[:roots]
+		s.turn, s.baseline = turn, baseline
+		restoreLegacy(moved)
+		return retryableError{err}
+	}
 
 	task := strings.TrimSpace(l.Task)
 	if task == "" && len(l.Steps) == 0 && len(l.Decisions) == 0 && len(l.Facts) == 0 {
-		// An empty ledger is not a task; there is nothing to lift.
-		return s.dropLegacy(path)
+		// An empty ledger is not a task; there is nothing to lift, and the
+		// files are already safely aside.
+		return nil
 	}
 	if task == "" {
 		task = "work carried over from an earlier session"
@@ -60,9 +101,6 @@ func (s *Store) migrateLedger(path string) error {
 	if l.Baseline != (Baseline{}) {
 		s.baseline = l.Baseline
 	}
-
-	var digests []Digest
-	loadJSON(filepath.Join(s.dir, "digests.json"), &digests)
 	for _, d := range digests {
 		if d.Path == "" {
 			continue
@@ -75,8 +113,6 @@ func (s *Store) migrateLedger(path string) error {
 			s.turn = d.Turn
 		}
 	}
-	var lookups []Lookup
-	loadJSON(filepath.Join(s.dir, "lookups.json"), &lookups)
 	for _, lk := range lookups {
 		n.Evidence.Lookups = append(n.Evidence.Lookups, LookupRef{
 			Tool: lk.Tool, Query: summariseKey(strings.TrimPrefix(lk.Query, lk.Tool+" ")), Hits: lk.Hits,
@@ -86,30 +122,55 @@ func (s *Store) migrateLedger(path string) error {
 		}
 	}
 
-	// Recorded before the flush that writes it, so the state on disk says
-	// "this ledger has been lifted" from the same moment the tree does. An
-	// interrupt after the flush and before the removal below then finds the
-	// flag and tidies up instead of migrating a second time.
-	s.migrated = true
 	s.markDirtyLocked()
-	// Write the lifted tree out before removing anything. Until this
-	// succeeds the migration exists only in memory, and the first Flush of a
-	// normal session does not happen until a request completes — so a Ctrl-C
-	// at the prompt would have taken the old store with it. On failure the
-	// originals are still there for the caller to rename aside.
+	// Write the lifted tree out now. Until this succeeds the migration
+	// exists only in memory, and a normal session does not flush until a
+	// request completes — so a Ctrl-C at the prompt would otherwise lose it.
 	if err := s.Flush(); err != nil {
-		return err
+		return undo(err)
 	}
-	return s.dropLegacy(path)
+	return nil
 }
 
-// dropLegacy removes the three 0.10.0 files, once the lifted tree is safely
-// on disk. Only the ledger's removal can fail the migration: it is what
-// decides whether this runs again.
-func (s *Store) dropLegacy(ledger string) error {
-	os.Remove(filepath.Join(s.dir, "digests.json"))
-	os.Remove(filepath.Join(s.dir, "lookups.json"))
-	return os.Remove(ledger)
+// setLegacyAside renames the 0.10.0 files out of the way under one stamp.
+// Nothing is deleted: the old store stays readable next to the new one.
+func (s *Store) setLegacyAside() ([]movedFile, error) {
+	at := stamp()
+	var moved []movedFile
+	for _, name := range legacyFiles {
+		from := filepath.Join(s.dir, name)
+		if _, err := os.Stat(from); err != nil {
+			continue
+		}
+		// os.Rename replaces the destination, and the stamp is only a
+		// second wide, so two migrations in the same second would destroy
+		// the first one's copy. Nothing is deleted here (ruling T3-d), so
+		// the name has to be free before we use it.
+		to := freeName(from + ".migrated-" + at)
+		if err := os.Rename(from, to); err != nil {
+			restoreLegacy(moved)
+			return nil, err
+		}
+		moved = append(moved, movedFile{from: from, to: to})
+	}
+	return moved, nil
+}
+
+// freeName is path, or path-2, path-3 … — the first that nothing occupies.
+func freeName(path string) string {
+	cand := path
+	for n := 2; ; n++ {
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+		cand = fmt.Sprintf("%s-%d", path, n)
+	}
+}
+
+func restoreLegacy(moved []movedFile) {
+	for _, m := range moved {
+		os.Rename(m.to, m.from)
+	}
 }
 
 func migratedStatus(s string) Status {

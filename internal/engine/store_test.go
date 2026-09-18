@@ -471,3 +471,71 @@ func TestAnEditedFileIsNotReportedAsAlreadyReadAcrossAReopen(t *testing.T) {
 		t.Fatalf("the reopen revived ranges describing text that is gone: %q", f)
 	}
 }
+
+// TestAHandDeletedStepDoesNotInheritAnothersHash: node ids are positional,
+// so deleting a step in an editor shifts every later sibling down. A file
+// memo pinned by id alone then lands on a different node's reference, and
+// dresses ranges measured against content that has since changed in the
+// current hash — "already read" for lines nobody saw. The ranges have to
+// match too.
+func TestAHandDeletedStepDoesNotInheritAnothersHash(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	oldSrc := "package a\nvar X = 1\n"
+	newSrc := "package a\nvar X = 2\n"
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("work", []string{"first", "current", "stale"})
+
+	// The third step read one line of the file as it was then.
+	writeFile(t, root, "a.go", oldSrc)
+	if err := s.SetStatus(id+".3", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.NextTurn()
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"},
+		Content: numbered("package a\n", 1)})
+
+	// The second step read the whole file after it changed, so it is the
+	// newest reference and owns the memo.
+	writeFile(t, root, "a.go", newSrc)
+	if err := s.SetStatus(id+".2", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.NextTurn()
+	s.NextTurn()
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"},
+		Content: numbered(newSrc, 1)})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The user deletes the first step in their editor; "stale" shifts into
+	// the id the memo recorded for "current".
+	path := filepath.Join(root, ".be-code", "tasks", "001-work.md")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.Contains(line, "1.1. first") {
+			kept = append(kept, line)
+		}
+	}
+	os.WriteFile(path, []byte(strings.Join(kept, "\n")), 0o644)
+
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.NextTurn()
+	f := again.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"},
+		Content: numbered("package a\n", 1)})
+	if f != "" {
+		t.Fatalf("a shifted step inherited another's hash: %q", f)
+	}
+}

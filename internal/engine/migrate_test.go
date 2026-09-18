@@ -109,43 +109,83 @@ func TestMigrationCarriesDigestsAndLookups(t *testing.T) {
 	}
 }
 
-// TestMigrationDoesNotRunTwiceAfterAnInterruptedTidyUp: the window between
-// the flush that writes the lifted tree and the removal of the legacy files.
-// Dying in there used to migrate the same ledger again on the next open,
-// giving two identical tasks and two documents.
-func TestMigrationDoesNotRunTwiceAfterAnInterruptedTidyUp(t *testing.T) {
+// TestMigrationIsIdempotentWithoutAnyFlag: ruling T3-d. The legacy files are
+// renamed aside before anything is written, so "has this been migrated?" is
+// a fact about the filesystem. Losing state.json entirely — the window in
+// which a flag written after the documents had not reached disk — must not
+// migrate the same ledger into a second task.
+func TestMigrationIsIdempotentWithoutAnyFlag(t *testing.T) {
 	root := t.TempDir()
 	dir := t.TempDir()
 	ledger := `{"task":"lift me","steps":[{"text":"one","status":"done"}],"session":"s0"}`
-	path := filepath.Join(dir, "ledger.json")
-	os.WriteFile(path, []byte(ledger), 0o600)
-
+	os.WriteFile(filepath.Join(dir, "ledger.json"), []byte(ledger), 0o600)
 	if _, err := OpenAt(dir, root, "s0", true, testLimits()); err != nil {
 		t.Fatal(err)
 	}
-	// Interrupted after the flush, before the removal: the ledger is still
-	// on disk exactly as it was.
-	os.WriteFile(path, []byte(ledger), 0o600)
 
+	// Renamed, not removed, and readable exactly as it was.
+	if _, err := os.Stat(filepath.Join(dir, "ledger.json")); !os.IsNotExist(err) {
+		t.Fatal("ledger.json should have been renamed aside")
+	}
+	aside, _ := filepath.Glob(filepath.Join(dir, "ledger.json.migrated-*"))
+	if len(aside) != 1 {
+		t.Fatalf("aside files: %v", aside)
+	}
+	if b, _ := os.ReadFile(aside[0]); string(b) != ledger {
+		t.Fatalf("the 0.10.0 ledger was not preserved intact: %s", b)
+	}
+
+	// The kill window no flag could cover: the documents are on disk and
+	// state.json never was.
+	os.Remove(filepath.Join(dir, "state.json"))
 	again, err := OpenAt(dir, root, "s1", false, testLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := again.Tree()
-	if len(tr.Roots) != 1 {
-		t.Fatalf("the ledger was migrated twice: %+v", tr.Roots)
+	if len(again.Tree().Roots) != 1 {
+		t.Fatalf("migrated a second time with no state.json: %+v", again.Tree().Roots)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("the second open should have finished the tidying it interrupted")
-	}
-	ents, _ := os.ReadDir(filepath.Join(root, ".be-code", "tasks"))
-	var docs []string
-	for _, e := range ents {
-		if e.Name() != "README.md" {
-			docs = append(docs, e.Name())
-		}
-	}
+	docs, _ := filepath.Glob(filepath.Join(root, ".be-code", "tasks", "0*.md"))
 	if len(docs) != 1 {
 		t.Fatalf("documents: %v", docs)
+	}
+}
+
+// TestARestoredLedgerIsLiftedNotLost: ruling T3-d. A ledger.json that turns
+// up after a migration — a downgrade, a restored backup — has simply not
+// been migrated yet. A permanent "migrated" flag deleted it unread, losing
+// whatever work it carried.
+func TestARestoredLedgerIsLiftedNotLost(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "ledger.json"),
+		[]byte(`{"task":"the first task","session":"s0"}`), 0o600)
+	if _, err := OpenAt(dir, root, "s0", true, testLimits()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A backup is restored, carrying work this store has never seen.
+	os.WriteFile(filepath.Join(dir, "ledger.json"),
+		[]byte(`{"task":"work from the backup","steps":[{"text":"one","status":"doing"}],"session":"s0"}`), 0o600)
+	again, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, r := range again.Tree().Roots {
+		texts = append(texts, r.Text)
+	}
+	found := false
+	for _, x := range texts {
+		if x == "work from the backup" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the restored ledger was discarded without being lifted: %v", texts)
+	}
+	// And it too was set aside rather than deleted.
+	if aside, _ := filepath.Glob(filepath.Join(dir, "ledger.json.migrated-*")); len(aside) != 2 {
+		t.Fatalf("aside files: %v", aside)
 	}
 }
