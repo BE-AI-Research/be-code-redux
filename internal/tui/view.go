@@ -1496,7 +1496,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.ag.Engine.ClearSession()
 			m.renderLocalNote("this session's open work is closed as dropped (reason: cleared); the task documents are untouched")
 		case len(args) > 0 && args[0] == "open":
-			m.renderLocalNote(m.ag.Engine.TasksDir())
+			if m.ag.Engine.HasTaskDocuments() {
+				m.renderLocalNote(m.ag.Engine.TasksDir())
+			} else {
+				m.renderLocalNote("no task documents yet; the first one will be written to " + m.ag.Engine.TasksDir())
+			}
 		default:
 			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
 		}

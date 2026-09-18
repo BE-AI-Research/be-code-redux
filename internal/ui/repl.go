@@ -626,7 +626,11 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Agent.Engine.ClearSession()
 			fmt.Println(dim("this session's open work is closed as dropped (reason: cleared); the task documents are untouched"))
 		case len(args) > 0 && args[0] == "open":
-			fmt.Println(r.Agent.Engine.TasksDir())
+			if r.Agent.Engine.HasTaskDocuments() {
+				fmt.Println(r.Agent.Engine.TasksDir())
+			} else {
+				fmt.Println(dim("no task documents yet; the first one will be written to " + r.Agent.Engine.TasksDir()))
+			}
 		default:
 			for _, line := range TaskLines(r.Agent.Engine, args) {
 				fmt.Println(line)

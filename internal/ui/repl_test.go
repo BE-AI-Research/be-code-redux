@@ -452,6 +452,28 @@ func TestPlainTaskCommands(t *testing.T) {
 	}
 }
 
+// TestPlainTaskOpenIsTruthfulBeforeAnythingIsWritten (fix round 1): before
+// any document has reached disk, "/task open" must not just print a
+// directory that does not exist yet as if it were an answer.
+func TestPlainTaskOpenIsTruthfulBeforeAnythingIsWritten(t *testing.T) {
+	r := newTestREPL(t)
+	st := testStoreFor(t, r)
+
+	out := capture(t, func() { r.command(context.Background(), "/task open") })
+	if !strings.Contains(out, "no task documents yet") || !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open before any document exists: %q", out)
+	}
+
+	st.Plan("fix the parser", []string{"find the bug"})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task open") })
+	if strings.Contains(out, "no task documents yet") || !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open once a document exists: %q", out)
+	}
+}
+
 func TestPlainResumeReplaysTheTranscript(t *testing.T) {
 	r := newTestREPL(t)
 	s := store.NewSession("null", "m", r.Agent.Tools.Root)

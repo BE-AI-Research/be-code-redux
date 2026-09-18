@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,102 @@ func TestQuarantineRatherThanOverwrite(t *testing.T) {
 	b, _ := os.ReadFile(glob[0])
 	if !strings.Contains(string(b), "not a status") {
 		t.Fatal("quarantined content was not preserved")
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	w.Close()
+	b, _ := io.ReadAll(r)
+	r.Close()
+	return string(b)
+}
+
+// TestWarnsOnMultipleDoingMarks (ruling T6-a): a hand-edited status is the
+// user's own intent (spec 5.2), so unlike a repaired id or a quarantined
+// document, the engine must not touch either document over two [>] marks —
+// it only says so, on stderr, naming both documents.
+func TestWarnsOnMultipleDoingMarks(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	s.Plan("first task", []string{"one", "two"})
+	s.Plan("second task", []string{"three"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	docA := filepath.Join(root, ".be-code", "tasks", "001-first-task.md")
+	docB := filepath.Join(root, ".be-code", "tasks", "002-second-task.md")
+	beforeA, err := os.ReadFile(docA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeB, err := os.ReadFile(docB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hand-mark the task itself doing in each document, the way a person
+	// would with an editor — the first "[ ]" in each file is that line.
+	os.WriteFile(docA, []byte(strings.Replace(string(beforeA), "[ ] ", "[>] ", 1)), 0o644)
+	os.WriteFile(docB, []byte(strings.Replace(string(beforeB), "[ ] ", "[>] ", 1)), 0o644)
+	afterA, _ := os.ReadFile(docA)
+	afterB, _ := os.ReadFile(docB)
+
+	var s2 *Store
+	stderr := captureStderr(t, func() {
+		s2, err = OpenAt(dir, root, "s2", false, testLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(stderr, "warn:") || !strings.Contains(stderr, "001-first-task.md") || !strings.Contains(stderr, "002-second-task.md") {
+		t.Fatalf("no warning naming both documents:\n%s", stderr)
+	}
+	// Neither document is touched: no id-repair note, no rewritten status —
+	// the files on disk are exactly what the hand edit left them as.
+	stillA, _ := os.ReadFile(docA)
+	stillB, _ := os.ReadFile(docB)
+	if string(stillA) != string(afterA) || string(stillB) != string(afterB) {
+		t.Fatal("the engine rewrote a document over a hand-marked doing status")
+	}
+	n := 0
+	tr := s2.Tree()
+	tr.Walk(func(node *Node, _ int) {
+		if node.Status == StatusDoing {
+			n++
+		}
+	})
+	if n != 2 {
+		t.Fatalf("both hand-marked steps should still read back doing, got %d", n)
+	}
+}
+
+// TestHasTaskDocuments: false until a document actually reaches disk, true
+// once Flush has written at least one — the test "/task open" uses to tell
+// a truthful "nothing here yet" from the directory it will use.
+func TestHasTaskDocuments(t *testing.T) {
+	s, _ := openTest(t, "s1", false)
+	if s.HasTaskDocuments() {
+		t.Fatal("no document has been written yet")
+	}
+	s.Plan("a task", []string{"one"})
+	if s.HasTaskDocuments() {
+		t.Fatal("a planned-but-unflushed task has not reached disk yet")
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.HasTaskDocuments() {
+		t.Fatal("a flushed task should count")
 	}
 }
 

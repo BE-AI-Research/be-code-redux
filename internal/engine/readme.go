@@ -43,9 +43,10 @@ If your project is a git repository, the first document written here adds
 shows up in ` + "`git status`" + ` uninvited. If you decide the task record
 is worth keeping in your project's history, delete that one line —
 ` + "`.be-code/`" + ` — from ` + "`.gitignore`" + ` and commit
-` + "`.be-code/tasks/`" + `. Outside a git repository this folder is not
-hidden from anything, because there is no ` + "`.gitignore`" + ` to add a
-line to.
+` + "`.be-code/tasks/`" + `. Outside a git repository nothing creates a
+` + "`.gitignore`" + ` for you, so this folder is not hidden from
+anything — unless a ` + "`.gitignore`" + ` is already there, in which case
+the same line is still added to it, git repository or not.
 
 ## The format
 
@@ -95,9 +96,10 @@ it carries a number, so ` + "`- [ ] buy milk`" + ` at the bottom of the file
 stays your own text; write ` + "`- [ ] 2. buy milk`" + ` if you want it
 tracked as one.
 
-The engine never renames or deletes a document once it exists, even when
-the task it describes is retitled — a document keeps its file for life, so
-its file name can drift out of step with the task's current title. The
+Short of quarantining one it cannot parse (below), the engine never renames
+or deletes a document once it exists, even when the task it describes is
+retitled — a document keeps its file for life, so its file name can drift
+out of step with the task's current title. The
 ` + "`# NNN — title`" + ` heading at the top is regenerated on every save
 and is the one to trust; the file name is only ever a label.
 
@@ -127,9 +129,15 @@ rename it back; nothing here is ever deleted.
 Exactly one step across the whole record should be marked ` + "`[>]`" + `
 doing at a time — it is how the model (and the harness's own summary of
 where things stand) knows what is in progress. The engine keeps this true
-on its own whenever it moves a step to doing. It does not, however, check
-or repair a document you hand-edit into having two: if you ever end up
-with more than one ` + "`[>]`" + ` across your documents, the engine simply
-goes with whichever it reads last and quietly ignores the rest, so it is
-worth keeping to one yourself when editing by hand.
+on its own whenever it moves a step to doing.
+
+It does not, however, choose for you: a hand-edited status is your own
+intent, so the engine never overrides one, even a second ` + "`[>]`" + `
+where only one belongs. If you end up with more than one, it simply uses
+whichever it reads last and ignores the rest. Unlike a repaired id or a
+quarantined document, there is no note to leave on either step for this —
+nothing is wrong with either one alone, only with having two — so instead
+the engine prints a line to the terminal every time it loads the record
+while more than one is marked doing, naming the documents involved. Nothing
+about your files changes; fixing it is one status mark away.
 `

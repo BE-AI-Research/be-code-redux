@@ -365,6 +365,45 @@ func (s *Store) loadDocs() {
 		}
 	}
 	s.repairRootIDs()
+	s.warnMultipleDoing()
+}
+
+// warnMultipleDoing tells the human, once per open, when more than one step
+// across the loaded documents is marked doing. Spec 5.2: a hand-written
+// status is the user's own intent, so unlike a repaired id or a quarantined
+// document, the engine changes neither document over this — it only says
+// so. Id repair gets a note in the file and quarantine gets a stderr line;
+// this has no single node to leave a note on (nothing is wrong with either
+// node in isolation, only with the pair), so stderr is the only place left
+// to say it.
+func (s *Store) warnMultipleDoing() {
+	var docs []string
+	seen := map[string]bool{}
+	total := 0
+	var walk func(n *Node, doc string)
+	walk = func(n *Node, doc string) {
+		if n.Status == StatusDoing {
+			total++
+			if !seen[doc] {
+				seen[doc] = true
+				docs = append(docs, doc)
+			}
+		}
+		for _, c := range n.Children {
+			walk(c, doc)
+		}
+	}
+	for i, r := range s.tree.Roots {
+		doc := ""
+		if i < len(s.files) {
+			doc = s.files[i]
+		}
+		walk(r, doc)
+	}
+	if total < 2 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warn: engine: %d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last\n", total, strings.Join(docs, ", "))
 }
 
 // repairRootIDs makes every root's id its position in the tree, noting the
@@ -611,6 +650,16 @@ func (s *Store) Dir() string { return s.dir }
 // never the dotdir Dir returns. s.root is set once at construction and
 // never changes, so this needs no lock.
 func (s *Store) TasksDir() string { return s.tasksDir() }
+
+// HasTaskDocuments reports whether at least one task document exists on
+// disk — the true test for "/task open": the tasks directory can exist
+// with nothing but README.md, or a reserved document emptied of every
+// bullet, and neither is a task record a person would find anything in.
+func (s *Store) HasTaskDocuments() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.docs) > 0
+}
 
 // Flush writes every task document, the dotdir state and the durable notes
 // when anything changed. The whole snapshot is taken under the lock; the
