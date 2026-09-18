@@ -157,5 +157,61 @@ func (t *Tree) ActiveBranch() []*Node {
 	return path
 }
 
-// Evidence is what a node accumulated while it was doing. Task 2 fills it.
-type Evidence struct{}
+// FileRef is the durable record of one file touched while a node was doing:
+// the ranges of it that were read, its hash and outline as of the last time
+// they were refreshed, and whether the node itself edited it.
+type FileRef struct {
+	Path    string   `json:"path"`
+	Hash    string   `json:"hash,omitempty"`
+	Ranges  []Range  `json:"ranges,omitempty"`
+	Edited  bool     `json:"edited,omitempty"`
+	Note    string   `json:"note,omitempty"`
+	Outline []string `json:"outline,omitempty"`
+}
+
+// CmdRef is the durable record of one shell/process invocation.
+type CmdRef struct {
+	Cmd     string `json:"cmd"`
+	OK      bool   `json:"ok"`
+	Excerpt string `json:"excerpt,omitempty"` // capped, first + last lines
+}
+
+// LookupRef is the durable record of one search/lookup/history call.
+type LookupRef struct {
+	Tool  string `json:"tool"`
+	Query string `json:"query"`
+	Hits  []Hit  `json:"hits,omitempty"`
+}
+
+// NoteRef is a fact or decision recorded against a node, optionally tied to
+// a file.
+type NoteRef struct {
+	Text     string `json:"text"`
+	File     string `json:"file,omitempty"`
+	Decision bool   `json:"decision,omitempty"`
+}
+
+// RawItem is one verbatim tool call and its output, kept only while its
+// node is doing. It lives in the dotdir state file, never in the workspace
+// document, because it is large and transient.
+type RawItem struct {
+	Tool string `json:"tool"`
+	Args string `json:"args,omitempty"`
+	Out  string `json:"out,omitempty"`
+	OK   bool   `json:"ok"`
+	Turn int    `json:"turn"`
+}
+
+// Evidence is what a node accumulates while it is doing (Raw, verbatim and
+// lossless) and what it is distilled into once the node closes (Files,
+// Cmds, Lookups, Notes, Errors). Raw is only ever non-empty while the node
+// is doing; distill empties it into the rest.
+type Evidence struct {
+	Files   []FileRef   `json:"files,omitempty"`
+	Cmds    []CmdRef    `json:"cmds,omitempty"`
+	Lookups []LookupRef `json:"lookups,omitempty"`
+	Notes   []NoteRef   `json:"notes,omitempty"`
+	Errors  []string    `json:"errors,omitempty"`
+	Raw     []RawItem   `json:"raw,omitempty"`     // only while doing
+	Dropped int         `json:"dropped,omitempty"` // raw items dropped to a cap
+}
