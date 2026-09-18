@@ -453,7 +453,8 @@ func TestConcurrentApplyAsksOnceAndAgrees(t *testing.T) {
 	p := provider.NewOllama("t", srv.URL, "")
 
 	var asks int32
-	l := New(p, cfg, func(string, string) bool {
+	var l *Loader
+	l = New(p, cfg, func(string, string) bool {
 		// Yes to the first caller, no to any other — the shape that used to
 		// leave one caller holding 32768 while the wire ended at 8192.
 		first := atomic.AddInt32(&asks, 1) == 1
@@ -487,4 +488,119 @@ func TestConcurrentApplyAsksOnceAndAgrees(t *testing.T) {
 	if got[0] != 32768 {
 		t.Fatalf("the answer given was yes; window %d", got[0])
 	}
+}
+
+// ---- fix round 2 -----------------------------------------------------------
+
+// TestUnconfiguredWindowNeverAdoptsTheModelfileOverALoadedModel: the model is
+// resident but /api/ps does not say at what size, so ContextLength falls back
+// to the Modelfile. A Modelfile describes the load that *would* happen, not
+// the one that already has: sending its 4096 for a model somebody else loaded
+// at something else reloads and evicts it, with nobody asked. With no
+// configured window there is not even a preference to put to the user, so the
+// only correct move is to leave the running model alone.
+func TestUnconfiguredWindowNeverAdoptsTheModelfileOverALoadedModel(t *testing.T) {
+	srv, shows := stub(t, `{"models":[{"name":"m","model":"m"}]}`, `{"parameters":"num_ctx 4096"}`)
+	cfg := config.Default() // no models entry, no provider context_window
+	p := provider.NewOllama("t", srv.URL, "")
+	var notes []string
+	l := New(p, cfg, refuse(t), func(s string) { notes = append(notes, s) })
+
+	w, err := l.Apply(context.Background(), "m")
+	if w != 0 || err != nil {
+		t.Fatalf("window %d err %v; a loaded model's window is not the Modelfile's", w, err)
+	}
+	if got := p.Options().NumCtx; got != 0 {
+		t.Fatalf("num_ctx %d went on the wire for a model that is loaded at something else", got)
+	}
+	if atomic.LoadInt32(shows) != 0 {
+		t.Fatalf("asked the Modelfile %d times about a model that is already loaded", *shows)
+	}
+	if len(notes) == 0 {
+		t.Fatal("no notice")
+	}
+}
+
+// TestUnconfiguredWindowStillAdoptsTheModelfileWhenNothingIsLoaded: nothing
+// is holding the model, so the Modelfile describes the load that is about to
+// happen and is safe to adopt. This is 0.10.0's behaviour and must survive.
+func TestUnconfiguredWindowStillAdoptsTheModelfileWhenNothingIsLoaded(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{"parameters":"num_ctx 4096"}`)
+	p := provider.NewOllama("t", srv.URL, "")
+	l := New(p, config.Default(), refuse(t), func(string) {})
+	if w, _ := l.Apply(context.Background(), "m"); w != 4096 {
+		t.Fatalf("window %d", w)
+	}
+	if p.Options().NumCtx != 4096 {
+		t.Fatalf("num_ctx %d", p.Options().NumCtx)
+	}
+}
+
+// TestUnconfiguredWindowWithAnUnreadableServerSendsNothing: the same rule as
+// the configured arm — an unknown is not a licence.
+func TestUnconfiguredWindowWithAnUnreadableServerSendsNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("<html>502</html>"))
+	}))
+	defer srv.Close()
+	p := provider.NewOllama("t", srv.URL, "")
+	var notes []string
+	l := New(p, config.Default(), refuse(t), func(s string) { notes = append(notes, s) })
+	if w, _ := l.Apply(context.Background(), "m"); w != 0 {
+		t.Fatalf("window %d", w)
+	}
+	if p.Options().NumCtx != 0 {
+		t.Fatalf("num_ctx %d", p.Options().NumCtx)
+	}
+	if len(notes) == 0 {
+		t.Fatal("no notice")
+	}
+}
+
+// TestWaitingForSomeoneElsesAnswerIsCancellable: an ask takes as long as a
+// person takes to read it. A caller parked behind one must stay cancellable,
+// or "somebody is being asked" becomes a hang with no way out — including
+// the shape that used to be a hard deadlock, a second Apply for the same
+// model raised from inside the approver.
+func TestWaitingForSomeoneElsesAnswerIsCancellable(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+
+	asking := make(chan struct{})
+	release := make(chan struct{})
+	var reentrant int
+	var reentrantWindow int
+	var l *Loader
+	l = New(p, cfg, func(string, string) bool {
+		// While this ask is open, a second caller wants the same model and
+		// gives up rather than waiting forever.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		reentrantWindow, _ = l2Apply(l, ctx, "m")
+		reentrant++
+		close(asking)
+		<-release
+		return true
+	}, func(string) {})
+
+	go func() { <-asking; close(release) }()
+	w, _ := l.Apply(context.Background(), "m")
+
+	if reentrant != 1 {
+		t.Fatalf("the nested call did not run (%d)", reentrant)
+	}
+	if reentrantWindow != 8192 {
+		t.Fatalf("a caller that gave up waiting got %d; it must keep what the server has", reentrantWindow)
+	}
+	if w != 32768 {
+		t.Fatalf("the answered call got %d", w)
+	}
+}
+
+// l2Apply exists only to make the nested call above read as what it is.
+func l2Apply(l *Loader, ctx context.Context, model string) (int, error) {
+	return l.Apply(ctx, model)
 }

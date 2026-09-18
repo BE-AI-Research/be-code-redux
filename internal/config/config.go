@@ -132,8 +132,8 @@ type Config struct {
 	// to disappear with nothing printed. A positive value is still an
 	// explicit cap and still wins, so existing files keep behaving.
 	ContextTokens int `json:"context_tokens,omitempty"`
-	MaxTurns        int    `json:"max_turns"`      // tool-loop iterations per request
-	MaxRepairs      int    `json:"max_repairs"`    // verification repair attempts
+	MaxTurns      int `json:"max_turns"`   // tool-loop iterations per request
+	MaxRepairs    int `json:"max_repairs"` // verification repair attempts
 
 	// CompatToolCalls forces prompt-embedded JSON tool calls for models
 	// whose native tool-call support is unreliable. "auto" tries native

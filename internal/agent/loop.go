@@ -130,7 +130,7 @@ type Agent struct {
 	// nativeFallbackNotified keeps the native-endpoint downgrade to one
 	// notice per session (see noteNativeFallback).
 	nativeFallbackNotified bool
-	repoMap          string
+	repoMap                string
 	// saveDisabled latches on when another live process is found to own the
 	// session file; saveOwner is its pid and saveWarned keeps the warning to
 	// one line per run (see SaveGuard, autosave).
@@ -253,9 +253,13 @@ func (a *Agent) SetModel(model string) {
 	if a.History != nil {
 		a.History.System.Content = a.composeSystem("")
 		// A thinking model needs a different reserve than a plain one.
+		// Before a real window is known the budget is the best stand-in:
+		// context_tokens is now routinely unset (it means "derive from the
+		// window"), and reserving against 0 would drop a thinking model from
+		// a 4096-token headroom to the 1024 floor.
 		w := a.Window
 		if w <= 0 {
-			w = a.Cfg.ContextTokens
+			w = a.History.Budget
 		}
 		a.applyReserve(w)
 	}

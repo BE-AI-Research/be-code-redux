@@ -384,14 +384,17 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// The clamp warning is only news when the server won. A window the user
 	// configured is the answer they chose, and the loader has already said
 	// so if the server refused to give it up.
+	//
+	// The budget is read *before* ApplyWindow because ApplyWindow overwrites
+	// it: the number worth naming in the advice is the one the session was
+	// going to use, not the one it has been cut down to, or the line reads
+	// "budget clamped to 4096 ... start the server with
+	// OLLAMA_CONTEXT_LENGTH=4096".
+	wanted := ag.History.Budget
 	if ag.ApplyWindow(n) && !configured {
-		want := cfg.ContextTokens
-		if want <= 0 {
-			want = n
-		}
 		fmt.Fprintf(os.Stderr, "warn: model %s runs with a %d-token window; budget clamped to %d.\n"+
 			"      Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.\n",
-			model, n, n, want)
+			model, n, n, wanted)
 	}
 	// The other direction, and the one that used to say nothing at all:
 	// context_tokens is below the window, so most of a window the user went

@@ -372,3 +372,29 @@ func TestSetProviderClearsTheEvictionLatch(t *testing.T) {
 		t.Fatalf("an eviction on a newly selected backend was silent: %v", *notes)
 	}
 }
+
+// TestSetModelReserveSurvivesAnUnsetContextTokens: context_tokens is now
+// routinely unset (it means "derive from the window"), so a SetModel before
+// any window is known must reserve against the budget rather than against a
+// literal 0 — which would drop a thinking model from 4096 tokens of
+// generation headroom to the 1024 floor and truncate its reasoning.
+func TestSetModelReserveSurvivesAnUnsetContextTokens(t *testing.T) {
+	p := &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.ContextTokens = 0 })
+	if ag.Window != 0 {
+		t.Fatalf("this test is about the no-window-yet case; window %d", ag.Window)
+	}
+	budget := ag.History.Budget
+	if budget <= 0 {
+		t.Fatalf("an unset context_tokens must still leave a usable budget; got %d", budget)
+	}
+	ag.SetModel("qwen3:8b") // a thinking model: a third of the budget, floored at 4096
+	if got, want := ag.History.Reserve, ag.reserveFor(budget); got != want {
+		t.Fatalf("reserve %d; with no window known it follows the budget (%d)", got, want)
+	}
+	if ag.History.Reserve <= 1024 {
+		t.Fatalf("reserve collapsed to the floor: %d", ag.History.Reserve)
+	}
+}

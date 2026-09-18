@@ -68,13 +68,14 @@ type Loader struct {
 	agreed map[string]bool // models the user has already answered for
 	asked  map[string]bool // models already put to the user this session
 	noted  map[string]bool // one notice per model, not one per request
-	// gates serializes reconcile per model. The decision maps alone are not
+	// inflight names the models with a consent ask in progress, each with a
+	// channel closed when it is answered. The decision maps alone are not
 	// enough: consent takes as long as a person takes to read it, and two
 	// callers that both find "not yet asked" would raise two modals and then
 	// race to write two answers, with the wire ending up on whichever landed
-	// last. The gate is held across the ask, so the second caller waits and
-	// then reads the first caller's answer.
-	gates map[string]*sync.Mutex
+	// last. Waiters block on the channel instead, and so read the answer that
+	// was actually given.
+	inflight map[string]chan struct{}
 }
 
 // New builds a loader for one provider. approve may be nil (a refusal);
@@ -83,7 +84,7 @@ func New(p provider.Provider, cfg *config.Config, approve tools.ApproveFunc, not
 	return &Loader{
 		prov: p, cfg: cfg, approve: approve, notice: notice,
 		agreed: map[string]bool{}, asked: map[string]bool{}, noted: map[string]bool{},
-		gates: map[string]*sync.Mutex{},
+		inflight: map[string]chan struct{}{},
 	}
 }
 
@@ -155,20 +156,7 @@ func (l *Loader) Apply(ctx context.Context, model string) (int, error) {
 		cancel()
 		switch {
 		case err != nil:
-			// /api/ps could not be read: the server is unreachable, behind a
-			// proxy answering 502, or simply slower than the probe timeout.
-			// That is an unknown, and an unknown is not a licence. Assuming
-			// the configured window here would put a num_ctx on the wire that
-			// reloads — and evicts — a model another application may be
-			// holding, without anyone being asked, which is the one thing
-			// this package exists to prevent. So: no window, a notice, and
-			// nothing latched, because nothing was decided.
-			o.SetOptions(provider.Options{Extra: p.Options})
-			l.noticeOnce(model, fmt.Sprintf(
-				"could not read the backend's loaded models (%s), so it is unknown whether %s is held at another window; "+
-					"sending no context window this session rather than risking a reload of somebody else's model",
-				compactErr(err), model))
-			return 0, nil
+			return l.unknownResidency(o, p, model, err)
 		case !resident:
 			// Nothing is holding the model, so loading it at our window
 			// evicts nobody. No consent needed.
@@ -178,23 +166,35 @@ func (l *Loader) Apply(ctx context.Context, model string) (int, error) {
 			l.setWindow(o, p, p.Window)
 			return p.Window, nil
 		case serverWindow <= 0:
-			// Resident, but the server will not say with what window (an
-			// older /api/ps). We cannot tell whether our num_ctx would
-			// reload it, and guessing wrong evicts somebody, so we send no
-			// window at all and run inside whatever it has.
-			o.SetOptions(provider.Options{Extra: p.Options})
-			l.noticeOnce(model, fmt.Sprintf(
-				"model %s is loaded but the server does not report the window it was loaded with; "+
-					"running inside it rather than risking a reload", model))
-			return 0, nil
+			return l.residentUnreportedWindow(o, p, model)
 		default:
-			return l.reconcile(model, serverWindow, p)
+			return l.reconcile(ctx, model, serverWindow, p)
 		}
 	}
 
 	// No configured window: read what the server has and fit ourselves to it.
+	//
+	// Residency is asked first, and for the same reason it is asked above.
+	// ContextLength falls back to the Modelfile's num_ctx, and a Modelfile
+	// describes the load that *would* happen, not the one that already has:
+	// putting 4096 on the wire for a model somebody else loaded at 32768
+	// reloads and evicts it. With no configured window there is not even a
+	// preference to put to the user, so the only correct move is to leave
+	// the running model alone.
 	pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
+	switch serverWindow, resident, err := o.Resident(pctx, model); {
+	case err != nil:
+		return l.unknownResidency(o, p, model, err)
+	case resident && serverWindow <= 0:
+		return l.residentUnreportedWindow(o, p, model)
+	case resident:
+		l.setWindow(o, p, serverWindow)
+		return serverWindow, nil
+	}
+
+	// Not resident: nothing is holding the model, so the Modelfile describes
+	// the load that is about to happen and is safe to adopt.
 	n, err := o.ContextLength(pctx, model)
 	if err != nil || n == 0 {
 		// The window stays the server's business, but the passthrough
@@ -206,10 +206,38 @@ func (l *Loader) Apply(ctx context.Context, model string) (int, error) {
 	return n, nil
 }
 
+// unknownResidency handles a backend that would not say what it has loaded:
+// unreachable, behind a proxy answering 502, or simply slower than the probe
+// timeout. That is an unknown, and an unknown is not a licence. Putting a
+// num_ctx on the wire here would reload — and evict — a model another
+// application may be holding, with nobody asked, which is the one thing this
+// package exists to prevent. So: no window, a notice, and nothing latched,
+// because nothing was decided.
+func (l *Loader) unknownResidency(o *provider.Ollama, p Params, model string, err error) (int, error) {
+	o.SetOptions(provider.Options{Extra: p.Options})
+	l.noticeOnce(model, fmt.Sprintf(
+		"could not read the backend's loaded models (%s), so it is unknown whether %s is held at another window; "+
+			"sending no context window this session rather than risking a reload of somebody else's model",
+		compactErr(err), model))
+	return 0, nil
+}
+
+// residentUnreportedWindow handles a model that is loaded while /api/ps
+// declines to say at what size (an older server). We cannot tell whether our
+// num_ctx would reload it, and guessing wrong evicts somebody, so we send no
+// window at all and run inside whatever it has.
+func (l *Loader) residentUnreportedWindow(o *provider.Ollama, p Params, model string) (int, error) {
+	o.SetOptions(provider.Options{Extra: p.Options})
+	l.noticeOnce(model, fmt.Sprintf(
+		"model %s is loaded but the server does not report the window it was loaded with; "+
+			"running inside it rather than risking a reload", model))
+	return 0, nil
+}
+
 // reconcile is where consent lives: the model is resident with a window that
 // is not the configured one, and changing it means reloading somebody else's
 // model out from under them.
-func (l *Loader) reconcile(model string, serverWindow int, p Params) (int, error) {
+func (l *Loader) reconcile(ctx context.Context, model string, serverWindow int, p Params) (int, error) {
 	o := l.prov.(*provider.Ollama)
 	// Keeping the server's window means sending it, not sending nothing:
 	// our own requests must name the window the model already has, or the
@@ -237,22 +265,59 @@ func (l *Loader) reconcile(model string, serverWindow int, p Params) (int, error
 	// it was answered: a person who has said no is not asked again every
 	// time the loader runs.
 	//
-	// The gate is taken before the decision is read and held across the ask,
-	// so concurrent callers — a startup Apply, a model switch, a recovery
-	// after the backend-status check trips — raise one modal between them and
-	// every one of them returns the answer that actually reached the wire.
-	g := l.gateFor(model)
-	g.Lock()
-	defer g.Unlock()
-
-	l.mu.Lock()
-	answered, yes := l.asked[model], l.agreed[model]
-	l.mu.Unlock()
-	if answered {
-		if yes {
-			return take()
+	// One caller claims the ask and the rest wait for its answer, so
+	// concurrent callers — a startup Apply, a model switch, a recovery after
+	// the backend-status check trips — raise one modal between them and every
+	// one of them returns the answer that actually reached the wire.
+	//
+	// The wait is a channel rather than a mutex, and it is selected against
+	// ctx, deliberately. An ask takes as long as a person takes to read it,
+	// so a caller parked behind one must remain cancellable: a wait that
+	// could not be abandoned would turn "somebody is being asked" into a hang
+	// with no way out, which is worse than running inside the server's
+	// window. A caller whose context ends while waiting simply keeps what the
+	// server has and latches nothing.
+	//
+	// The one shape this cannot rescue is an approver that calls Apply for
+	// the *same* model on its own goroutine, which would wait on an answer
+	// only it can give. Nothing does: an approver renders a prompt and
+	// returns a bool, and in the TUI the goroutine that answers is Bubble
+	// Tea's, never the asking one (`Session.Ask` blocks the asker precisely
+	// so). Treat it as forbidden — an approver must not call back into the
+	// loader — and note that even then a cancellable context turns it into a
+	// bounded wait rather than a dead session.
+	for {
+		l.mu.Lock()
+		if ch, busy := l.inflight[model]; busy {
+			l.mu.Unlock()
+			select {
+			case <-ch:
+				continue // answered by whoever claimed it; re-read the answer
+			case <-ctx.Done():
+				return keep()
+			}
 		}
-		return keep()
+		answered, yes := l.asked[model], l.agreed[model]
+		if answered {
+			l.mu.Unlock()
+			if yes {
+				return take()
+			}
+			return keep()
+		}
+		// Claim the ask. Every path out of here below must release it, so
+		// the release is deferred to the end of reconcile rather than
+		// written at each return.
+		done := make(chan struct{})
+		l.inflight[model] = done
+		l.mu.Unlock()
+		defer func() {
+			l.mu.Lock()
+			delete(l.inflight, model)
+			l.mu.Unlock()
+			close(done)
+		}()
+		break
 	}
 
 	approve := l.approver()
@@ -352,18 +417,6 @@ func (l *Loader) approver() tools.ApproveFunc {
 		return fn()
 	}
 	return fixed
-}
-
-// gateFor returns the per-model consent gate, creating it on first use.
-func (l *Loader) gateFor(model string) *sync.Mutex {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	g, ok := l.gates[model]
-	if !ok {
-		g = &sync.Mutex{}
-		l.gates[model] = g
-	}
-	return g
 }
 
 func (l *Loader) providerName() string {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -149,10 +150,18 @@ func TestStartupFitsTheServerWhenNothingIsConfigured(t *testing.T) {
 	p := provider.NewOllama("lan", stub.srv.URL, "")
 	ag, reg := testAgentFor(t, cfg, p, "m")
 
-	applyModelParams(cfg, p, reg, ag, "m")
+	before := ag.History.Budget
+	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
 
 	if ag.Window != 4096 {
 		t.Fatalf("window %d; the Modelfile num_ctx is the answer here", ag.Window)
+	}
+	// The advice must name the budget the session was going to use, not the
+	// one it has just been cut down to: "clamped to 4096 ... start the server
+	// with OLLAMA_CONTEXT_LENGTH=4096" tells the user to ask for what they
+	// already have.
+	if !strings.Contains(out, fmt.Sprintf("OLLAMA_CONTEXT_LENGTH=%d", before)) {
+		t.Fatalf("advice does not name a window worth asking for (budget was %d):\n%s", before, out)
 	}
 	if atomic.LoadInt32(&stub.generate) != 0 {
 		t.Fatal("an unknown window must not be resolved by loading the model")
