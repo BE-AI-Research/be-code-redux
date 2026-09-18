@@ -12,9 +12,13 @@ import (
 // the active branch — the path from the top-level task to the doing node,
 // with sibling statuses so what remains is visible; the doing node's raw
 // buffer, verbatim, because that is the lossless part; then the durable
-// notes. inMap reports whether the repository map already lists a file's
-// symbols, so the active node's own file listing does not repeat an
-// outline the model has already been shown.
+// notes. Ruling T4-b: when nothing is doing (a task planned but not yet
+// started), the active section falls back to the newest root that is not
+// wholly finished, showing its own status and its children — that is
+// exactly when the model most needs to see the plan it just made. inMap
+// reports whether the repository map already lists a file's symbols, so the
+// active node's own file listing does not repeat an outline the model has
+// already been shown.
 //
 // The budget is a ladder, not a cliff: composed at full detail, measured,
 // and while it is over budget the oldest report condenses one rung —
@@ -22,8 +26,9 @@ import (
 // before the next-oldest report starts condensing. The active branch and
 // its verbatim step are never a rung; they are the work in flight. If
 // every report has condensed all the way to its pointer and the block
-// still does not fit, reports are dropped oldest-first until what remains
-// fits beside the active branch, and the block says so.
+// still does not fit, whole reports are dropped oldest-first, and if even
+// the single newest one still does not fit beside the active branch it is
+// trimmed to what remains rather than dropped outright.
 func (s *Store) Render(budget int, inMap func(string) bool) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -40,18 +45,14 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 	}
 
 	rung := make([]int, len(roots))
-	reportLines := func() []string {
-		out := make([]string, len(roots))
-		for i, r := range roots {
-			out[i] = rungText(r, rung[i])
-		}
-		return out
+	reports := make([]string, len(roots))
+	for i, r := range roots {
+		reports[i] = rungText(r, rung[i])
 	}
 	compose := func(reports []string) string {
 		return joinBlock(strings.Join(reports, "\n\n"), tail)
 	}
 
-	reports := reportLines()
 	out := compose(reports)
 	for len(out) > budget {
 		i := -1
@@ -65,7 +66,9 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 			break
 		}
 		rung[i]++
-		reports = reportLines()
+		// Only the report that just condensed needs re-rendering; every
+		// other report's text is unchanged by this step.
+		reports[i] = rungText(roots[i], rung[i])
 		out = compose(reports)
 	}
 	if len(out) <= budget {
@@ -74,10 +77,28 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 
 	// Every report is at its floor and the block still does not fit. The
 	// active branch stays whole regardless — it is never what gets cut —
-	// so what gives is the reports, oldest first, dropped entirely if
-	// nothing short of that fits.
-	for len(reports) > 0 && len(out) > budget {
+	// so what gives is the reports, oldest first, dropped entirely down to
+	// the single newest one; if even that alone does not fit beside the
+	// active branch, it is trimmed rather than dropped, so something of the
+	// most recent finished work survives over nothing at all.
+	for len(reports) > 1 && len(out) > budget {
 		reports = reports[1:]
+		out = compose(reports)
+	}
+	if len(out) > budget && len(reports) == 1 {
+		avail := budget - len(tail)
+		if tail != "" {
+			avail -= 2 // the blank line joinBlock puts between sections
+		}
+		// trimLines treats budget<=0 as "no limit", so a non-positive avail
+		// has to drop the report outright rather than call it.
+		if avail <= 0 {
+			reports = nil
+		} else if trimmed := trimLines(reports[0], avail); trimmed != "" {
+			reports[0] = trimmed
+		} else {
+			reports = nil
+		}
 		out = compose(reports)
 	}
 	return strings.TrimRight(out, "\n") + "\n(reports condensed)"
@@ -88,15 +109,28 @@ func (s *Store) TreeText() string {
 	return s.ShowText("")
 }
 
-// activeBranchText renders the path from a root down to the doing node — an
-// empty string when nothing is doing. At each level it lists that level's
-// siblings too, so what remains beside the active step is visible, and it
-// closes with the doing node's raw buffer verbatim (the lossless part) and,
-// when the node has read a file, that file's current listing.
+// activeBranchText renders the path from a root down to the doing node,
+// with sibling statuses at each level, closed by the doing node's raw
+// buffer verbatim (the lossless part) and, when it has read a file, that
+// file's current listing. When nothing is doing at all, ruling T4-b's
+// fallback applies: the newest root that is not wholly finished renders its
+// own status and its children, with no doing node to descend into and
+// nothing verbatim to show — a plan the model made but has not started yet
+// is exactly when it most needs to see it.
 func activeBranchText(t *Tree, inMap func(string) bool) string {
 	path := t.ActiveBranch()
 	if len(path) == 0 {
-		return ""
+		r := newestOpenRoot(t)
+		if r == nil {
+			return ""
+		}
+		var b strings.Builder
+		b.WriteString("Active task:\n")
+		fmt.Fprintf(&b, "%s\n", statusLine(r))
+		for _, c := range r.Children {
+			fmt.Fprintf(&b, "  %s\n", statusLine(c))
+		}
+		return strings.TrimRight(b.String(), "\n")
 	}
 	var b strings.Builder
 	b.WriteString("Active task:\n")
@@ -107,7 +141,7 @@ func activeBranchText(t *Tree, inMap func(string) bool) string {
 		}
 	}
 	doing := path[len(path)-1]
-	if raw := rawBlock(doing.Evidence.Raw); raw != "" {
+	if raw := rawBlock(doing.Evidence.Raw, doing.Evidence.Dropped); raw != "" {
 		b.WriteString("\n" + raw + "\n")
 	}
 	if files := activeFilesBlock(doing.Evidence.Files, inMap); files != "" {
@@ -116,11 +150,26 @@ func activeBranchText(t *Tree, inMap func(string) bool) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// newestOpenRoot is the last root that is not wholly finished — the same
+// definition of "the active task" store.go's own activeRootLocked uses.
+// Ruling T4-b: it is what the active section falls back to when nothing is
+// doing, so a task the model has planned but not started still renders.
+func newestOpenRoot(t *Tree) *Node {
+	for i := len(t.Roots) - 1; i >= 0; i-- {
+		if !t.Terminal(t.Roots[i]) {
+			return t.Roots[i]
+		}
+	}
+	return nil
+}
+
 // rawBlock renders a node's verbatim buffer: every tool call still in
 // flight, exactly as the model saw it. This is what "the doing node
-// verbatim" means — it is never condensed and never summarised.
-func rawBlock(items []RawItem) string {
-	if len(items) == 0 {
+// verbatim" means — it is never condensed and never summarised. dropped is
+// Evidence.Dropped, the count of raw items the node cap already discarded;
+// a node whose buffer was capped is never allowed to read as complete.
+func rawBlock(items []RawItem, dropped int) string {
+	if len(items) == 0 && dropped == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -134,6 +183,9 @@ func rawBlock(items []RawItem) string {
 		for _, line := range strings.Split(out, "\n") {
 			fmt.Fprintf(&b, "    %s\n", line)
 		}
+	}
+	if dropped > 0 {
+		fmt.Fprintf(&b, "  (%d item(s) dropped)\n", dropped)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

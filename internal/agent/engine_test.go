@@ -68,7 +68,7 @@ func TestReadsAreDigestedAndTheBlockReachesTheSystemPrompt(t *testing.T) {
 	if !strings.Contains(sys, "Working memory:") || !strings.Contains(sys, "a.go (lines 1–4)") {
 		t.Fatalf("system prompt lacks the block:\n%s", sys)
 	}
-	if !strings.Contains(sys, "Task: look at a.go") {
+	if !strings.Contains(sys, "look at a.go — todo") {
 		t.Fatalf("RunFull/Run did not seed the task line:\n%s", sys)
 	}
 	// Flushed at turn end.
@@ -141,7 +141,7 @@ func TestResumeRebuildsTheBlockAndHandoffCarriesStoppedAt(t *testing.T) {
 		t.Fatalf("stopped-at lines accumulated:\n%s", h2)
 	}
 	ag.Resume(ag.Session)
-	if !strings.Contains(ag.History.System.Content, "doing: 1. one") {
+	if !strings.Contains(ag.History.System.Content, "one — doing") {
 		t.Fatal("resume did not rebuild the block")
 	}
 }
@@ -217,7 +217,7 @@ func TestRunFullRefreshesTheTaskLineBetweenRequests(t *testing.T) {
 	if st.Ledger().Task != "second thing" {
 		t.Fatalf("task %q", st.Ledger().Task)
 	}
-	if !strings.Contains(ag.History.System.Content, "Task: second thing") {
+	if !strings.Contains(ag.History.System.Content, "second thing — todo") {
 		t.Fatalf("block did not follow the new request:\n%s", ag.History.System.Content)
 	}
 	// A plan in flight keeps its own task line.
@@ -255,8 +255,19 @@ func TestCompactUsesDigestsAndFeedsFileNotesBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := summaryReq.Messages[1].Content
-	if !strings.Contains(u, "(read a.go lines 1–2; digested)") || strings.Contains(u, "package a") {
-		t.Fatalf("summary transcript still carries the read:\n%s", u)
+	// The working-memory block folded into this same request carries the
+	// doing node's raw buffer verbatim, on purpose (that block is never
+	// summarised or condensed — it is the lossless part). "package a"
+	// legitimately appears there. What must still be true is that the
+	// *transcript* section — the part compaction actually rewrites — has
+	// the read collapsed rather than repeating the file's content a second
+	// time.
+	transcript := u
+	if i := strings.Index(u, "Transcript (most recent last):"); i >= 0 {
+		transcript = u[i:]
+	}
+	if !strings.Contains(transcript, "(read a.go lines 1–2; digested)") || strings.Contains(transcript, "package a") {
+		t.Fatalf("summary transcript still carries the read:\n%s", transcript)
 	}
 	if !strings.Contains(u, "Working memory:") || !strings.Contains(summaryReq.Messages[0].Content, "Do not restate anything already in Working memory.") {
 		t.Fatalf("summary request lacks the block or the instruction:\n%s\n%s", summaryReq.Messages[0].Content, u)

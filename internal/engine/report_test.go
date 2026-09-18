@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -50,5 +51,28 @@ func TestReportNeedsNoModel(t *testing.T) {
 	s.SetStatus(id, StatusDone, "")
 	if s.Report(id) != s.Report(id) {
 		t.Fatal("report is not deterministic")
+	}
+}
+
+// TestReportSurfacesDroppedEvidence: a node cap that discards raw items
+// (record.go's capNode) must not let the finished report read as complete —
+// it says how many were dropped.
+func TestReportSurfacesDroppedEvidence(t *testing.T) {
+	s, err := OpenAt(t.TempDir(), t.TempDir(), "s1", false,
+		Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("noisy task", []string{"step"})
+	s.SetStatus(id+".1", StatusDoing, "")
+	for i := 0; i < 5; i++ {
+		s.Observe(Event{Tool: "shell", Args: map[string]any{"command": fmt.Sprintf("echo %d", i)},
+			Content: strings.Repeat("x", 20)})
+	}
+	s.SetStatus(id+".1", StatusDone, "")
+	s.SetStatus(id, StatusDone, "")
+	rep := s.Report(id)
+	if !strings.Contains(rep, "item(s) dropped") {
+		t.Fatalf("dropped evidence not surfaced:\n%s", rep)
 	}
 }

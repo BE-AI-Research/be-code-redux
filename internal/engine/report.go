@@ -65,6 +65,9 @@ func buildReport(n *Node) string {
 	if left := leftLines(n); left != "" {
 		b.WriteString("left:\n" + left + "\n")
 	}
+	if ev.dropped > 0 {
+		fmt.Fprintf(&b, "(%d item(s) dropped)\n", ev.dropped)
+	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -169,12 +172,16 @@ func leftLines(n *Node) string {
 // store-wide digest was (latest turn wins for hash/note, ranges merge);
 // cmds keep only the successes, because a failed one is already named by
 // its errors entry as "<args>: <first line>" and printing it again under
-// cmds would print the same command twice (ruling T2-a).
+// cmds would print the same command twice (ruling T2-a). dropped sums every
+// node's Evidence.Dropped — raw items the node cap discarded before they
+// were ever distilled — so a report never reads as complete when part of
+// its evidence was silently capped.
 type subtreeEvidence struct {
 	files     []FileRef
 	cmdsOK    []CmdRef
 	decisions []string
 	errors    []string
+	dropped   int
 }
 
 func collectEvidence(n *Node) subtreeEvidence {
@@ -216,6 +223,7 @@ func collectEvidence(n *Node) subtreeEvidence {
 			}
 		}
 		out.errors = append(out.errors, m.Evidence.Errors...)
+		out.dropped += m.Evidence.Dropped
 		for _, c := range m.Children {
 			walk(c)
 		}

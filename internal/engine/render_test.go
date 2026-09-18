@@ -61,6 +61,67 @@ func TestEmptyStoreRendersNothing(t *testing.T) {
 	}
 }
 
+// TestPlannedTaskIsVisibleBeforeAnythingIsDoing: ruling T4-b — a task the
+// model has planned but not yet started (nothing marked doing) must still
+// render, because that is exactly when it most needs to see the plan it
+// just made.
+func TestPlannedTaskIsVisibleBeforeAnythingIsDoing(t *testing.T) {
+	s := testStore(t)
+	s.Plan("fix the parser", []string{"find the bug", "fix it"})
+	block := s.Render(4096, func(string) bool { return false })
+	for _, want := range []string{"fix the parser", "find the bug"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("planned task not visible; missing %q:\n%s", want, block)
+		}
+	}
+}
+
+// TestASingleReportIsSqueezedRatherThanDroppedWhenBudgetIsImpossible: once
+// the ladder and the drop pass both bottom out, the one remaining report is
+// trimmed byte-wise rather than vanishing outright, and the active branch —
+// which is never touched by either pass — still survives whole.
+func TestASingleReportIsSqueezedRatherThanDroppedWhenBudgetIsImpossible(t *testing.T) {
+	s := testStore(t)
+	id := s.Plan("finished task", []string{"step"})
+	s.SetStatus(id+".1", StatusDone, "")
+	s.SetStatus(id, StatusDone, "")
+	live := s.Plan("the live task", []string{"the live step"})
+	s.SetStatus(live+".1", StatusDoing, "")
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "go test ./parser"},
+		Content: "--- FAIL: TestQuote\n    parser_test.go:88: unexpected EOF\n"})
+
+	tail := activeBranchText(&s.tree, func(string) bool { return false })
+	budget := len(tail) + 5 // room for barely a sliver of the finished report
+	block := s.Render(budget, func(string) bool { return false })
+	if !strings.Contains(block, "the live task") || !strings.Contains(block, "parser_test.go:88: unexpected EOF") {
+		t.Fatalf("active branch was not kept whole:\n%s", block)
+	}
+	if !strings.HasSuffix(block, "(reports condensed)") {
+		t.Fatalf("missing the condensed marker:\n%s", block)
+	}
+}
+
+// TestDroppedRawItemsAreSurfacedInTheActiveBranch: a doing node whose
+// buffer was capped (record.go's capNode) must not render as if its raw
+// evidence were complete.
+func TestDroppedRawItemsAreSurfacedInTheActiveBranch(t *testing.T) {
+	s, err := OpenAt(t.TempDir(), t.TempDir(), "s1", false,
+		Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("noisy task", []string{"step"})
+	s.SetStatus(id+".1", StatusDoing, "")
+	for i := 0; i < 5; i++ {
+		s.Observe(Event{Tool: "shell", Args: map[string]any{"command": fmt.Sprintf("echo %d", i)},
+			Content: strings.Repeat("x", 20)})
+	}
+	block := s.Render(8192, func(string) bool { return false })
+	if !strings.Contains(block, "item(s) dropped") {
+		t.Fatalf("dropped raw items not surfaced:\n%s", block)
+	}
+}
+
 func TestTrimLinesIsUTF8Safe(t *testing.T) {
 	// No newline anywhere, so trimLines must fall back to a rune-boundary
 	// cut. Each "é" is 2 bytes; a byte-5 cut of 10 of them lands mid-rune.
