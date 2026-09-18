@@ -360,7 +360,7 @@ var sessionLoader *loader.Loader
 // watching. Startup therefore keeps whatever window the server already has.
 func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Registry, ag *agent.Agent, model string) {
 	ld := loader.New(p, cfg, nil, func(s string) { fmt.Fprintf(os.Stderr, "warn: %s\n", s) })
-	ld.Approver = func() tools.ApproveFunc { return reg.Approve }
+	ld.SetApprover(func() tools.ApproveFunc { return reg.Approve })
 	sessionLoader = ld
 
 	n, err := ld.Apply(context.Background(), model)
@@ -392,6 +392,17 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 		fmt.Fprintf(os.Stderr, "warn: model %s runs with a %d-token window; budget clamped to %d.\n"+
 			"      Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.\n",
 			model, n, n, want)
+	}
+	// The other direction, and the one that used to say nothing at all:
+	// context_tokens is below the window, so most of a window the user went
+	// to the trouble of configuring simply goes unused. ApplyWindow reports
+	// no clamp here — the budget was already under the window — so without
+	// this line the loss is invisible, which is the complaint that started
+	// this work.
+	if cfg.ContextTokens > 0 && n > cfg.ContextTokens {
+		fmt.Fprintf(os.Stderr, "warn: model %s has a %d-token window but context_tokens=%d caps the budget; %d tokens go unused.\n"+
+			"      Remove \"context_tokens\" from config to use the whole window, or raise it.\n",
+			model, n, cfg.ContextTokens, n-cfg.ContextTokens)
 	}
 }
 

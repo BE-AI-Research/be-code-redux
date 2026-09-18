@@ -264,3 +264,64 @@ func TestModelAndProviderParametersRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestContextTokensAbsentMeansDerive: a literal default here silently capped
+// every window larger than it — a configured 32768-token window ran on a
+// 16384-token budget with nothing printed. Absent must mean "derive from the
+// model's window", which is the 0 the agent already understands.
+func TestContextTokensAbsentMeansDerive(t *testing.T) {
+	if got := Default().ContextTokens; got != 0 {
+		t.Fatalf("Default().ContextTokens = %d; a guessed budget caps real windows", got)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"), []byte(`{"model":"m"}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextTokens != 0 {
+		t.Fatalf("absent key loaded as %d", cfg.ContextTokens)
+	}
+}
+
+// TestContextTokensSetStillWins: every config file written before this
+// change carries a literal, and those sessions must keep behaving.
+func TestContextTokensSetStillWins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"), []byte(`{"context_tokens":16384}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextTokens != 16384 {
+		t.Fatalf("explicit key loaded as %d", cfg.ContextTokens)
+	}
+}
+
+// TestContextTokensZeroIsNotACap: a file that says 0 (this version's own
+// Save used to write one) means derive, not "a budget of nothing".
+func TestContextTokensZeroIsNotACap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	os.MkdirAll(filepath.Join(home, ".be-code"), 0o755)
+	os.WriteFile(filepath.Join(home, ".be-code", "config.json"), []byte(`{"context_tokens":0}`), 0o600)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ContextTokens != 0 {
+		t.Fatalf("context_tokens = %d", cfg.ContextTokens)
+	}
+	// And a derived budget is not persisted back as a cap.
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".be-code", "config.json"))
+	if strings.Contains(string(b), "context_tokens") {
+		t.Fatalf("a derived budget was written back as an explicit key:\n%s", b)
+	}
+}

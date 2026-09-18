@@ -53,19 +53,28 @@ type Loader struct {
 	approve tools.ApproveFunc // nil means non-interactive: a refusal
 	notice  func(string)
 
-	// Approver, when set, supplies the approver at the moment consent is
-	// needed rather than at construction. The UI wires Registry.Approve
-	// after the agent is built, so a loader constructed during startup would
-	// otherwise be stuck with the nil it saw then — and, worse, could not
-	// tell "there is nobody to ask yet" from "the user said no", which is
-	// the difference between a question deferred and a question answered.
-	// Returning nil from it is a refusal, exactly as a nil approve is.
-	Approver func() tools.ApproveFunc
+	// approverFn, when set (SetApprover), supplies the approver at the moment
+	// consent is needed rather than at construction. The UI wires
+	// Registry.Approve after the agent is built, so a loader constructed
+	// during startup would otherwise be stuck with the nil it saw then — and,
+	// worse, could not tell "there is nobody to ask yet" from "the user said
+	// no", which is the difference between a question deferred and a question
+	// answered. Returning nil from it is a refusal, exactly as a nil approve
+	// is. Guarded by mu: it is written from a UI goroutine and read from
+	// whichever goroutine needs consent.
+	approverFn func() tools.ApproveFunc
 
 	mu     sync.Mutex
 	agreed map[string]bool // models the user has already answered for
 	asked  map[string]bool // models already put to the user this session
 	noted  map[string]bool // one notice per model, not one per request
+	// gates serializes reconcile per model. The decision maps alone are not
+	// enough: consent takes as long as a person takes to read it, and two
+	// callers that both find "not yet asked" would raise two modals and then
+	// race to write two answers, with the wire ending up on whichever landed
+	// last. The gate is held across the ask, so the second caller waits and
+	// then reads the first caller's answer.
+	gates map[string]*sync.Mutex
 }
 
 // New builds a loader for one provider. approve may be nil (a refusal);
@@ -74,7 +83,18 @@ func New(p provider.Provider, cfg *config.Config, approve tools.ApproveFunc, not
 	return &Loader{
 		prov: p, cfg: cfg, approve: approve, notice: notice,
 		agreed: map[string]bool{}, asked: map[string]bool{}, noted: map[string]bool{},
+		gates: map[string]*sync.Mutex{},
 	}
+}
+
+// SetApprover replaces the lazy approver source. The UI wires its approver
+// from its own goroutine well after the loader was built, so this is a write
+// to a field the loader's own goroutine reads: it takes the lock rather than
+// leaving a data race for whoever wires it next.
+func (l *Loader) SetApprover(f func() tools.ApproveFunc) {
+	l.mu.Lock()
+	l.approverFn = f
+	l.mu.Unlock()
 }
 
 // Params resolves one model's parameters. Parameters belong to the model, so
@@ -135,12 +155,20 @@ func (l *Loader) Apply(ctx context.Context, model string) (int, error) {
 		cancel()
 		switch {
 		case err != nil:
-			// The backend is unreachable or not speaking /api/ps. We cannot
-			// tell whether anyone is holding the model, so we assume the
-			// configured window (which is what the user asked for) and let
-			// the first real request report any failure.
-			l.setWindow(o, p, p.Window)
-			return p.Window, nil
+			// /api/ps could not be read: the server is unreachable, behind a
+			// proxy answering 502, or simply slower than the probe timeout.
+			// That is an unknown, and an unknown is not a licence. Assuming
+			// the configured window here would put a num_ctx on the wire that
+			// reloads — and evicts — a model another application may be
+			// holding, without anyone being asked, which is the one thing
+			// this package exists to prevent. So: no window, a notice, and
+			// nothing latched, because nothing was decided.
+			o.SetOptions(provider.Options{Extra: p.Options})
+			l.noticeOnce(model, fmt.Sprintf(
+				"could not read the backend's loaded models (%s), so it is unknown whether %s is held at another window; "+
+					"sending no context window this session rather than risking a reload of somebody else's model",
+				compactErr(err), model))
+			return 0, nil
 		case !resident:
 			// Nothing is holding the model, so loading it at our window
 			// evicts nobody. No consent needed.
@@ -208,6 +236,15 @@ func (l *Loader) reconcile(model string, serverWindow int, p Params) (int, error
 	// "ask", the default. One question per model per session, whichever way
 	// it was answered: a person who has said no is not asked again every
 	// time the loader runs.
+	//
+	// The gate is taken before the decision is read and held across the ask,
+	// so concurrent callers — a startup Apply, a model switch, a recovery
+	// after the backend-status check trips — raise one modal between them and
+	// every one of them returns the answer that actually reached the wire.
+	g := l.gateFor(model)
+	g.Lock()
+	defer g.Unlock()
+
 	l.mu.Lock()
 	answered, yes := l.asked[model], l.agreed[model]
 	l.mu.Unlock()
@@ -308,10 +345,25 @@ func (l *Loader) mode() string {
 // approver resolves who to ask right now. Nil means nobody, which is a
 // refusal, never a silent yes.
 func (l *Loader) approver() tools.ApproveFunc {
-	if l.Approver != nil {
-		return l.Approver()
+	l.mu.Lock()
+	fn, fixed := l.approverFn, l.approve
+	l.mu.Unlock()
+	if fn != nil {
+		return fn()
 	}
-	return l.approve
+	return fixed
+}
+
+// gateFor returns the per-model consent gate, creating it on first use.
+func (l *Loader) gateFor(model string) *sync.Mutex {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	g, ok := l.gates[model]
+	if !ok {
+		g = &sync.Mutex{}
+		l.gates[model] = g
+	}
+	return g
 }
 
 func (l *Loader) providerName() string {
@@ -360,6 +412,21 @@ func parseDuration(s string) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// compactErr keeps a backend failure to one readable line inside a notice.
+func compactErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 120 {
+		s = s[:120] + "..."
+	}
+	return s
 }
 
 func copyOptions(m map[string]any) map[string]any {

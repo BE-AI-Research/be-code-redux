@@ -626,12 +626,14 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   When another client reloads the model underneath a running session,
   BE-Code adapts to *their* window rather than reloading it back — a reload
   war between two clients on a shared box is the worst outcome available.
-- `temperature` (0.2), `max_tokens`, `context_tokens` (16384) — generation/budget.
+- `temperature` (0.2), `max_tokens`, `context_tokens` (unset) — generation/budget.
   `context_tokens` is the total prompt budget (system prompt, tools schema and
-  history) and is clamped to the window the session actually gets — the
+  history). **Leave it out** and it is simply the window the session gets — the
   configured `context_window` when there is one, otherwise what the backend
-  reports (Ollama: `/api/ps`, Modelfile `num_ctx`). Left at 0 it is simply the
-  window; set, it still wins, so existing configs keep behaving. Generation headroom is reserved
+  reports (Ollama: `/api/ps`, Modelfile `num_ctx`). Set, it is a cap and still
+  wins, so existing config files keep behaving — but a cap below the window
+  means the rest of the window goes unused, and BE-Code now says so at startup
+  instead of shrinking the budget in silence. Generation headroom is reserved
   from it: `max_tokens` if set, else a quarter of the window (1k–4k) for plain
   models or a third (4k–16k) for reasoning models, which think before they
   answer. The

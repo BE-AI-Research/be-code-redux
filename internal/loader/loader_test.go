@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -377,5 +378,113 @@ func TestPassthroughOptionsSurviveAnUnknownWindow(t *testing.T) {
 	}
 	if p.Options().Extra["top_k"] != 40 {
 		t.Fatalf("passthrough options lost: %v", p.Options().Extra)
+	}
+}
+
+// ---- fix round 1 -----------------------------------------------------------
+
+// TestUnreadablePsIsNotALicenceToReload: /api/ps could not be read, so it is
+// unknown whether another application is holding this model. An unknown is
+// not consent. Assuming the configured window here would evict somebody on
+// the user's shared box with nobody asked, which is the one thing this
+// package exists to prevent.
+func TestUnreadablePsIsNotALicenceToReload(t *testing.T) {
+	// Shape one: a proxy in front of the server answers with an error page,
+	// which is not JSON and so never yields a model list.
+	t.Run("proxy error page", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("<html><head><title>502 Bad Gateway</title></head></html>"))
+		}))
+		defer srv.Close()
+		assertNoWindowSentWithoutConsent(t, srv.URL, context.Background())
+	})
+	// Shape two: the probe simply does not come back in time.
+	t.Run("probe timeout", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(2 * time.Second)
+			w.Write([]byte(psLoaded8k))
+		}))
+		defer srv.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		assertNoWindowSentWithoutConsent(t, srv.URL, ctx)
+	})
+}
+
+func assertNoWindowSentWithoutConsent(t *testing.T, url string, ctx context.Context) {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768, Options: map[string]any{"top_k": 40}}}
+	p := provider.NewOllama("t", url, "")
+	var notes []string
+	l := New(p, cfg, refuse(t), func(s string) { notes = append(notes, s) })
+
+	w, _ := l.Apply(ctx, "m")
+	if w != 0 {
+		t.Fatalf("window %d; an unreadable server is an unknown, not an answer", w)
+	}
+	if got := p.Options().NumCtx; got != 0 {
+		t.Fatalf("num_ctx %d went on the wire unasked; that reloads and evicts whoever else holds the model", got)
+	}
+	if p.Options().Extra["top_k"] != 40 {
+		t.Fatalf("passthrough options lost: %v", p.Options().Extra)
+	}
+	if len(notes) == 0 {
+		t.Fatal("a session quietly running without its configured window is not acceptable")
+	}
+	// Nothing was decided, so nothing may be latched: once the server answers
+	// again the question must still be live.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.asked["m"] || l.agreed["m"] {
+		t.Fatal("a failed probe latched a decision nobody made")
+	}
+}
+
+// TestConcurrentApplyAsksOnceAndAgrees: a startup Apply, a model switch and
+// a recovery can all want the same model at once. Two modals for one
+// question is bad; two different answers reaching two callers while a third
+// value sits on the wire is worse.
+func TestConcurrentApplyAsksOnceAndAgrees(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+
+	var asks int32
+	l := New(p, cfg, func(string, string) bool {
+		// Yes to the first caller, no to any other — the shape that used to
+		// leave one caller holding 32768 while the wire ended at 8192.
+		first := atomic.AddInt32(&asks, 1) == 1
+		time.Sleep(20 * time.Millisecond) // a person reading the prompt
+		return first
+	}, func(string) {})
+
+	const callers = 8
+	got := make([]int, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i], _ = l.Apply(context.Background(), "m")
+		}(i)
+	}
+	wg.Wait()
+
+	if n := atomic.LoadInt32(&asks); n != 1 {
+		t.Fatalf("asked %d times for one model", n)
+	}
+	for i, w := range got {
+		if w != got[0] {
+			t.Fatalf("caller %d got %d, caller 0 got %d; one question has one answer", i, w, got[0])
+		}
+	}
+	if got[0] != p.Options().NumCtx {
+		t.Fatalf("callers were told %d but %d reached the wire", got[0], p.Options().NumCtx)
+	}
+	if got[0] != 32768 {
+		t.Fatalf("the answer given was yes; window %d", got[0])
 	}
 }

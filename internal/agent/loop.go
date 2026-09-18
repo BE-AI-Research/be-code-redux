@@ -200,7 +200,10 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	}
 	a.applyModel(model)
 	a.History = NewHistory(a.composeSystem(""), cfg.ContextTokens)
-	a.applyReserve(cfg.ContextTokens) // until a real window is detected
+	// NewHistory rescues an unset budget; the reserve must start from the
+	// same number, or an unset context_tokens leaves the floor reserve
+	// against a 16k budget until the real window arrives.
+	a.applyReserve(a.History.Budget) // until a real window is detected
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}

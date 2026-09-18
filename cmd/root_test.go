@@ -3,6 +3,7 @@ package cmd
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -170,5 +171,54 @@ func TestStartupLeavesNonOllamaBackendsAlone(t *testing.T) {
 
 	if ag.Window != 0 || ag.History.Budget != before {
 		t.Fatalf("window %d budget %d", ag.Window, ag.History.Budget)
+	}
+}
+
+// TestConfiguredWindowAboveContextTokensIsNotLostSilently: the complaint that
+// started this work. context_tokens caps the budget below the window, and
+// because the budget was already under the window ApplyWindow reports no
+// clamp — so before this, half a deliberately configured 32768-token window
+// vanished with nothing printed at all. Note that this test does *not* zero
+// cfg.ContextTokens: every existing config file on disk carries a literal,
+// and that is exactly the case that was invisible.
+func TestConfiguredWindowAboveContextTokensIsNotLostSilently(t *testing.T) {
+	stub := newOllamaProbeStub(t, `{"models":[]}`)
+	cfg := config.Default()
+	cfg.ContextTokens = 16384 // what every pre-existing config.json says
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: stub.srv.URL}
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("lan", stub.srv.URL, "")
+	ag, reg := testAgentFor(t, cfg, p, "m")
+
+	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
+
+	if ag.Window != 32768 {
+		t.Fatalf("window %d", ag.Window)
+	}
+	if ag.History.Budget != 16384 {
+		t.Fatalf("budget %d; an explicit context_tokens still wins", ag.History.Budget)
+	}
+	if !strings.Contains(out, "context_tokens=16384") || !strings.Contains(out, "go unused") {
+		t.Fatalf("the loss was not reported:\n%s", out)
+	}
+}
+
+// TestDerivedBudgetUsesTheWholeWindowQuietly: with no context_tokens the
+// window is the budget, and there is nothing to warn about.
+func TestDerivedBudgetUsesTheWholeWindowQuietly(t *testing.T) {
+	stub := newOllamaProbeStub(t, `{"models":[]}`)
+	cfg := config.Default() // ContextTokens is 0 here by design now
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: stub.srv.URL}
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("lan", stub.srv.URL, "")
+	ag, reg := testAgentFor(t, cfg, p, "m")
+
+	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
+
+	if ag.History.Budget != 32768 {
+		t.Fatalf("budget %d; an unset context_tokens derives from the window", ag.History.Budget)
+	}
+	if strings.Contains(out, "warn:") {
+		t.Fatalf("nothing is wrong here:\n%s", out)
 	}
 }

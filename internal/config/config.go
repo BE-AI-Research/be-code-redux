@@ -126,7 +126,12 @@ type Config struct {
 	// more than half the window, and "low" for the rest of a request once
 	// reasoning has exhausted the window.
 	ReasoningEffort string `json:"reasoning_effort"`
-	ContextTokens   int    `json:"context_tokens"` // conversation budget for truncation
+	// ContextTokens caps the conversation budget. 0 means "derive it from the
+	// model's context window", which is what an absent key now gives you:
+	// guessing a number here is how half a configured 32768-token window used
+	// to disappear with nothing printed. A positive value is still an
+	// explicit cap and still wins, so existing files keep behaving.
+	ContextTokens int `json:"context_tokens,omitempty"`
 	MaxTurns        int    `json:"max_turns"`      // tool-loop iterations per request
 	MaxRepairs      int    `json:"max_repairs"`    // verification repair attempts
 
@@ -289,9 +294,11 @@ func Default() *Config {
 				BaseURL: "http://localhost:8000/v1",
 			},
 		},
-		Temperature:         0.2,
-		MaxTokens:           0,
-		ContextTokens:       16384,
+		Temperature: 0.2,
+		MaxTokens:   0,
+		// No ContextTokens default on purpose: the model's window is the
+		// honest answer, and a literal here silently capped every window
+		// larger than it.
 		MaxTurns:            24,
 		MaxRepairs:          3,
 		CompatToolCalls:     "auto",
@@ -394,6 +401,19 @@ func Load() (*Config, error) {
 	cfg := Default() // defaults for fields missing from older files
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", p, err)
+	}
+	// context_tokens is decoded a second time through a pointer, because
+	// "the user chose 16384" and "this key is not in the file" are different
+	// facts that a plain int flattens into the same number. Absent (or a
+	// nonsense value) means derive it from the model's context window; a
+	// positive value is a cap the user chose and still wins.
+	var shadow struct {
+		ContextTokens *int `json:"context_tokens"`
+	}
+	if json.Unmarshal(data, &shadow) == nil {
+		if shadow.ContextTokens == nil || *shadow.ContextTokens <= 0 {
+			cfg.ContextTokens = 0
+		}
 	}
 	if cfg.ClientThemes == nil {
 		cfg.ClientThemes = map[string]string{}

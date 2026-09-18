@@ -312,3 +312,63 @@ func TestNativeFallbackIsNoticedOnce(t *testing.T) {
 		t.Fatalf("want exactly one downgrade notice, got %d: %v", n, *notices)
 	}
 }
+
+// TestSetProviderClearsTheNoticeLatches: the downgrade notice and the
+// eviction notice describe *a backend*, and must not outlive the backend
+// they described. Switching providers with a bare assignment left both
+// latched, so the same thing happening on the newly chosen backend was
+// silent — a session quietly unable to set its context window with nothing
+// on screen to say so.
+func TestSetProviderClearsTheNoticeLatches(t *testing.T) {
+	reply := func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	first := &fallbackProvider{fellBack: true}
+	first.fn = reply
+	ag, _ := newTestAgent(t, first, nil)
+	notes := collectNotices(ag)
+
+	ag.Run(context.Background(), "one")
+	if !hasNotice(*notes, "openai-compatible path") {
+		t.Fatalf("no downgrade notice for the first backend: %v", *notes)
+	}
+	before := len(*notes)
+	ag.Run(context.Background(), "two")
+	if len(*notes) != before {
+		t.Fatalf("the same backend reported its downgrade twice: %v", *notes)
+	}
+
+	// A different backend, downgraded for its own reasons. That is news.
+	second := &fallbackProvider{fellBack: true}
+	second.fn = reply
+	ag.SetProvider(second)
+	ag.Run(context.Background(), "three")
+	if len(*notes) == before {
+		t.Fatalf("a downgrade on a newly selected backend was silent: %v", *notes)
+	}
+}
+
+// TestSetProviderClearsTheEvictionLatch: the same rule for "model is not
+// loaded", which is equally a fact about one backend.
+func TestSetProviderClearsTheEvictionLatch(t *testing.T) {
+	reply := func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	first := &statusProvider{funcProvider: &funcProvider{fn: reply}, window: 32768, loaded: false}
+	ag, _ := newTestAgent(t, first, nil)
+	ag.ApplyWindow(32768)
+	notes := collectNotices(ag)
+
+	ag.Run(context.Background(), "one")
+	if !hasNotice(*notes, "not loaded") {
+		t.Fatalf("no eviction notice: %v", *notes)
+	}
+	before := len(*notes)
+
+	second := &statusProvider{funcProvider: &funcProvider{fn: reply}, window: 32768, loaded: false}
+	ag.SetProvider(second)
+	ag.Run(context.Background(), "two")
+	if len(*notes) == before {
+		t.Fatalf("an eviction on a newly selected backend was silent: %v", *notes)
+	}
+}
