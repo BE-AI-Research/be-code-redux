@@ -1,85 +1,63 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
-func TestRenderIsEmptyForAFreshStore(t *testing.T) {
-	s, _ := openTest(t, "s1", false)
-	if out := s.Render(6144, func(string) bool { return false }); out != "" {
-		t.Fatalf("fresh render %q", out)
+// TestActiveWorkOutranksHistory: under a tight budget the finished reports
+// condense and the work in flight stays whole, because that is the work the
+// model is about to continue.
+func TestActiveWorkOutranksHistory(t *testing.T) {
+	s := testStore(t)
+	for i := 0; i < 4; i++ {
+		id := s.Plan(fmt.Sprintf("finished task %d", i), []string{"step"})
+		s.SetStatus(id+".1", StatusDoing, "")
+		s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "go build ./..."},
+			Content: strings.Repeat("noise\n", 200)})
+		s.SetStatus(id+".1", StatusDone, "")
+		s.SetStatus(id, StatusDone, "")
 	}
-}
+	live := s.Plan("the live task", []string{"the live step"})
+	s.SetStatus(live+".1", StatusDoing, "")
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "go test ./parser"},
+		Content: "--- FAIL: TestQuote\n    parser_test.go:88: unexpected EOF\n"})
 
-func TestRenderPriorityMarkersAndBudget(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	s.AddNoteLine("tests need go on PATH")
-	s.SetPlan("add flag", []string{"parse", "wire"})
-	s.SetStep(1, "done")
-	s.SetStep(2, "doing")
-	s.AddNote("cobra owns flags", "", true, false)
-	writeFile(t, root, "cmd/root.go", "package cmd\nfunc Execute() {}\n")
-	s.NextTurn()
-	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "cmd/root.go"}, Content: numbered("package cmd\nfunc Execute() {}\n", 1)})
-	s.AddNote("flags are parsed here", "cmd/root.go", false, false)
-	writeFile(t, root, "cmd/root.go", "package cmd\nfunc Execute() {}\n// changed\n")
-	// glob sorts before pattern in the canonical key; the row must still
-	// name the pattern, not the glob.
-	s.Observe(Event{Tool: "search", Args: map[string]any{"pattern": "Execute", "glob": "*.go"}, Content: "cmd/root.go:2:func Execute() {}"})
-	out := s.Render(6144, func(p string) bool { return p == "cmd/root.go" })
-	want := []string{
-		"tests need go on PATH",
-		"Task: add flag",
-		"doing: 2. wire",
-		"done: 1. parse",
-		"decisions:\n- cobra owns flags",
-		"facts:\n- flags are parsed here",
-		"cmd/root.go (lines 1–2) — flags are parsed here [changed since read]",
-		`search "Execute": cmd/root.go:2`,
+	block := s.Render(1200, func(string) bool { return false })
+	if len(block) > 1200 {
+		t.Fatalf("over budget: %d bytes", len(block))
 	}
-	for _, w := range want {
-		if !strings.Contains(out, w) {
-			t.Fatalf("render lacks %q:\n%s", w, out)
+	for _, want := range []string{"the live task", "the live step", "parser_test.go:88: unexpected EOF"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("live work was cut; missing %q:\n%s", want, block)
 		}
 	}
-	if strings.Contains(out, "outline:") {
-		t.Fatal("outline repeated although the repo map has the file")
-	}
-	// Outline appears when the map does not carry the file.
-	out2 := s.Render(6144, func(string) bool { return false })
-	if !strings.Contains(out2, "outline: Execute") {
-		t.Fatalf("outline missing:\n%s", out2)
-	}
-	// Budget trims at a line boundary, notes and task first to survive.
-	small := s.Render(120, func(string) bool { return false })
-	if !strings.HasPrefix(small, "tests need go on PATH") || len(small) > 120 || strings.Contains(small, "search") {
-		t.Fatalf("budgeted render:\n%s", small)
-	}
-	if idx := strings.Index(out, "Task:"); idx < strings.Index(out, "tests need") {
-		t.Fatal("notes must come before the task")
+	if !strings.Contains(block, "finished task 0") {
+		t.Fatal("an old task vanished entirely instead of condensing to a line")
 	}
 }
 
-func TestLedgerTextStoppedAtAndFileNotes(t *testing.T) {
-	s, root := openTest(t, "s1", false)
-	if s.StoppedAt() != "" {
-		t.Fatal("stopped-at on an empty ledger")
+// TestBlockStartsWithReportsThenActive: order matters — history first, the
+// live branch last, so the newest thing is nearest the model's attention.
+func TestBlockStartsWithReportsThenActive(t *testing.T) {
+	s := testStore(t)
+	done := s.Plan("finished", []string{"a"})
+	s.SetStatus(done+".1", StatusDone, "")
+	s.SetStatus(done, StatusDone, "")
+	live := s.Plan("live", []string{"b"})
+	s.SetStatus(live+".1", StatusDoing, "")
+	block := s.Render(4096, func(string) bool { return false })
+	if strings.Index(block, "finished") > strings.Index(block, "live") {
+		t.Fatalf("order wrong:\n%s", block)
 	}
-	s.SetPlan("t", []string{"one", "two"})
-	s.SetStep(2, "doing")
-	if s.StoppedAt() != "two" {
-		t.Fatalf("stopped at %q", s.StoppedAt())
-	}
-	if lt := s.LedgerText(); !strings.Contains(lt, "[ ] 1. one") || !strings.Contains(lt, "[>] 2. two") {
-		t.Fatalf("ledger text:\n%s", lt)
-	}
-	writeFile(t, root, "a.go", "package a\n")
-	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered("package a\n", 1)})
-	s.ApplyFileNotes("- a.go — entry point\n- unknown.go — ignored\n")
-	if s.Digests()[0].Note != "entry point" || len(s.Digests()) != 1 {
-		t.Fatalf("file notes %+v", s.Digests())
+}
+
+// TestEmptyStoreRendersNothing: a fresh session adds no prompt weight.
+func TestEmptyStoreRendersNothing(t *testing.T) {
+	if got := testStore(t).Render(4096, func(string) bool { return false }); got != "" {
+		t.Fatalf("expected empty, got %q", got)
 	}
 }
 
@@ -93,19 +71,5 @@ func TestTrimLinesIsUTF8Safe(t *testing.T) {
 	}
 	if len(out) > 5 {
 		t.Fatalf("trimmed string exceeds budget: %q (%d bytes)", out, len(out))
-	}
-}
-
-func TestSplitFilesBlockAndParsePlanSteps(t *testing.T) {
-	body, files := SplitFilesBlock("Summary text.\nMore.\n\nfiles:\n- a.go — main\n- b.go — helper\n")
-	if body != "Summary text.\nMore." || !strings.Contains(files, "a.go — main") {
-		t.Fatalf("split: %q | %q", body, files)
-	}
-	if b, f := SplitFilesBlock("no block"); b != "no block" || f != "" {
-		t.Fatalf("no block: %q %q", b, f)
-	}
-	steps := ParsePlanSteps("Plan:\n1. parse flags\n2) wire cobra\n- write tests\n* docs\nnot a step\n")
-	if len(steps) != 4 || steps[0] != "parse flags" || steps[3] != "docs" {
-		t.Fatalf("steps %v", steps)
 	}
 }
