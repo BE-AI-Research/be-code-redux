@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -354,16 +355,7 @@ var doctorCmd = &cobra.Command{
 			}
 			fmt.Printf("  %-14s %s (%dms)\n", name, status, time.Since(start).Milliseconds())
 			if o, ok := p.(*provider.Ollama); ok && name == cfg.DefaultProvider {
-				model := provider.ResolveModel(cfg, name, "")
-				if n, err := o.ContextLength(cmd.Context(), model); err == nil && n > 0 {
-					note := "ok"
-					if n < cfg.ContextTokens {
-						note = fmt.Sprintf("BELOW context_tokens=%d: prompts would be truncated; BE-Code clamps its budget to %d", cfg.ContextTokens, n)
-					}
-					fmt.Printf("  %-14s %s window %d tokens (%s)\n", "", model, n, note)
-				} else if err == nil {
-					fmt.Printf("  %-14s %s window unknown (model not loaded, no Modelfile num_ctx)\n", "", model)
-				}
+				reportWindow(cmd.Context(), o, cfg, name)
 			}
 		}
 		model := provider.ResolveModel(cfg, cfg.DefaultProvider, "")
@@ -398,6 +390,56 @@ var doctorCmd = &cobra.Command{
 		fmt.Println()
 		return nil
 	},
+}
+
+// reportWindow is doctor's account of the one number that decides whether a
+// session is running in the window it thinks it is.
+//
+// It reports context_window — the num_ctx the harness actually sends — not
+// context_tokens, which is only a cap on the budget and says nothing about
+// the server. The comparison that matters is between what config asks for
+// and what the model is loaded with, because they differing is what makes
+// Ollama reload the model and evict whoever else was using it. That is the
+// question reload_on_mismatch answers, so doctor names its setting too.
+func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, providerName string) {
+	model := provider.ResolveModel(cfg, providerName, "")
+	want := 0
+	if pc, ok := cfg.Providers[providerName]; ok {
+		want = pc.ContextWindow
+	}
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		want = mc.ContextWindow
+	}
+	asks := "context_window unset (the harness fits itself to the server)"
+	if want > 0 {
+		asks = fmt.Sprintf("context_window=%d", want)
+	}
+	fmt.Printf("  %-14s %s: %s\n", "", model, asks)
+
+	loadedWindow, resident, err := o.Resident(ctx, model)
+	switch {
+	case err != nil:
+		fmt.Printf("  %-14s could not read loaded models (%v); the window in use is unknown\n", "", compactErr(err))
+		return
+	case resident && loadedWindow <= 0:
+		fmt.Printf("  %-14s loaded, but this server does not report the window it was loaded with\n", "")
+		return
+	case resident && want > 0 && want != loadedWindow:
+		fmt.Printf("  %-14s loaded with %d tokens — MISMATCH: reaching %d reloads the model and evicts other users (reload_on_mismatch=%s)\n",
+			"", loadedWindow, want, cfg.ReloadOnMismatch)
+	case resident:
+		fmt.Printf("  %-14s loaded with %d tokens (ok)\n", "", loadedWindow)
+	default:
+		n, _ := o.ContextLength(ctx, model)
+		if n > 0 {
+			fmt.Printf("  %-14s not loaded; the Modelfile says %d tokens\n", "", n)
+		} else {
+			fmt.Printf("  %-14s not loaded, and no Modelfile num_ctx to go on\n", "")
+		}
+	}
+	if cfg.ContextTokens > 0 {
+		fmt.Printf("  %-14s context_tokens=%d caps the prompt budget below whatever window is in use\n", "", cfg.ContextTokens)
+	}
 }
 
 var verifyCmd = &cobra.Command{

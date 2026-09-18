@@ -604,3 +604,93 @@ func TestWaitingForSomeoneElsesAnswerIsCancellable(t *testing.T) {
 func l2Apply(l *Loader, ctx context.Context, model string) (int, error) {
 	return l.Apply(ctx, model)
 }
+
+// A caller that gives up waiting for somebody else's answer must budget
+// against the server's window but put nothing on the wire. The claimer is
+// releasing at that very instant, so a write here lands *after* the
+// consented window and silently undoes it — always downward, so never an
+// eviction, but the next caller is then truncated with nothing said.
+func TestACancelledWaiterPutsNothingOnTheWire(t *testing.T) {
+	const sentinel = 12345
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("t", srv.URL, "")
+
+	asking := make(chan struct{})
+	release := make(chan struct{})
+	type waited struct {
+		window  int
+		onWire  int
+		problem string
+	}
+	result := make(chan waited, 1)
+
+	var l *Loader
+	l = New(p, cfg, func(string, string) bool {
+		close(asking)
+		<-release
+		return true
+	}, func(string) {})
+
+	go func() {
+		<-asking
+		// A window nothing in this test would ever choose, so anything the
+		// waiter writes is visible.
+		p.SetOptions(provider.Options{NumCtx: sentinel})
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		w, err := l.Apply(ctx, "m")
+		r := waited{window: w, onWire: p.Options().NumCtx}
+		if err != nil {
+			r.problem = err.Error()
+		}
+		result <- r
+		close(release)
+	}()
+
+	w, err := l.Apply(context.Background(), "m")
+	if err != nil || w != 32768 {
+		t.Fatalf("the answered call got %d (%v)", w, err)
+	}
+	r := <-result
+	if r.problem != "" {
+		t.Fatalf("the waiter failed: %s", r.problem)
+	}
+	if r.window != 8192 {
+		t.Fatalf("a caller that gave up waiting got %d; it budgets against what the server has", r.window)
+	}
+	if r.onWire != sentinel {
+		t.Fatalf("the cancelled waiter wrote %d to the provider; it must write nothing", r.onWire)
+	}
+	if p.Options().NumCtx != 32768 {
+		t.Fatalf("the consented window did not survive: %d", p.Options().NumCtx)
+	}
+}
+
+// The "nobody to ask yet" notice describes a state an interactive session
+// leaves within moments: it re-runs Apply once its UI has wired an
+// approver. It must not share a notice key with the real answer, or a
+// denial a moment later explains itself to nobody.
+func TestTheDeferredNoticeDoesNotSwallowTheRealOne(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	var notes []string
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(s string) { notes = append(notes, s) })
+
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("no approver is a refusal; got %d", w)
+	}
+	// The UI comes up and the user says no.
+	l.SetApprover(func() tools.ApproveFunc { return func(string, string) bool { return false } })
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("a denial keeps the server's window; got %d", w)
+	}
+	if len(notes) != 2 {
+		t.Fatalf("expected the deferred line and then the denial, got %d: %v", len(notes), notes)
+	}
+	if !strings.Contains(notes[1], "clamped") {
+		t.Fatalf("the denial did not explain itself: %q", notes[1])
+	}
+}

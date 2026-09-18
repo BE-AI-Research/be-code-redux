@@ -502,3 +502,53 @@ func TestProxyErrorPageDowngradesTheSession(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// One formatter for both model pickers, so the TUI's list and plain mode's
+// /models cannot drift apart. The row has to answer what a person picking a
+// model is actually weighing: size, quantization, the window it is loaded
+// with, and whether loading it costs anything at all.
+func TestModelDetailDescribe(t *testing.T) {
+	cases := []struct {
+		name string
+		d    ModelDetail
+		want []string
+		not  []string
+	}{
+		{"resident", ModelDetail{SizeBytes: 17_000_000_000, Family: "qwen3", Quantization: "Q4_K_XL", Window: 32768, Resident: true},
+			[]string{"17.0GB", "qwen3", "Q4_K_XL", "32k ctx", "· loaded"}, nil},
+		{"on disk only", ModelDetail{SizeBytes: 4_000_000_000, Family: "llama", Quantization: "Q4_0"},
+			[]string{"4.0GB", "ctx unknown"}, []string{"loaded"}},
+		{"tiny window", ModelDetail{SizeBytes: 1_000_000_000, Family: "x", Quantization: "q", Window: 512},
+			[]string{"512 ctx"}, []string{"k ctx"}},
+		{"names only", ModelDetail{ID: "gpt-ish", Window: 8192},
+			[]string{"8k ctx"}, []string{"0.0GB"}},
+	}
+	for _, c := range cases {
+		got := c.d.Describe()
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: %q missing %q", c.name, got, w)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(got, n) {
+				t.Errorf("%s: %q should not contain %q", c.name, got, n)
+			}
+		}
+	}
+}
+
+// A backend with no richer listing still fills a picker: ModelDetails falls
+// back to ListModels rather than leaving the list empty.
+func TestModelDetailsFallsBackToListModels(t *testing.T) {
+	p := NewOpenAICompat("x", "http://127.0.0.1:1/v1", "")
+	if _, ok := any(p).(ModelDetailer); ok {
+		t.Fatal("this test is about a provider that is NOT a detailer")
+	}
+	// The call itself will fail against a dead endpoint; what matters is
+	// that it went to ListModels and reported that error rather than
+	// silently returning nothing.
+	if _, err := ModelDetails(context.Background(), p); err == nil {
+		t.Fatal("a failing listing must be reported, not swallowed")
+	}
+}

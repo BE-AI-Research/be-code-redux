@@ -118,6 +118,16 @@ type KeepAliver interface {
 	KeepAlive(ctx context.Context, model string, d time.Duration) error
 }
 
+// ModelDetailer is implemented by providers that can say more about their
+// models than a name and a size: the window each one is currently loaded
+// with, and whether it is resident at all. That is what a model picker is
+// really being asked — "what am I choosing between" — and it is the one
+// place a user can see, before switching, that a model is already held by
+// somebody else at a window our own config disagrees with.
+type ModelDetailer interface {
+	Details(ctx context.Context) ([]ModelDetail, error)
+}
+
 // ModelInfo describes an available model.
 type ModelInfo struct {
 	ID           string

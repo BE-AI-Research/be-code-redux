@@ -124,8 +124,8 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 }
 
 func (t *webSearchTool) maxOut() int {
-	if t.r != nil && t.r.MaxOutput > 0 {
-		return t.r.MaxOutput
+	if t.r != nil && t.r.MaxOutput() > 0 {
+		return t.r.MaxOutput()
 	}
 	return defaultMaxOutput
 }
@@ -189,8 +189,8 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 		return Result{Content: "(offset past end of page)"}
 	}
 	max := defaultMaxOutput
-	if t.r != nil && t.r.MaxOutput > 0 {
-		max = t.r.MaxOutput
+	if t.r != nil && t.r.MaxOutput() > 0 {
+		max = t.r.MaxOutput()
 	}
 	header := fmt.Sprintf("%s (%d chars total)\n", u, len(text)+off)
 	return Result{Content: header + truncate(text, max)}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -107,9 +108,14 @@ type Agent struct {
 	// UI can report the connection once it owns the screen.
 	IDETools int
 
-	projectNotes   string
-	handoff        string // briefing from the resumed session, kept in the system prompt
-	Window         int    // backend context window when detected (0 = unknown)
+	projectNotes string
+	handoff      string // briefing from the resumed session, kept in the system prompt
+	// window is the backend context window when detected (0 = unknown),
+	// read through Window(). It is atomic because it is written off the
+	// agent goroutine — resolveModel lands a model switch's window from a
+	// goroutine of its own — while a UI reads it to draw the context
+	// wheel.
+	window         atomic.Int64
 	systemOverride string // plan mode: replaces the base coding prompt
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
@@ -170,6 +176,22 @@ type Agent struct {
 	autoVerifyUsed bool
 	toolFailStreak toolFailStreak
 	pendingAdvice  string
+
+	// Model parameters (see the ModelLoader block below). modelMu guards
+	// the model identity a switch rewrites — Model, Profile, compat,
+	// knownTools — together with the loader and the switch generation,
+	// because SetModel runs on a UI goroutine while resolveModel reads the
+	// same fields from its own. It is never held across anything that can
+	// block.
+	modelMu  sync.Mutex
+	loader   ModelLoader
+	modelGen int
+	// turnMu is held for the whole of run(). It exists for exactly one
+	// caller outside the loop: the compaction resolveModel does when a
+	// model switch lands a window smaller than the conversation. That is
+	// the only transcript rewrite that does not come from the tool loop,
+	// and it must never interleave with one that does.
+	turnMu sync.Mutex
 }
 
 // toolFailStreak is one run of consecutive failures of the same tool:
@@ -215,8 +237,20 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	return a
 }
 
-// applyModel re-derives the model profile and tool-call mode.
+// applyModel re-derives the model profile and tool-call mode. It takes
+// modelMu: a switch comes from a UI goroutine, and resolveModel reads the
+// profile from its own to size the reserve.
 func (a *Agent) applyModel(model string) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	a.applyModelLocked(model)
+}
+
+// applyModelLocked is applyModel with modelMu already held, for SetModel,
+// which has to rewrite the system prompt in the same critical section: the
+// prompt is what a model resolution reads when it measures the
+// conversation, and half a switch is not a state anything should measure.
+func (a *Agent) applyModelLocked(model string) {
 	a.Model = model
 	a.Profile = profiles.Detect(model)
 	switch a.Cfg.CompatToolCalls {
@@ -245,25 +279,195 @@ func (a *Agent) SetProvider(p provider.Provider) {
 	a.Provider = p
 	a.nativeFallbackNotified = false
 	a.unloadedNotified = false
+	// A loader speaks for one backend. Carrying the old one across a
+	// provider switch would put another server's num_ctx on the wire — and
+	// raise its consent question about a machine the user has just left —
+	// while the session's own consent record described a different box
+	// entirely. A fresh loader, or none at all if nothing can build one.
+	if LoaderFactory != nil {
+		a.SetLoader(LoaderFactory(a.Cfg, p))
+	} else {
+		a.SetLoader(nil)
+	}
 }
 
-// SetModel switches models mid-session, refreshing the profile.
+// LoaderFactory builds a model loader for one provider. Injected by cmd,
+// the same import-cycle dodge ReviewerFactory and CoworkerFactory use; nil
+// means a provider switch carries on with no parameter resolution, which is
+// what a test or a scratch agent wants.
+var LoaderFactory func(cfg *config.Config, p provider.Provider) ModelLoader
+
+// SetModel switches models mid-session, refreshing the profile. The switch
+// itself is synchronous — the next request uses the new model whatever the
+// backend says — and the parameter resolution runs behind it.
 func (a *Agent) SetModel(model string) {
-	a.applyModel(model)
+	a.modelMu.Lock()
+	a.applyModelLocked(model)
 	if a.History != nil {
 		a.History.System.Content = a.composeSystem("")
+	}
+	a.modelGen++
+	gen, l := a.modelGen, a.loader
+	a.modelMu.Unlock()
+	if a.History != nil {
 		// A thinking model needs a different reserve than a plain one.
 		// Before a real window is known the budget is the best stand-in:
 		// context_tokens is now routinely unset (it means "derive from the
 		// window"), and reserving against 0 would drop a thinking model from
 		// a 4096-token headroom to the 1024 floor.
-		w := a.Window
+		w := a.Window()
 		if w <= 0 {
-			w = a.History.Budget
+			w, _, _ = a.History.Scalars()
 		}
-		a.applyReserve(w)
+		a.applyReserve(w) // takes modelMu itself, hence outside the block above
+	}
+	// The loader may prompt and may reload a model, so it never runs on the
+	// caller's goroutine: /model returns now, the window lands as a notice.
+	if l != nil {
+		go a.resolveModel(context.Background(), l, model, gen)
 	}
 }
+
+// ModelLoader is the one path to a model's runtime parameters: it resolves
+// them, puts them on the wire, and asks first whenever doing so would
+// change what another application on a shared backend is using. The agent
+// takes an interface rather than importing internal/loader — the same
+// import-cycle dodge ReviewerFactory and CoworkerFactory use — and cmd
+// injects the real one.
+type ModelLoader interface {
+	// Apply makes the model's parameters true on the backend and returns
+	// the window the session should budget against; 0 means unknown.
+	Apply(ctx context.Context, model string) (window int, err error)
+	// OnEvicted is a model that is no longer resident. The next request
+	// reloads it whatever we do, so the reload carries our parameters. No
+	// consent: nothing was holding the model.
+	OnEvicted(ctx context.Context, model string)
+	// OnWindowChanged is another client having reloaded the model at a
+	// different size. The loader adapts and never reloads back.
+	OnWindowChanged(model string, window int)
+}
+
+// modelResolveTimeout bounds one parameter resolution, consent prompt
+// included. It is generous because the question in the middle of it is one
+// a person has to read; it exists so a session that is never answered does
+// not carry a goroutine for the life of the process.
+const modelResolveTimeout = 2 * time.Minute
+
+// SetLoader hands the agent the session's model loader. Nil disables the
+// resolution entirely, which is what a test or a scratch agent wants.
+func (a *Agent) SetLoader(l ModelLoader) {
+	a.modelMu.Lock()
+	a.loader = l
+	a.modelMu.Unlock()
+}
+
+// ResolveModel resolves the current model's parameters through the loader,
+// off the caller's goroutine, and lands the window it gets as a notice.
+//
+// Two callers: SetModel, and the UI once it has wired Registry.Approve.
+// The second is why this is public. buildAgent runs before any UI exists,
+// so the consent question spec 9.3 describes has nobody to put it to and is
+// refused — correctly, but silently. Re-running it from runInteractive and
+// runSessionHost is what turns that refusal back into a question.
+func (a *Agent) ResolveModel() {
+	a.modelMu.Lock()
+	l, model := a.loader, a.Model
+	a.modelGen++
+	gen := a.modelGen
+	a.modelMu.Unlock()
+	if l == nil {
+		return
+	}
+	go a.resolveModel(context.Background(), l, model, gen)
+}
+
+// ResolveModelNow is ResolveModel on the caller's goroutine. Plain mode
+// needs it: its approval prompt reads the one terminal input stream the
+// REPL loop is also reading, so a question raised from a second goroutine
+// would race the user's own keystrokes. The REPL calls this from its own
+// goroutine, once, before it starts reading lines.
+func (a *Agent) ResolveModelNow(ctx context.Context) {
+	a.modelMu.Lock()
+	l, model := a.loader, a.Model
+	a.modelGen++
+	gen := a.modelGen
+	a.modelMu.Unlock()
+	if l == nil {
+		return
+	}
+	a.resolveModel(ctx, l, model, gen)
+}
+
+// resolveModel is the body of both, fenced against a loader that panics:
+// model parameters are advisory, and a session that cannot learn its window
+// still runs — at the budget it already had.
+func (a *Agent) resolveModel(parent context.Context, l ModelLoader, model string, gen int) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("model parameters for %s could not be resolved: %v", model, r)
+		}
+	}()
+	ctx, cancel := context.WithTimeout(parent, modelResolveTimeout)
+	defer cancel()
+	w, err := l.Apply(ctx, model)
+	if err != nil || w <= 0 {
+		// Every reason the loader has for declining is one it has already
+		// explained in its own words; repeating it here would say it twice.
+		return
+	}
+	// A switch that has been overtaken is not the session's model any more.
+	// Its window must not land on the model the user actually chose: the
+	// answers come back in whatever order the backend gives them.
+	a.modelMu.Lock()
+	stale := gen != a.modelGen
+	a.modelMu.Unlock()
+	if stale {
+		return
+	}
+	prev := a.Window()
+	if a.ApplyWindow(w) {
+		budget, _, _ := a.History.Scalars()
+		a.notice("%s runs with a %d-token window; budget now %d tokens", model, w, budget)
+	}
+	// A smaller window than the conversation already occupies would make
+	// the next request truncate silently: compact once, now, and say so.
+	//
+	// Measuring the conversation means reading the transcript and the
+	// system prompt, so it happens under both locks that can be rewriting
+	// them: turnMu for a request in flight, modelMu for a switch landing
+	// behind this one. A request holding turnMu is left alone entirely —
+	// the tool loop compacts at the top of every model call, so nothing is
+	// lost, and reading the transcript it is rewriting would be the race
+	// this avoids.
+	if !a.turnMu.TryLock() {
+		if prev > 0 && w < prev {
+			a.notice("%s has a smaller window (%d) than the model this request started with; the request in flight compacts if it needs to", model, w)
+		}
+		return
+	}
+	defer a.turnMu.Unlock()
+	a.modelMu.Lock()
+	tokens := a.History.Tokens() // the system prompt and the transcript
+	a.modelMu.Unlock()
+	if tokens <= a.History.Usable() { // the budget, read under its own lock
+		return
+	}
+	a.notice("the new model's window is smaller than this conversation; compacting once")
+	if err := a.Compact(ctx); err != nil {
+		a.notice("compaction after the model switch failed: %v", err)
+	}
+}
+
+// modelLoader is the loader as the agent goroutine reads it (checkBackend).
+func (a *Agent) modelLoader() ModelLoader {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.loader
+}
+
+// Window is the backend context window this session budgets against, or 0
+// when it is unknown.
+func (a *Agent) Window() int { return int(a.window.Load()) }
 
 // SetGuidance sets extra system-prompt text and recomposes the prompt so it
 // takes effect on the next call even when nothing else triggers a refresh.
@@ -388,6 +592,20 @@ func (a *Agent) notice(format string, args ...any) {
 	}
 }
 
+// Notice delivers one message to whatever UI is wired and reports whether
+// there was one. Startup wiring needs the answer: cmd builds the model
+// loader before any UI exists, and a notice raised then has to fall back to
+// stderr — but the same notice raised later belongs in the transcript,
+// which under a TUI is the only place it can be read at all (stderr is
+// wiped by the alt screen, or is a host log file).
+func (a *Agent) Notice(msg string) bool {
+	if a.Events.OnNotice == nil {
+		return false
+	}
+	a.Events.OnNotice(msg)
+	return true
+}
+
 // transient emits a status notice that need not be kept: it goes to
 // OnTransient when the UI provides one, otherwise to OnNotice.
 func (a *Agent) transient(format string, args ...any) {
@@ -413,6 +631,11 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 // newTurn=false so the whole request (first attempt plus repairs) is one
 // undo unit and one changed-files set for the reviewer.
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
+	// Held for the whole request: the only other writer of the transcript
+	// is resolveModel's post-switch compaction, which runs on a goroutine
+	// of its own and steps aside rather than interleave with this.
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 	a.lastGitInfo = ""

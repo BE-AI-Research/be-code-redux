@@ -116,18 +116,38 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	if err != nil {
 		return // unreachable backend: the chat call will report it
 	}
+	// Both arms below hand the trip to the loader, because the loader is
+	// the only place a model's parameters are decided (spec §10.1). What
+	// it does with each is different, and the difference is who else is
+	// affected:
+	//
+	//   evicted — nothing is holding the model, so the next request
+	//   reloads it whatever we do. The reload may as well carry our
+	//   num_ctx, and nobody has to be asked for it.
+	//
+	//   window changed — another client reloaded the model at their size.
+	//   We adapt. Reloading it back would be a reload war on a shared
+	//   server, which is the worst outcome available, so the loader
+	//   insists only where standing consent already exists.
+	l := a.modelLoader()
 	if !loaded {
 		if !a.unloadedNotified {
 			a.unloadedNotified = true
 			a.transient("model %s is not loaded on the backend (evicted by another model or idle expiry); the next reply includes reload and prompt re-processing time", a.Model)
 		}
+		if l != nil {
+			l.OnEvicted(ctx, a.Model)
+		}
 	} else {
 		a.unloadedNotified = false
 	}
-	if window > 0 && window != a.Window {
-		old := a.Window
+	if window > 0 && window != a.Window() {
+		old := a.Window()
 		a.ApplyWindow(window)
 		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, a.History.Budget, a.History.Limit())
+		if l != nil {
+			l.OnWindowChanged(a.Model, window)
+		}
 	}
 }
 

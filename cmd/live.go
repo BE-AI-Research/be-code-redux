@@ -120,6 +120,14 @@ func runSessionHost(code string) error {
 	// See root.go: the editor-side status note only for reviews that reach it.
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 
+	// The hosted case is the one that most needed this. Here stdio is the
+	// host's log file, so a loader notice printed at startup is written
+	// where nobody will read it, and a consent prompt had nobody at all to
+	// ask. NewSession has now wired Registry.Approve, so re-running the
+	// resolution puts the question on the shared modal every attached
+	// terminal renders — including one that attaches after it was raised.
+	ag.ResolveModel()
+
 	// A signal must take the same route as a client's /quit, or the process
 	// would die past its defers: no handoff briefing, no tool cleanup, and
 	// MCP server children orphaned. `be-code sessions kill` falls back to

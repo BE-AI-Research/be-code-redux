@@ -383,8 +383,8 @@ func TestSetModelReserveSurvivesAnUnsetContextTokens(t *testing.T) {
 		return &provider.ChatResponse{Content: "ok"}, nil
 	}}
 	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.ContextTokens = 0 })
-	if ag.Window != 0 {
-		t.Fatalf("this test is about the no-window-yet case; window %d", ag.Window)
+	if ag.Window() != 0 {
+		t.Fatalf("this test is about the no-window-yet case; window %d", ag.Window())
 	}
 	budget := ag.History.Budget
 	if budget <= 0 {

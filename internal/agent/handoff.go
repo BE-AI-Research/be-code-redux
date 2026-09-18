@@ -199,7 +199,7 @@ func (a *Agent) ApplyWindow(window int) bool {
 	if window <= 0 {
 		return false
 	}
-	a.Window = window
+	a.window.Store(int64(window))
 	// The budget follows the window both ways, never above the configured
 	// context_tokens: a shrunken window clamps it, a restored one gives it
 	// back.
@@ -221,11 +221,18 @@ func (a *Agent) ApplyWindow(window int) bool {
 // Reasoning models spend a large, unpredictable share of the window
 // thinking before the first answer token, so they get a third of it;
 // plain models a quarter. An explicit max_tokens wins.
+//
+// It takes modelMu because the profile it reads is what a model switch
+// rewrites, and the window it is sizing for may be arriving on
+// resolveModel's goroutine while the switch itself ran on a UI's.
 func (a *Agent) reserveFor(window int) int {
 	if a.Cfg.MaxTokens > 0 {
 		return a.Cfg.MaxTokens
 	}
-	if a.Profile.StripThink {
+	a.modelMu.Lock()
+	thinking := a.Profile.StripThink
+	a.modelMu.Unlock()
+	if thinking {
 		r := window / 3
 		if r < 4096 {
 			r = 4096
@@ -251,17 +258,26 @@ func (a *Agent) reserveFor(window int) int {
 // limit in bytes, between 4KB and the 24KB default.
 func (a *Agent) applyReserve(window int) {
 	reserve := a.reserveFor(window)
+	// The limit is read from the two scalars under the same lock that just
+	// wrote one of them, rather than through History.Limit(), which reads
+	// them bare. Since a model switch resolves its window on a goroutine of
+	// its own, two applyReserve calls really can overlap, and the unlocked
+	// read was a data race between them.
 	a.History.mu.Lock()
 	a.History.Reserve = reserve
+	limit := a.History.Budget - reserve
 	a.History.mu.Unlock()
+	if limit < 512 {
+		limit = 512 // History.Limit's floor: never trim into nothing
+	}
 	if a.Tools != nil {
-		capBytes := a.History.Limit() * 3 / 4
+		capBytes := limit * 3 / 4
 		if capBytes > 24*1024 {
 			capBytes = 24 * 1024
 		}
 		if capBytes < 4*1024 {
 			capBytes = 4 * 1024
 		}
-		a.Tools.MaxOutput = capBytes
+		a.Tools.SetMaxOutput(capBytes)
 	}
 }

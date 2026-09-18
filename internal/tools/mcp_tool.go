@@ -67,5 +67,5 @@ func (t *MCPTool) Run(ctx context.Context, args map[string]any) Result {
 	if out == "" {
 		out = "(no content returned)"
 	}
-	return Result{IsError: isErr, Content: truncate(out, t.r.MaxOutput)}
+	return Result{IsError: isErr, Content: truncate(out, t.r.MaxOutput())}
 }

@@ -46,6 +46,15 @@ type REPL struct {
 	// terminal, or both with the first answer winning). Set by cmd after
 	// NewREPL; nil when nothing wired it.
 	Review *review.Coordinator
+
+	// OnStart, when set, runs once on this goroutine after the input
+	// reader is up and before the first line is read. It exists for a
+	// question that has to be asked before the session begins and can only
+	// be answered through this terminal's one input stream — the model
+	// loader's consent prompt. Raising it from a goroutine of its own
+	// would put two readers on r.lines and hand the user's answer to
+	// whichever won.
+	OnStart func()
 }
 
 type lineEvent struct {
@@ -214,6 +223,9 @@ func (r *REPL) Run(ctx context.Context) error {
 			}
 		}
 	}()
+	if r.OnStart != nil {
+		r.OnStart()
+	}
 	for {
 		ev := <-r.lines
 		if ev.err == readline.ErrInterrupt {
@@ -479,17 +491,15 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Println("@path in a message pins that file into context. Tab completes; ↑ history.")
 	case "/models":
-		models, err := r.Provider.ListModels(ctx)
+		// The same rows the TUI's picker shows: size, family, quantization,
+		// the window each is loaded with, and whether it is resident.
+		models, err := provider.ModelDetails(ctx, r.Provider)
 		if err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
 		for _, m := range models {
-			extra := ""
-			if m.SizeBytes > 0 {
-				extra = fmt.Sprintf("  %s %.1fGB %s", m.Family, float64(m.SizeBytes)/1e9, m.Quantization)
-			}
-			fmt.Printf("  %s%s\n", m.ID, dim(extra))
+			fmt.Printf("  %s%s\n", m.ID, dim("  "+m.Describe()))
 		}
 	case "/model":
 		if len(fields) < 2 {

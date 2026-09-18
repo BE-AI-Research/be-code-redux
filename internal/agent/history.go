@@ -113,6 +113,21 @@ func (h *History) Limit() int {
 // Over reports whether the next prompt would exceed the usable limit.
 func (h *History) Over() bool { return h.Tokens() > h.Limit() }
 
+// Usable is Limit read under mu, for a goroutine that is not the agent's
+// own — the same reason Scalars exists. A model switch resolves its window
+// on a goroutine of its own and then has to ask whether the conversation
+// still fits, while the tool loop may be rewriting the budget it is asking
+// about.
+func (h *History) Usable() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l := h.Budget - h.Reserve
+	if l < 512 {
+		l = 512
+	}
+	return l
+}
+
 // Calibrate adjusts CharsPerToken so the estimate of the last prompt matches
 // the token count the server reported for it. Smoothed and clamped so one
 // odd report cannot swing the budget.

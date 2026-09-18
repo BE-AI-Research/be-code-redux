@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -70,8 +72,8 @@ func TestStartupAppliesAConfiguredWindowWithoutProbing(t *testing.T) {
 
 	applyModelParams(cfg, p, reg, ag, "m")
 
-	if ag.Window != 32768 {
-		t.Fatalf("window %d", ag.Window)
+	if ag.Window() != 32768 {
+		t.Fatalf("window %d", ag.Window())
 	}
 	if p.Options().NumCtx != 32768 {
 		t.Fatalf("num_ctx %d never reached the provider", p.Options().NumCtx)
@@ -99,8 +101,8 @@ func TestStartupNeverReloadsAModelNobodyAskedAbout(t *testing.T) {
 
 	applyModelParams(cfg, p, reg, ag, "m")
 
-	if ag.Window != 8192 {
-		t.Fatalf("window %d; an unasked reload is a change to somebody else's server", ag.Window)
+	if ag.Window() != 8192 {
+		t.Fatalf("window %d; an unasked reload is a change to somebody else's server", ag.Window())
 	}
 	if p.Options().NumCtx != 8192 {
 		t.Fatalf("num_ctx %d; our own requests must not reload it either", p.Options().NumCtx)
@@ -124,8 +126,8 @@ func TestStartupConsentIsDeferredNotDenied(t *testing.T) {
 	ag, reg := testAgentFor(t, cfg, p, "m")
 
 	applyModelParams(cfg, p, reg, ag, "m")
-	if ag.Window != 8192 {
-		t.Fatalf("window %d before an approver existed", ag.Window)
+	if ag.Window() != 8192 {
+		t.Fatalf("window %d before an approver existed", ag.Window())
 	}
 
 	// The UI comes up and wires its approver, exactly as tui/ui do.
@@ -153,8 +155,8 @@ func TestStartupFitsTheServerWhenNothingIsConfigured(t *testing.T) {
 	before := ag.History.Budget
 	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
 
-	if ag.Window != 4096 {
-		t.Fatalf("window %d; the Modelfile num_ctx is the answer here", ag.Window)
+	if ag.Window() != 4096 {
+		t.Fatalf("window %d; the Modelfile num_ctx is the answer here", ag.Window())
 	}
 	// The advice must name the budget the session was going to use, not the
 	// one it has just been cut down to: "clamped to 4096 ... start the server
@@ -178,8 +180,8 @@ func TestStartupLeavesNonOllamaBackendsAlone(t *testing.T) {
 
 	applyModelParams(cfg, p, reg, ag, "m")
 
-	if ag.Window != 0 || ag.History.Budget != before {
-		t.Fatalf("window %d budget %d", ag.Window, ag.History.Budget)
+	if ag.Window() != 0 || ag.History.Budget != before {
+		t.Fatalf("window %d budget %d", ag.Window(), ag.History.Budget)
 	}
 }
 
@@ -201,8 +203,8 @@ func TestConfiguredWindowAboveContextTokensIsNotLostSilently(t *testing.T) {
 
 	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
 
-	if ag.Window != 32768 {
-		t.Fatalf("window %d", ag.Window)
+	if ag.Window() != 32768 {
+		t.Fatalf("window %d", ag.Window())
 	}
 	if ag.History.Budget != 16384 {
 		t.Fatalf("budget %d; an explicit context_tokens still wins", ag.History.Budget)
@@ -229,5 +231,80 @@ func TestDerivedBudgetUsesTheWholeWindowQuietly(t *testing.T) {
 	}
 	if strings.Contains(out, "warn:") {
 		t.Fatalf("nothing is wrong here:\n%s", out)
+	}
+}
+
+// Ruling T8-a, first half. buildAgent runs before any UI exists, so the
+// consent question has nobody to put it to and is refused — correctly, but
+// the session then runs at whatever window the server happened to hold,
+// with the explanation on stderr, which under a TUI is wiped and in a
+// hosted session is a log file. runInteractive and runSessionHost re-run
+// the resolution once Registry.Approve is wired; this is that re-run.
+func TestTheDeferredQuestionIsAskedOnceAUIExists(t *testing.T) {
+	stub := newOllamaProbeStub(t, `{"models":[{"name":"m","model":"m","context_length":8192}]}`)
+	cfg := config.Default()
+	cfg.ContextTokens = 0
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: stub.srv.URL}
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("lan", stub.srv.URL, "")
+	ag, reg := testAgentFor(t, cfg, p, "m")
+
+	applyModelParams(cfg, p, reg, ag, "m")
+	if ag.Window() != 8192 {
+		t.Fatalf("window %d before an approver existed", ag.Window())
+	}
+
+	// The UI comes up: it wires the approval seam and re-runs the loader,
+	// exactly as runInteractive and runSessionHost now do.
+	asked := make(chan string, 1)
+	reg.Approve = func(action, detail string) bool { asked <- action; return true }
+	ag.ResolveModel()
+
+	select {
+	case action := <-asked:
+		if action != "model_reload" {
+			t.Fatalf("asked %q", action)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the question was never put to the UI")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for ag.Window() != 32768 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ag.Window() != 32768 {
+		t.Fatalf("window %d; the consented window never reached the session", ag.Window())
+	}
+	if p.Options().NumCtx != 32768 {
+		t.Fatalf("num_ctx %d never reached the provider", p.Options().NumCtx)
+	}
+}
+
+// Ruling T8-a, second half. A loader notice is only useful where it can be
+// read: the transcript when a UI is up, stderr only while one is not.
+func TestLoaderNoticesGoToTheTranscriptWhenThereIsOne(t *testing.T) {
+	stub := newOllamaProbeStub(t, `{"models":[{"name":"m","model":"m","context_length":8192}]}`)
+	cfg := config.Default()
+	cfg.ContextTokens = 0
+	cfg.ReloadOnMismatch = "never" // the loader explains itself and keeps 8192
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: stub.srv.URL}
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	p := provider.NewOllama("lan", stub.srv.URL, "")
+	ag, reg := testAgentFor(t, cfg, p, "m")
+
+	var mu sync.Mutex
+	var notices []string
+	ag.Events.OnNotice = func(s string) { mu.Lock(); notices = append(notices, s); mu.Unlock() }
+
+	out := captureStderr(t, func() { applyModelParams(cfg, p, reg, ag, "m") })
+
+	mu.Lock()
+	got := strings.Join(notices, "\n")
+	mu.Unlock()
+	if !strings.Contains(got, "reload_on_mismatch") {
+		t.Fatalf("the reason never reached the transcript: %q", got)
+	}
+	if strings.Contains(out, "reload_on_mismatch") {
+		t.Fatalf("it went to stderr as well, where a TUI wipes it:\n%s", out)
 	}
 }

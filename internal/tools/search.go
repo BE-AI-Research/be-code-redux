@@ -113,5 +113,5 @@ func (t *searchTool) Run(ctx context.Context, args map[string]any) Result {
 	if count >= maxResults {
 		header += " (capped; narrow the pattern or glob)"
 	}
-	return Result{Content: truncate(header+"\n"+strings.Join(out, "\n"), t.r.MaxOutput)}
+	return Result{Content: truncate(header+"\n"+strings.Join(out, "\n"), t.r.MaxOutput())}
 }

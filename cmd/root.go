@@ -359,9 +359,29 @@ var sessionLoader *loader.Loader
 // using it, and a session must not be able to do that before anyone is
 // watching. Startup therefore keeps whatever window the server already has.
 func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Registry, ag *agent.Agent, model string) {
-	ld := loader.New(p, cfg, nil, func(s string) { fmt.Fprintf(os.Stderr, "warn: %s\n", s) })
-	ld.SetApprover(func() tools.ApproveFunc { return reg.Approve })
-	sessionLoader = ld
+	// One way to build a loader, used both now and again if /provider
+	// moves this session to another backend — a loader speaks for exactly
+	// one server, and its consent record is about that server's users.
+	//
+	// Notices go to the transcript when there is one, and to stderr only
+	// while there is not. Under a TUI stderr is wiped by the alt screen,
+	// and in a hosted session it is a log file nobody opens — which is
+	// where every explanation of a refused reload used to end up.
+	agent.LoaderFactory = func(c *config.Config, prov provider.Provider) agent.ModelLoader {
+		l := loader.New(prov, c, nil, func(s string) {
+			if !ag.Notice(s) {
+				fmt.Fprintf(os.Stderr, "warn: %s\n", s)
+			}
+		})
+		l.SetApprover(func() tools.ApproveFunc { return reg.Approve })
+		sessionLoader = l
+		return l
+	}
+	// Spec §10.1: the loader is the only path to a model's parameters, so
+	// the agent holds it for every later request — a /model switch, a pick
+	// from /models, a recovery after the backend-status check trips.
+	ag.SetLoader(agent.LoaderFactory(cfg, p))
+	ld := sessionLoader
 
 	n, err := ld.Apply(context.Background(), model)
 	if _, isOllama := p.(*provider.Ollama); !isOllama {
@@ -590,6 +610,11 @@ func runInteractive(cmd *cobra.Command) error {
 		// really reach the editor: mode "tui" (or no editor at all) resolves
 		// in the terminal instead.
 		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+		// Plain mode answers on the one input stream its own loop reads,
+		// so its half of the deferred consent runs inline, on the REPL
+		// goroutine, after the reader is up and before the first line is
+		// taken (see agent.ResolveModelNow).
+		repl.OnStart = func() { ag.ResolveModelNow(ctx) }
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)
@@ -597,5 +622,11 @@ func runInteractive(cmd *cobra.Command) error {
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+	// Now that NewSession has wired Registry.Approve, the question startup
+	// could not put to anybody can be asked: it goes through the shared
+	// approval modal, which is the only place under a TUI a person can see
+	// it. A terminal that attaches after it is raised is shown it too
+	// (Session.NewView), so this is safe to run before the program starts.
+	ag.ResolveModel()
 	return s.RunLocal(ctx)
 }

@@ -208,7 +208,7 @@ func (t *processTool) Run(_ context.Context, args map[string]any) Result {
 		if p.done {
 			state = "exited"
 		}
-		return Result{Content: truncate(fmt.Sprintf("[%d] %s (%s)\n%s", id, p.command, state, out), t.r.MaxOutput)}
+		return Result{Content: truncate(fmt.Sprintf("[%d] %s (%s)\n%s", id, p.command, state, out), t.r.MaxOutput())}
 	case "stop":
 		id := argInt(args, 0, "id")
 		if err := t.r.procs.Stop(id); err != nil {

@@ -294,7 +294,13 @@ func (l *Loader) reconcile(ctx context.Context, model string, serverWindow int, 
 			case <-ch:
 				continue // answered by whoever claimed it; re-read the answer
 			case <-ctx.Done():
-				return keep()
+				// The server's window is what *this* caller budgets
+				// against, but it must not be written to the provider:
+				// the claimer is releasing at this very instant, and a
+				// keep() here can land after the consented window and
+				// silently undo it. Landing downward it never evicts
+				// anybody — it just truncates whoever answers next.
+				return serverWindow, nil
 			}
 		}
 		answered, yes := l.asked[model], l.agreed[model]
@@ -324,7 +330,13 @@ func (l *Loader) reconcile(ctx context.Context, model string, serverWindow int, 
 	if approve == nil {
 		// Nobody to ask: a headless run, a scripted run, or a session whose
 		// UI has not wired an approver yet. That is a refusal.
-		l.noticeOnce(model, fmt.Sprintf(
+		//
+		// Its own notice key, not the model's: this state is the one that
+		// is explicitly temporary — an interactive session re-runs Apply
+		// the moment its UI has wired an approver — and sharing the key
+		// would let this line swallow the explanation the real answer
+		// deserves a moment later.
+		l.noticeOnce(model+"\x00deferred", fmt.Sprintf(
 			"model %s is loaded with a %d-token window; config asks for %d, but there is nobody to ask "+
 				"(a headless run, or a session that has not opened its UI yet), so this session runs inside %d. "+
 				"Set reload_on_mismatch: \"always\" if this server is yours to reshape.",

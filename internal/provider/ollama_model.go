@@ -26,6 +26,49 @@ type ModelDetail struct {
 	Resident     bool
 }
 
+// Describe is the one-line summary both model pickers show under a name, so
+// the TUI's list and plain mode's /models never drift apart.
+func (d ModelDetail) Describe() string {
+	window := "ctx unknown"
+	switch {
+	case d.Window >= 1024:
+		window = fmt.Sprintf("%dk ctx", (d.Window+512)/1024)
+	case d.Window > 0:
+		window = fmt.Sprintf("%d ctx", d.Window)
+	}
+	resident := ""
+	if d.Resident {
+		resident = " · loaded"
+	}
+	// A backend that reports no size reports no family or quantization
+	// either (an OpenAI-compatible endpoint lists names and nothing else),
+	// so the row is the window alone rather than "0.0GB  ·".
+	if d.SizeBytes <= 0 {
+		return window + resident
+	}
+	return strings.TrimSpace(fmt.Sprintf("%.1fGB %s %s",
+		float64(d.SizeBytes)/1e9, d.Family, d.Quantization)) + " · " + window + resident
+}
+
+// ModelDetails asks p for its model rows, falling back to ListModels for a
+// backend that has no richer listing (an OpenAI-compatible endpoint knows
+// nothing about residency).
+func ModelDetails(ctx context.Context, p Provider) ([]ModelDetail, error) {
+	if d, ok := p.(ModelDetailer); ok {
+		return d.Details(ctx)
+	}
+	models, err := p.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ModelDetail, 0, len(models))
+	for _, m := range models {
+		out = append(out, ModelDetail{ID: m.ID, SizeBytes: m.SizeBytes,
+			Family: m.Family, Quantization: m.Quantization})
+	}
+	return out, nil
+}
+
 // psModel is one entry of /api/ps: a model currently held in memory, with
 // the context window it was actually loaded with.
 type psModel struct {

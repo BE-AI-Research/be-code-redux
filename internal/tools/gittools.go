@@ -159,7 +159,7 @@ func (t *lookupTool) Run(ctx context.Context, args map[string]any) Result {
 	if err != nil {
 		return gitErr(err, out)
 	}
-	return Result{Content: truncate(out, t.r.MaxOutput)}
+	return Result{Content: truncate(out, t.r.MaxOutput())}
 }
 
 // ---- history ---------------------------------------------------------------
@@ -221,7 +221,7 @@ func (t *historyTool) Run(ctx context.Context, args map[string]any) Result {
 	if strings.TrimSpace(out) == "" {
 		out = "no history"
 	}
-	return Result{Content: truncate(out, t.r.MaxOutput)}
+	return Result{Content: truncate(out, t.r.MaxOutput())}
 }
 
 // ---- show ------------------------------------------------------------------
@@ -284,7 +284,7 @@ func (t *showTool) Run(ctx context.Context, args map[string]any) Result {
 	if end < len(lines) {
 		fmt.Fprintf(&b, "... (%d more lines; call show again with offset=%d)\n", len(lines)-end, end+1)
 	}
-	return Result{Content: truncate(b.String(), t.r.MaxOutput)}
+	return Result{Content: truncate(b.String(), t.r.MaxOutput())}
 }
 
 // ---- changes ---------------------------------------------------------------
@@ -350,5 +350,5 @@ func (t *changesTool) Run(ctx context.Context, args map[string]any) Result {
 			out += "\n(already modified before this task began: " + strings.Join(pre, ", ") + ")"
 		}
 	}
-	return Result{Content: truncate(out, t.r.MaxOutput)}
+	return Result{Content: truncate(out, t.r.MaxOutput())}
 }

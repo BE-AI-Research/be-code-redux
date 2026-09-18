@@ -54,12 +54,12 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	out, err := RunShell(ctx, t.r.Root, command, time.Duration(timeout)*time.Second)
 	if err != nil {
-		return Result{IsError: true, Content: truncate(out+"\n[exit error] "+err.Error(), t.r.MaxOutput)}
+		return Result{IsError: true, Content: truncate(out+"\n[exit error] "+err.Error(), t.r.MaxOutput())}
 	}
 	if strings.TrimSpace(out) == "" {
 		out = "(command succeeded with no output)"
 	}
-	return Result{Content: truncate(out, t.r.MaxOutput)}
+	return Result{Content: truncate(out, t.r.MaxOutput())}
 }
 
 type cmdClass int

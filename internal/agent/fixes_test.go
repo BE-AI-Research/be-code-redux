@@ -164,13 +164,13 @@ func TestMaybeCompactCollapsesOldToolResultsBeforeCallingModel(t *testing.T) {
 func TestApplyWindowScalesToolOutputCap(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
 	ag.ApplyWindow(8192)
-	small := ag.Tools.MaxOutput
+	small := ag.Tools.MaxOutput()
 	if small >= 24*1024 || small < 4*1024 {
 		t.Fatalf("cap for 8k window = %d", small)
 	}
 	big, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 131072 })
 	big.ApplyWindow(131072)
-	if big.Tools.MaxOutput != 24*1024 {
-		t.Fatalf("cap for a large window should stay at the 24KB default, got %d", big.Tools.MaxOutput)
+	if big.Tools.MaxOutput() != 24*1024 {
+		t.Fatalf("cap for a large window should stay at the 24KB default, got %d", big.Tools.MaxOutput())
 	}
 }
