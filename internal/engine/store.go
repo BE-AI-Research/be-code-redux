@@ -495,14 +495,15 @@ func (s *Store) markDirtyLocked() {
 var tmpSeq uint64
 
 // flushError is what a failed Flush returns, carrying the one fact a caller
-// cannot recover afterwards: whether any task document had already reached
-// the workspace. The migration needs it (ruling T3-f) — once a document is
-// written the lift has happened and the legacy files must stay aside — and
-// every other caller sees an ordinary error, since Error and Unwrap defer to
-// the cause.
+// cannot recover afterwards: how many task documents had already reached the
+// workspace. The migration needs it (ruling T3-f) — once *its own* document
+// is written the lift has happened and the legacy files must stay aside — and
+// a count rather than a flag is what lets it tell its own document apart from
+// an older task's, since the documents are written in root order. Every other
+// caller sees an ordinary error, since Error and Unwrap defer to the cause.
 type flushError struct {
-	err       error
-	wroteDocs bool
+	err    error
+	wroteN int
 }
 
 func (e flushError) Error() string { return e.err.Error() }
@@ -637,7 +638,9 @@ func (s *Store) Flush() error {
 	notes := []byte(s.notes)
 	s.mu.Unlock()
 
-	wroteDocs := false
+	// wroteN counts documents written, in root order, so a caller can ask
+	// whether one particular root's document reached disk.
+	wroteN := 0
 	if len(writes) > 0 {
 		tasks := filepath.Join(root, workspaceDir, "tasks")
 		if err := os.MkdirAll(tasks, 0o755); err != nil {
@@ -646,17 +649,17 @@ func (s *Store) Flush() error {
 		ensureReadme(tasks)
 		for _, w := range writes {
 			if err := writeAtomic(filepath.Join(tasks, w.name), []byte(w.body), 0o644); err != nil {
-				return flushError{err: err, wroteDocs: wroteDocs}
+				return flushError{err: err, wroteN: wroteN}
 			}
-			wroteDocs = true
+			wroteN++
 		}
 		ensureGitignore(root)
 	}
 	if err := writeAtomic(filepath.Join(dir, "state.json"), stateBytes, 0o600); err != nil {
-		return flushError{err: err, wroteDocs: wroteDocs}
+		return flushError{err: err, wroteN: wroteN}
 	}
 	if err := writeAtomic(filepath.Join(dir, "notes.md"), notes, 0o600); err != nil {
-		return flushError{err: err, wroteDocs: wroteDocs}
+		return flushError{err: err, wroteN: wroteN}
 	}
 
 	s.mu.Lock()

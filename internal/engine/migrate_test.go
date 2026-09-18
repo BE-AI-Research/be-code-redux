@@ -281,3 +281,107 @@ func TestAFailedFlushBeforeTheDocumentsPutsTheLedgerBack(t *testing.T) {
 		t.Fatalf("the retried migration did not lift the ledger: %+v", again.Tree().Roots)
 	}
 }
+
+// TestAFailedFlushOfTheMigratedDocumentPutsTheLedgerBack: "a document was
+// written" is not "the migrated task's document was written". With an older
+// task's document already on disk, a flush that fails on the lifted root's
+// own file has written nothing of the lift, so the legacy files must go back
+// and the whole migration be retried — otherwise the work survives only as
+// ledger.json.migrated-*, recoverable by hand.
+func TestAFailedFlushOfTheMigratedDocumentPutsTheLedgerBack(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+
+	// An existing task, with its document on disk.
+	first, err := OpenAt(dir, root, "s0", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Plan("alpha", []string{"one"})
+	if err := first.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	tasks := filepath.Join(root, workspaceDir, "tasks")
+	if _, err := os.Stat(filepath.Join(tasks, "001-alpha.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A 0.10.0 ledger turns up — a downgrade, a restored backup — and the
+	// document it would be lifted into cannot be written.
+	ledger := `{"task":"lift me","steps":[{"text":"one","status":"done"}],"session":"s0"}`
+	os.WriteFile(filepath.Join(dir, "ledger.json"), []byte(ledger), 0o600)
+	if err := os.Mkdir(filepath.Join(tasks, "002-lift-me.md"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, r := range s.Tree().Roots {
+		texts = append(texts, r.Text)
+	}
+	if len(texts) != 1 || texts[0] != "alpha" {
+		t.Fatalf("a lift that reached no disk was kept: %v", texts)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "ledger.json")); err != nil || string(b) != ledger {
+		t.Fatalf("the migrated work survives only as an aside file: %v %q", err, b)
+	}
+	if aside, _ := filepath.Glob(filepath.Join(dir, "*.migrated-*")); len(aside) != 0 {
+		t.Fatalf("aside files left behind: %v", aside)
+	}
+
+	// Unobstructed, the retry lifts it.
+	os.RemoveAll(filepath.Join(tasks, "002-lift-me.md"))
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts = nil
+	for _, r := range again.Tree().Roots {
+		texts = append(texts, r.Text)
+	}
+	if len(texts) != 2 || texts[1] != "lift me" {
+		t.Fatalf("the retried migration did not lift the ledger: %v", texts)
+	}
+}
+
+// TestAnUnstattableLegacyFileLeavesTheSetWhereItIs: a stat that fails for a
+// reason other than "not there" is not an answer. Skipping the file would
+// leave the 0.10.0 store half moved — one file aside, another still in place
+// — so the migration stops and puts back whatever it had already moved.
+func TestAnUnstattableLegacyFileLeavesTheSetWhereItIs(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	ledger := `{"task":"lift me","steps":[{"text":"one","status":"done"}],"session":"s0"}`
+	os.WriteFile(filepath.Join(dir, "ledger.json"), []byte(ledger), 0o600)
+	// A symlink loop: stat fails with ELOOP, not IsNotExist.
+	if err := os.Symlink("digests.json", filepath.Join(dir, "digests.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	s, err := OpenAt(dir, root, "s0", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tree().Roots) != 0 {
+		t.Fatalf("a migration that could not move its files went ahead: %+v", s.Tree().Roots)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "ledger.json")); err != nil || string(b) != ledger {
+		t.Fatalf("the ledger was left aside while digests.json stayed behind: %v %q", err, b)
+	}
+	if aside, _ := filepath.Glob(filepath.Join(dir, "*.migrated-*")); len(aside) != 0 {
+		t.Fatalf("the 0.10.0 store was half moved: %v", aside)
+	}
+
+	// Cleared up, the retry runs normally.
+	os.Remove(filepath.Join(dir, "digests.json"))
+	again, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Tree().Roots) != 1 || again.Tree().Roots[0].Text != "lift me" {
+		t.Fatalf("the retried migration did not lift the ledger: %+v", again.Tree().Roots)
+	}
+}

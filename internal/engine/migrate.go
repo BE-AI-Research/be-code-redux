@@ -141,9 +141,14 @@ func (s *Store) migrateLedger(path string) error {
 	// request completes — so a Ctrl-C at the prompt would otherwise lose it.
 	if err := s.Flush(); err != nil {
 		var fe flushError
-		if errors.As(err, &fe) && fe.wroteDocs {
-			// Ruling T3-f. The task documents are written, so the lift has
-			// happened; only the dotdir state failed to persist. Restoring
+		// The documents are written in root order and the lift appended
+		// exactly one root, so its own document is the (roots+1)-th write:
+		// anything less and the lift itself reached no disk, however many
+		// older tasks' documents were rewritten along the way.
+		if errors.As(err, &fe) && fe.wroteN > roots {
+			// Ruling T3-f. The lifted task's own document is written, so
+			// the lift has happened; only the dotdir state (or a document
+			// after this one) failed to persist. Restoring
 			// the legacy files here would put ledger.json back beside the
 			// document it was lifted into, and the next open would load the
 			// document *and* migrate the ledger again — two roots and two
@@ -169,6 +174,15 @@ func (s *Store) setLegacyAside() ([]movedFile, error) {
 	for _, name := range legacyFiles {
 		from := filepath.Join(s.dir, name)
 		if _, err := os.Stat(from); err != nil {
+			if !os.IsNotExist(err) {
+				// Not "there is no such file" but "this file cannot be
+				// answered for" — a symlink loop, an unreadable directory.
+				// Skipping it would leave the 0.10.0 store half moved, one
+				// file aside and another still in place, so the migration
+				// stops here and whatever moved already goes back.
+				restoreLegacy(moved)
+				return nil, err
+			}
 			continue
 		}
 		// os.Rename replaces the destination, and the stamp is only a
