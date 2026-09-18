@@ -72,8 +72,49 @@ func TestDistillKeepsTheFactsAndDropsTheBulk(t *testing.T) {
 	if n.Evidence.Cmds[1].OK {
 		t.Fatal("a failing command must be recorded as failing")
 	}
-	if len(n.Evidence.Errors) != 1 || n.Evidence.Errors[0] != "FAIL: TestLex" {
-		t.Fatalf("errors: %+v", n.Evidence.Errors) // first line only
+	if len(n.Evidence.Errors) != 1 || n.Evidence.Errors[0] != "go test ./...: FAIL: TestLex" {
+		t.Fatalf("errors: %+v", n.Evidence.Errors) // "<args>: <first line>"
+	}
+}
+
+// TestFailedWriteLeavesFileRefUntouched: a failed write/edit told the model
+// nothing about the file's real content, so it must not be merged in —
+// neither marking the file edited nor stretching its ranges over the error
+// text.
+func TestFailedWriteLeavesFileRefUntouched(t *testing.T) {
+	r := newRec(4096, 32768)
+	n := &Node{ID: "1", Status: StatusDoing}
+	r.record(n, Event{Tool: "read_file", Args: map[string]any{"path": "a.go"},
+		Content: "     1\tpackage a\n     2\tvar X = 1\n"}, 1)
+	r.record(n, Event{Tool: "write_file", Args: map[string]any{"path": "a.go"},
+		Content: "permission denied", IsError: true}, 2)
+	r.distill(n)
+	if len(n.Evidence.Files) != 1 {
+		t.Fatalf("files: %+v", n.Evidence.Files)
+	}
+	f := n.Evidence.Files[0]
+	if f.Edited {
+		t.Fatal("a failed write must not mark the file edited")
+	}
+	if len(f.Ranges) != 1 || f.Ranges[0] != (Range{From: 1, To: 2}) {
+		t.Fatalf("ranges corrupted by the failed write: %+v", f.Ranges)
+	}
+	if len(n.Evidence.Errors) != 1 || n.Evidence.Errors[0] != "a.go: permission denied" {
+		t.Fatalf("errors: %+v", n.Evidence.Errors)
+	}
+}
+
+// TestFailedCallWithNoOutputStillRecordsAnError: a failing tool call with
+// empty output must not vanish from Errors — that would be total loss of
+// the failure for the file tools, which carry no per-file OK flag.
+func TestFailedCallWithNoOutputStillRecordsAnError(t *testing.T) {
+	r := newRec(4096, 32768)
+	n := &Node{ID: "1", Status: StatusDoing}
+	r.record(n, Event{Tool: "write_file", Args: map[string]any{"path": "a.go"},
+		Content: "", IsError: true}, 1)
+	r.distill(n)
+	if len(n.Evidence.Errors) != 1 || n.Evidence.Errors[0] != "a.go: (no output)" {
+		t.Fatalf("errors: %+v", n.Evidence.Errors)
 	}
 }
 

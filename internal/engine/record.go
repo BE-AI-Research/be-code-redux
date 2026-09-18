@@ -34,7 +34,7 @@ func (r *recorder) record(n *Node, ev Event, turn int) string {
 	if n == nil {
 		return ""
 	}
-	item := RawItem{Tool: ev.Tool, Args: argsLine(ev.Args), Out: excerpt(ev.Content, r.lim.ItemCap), OK: !ev.IsError, Turn: turn}
+	item := RawItem{Tool: ev.Tool, Args: excerpt(argsLine(ev.Args), r.lim.ItemCap), Out: excerpt(ev.Content, r.lim.ItemCap), OK: !ev.IsError, Turn: turn}
 	n.Evidence.Raw = append(n.Evidence.Raw, item)
 	r.capNode(n)
 
@@ -58,6 +58,10 @@ func (r *recorder) capNode(n *Node) {
 	for _, it := range n.Evidence.Raw {
 		total += len(it.Out) + len(it.Args)
 	}
+	// The len(...)>1 guard never drops the last remaining item, even if it
+	// alone is over NodeCap (only possible when ItemCap > NodeCap): there
+	// has to be something left to distill, and evidence that reads as
+	// over-budget is safer than a node with none at all.
 	for total > r.lim.NodeCap && len(n.Evidence.Raw) > 1 {
 		drop := n.Evidence.Raw[0]
 		total -= len(drop.Out) + len(drop.Args)
@@ -124,9 +128,14 @@ func (r *recorder) distill(n *Node) {
 			})
 		}
 		if !it.OK {
-			if line := firstLine(it.Out); line != "" {
-				n.Evidence.Errors = append(n.Evidence.Errors, line)
+			line := firstLine(it.Out)
+			if line == "" {
+				line = "(no output)"
 			}
+			// Spec 4.2: an error names the command that produced it.
+			// Errors stays []string (later tasks consume that shape), so
+			// the command and the line share one entry.
+			n.Evidence.Errors = append(n.Evidence.Errors, it.Args+": "+line)
 		}
 	}
 	n.Evidence.Raw = nil
@@ -140,6 +149,12 @@ func (r *recorder) distill(n *Node) {
 func (r *recorder) mergeFile(n *Node, it RawItem) {
 	rel := r.rel(it.Args)
 	if rel == "" {
+		return
+	}
+	// A failed read/write/edit told the model nothing about the file's
+	// actual content: merging it in would mark a failed write "edited" and
+	// stretch Ranges over the error text seenRange mistakes for output.
+	if !it.OK {
 		return
 	}
 	var ref *FileRef
