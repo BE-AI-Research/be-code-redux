@@ -205,6 +205,15 @@ On a switch:
 
 A switch never loads a model just to read its window. If the window is unknown, the harness sends its configured default and reconciles from what the first real response reports.
 
+### 10.1 The loader is the only path
+
+Every request for a model goes through the loader, which applies that model's resolved parameters including `num_ctx`: startup, `/model`, a pick from `/models`, a warm, and a recovery after the backend-status check trips. Nothing else sends options or loads a model, so there is one place where a model's parameters are decided and one place to look when they are wrong.
+
+When the protection trips, what the loader does depends on which trip it was:
+
+- **Evicted or idle-expired** — the model is not resident, so the next request reloads it regardless. The loader supplies the resolved `num_ctx` for that reload. No other application loses anything, because nothing was holding it, so this needs no consent.
+- **Window changed underneath us** — another client reloaded the model at a different size. The loader adapts: re-derive the budget, notice it, carry on. It re-applies our `num_ctx` only where consent already exists for that model (`reload_on_mismatch: always`), and otherwise leaves the other client's model alone.
+
 If the new model's window is smaller than what the conversation currently occupies, the harness compacts once on the spot rather than letting the next request truncate, and says so.
 
 `/models` shows what is being chosen between: parameter size and quantization from the tag listing, window, and whether the model is resident.
