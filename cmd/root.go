@@ -338,12 +338,6 @@ func usePlainUI(cfg *config.Config) bool {
 	return flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 }
 
-// sessionLoader is this session's model-parameter loader: the one place a
-// model's context window, keep-alive and options block are decided, and the
-// one place num_ctx reaches the wire. Later callers (a model switch, a
-// recovery after the backend-status check trips) reach it here.
-var sessionLoader *loader.Loader
-
 // applyModelParams resolves the model's parameters through the loader and
 // budgets the session against the window it actually gets.
 //
@@ -367,21 +361,25 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// while there is not. Under a TUI stderr is wiped by the alt screen,
 	// and in a hosted session it is a log file nobody opens — which is
 	// where every explanation of a refused reload used to end up.
-	agent.LoaderFactory = func(c *config.Config, prov provider.Provider) agent.ModelLoader {
+	newLoader := func(c *config.Config, prov provider.Provider) *loader.Loader {
 		l := loader.New(prov, c, nil, func(s string) {
 			if !ag.Notice(s) {
 				fmt.Fprintf(os.Stderr, "warn: %s\n", s)
 			}
 		})
 		l.SetApprover(func() tools.ApproveFunc { return reg.Approve })
-		sessionLoader = l
 		return l
+	}
+	agent.LoaderFactory = func(c *config.Config, prov provider.Provider) agent.ModelLoader {
+		return newLoader(c, prov)
 	}
 	// Spec §10.1: the loader is the only path to a model's parameters, so
 	// the agent holds it for every later request — a /model switch, a pick
-	// from /models, a recovery after the backend-status check trips.
-	ag.SetLoader(agent.LoaderFactory(cfg, p))
-	ld := sessionLoader
+	// from /models, a recovery after the backend-status check trips. It is
+	// reached through Agent.Loader, not a package var: /provider replaces it
+	// from a UI goroutine.
+	ld := newLoader(cfg, p)
+	ag.SetLoader(ld)
 
 	n, err := ld.Apply(context.Background(), model)
 	if _, isOllama := p.(*provider.Ollama); !isOllama {
@@ -394,7 +392,7 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 		if !configured {
 			budget := cfg.ContextTokens
 			if budget <= 0 {
-				budget = ag.History.Budget
+				budget, _, _ = ag.History.Scalars()
 			}
 			fmt.Fprintf(os.Stderr, "warn: could not determine the backend context window; using a budget of %d tokens.\n"+
 				"      Set \"context_window\" for this model in config to say what it really is.\n", budget)
@@ -410,7 +408,7 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// going to use, not the one it has been cut down to, or the line reads
 	// "budget clamped to 4096 ... start the server with
 	// OLLAMA_CONTEXT_LENGTH=4096".
-	wanted := ag.History.Budget
+	wanted, _, _ := ag.History.Scalars()
 	if ag.ApplyWindow(n) && !configured {
 		fmt.Fprintf(os.Stderr, "warn: model %s runs with a %d-token window; budget clamped to %d.\n"+
 			"      Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.\n",
@@ -613,8 +611,17 @@ func runInteractive(cmd *cobra.Command) error {
 		// Plain mode answers on the one input stream its own loop reads,
 		// so its half of the deferred consent runs inline, on the REPL
 		// goroutine, after the reader is up and before the first line is
-		// taken (see agent.ResolveModelNow).
-		repl.OnStart = func() { ag.ResolveModelNow(ctx) }
+		// taken (see agent.ResolveModelNow). The deadline is applied here
+		// rather than inside the agent, on a context the REPL's own prompt
+		// waits on too: a resolution that has timed out has to be able to
+		// take its question off the screen.
+		repl.OnStart = func() {
+			rctx, cancel := context.WithTimeout(ctx, agent.ModelResolveTimeout)
+			defer cancel()
+			repl.SetPromptContext(rctx)
+			defer repl.SetPromptContext(nil)
+			ag.ResolveModelNow(rctx)
+		}
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)

@@ -144,7 +144,8 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	if window > 0 && window != a.Window() {
 		old := a.Window()
 		a.ApplyWindow(window)
-		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, a.History.Budget, a.History.Limit())
+		budget, _, _ := a.History.Scalars()
+		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, budget, a.History.Limit())
 		if l != nil {
 			l.OnWindowChanged(a.Model, window)
 		}
@@ -158,13 +159,25 @@ func (a *Agent) refreshKeepAlive() {
 	if !ok {
 		return
 	}
-	d, err := time.ParseDuration(strings.TrimSpace(a.Cfg.KeepAlive))
-	if a.Cfg.KeepAlive == "" {
-		d = 30 * time.Minute
-	} else if err != nil || d <= 0 {
-		return
-	}
 	model := a.Model
+	// The loader resolves keep_alive per model (models entry, then the
+	// provider block, then the top-level setting), and it is the same
+	// number the requests themselves carry. Reading cfg.KeepAlive here
+	// instead would refresh residency on a schedule a per-model setting had
+	// already overridden.
+	var d time.Duration
+	if l := a.modelLoader(); l != nil {
+		d = l.KeepAlive(model)
+	}
+	if d <= 0 {
+		var err error
+		d, err = time.ParseDuration(strings.TrimSpace(a.Cfg.KeepAlive))
+		if a.Cfg.KeepAlive == "" {
+			d = 30 * time.Minute
+		} else if err != nil || d <= 0 {
+			return // "0" means do not keep it resident; nothing to refresh
+		}
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

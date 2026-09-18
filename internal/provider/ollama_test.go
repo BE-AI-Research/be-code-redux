@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func ollamaStub(t *testing.T, ps, show string) *httptest.Server {
@@ -550,5 +551,61 @@ func TestModelDetailsFallsBackToListModels(t *testing.T) {
 	// silently returning nothing.
 	if _, err := ModelDetails(context.Background(), p); err == nil {
 		t.Fatal("a failing listing must be reported, not swallowed")
+	}
+}
+
+// Warm is /api/generate with an empty prompt, and /api/generate *loads* the
+// model when it is not resident — which is exactly the case a post-request
+// keep-alive refresh runs into, since an eviction between requests is what
+// the refresh exists for. Without options that load comes up at the
+// server's default window, outside the loader entirely, which spec §10.1
+// says is the only path that loads a model or sends num_ctx.
+func TestWarmCarriesTheResolvedWindow(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	p := NewOllama("t", srv.URL, "")
+	p.SetOptions(Options{NumCtx: 32768, Extra: map[string]any{"top_k": 40}})
+	if err := p.Warm(context.Background(), "m", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	opts, _ := body["options"].(map[string]any)
+	if opts == nil {
+		t.Fatalf("warm sent no options; the model would load at the server's default: %v", body)
+	}
+	if n, _ := opts["num_ctx"].(float64); int(n) != 32768 {
+		t.Fatalf("num_ctx %v", opts["num_ctx"])
+	}
+	if k, _ := opts["top_k"].(float64); int(k) != 40 {
+		t.Fatalf("the passthrough options were dropped: %v", opts)
+	}
+	if body["keep_alive"] != "30m0s" {
+		t.Fatalf("keep_alive %v", body["keep_alive"])
+	}
+}
+
+// With nothing resolved there is nothing to say, and the key is omitted
+// rather than sent as an empty object.
+func TestWarmOmitsAnEmptyOptionsBlock(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	if err := p.Warm(context.Background(), "m", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := body["options"]; ok {
+		t.Fatalf("sent an options block with nothing in it: %v", body)
 	}
 }

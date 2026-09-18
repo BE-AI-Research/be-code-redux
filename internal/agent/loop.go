@@ -225,7 +225,8 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	// NewHistory rescues an unset budget; the reserve must start from the
 	// same number, or an unset context_tokens leaves the floor reserve
 	// against a 16k budget until the real window arrives.
-	a.applyReserve(a.History.Budget) // until a real window is detected
+	budget, _, _ := a.History.Scalars()
+	a.applyReserve(budget) // until a real window is detected
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}
@@ -345,13 +346,20 @@ type ModelLoader interface {
 	// OnWindowChanged is another client having reloaded the model at a
 	// different size. The loader adapts and never reloads back.
 	OnWindowChanged(model string, window int)
+	// KeepAlive is how long this model should stay resident: the models
+	// entry, else the provider block, else the top-level setting. 0 means
+	// nothing was configured, and the caller's own default applies.
+	KeepAlive(model string) time.Duration
 }
 
-// modelResolveTimeout bounds one parameter resolution, consent prompt
+// ModelResolveTimeout bounds one parameter resolution, consent prompt
 // included. It is generous because the question in the middle of it is one
 // a person has to read; it exists so a session that is never answered does
 // not carry a goroutine for the life of the process.
-const modelResolveTimeout = 2 * time.Minute
+//
+// Exported because the caller of ResolveModelNow has to apply it itself,
+// with a context its own approval prompt also waits on (see there).
+const ModelResolveTimeout = 2 * time.Minute
 
 // SetLoader hands the agent the session's model loader. Nil disables the
 // resolution entirely, which is what a test or a scratch agent wants.
@@ -378,7 +386,11 @@ func (a *Agent) ResolveModel() {
 	if l == nil {
 		return
 	}
-	go a.resolveModel(context.Background(), l, model, gen)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ModelResolveTimeout)
+		defer cancel()
+		a.resolveModel(ctx, l, model, gen)
+	}()
 }
 
 // ResolveModelNow is ResolveModel on the caller's goroutine. Plain mode
@@ -386,6 +398,12 @@ func (a *Agent) ResolveModel() {
 // REPL loop is also reading, so a question raised from a second goroutine
 // would race the user's own keystrokes. The REPL calls this from its own
 // goroutine, once, before it starts reading lines.
+//
+// It applies no deadline of its own, deliberately. There is no goroutine
+// here to leak, and a deadline applied here would be invisible to the
+// prompt the loader raises through the caller's UI — a timeout that cannot
+// withdraw the question it is timing is a lie. The caller bounds this with
+// ModelResolveTimeout on a context its own prompt also waits on.
 func (a *Agent) ResolveModelNow(ctx context.Context) {
 	a.modelMu.Lock()
 	l, model := a.loader, a.Model
@@ -401,14 +419,12 @@ func (a *Agent) ResolveModelNow(ctx context.Context) {
 // resolveModel is the body of both, fenced against a loader that panics:
 // model parameters are advisory, and a session that cannot learn its window
 // still runs — at the budget it already had.
-func (a *Agent) resolveModel(parent context.Context, l ModelLoader, model string, gen int) {
+func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, gen int) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.notice("model parameters for %s could not be resolved: %v", model, r)
 		}
 	}()
-	ctx, cancel := context.WithTimeout(parent, modelResolveTimeout)
-	defer cancel()
 	w, err := l.Apply(ctx, model)
 	if err != nil || w <= 0 {
 		// Every reason the loader has for declining is one it has already
@@ -449,7 +465,7 @@ func (a *Agent) resolveModel(parent context.Context, l ModelLoader, model string
 	a.modelMu.Lock()
 	tokens := a.History.Tokens() // the system prompt and the transcript
 	a.modelMu.Unlock()
-	if tokens <= a.History.Usable() { // the budget, read under its own lock
+	if tokens <= a.History.Limit() { // the budget, read under its own lock
 		return
 	}
 	a.notice("the new model's window is smaller than this conversation; compacting once")
@@ -458,12 +474,48 @@ func (a *Agent) resolveModel(parent context.Context, l ModelLoader, model string
 	}
 }
 
+// ClearHistory and CompactNow are the two transcript rewrites a *user* asks
+// for — /clear and /compact — and they exist because the transcript now has
+// more than one writer. Before model switching went through the loader, the
+// tool loop was the only thing that touched History.Messages, and a UI was
+// safe to touch it directly as long as it was not running. It is not the
+// only thing any more: a switch resolves its window on a goroutine of its
+// own and may compact on the spot, and the UI has no way to know that
+// goroutine is there. Both of these take the same turn lock run() holds, so
+// the three writers take turns instead of overlapping.
+//
+// **Neither may be called from inside a Bubble Tea Update.** The lock order
+// in a served session is turn lock first, session lock second: everything
+// that holds the turn lock — a request streaming deltas, a post-switch
+// compaction emitting notices — writes to the session as it goes, and that
+// takes the lock Update is holding. Waiting for the turn lock from inside
+// Update inverts that and deadlocks the terminal. Both UIs call these from
+// a goroutine of their own, with the UI in its busy state.
+func (a *Agent) ClearHistory() {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	a.History.Messages = nil
+}
+
+// CompactNow is Compact under the turn lock, for a UI asking for it
+// directly. The tool loop's own compaction is already inside run().
+func (a *Agent) CompactNow(ctx context.Context) error {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	return a.Compact(ctx)
+}
+
 // modelLoader is the loader as the agent goroutine reads it (checkBackend).
 func (a *Agent) modelLoader() ModelLoader {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	return a.loader
 }
+
+// Loader is this session's model loader, or nil. It is the read half of
+// SetLoader and takes the same lock, because a provider switch replaces the
+// loader from a UI goroutine while the tool loop reads it.
+func (a *Agent) Loader() ModelLoader { return a.modelLoader() }
 
 // Window is the backend context window this session budgets against, or 0
 // when it is unknown.
@@ -1154,6 +1206,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if len(a.History.Messages) <= keepTail {
 		return fmt.Errorf("nothing to compact")
 	}
+	// The model and its profile are snapshotted rather than read where they
+	// are used: this runs on the resolution's goroutine after a model
+	// switch, and a *second* switch landing mid-compaction would otherwise
+	// be read half-applied — a summary addressed to one model and stripped
+	// as if it came from another.
+	a.modelMu.Lock()
+	model, stripThink := a.Model, a.Profile.StripThink
+	a.modelMu.Unlock()
 	head := a.History.Messages[:len(a.History.Messages)-keepTail]
 	tail := a.History.Messages[len(a.History.Messages)-keepTail:]
 
@@ -1234,7 +1294,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: a.Model,
+		Model: model,
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: compactSystemPrompt},
 			{Role: provider.RoleUser, Content: u.String()},
@@ -1260,7 +1320,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 		return err
 	}
 	summary := resp.Content
-	if a.Profile.StripThink {
+	if stripThink {
 		summary = StripThink(summary)
 	}
 	filesOnly := false

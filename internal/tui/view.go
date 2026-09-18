@@ -1262,9 +1262,19 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		m.appendEntryLocked(entry{Kind: entryDim, Text: help})
 	case "/clear":
-		m.ag.History.Messages = nil
-		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
-		m.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
+		// Off the event loop, like /compact beside it. ClearHistory waits
+		// for the turn lock, and whatever holds that lock — a request, or a
+		// post-switch compaction — writes to this session as it goes, which
+		// takes the very lock Update is holding here. Waiting from inside
+		// Update would invert that order and hang the terminal.
+		m.setRunStateLocked(true, "clearing")
+		sess, name, model := m.Session, m.prov.Name(), m.ag.Model
+		go func() {
+			sess.ag.ClearHistory()
+			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			sess.appendEntry(entry{Kind: entryOK, Text: "history cleared; new session started"})
+			sess.finishTurn(nil, nil)
+		}()
 	case "/tools":
 		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
 	case "/config":
@@ -1332,7 +1342,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		ctx := m.runContextLocked()
 		sess := m.Session
 		go func() {
-			if err := sess.ag.Compact(ctx); err != nil {
+			if err := sess.ag.CompactNow(ctx); err != nil {
 				sess.notice("compaction failed: " + err.Error())
 			} else {
 				sess.notice(fmt.Sprintf("compacted; context now ~%d tokens", sess.ag.History.Tokens()))
@@ -1341,10 +1351,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/stats":
 		s := m.ag.Usage()
+		budget, _, _ := m.ag.History.Scalars()
 		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
-			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)})
+			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), budget)})
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})

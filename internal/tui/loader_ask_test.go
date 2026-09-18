@@ -11,6 +11,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/provider"
 )
 
 // consentLoader stands in for the real loader at the only point that
@@ -36,6 +37,7 @@ func (l *consentLoader) Apply(context.Context, string) (int, error) {
 }
 func (*consentLoader) OnEvicted(context.Context, string) {}
 func (*consentLoader) OnWindowChanged(string, int)       {}
+func (*consentLoader) KeepAlive(string) time.Duration    { return 0 }
 
 // The whole point of ruling T8-a: a window mismatch found at startup has to
 // become a question somewhere a person can answer it. Under a TUI the only
@@ -138,3 +140,49 @@ func (l blockingLoader) Apply(ctx context.Context, _ string) (int, error) {
 }
 func (blockingLoader) OnEvicted(context.Context, string) {}
 func (blockingLoader) OnWindowChanged(string, int)       {}
+func (blockingLoader) KeepAlive(string) time.Duration    { return 0 }
+
+// The lock order in a served session is turn lock first, session lock
+// second: everything holding the turn lock writes to the session as it goes
+// (deltas, notices), and that takes the lock Update holds. So a slash
+// command that needs the turn lock must not wait for it inside Update — it
+// would invert the order and hang the terminal, with no way to answer
+// anything. /clear is the one that had to move.
+func TestClearDoesNotWaitForTheTurnLockInsideUpdate(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	v := s.NewView(0, "local")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	flush(v)
+
+	// Give the agent a transcript and park something in Compact, which
+	// holds the turn lock until its model call returns.
+	for i := 0; i < 20; i++ {
+		s.ag.History.Messages = append(s.ag.History.Messages,
+			provider.Message{Role: provider.RoleUser, Content: strings.Repeat("x", 400)},
+			provider.Message{Role: provider.RoleAssistant, Content: strings.Repeat("y", 400)})
+	}
+	s.ag.Provider = blockingProvider{}
+	ctx, cancel := context.WithCancel(context.Background())
+	held := make(chan struct{})
+	go func() {
+		close(held)
+		_ = s.ag.CompactNow(ctx)
+	}()
+	<-held
+	time.Sleep(50 * time.Millisecond) // let it reach the model call
+
+	done := make(chan struct{})
+	go func() {
+		v.Update(runes("/clear"))
+		v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("Update blocked on the turn lock; a served terminal would be hung here")
+	}
+	cancel()
+}

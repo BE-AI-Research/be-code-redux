@@ -133,7 +133,7 @@ func TestStartupConsentIsDeferredNotDenied(t *testing.T) {
 	// The UI comes up and wires its approver, exactly as tui/ui do.
 	var asked string
 	reg.Approve = func(action, detail string) bool { asked = action; return true }
-	if w, err := sessionLoader.Apply(t.Context(), "m"); err != nil || w != 32768 {
+	if w, err := ag.Loader().Apply(t.Context(), "m"); err != nil || w != 32768 {
 		t.Fatalf("window %d err %v; the question must still be askable", w, err)
 	}
 	if asked != "model_reload" {

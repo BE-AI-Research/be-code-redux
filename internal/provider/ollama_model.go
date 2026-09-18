@@ -313,10 +313,17 @@ func (p *Ollama) ContextLength(ctx context.Context, model string) (int, error) {
 // Warm loads a model into memory with an extended keep-alive so the first
 // real request doesn't pay the load cost.
 func (p *Ollama) Warm(ctx context.Context, model string, keepAlive time.Duration) error {
-	body, _ := json.Marshal(map[string]any{
-		"model": model, "keep_alive": keepAlive.String(),
-	})
-	req, err := http.NewRequestWithContext(ctx, "POST", p.APIBase+"/api/generate", bytes.NewReader(body))
+	body := map[string]any{"model": model, "keep_alive": keepAlive.String()}
+	// With the resolved options, because this call loads the model when it
+	// is not resident (an eviction between requests is exactly when the
+	// keep-alive refresh matters). Without them it would load at the
+	// server's default window — outside the loader, which spec §10.1 says
+	// is the only path that loads a model or sends num_ctx.
+	if opts := p.loadOptions(); opts != nil {
+		body["options"] = opts
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", p.APIBase+"/api/generate", bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}

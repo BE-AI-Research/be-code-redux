@@ -134,6 +134,13 @@ func (l *Loader) Params(model string) Params {
 	return p
 }
 
+// KeepAlive is this model's resolved residency, for the caller that
+// refreshes it after each request. It is the same resolution Apply uses, so
+// a models entry's keep_alive governs the refresh as well as the request —
+// before this, the refresh read the top-level setting and quietly undid a
+// per-model one.
+func (l *Loader) KeepAlive(model string) time.Duration { return l.Params(model).KeepAlive }
+
 // Apply resolves the model's parameters and makes them true on the server,
 // asking first whenever that would change what another application on the
 // box is using. It returns the window the session should budget against; 0

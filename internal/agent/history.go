@@ -16,14 +16,16 @@ import (
 type History struct {
 	// mu guards the three scalars below — Budget, Reserve and
 	// CharsPerToken — and nothing else. They are written by the agent
-	// goroutine (Calibrate after every request, Agent.ApplyWindow when the
-	// backend's window moves) and read by whatever goroutine starts a
-	// consultation: /consult comes off a UI goroutine, and consultAgent
-	// copies all three into the scratch history. Readers on the agent's own
-	// goroutine (est, Tokens, Limit, trim) stay lock-free: they cannot race
-	// with a writer that is themselves, and a lock in est would be taken
-	// once per message per turn for nothing. Scalars is the one seam a
-	// foreign goroutine reads them through.
+	// goroutine (Calibrate after every request) and by two others besides:
+	// Agent.ApplyWindow, which since model switching went through the
+	// loader runs on the resolution's own goroutine when a switch's window
+	// lands, and whatever goroutine starts a consultation (/consult comes
+	// off a UI goroutine, and consultAgent copies all three into the
+	// scratch history). So Budget and Reserve are read through Limit or
+	// Scalars, both of which lock. CharsPerToken stays lock-free in est and
+	// MessageTokens: it is written only by Calibrate on the agent
+	// goroutine, and a lock there would be taken once per message per turn
+	// for nothing.
 	mu sync.Mutex
 
 	System   provider.Message
@@ -102,8 +104,18 @@ func (h *History) Target() int {
 
 // Limit is the budget available to System+Messages+Extra after reserving
 // generation headroom.
+//
+// It reads the two scalars under mu. They stopped being the agent
+// goroutine's private property when a model switch began resolving its
+// window on a goroutine of its own: ApplyWindow now writes Budget and
+// Reserve from there, while the tool loop's own budgeting notices and both
+// UIs' context wheels read them. Nothing calls this while holding mu —
+// trim, CollapseOldToolResults and Target all take no lock — so there is no
+// nesting to worry about.
 func (h *History) Limit() int {
+	h.mu.Lock()
 	l := h.Budget - h.Reserve
+	h.mu.Unlock()
 	if l < 512 {
 		l = 512 // never trim into nothing; the model must see something
 	}
@@ -112,21 +124,6 @@ func (h *History) Limit() int {
 
 // Over reports whether the next prompt would exceed the usable limit.
 func (h *History) Over() bool { return h.Tokens() > h.Limit() }
-
-// Usable is Limit read under mu, for a goroutine that is not the agent's
-// own — the same reason Scalars exists. A model switch resolves its window
-// on a goroutine of its own and then has to ask whether the conversation
-// still fits, while the tool loop may be rewriting the budget it is asking
-// about.
-func (h *History) Usable() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	l := h.Budget - h.Reserve
-	if l < 512 {
-		l = 512
-	}
-	return l
-}
 
 // Calibrate adjusts CharsPerToken so the estimate of the last prompt matches
 // the token count the server reported for it. Smoothed and clamped so one

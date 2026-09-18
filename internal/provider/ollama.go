@@ -140,6 +140,33 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	return m
 }
 
+// loadOptions is the options block for a call that carries no request of
+// its own: Warm's keep-alive touch, which is a /api/generate with an empty
+// prompt. It matters because that call *loads* the model when it is not
+// resident, and a load with no num_ctx is a load at the server's default —
+// the one remaining way a model could come up at a window the loader never
+// chose. The resolved window is the only one the loader ever puts here, so
+// sending it is the same number every chat request already carries.
+//
+// Nil when there is nothing to say, so the request body omits the key
+// entirely rather than sending an empty object.
+func (p *Ollama) loadOptions() map[string]any {
+	p.mu.RLock()
+	o := p.opts
+	p.mu.RUnlock()
+	m := map[string]any{}
+	if o.NumCtx > 0 {
+		m["num_ctx"] = o.NumCtx
+	}
+	for k, v := range o.Extra {
+		m[k] = v
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
 // ---- native wire types -----------------------------------------------------
 
 type nativeToolCall struct {

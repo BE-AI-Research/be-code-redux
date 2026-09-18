@@ -258,20 +258,14 @@ func (a *Agent) reserveFor(window int) int {
 // limit in bytes, between 4KB and the 24KB default.
 func (a *Agent) applyReserve(window int) {
 	reserve := a.reserveFor(window)
-	// The limit is read from the two scalars under the same lock that just
-	// wrote one of them, rather than through History.Limit(), which reads
-	// them bare. Since a model switch resolves its window on a goroutine of
-	// its own, two applyReserve calls really can overlap, and the unlocked
-	// read was a data race between them.
 	a.History.mu.Lock()
 	a.History.Reserve = reserve
-	limit := a.History.Budget - reserve
 	a.History.mu.Unlock()
-	if limit < 512 {
-		limit = 512 // History.Limit's floor: never trim into nothing
-	}
+	// Limit locks too, so it is read after the write above rather than
+	// inside it: a model switch resolves its window on a goroutine of its
+	// own, so two applyReserve calls really can overlap.
 	if a.Tools != nil {
-		capBytes := limit * 3 / 4
+		capBytes := a.History.Limit() * 3 / 4
 		if capBytes > 24*1024 {
 			capBytes = 24 * 1024
 		}

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chzyer/readline"
+
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
@@ -495,5 +497,95 @@ func TestPlainResumeReplaysTheTranscript(t *testing.T) {
 	out = capture(t, func() { r.printResume(s) })
 	if strings.Contains(out, "you> read a.go") || !strings.Contains(out, "resumed ") {
 		t.Fatalf("resume_replay off:\n%s", out)
+	}
+}
+
+// Ctrl-D at the startup consent prompt ends the session. The readline
+// goroutine exits on EOF, so the main loop's receive would otherwise wait
+// on a channel nobody will ever write to again — a hang with no prompt on
+// screen, which is worse than any answer the question could have had.
+func TestEOFAtAOneOffPromptEndsTheSession(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{err: io.EOF} // the reader's last word, taken by the prompt
+
+	if got := r.prompt("approve? "); got != "" {
+		t.Fatalf("EOF answered %q", got)
+	}
+	if !r.inputDone() {
+		t.Fatal("the prompt swallowed EOF without recording it")
+	}
+	done := make(chan bool, 1)
+	go func() { _, ok := r.nextLine(); done <- ok }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("the loop went on reading after input ended")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the main loop is waiting on a reader that has already exited")
+	}
+}
+
+// ^C is not the end of input: the reader goroutine survives it, so the loop
+// must too.
+func TestInterruptAtAOneOffPromptDoesNotEndTheSession(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{err: readline.ErrInterrupt}
+	if got := r.prompt("approve? "); got != "" {
+		t.Fatalf("^C answered %q", got)
+	}
+	if r.inputDone() {
+		t.Fatal("^C was mistaken for the end of input")
+	}
+}
+
+// A one-off prompt waits on the asker's context as well as on the user, so
+// a question whose asker has given up — the model resolution's
+// ModelResolveTimeout — leaves the screen instead of holding the session
+// open forever. Before this it waited on context.Background().
+func TestPromptContextWithdrawsAOneOffQuestion(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent) // nothing will ever arrive
+	ctx, cancel := context.WithCancel(context.Background())
+	r.SetPromptContext(ctx)
+	defer r.SetPromptContext(nil)
+
+	done := make(chan string, 1)
+	go func() { done <- r.prompt("approve? ") }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("a withdrawn question answered %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the question outlived the asker that raised it")
+	}
+}
+
+// The startup consent prompt is the caller this exists for: with the
+// approver wired, a resolution whose context ends takes its question with
+// it rather than blocking the REPL's first prompt.
+func TestLoaderConsentPromptIsWithdrawnWithItsContext(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent)
+	r.Agent.Tools.Approve = r.approve
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	r.SetPromptContext(ctx)
+	defer r.SetPromptContext(nil)
+
+	done := make(chan bool, 1)
+	go func() { done <- r.Agent.Tools.Approve("model_reload", "model m is loaded with 8192") }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a question nobody answered must not count as consent")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consent prompt could not be withdrawn")
 	}
 }

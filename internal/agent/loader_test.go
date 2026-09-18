@@ -17,12 +17,13 @@ import (
 // field is behind mu: resolveModel runs on a goroutine of its own, so a
 // test that read these directly would be the very race it is checking for.
 type fakeLoader struct {
-	mu      sync.Mutex
-	window  int
-	delay   time.Duration
-	applied []string
-	evicted []string
-	changed []int
+	mu        sync.Mutex
+	window    int
+	delay     time.Duration
+	applied   []string
+	evicted   []string
+	changed   []int
+	keepAlive time.Duration
 }
 
 func (f *fakeLoader) Apply(ctx context.Context, model string) (int, error) {
@@ -49,6 +50,14 @@ func (f *fakeLoader) OnWindowChanged(_ string, w int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.changed = append(f.changed, w)
+}
+
+// keepAlive is what the agent asks for when refreshing residency; 0 means
+// nothing configured, so the agent's own default stands.
+func (f *fakeLoader) KeepAlive(string) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.keepAlive
 }
 
 func (f *fakeLoader) appliedModels() []string {
@@ -124,7 +133,7 @@ func (n *noticeSink) all() []string {
 func over(ag *Agent) bool {
 	ag.turnMu.Lock()
 	defer ag.turnMu.Unlock()
-	return ag.History.Tokens() > ag.History.Usable()
+	return ag.History.Tokens() > ag.History.Limit()
 }
 
 // fillHistory pads the transcript past tokens' worth of text, so a smaller
@@ -335,6 +344,7 @@ func (l askingLoader) Apply(_ context.Context, _ string) (int, error) {
 }
 func (askingLoader) OnEvicted(context.Context, string) {}
 func (askingLoader) OnWindowChanged(string, int)       {}
+func (askingLoader) KeepAlive(string) time.Duration    { return 0 }
 
 // TestAProviderSwitchGetsItsOwnLoader: a loader speaks for one backend and
 // carries that server's consent record. Keeping it across /provider would
@@ -414,4 +424,171 @@ func TestConcurrentModelSwitchesAndBackendChecks(t *testing.T) {
 	}()
 	wg.Wait()
 	waitFor(t, "every resolution to land", func() bool { return ag.Window() > 0 })
+}
+
+// TestBudgetScalarsAreReadUnderTheLock: ApplyWindow writes Budget and
+// Reserve, and since a model switch resolves its window on a goroutine of
+// its own it writes them from there — before it ever reaches the turn lock.
+// Limit, Target and Over are read meanwhile by the tool loop's budgeting
+// notices and by both UIs' context wheels, so they cannot read the scalars
+// bare. Fails under -race before Limit took the lock.
+func TestBudgetScalarsAreReadUnderTheLock(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	fillHistory(t, ag, 4000)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // the resolution goroutine landing a switch's window
+		defer wg.Done()
+		for n := 0; n < 300; n++ {
+			ag.ApplyWindow(8192 + (n%2)*8192)
+		}
+	}()
+	wg.Add(1)
+	go func() { // what the loop's own budgeting and a UI's wheel read
+		defer wg.Done()
+		for n := 0; n < 300; n++ {
+			_ = ag.History.Limit()
+			_ = ag.History.Target()
+			_ = ag.History.Over()
+		}
+	}()
+	wg.Wait()
+}
+
+// TestUserHistoryRewritesTakeTheTurnLock: /clear and /compact were safe
+// while the tool loop was the only other writer of the transcript and a UI
+// only touched it when not running. The resolution goroutine broke that —
+// it can compact while the UI believes itself idle — so both now go through
+// the agent, under the same lock a request holds.
+func TestUserHistoryRewritesTakeTheTurnLock(t *testing.T) {
+	ag, _ := newTestAgent(t, summarizingProvider(), nil)
+	fillHistory(t, ag, 2000)
+	before := len(ag.History.Messages)
+
+	ag.turnMu.Lock() // stand in for a request, or for the post-switch compaction
+	cleared := make(chan struct{})
+	go func() { ag.ClearHistory(); close(cleared) }()
+	select {
+	case <-cleared:
+		t.Fatal("/clear rewrote the transcript while something else held the turn")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if len(ag.History.Messages) != before {
+		t.Fatal("the transcript was cleared out from under the lock holder")
+	}
+	ag.turnMu.Unlock()
+	select {
+	case <-cleared:
+	case <-time.After(2 * time.Second):
+		t.Fatal("/clear never completed after the lock was released")
+	}
+	if len(ag.History.Messages) != 0 {
+		t.Fatalf("history not cleared: %d messages", len(ag.History.Messages))
+	}
+}
+
+// And the same for /compact, which is the other rewrite a user asks for.
+func TestCompactNowTakesTheTurnLock(t *testing.T) {
+	ag, _ := newTestAgent(t, summarizingProvider(), nil)
+	fillHistory(t, ag, 2000)
+	ag.turnMu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- ag.CompactNow(context.Background()) }()
+	select {
+	case <-done:
+		t.Fatal("/compact rewrote the transcript while something else held the turn")
+	case <-time.After(50 * time.Millisecond):
+	}
+	ag.turnMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("compaction failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("/compact never completed after the lock was released")
+	}
+}
+
+// TestCompactSnapshotsTheModelItIsSummarizingFor: Compact runs on the
+// resolution's goroutine after a model switch, and a second switch landing
+// mid-compaction would otherwise be read half-applied — a summary addressed
+// to one model and stripped as if it came from another. Fails under -race
+// before the snapshot.
+func TestCompactSnapshotsTheModelItIsSummarizingFor(t *testing.T) {
+	ag, _ := newTestAgent(t, summarizingProvider(), nil)
+	fillHistory(t, ag, 2000)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { // the one UI goroutine that switches models
+		defer wg.Done()
+		for n := 0; ; n++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ag.SetModel(fmt.Sprintf("model-%d", n))
+		}
+	}()
+	// Refilling goes through the turn lock and never measures the history:
+	// Tokens reads the system prompt, which the switching goroutine is
+	// rewriting, and that read is the test's own race, not the code's.
+	chunk := strings.Repeat("more transcript. ", 100)
+	refill := func() {
+		ag.turnMu.Lock()
+		for i := 0; i < 20; i++ {
+			ag.History.Messages = append(ag.History.Messages,
+				provider.Message{Role: provider.RoleUser, Content: chunk},
+				provider.Message{Role: provider.RoleAssistant, Content: chunk})
+		}
+		ag.turnMu.Unlock()
+	}
+	for n := 0; n < 20; n++ {
+		refill()
+		if err := ag.CompactNow(context.Background()); err != nil {
+			t.Fatalf("compaction failed: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestKeepAliveComesFromTheLoader: keep_alive is resolved per model (the
+// models entry, then the provider block, then the top level), and the
+// residency refresh has to use the same answer — reading cfg.KeepAlive here
+// quietly undid a per-model setting.
+func TestKeepAliveComesFromTheLoader(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.KeepAlive = "30m" })
+	sp := &statusProvider{funcProvider: &funcProvider{}, window: 8192, loaded: true}
+	ag.Provider = sp
+	ag.SetLoader(&fakeLoader{window: 8192, keepAlive: 90 * time.Second})
+
+	ag.refreshKeepAlive()
+	waitFor(t, "the keep-alive refresh", func() bool { return sp.keepAlives() == 1 })
+	sp.mu.Lock()
+	got := sp.kept[0]
+	sp.mu.Unlock()
+	if got != 90*time.Second {
+		t.Fatalf("refreshed for %s; the loader said 90s and config said 30m", got)
+	}
+}
+
+// With no loader, or nothing configured for the model, the old behaviour
+// stands: a session must not lose its residency refresh to this change.
+func TestKeepAliveFallsBackToConfig(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.KeepAlive = "10m" })
+	sp := &statusProvider{funcProvider: &funcProvider{}, window: 8192, loaded: true}
+	ag.Provider = sp
+	ag.SetLoader(&fakeLoader{window: 8192}) // keepAlive 0: nothing configured
+
+	ag.refreshKeepAlive()
+	waitFor(t, "the keep-alive refresh", func() bool { return sp.keepAlives() == 1 })
+	sp.mu.Lock()
+	got := sp.kept[0]
+	sp.mu.Unlock()
+	if got != 10*time.Minute {
+		t.Fatalf("refreshed for %s; config said 10m", got)
+	}
 }
