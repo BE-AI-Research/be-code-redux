@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,16 @@ type retryableError struct{ err error }
 
 func (e retryableError) Error() string { return e.err.Error() }
 func (e retryableError) Unwrap() error { return e.err }
+
+// unsavedStateError marks a migration whose task documents were written and
+// whose dotdir state was not (ruling T3-f). The lift itself is on disk, so
+// the store is usable and the session continues; what was lost is the turn
+// counter and the baseline that the same flush would have persisted, and a
+// later flush in this session may still write them.
+type unsavedStateError struct{ err error }
+
+func (e unsavedStateError) Error() string { return e.err.Error() }
+func (e unsavedStateError) Unwrap() error { return e.err }
 
 // migrateLedger lifts a 0.10.0 flat ledger into one task. Steps become
 // children, decisions and facts become notes on the task, and digests and
@@ -55,8 +66,10 @@ func (s *Store) migrateLedger(path string) error {
 		return retryableError{err}
 	}
 
-	// Everything that follows is undone on a failed flush, so the store is
-	// left exactly as it was found.
+	// Everything that follows is undone on a flush that failed *before* it
+	// wrote any document, so the store is left exactly as it was found. Once
+	// a document is on disk the lift has happened and undoing is the wrong
+	// move — see the flush below.
 	roots, turn, baseline := len(s.tree.Roots), s.turn, s.baseline
 	undo := func(err error) error {
 		s.tree.Roots = s.tree.Roots[:roots]
@@ -127,6 +140,22 @@ func (s *Store) migrateLedger(path string) error {
 	// exists only in memory, and a normal session does not flush until a
 	// request completes — so a Ctrl-C at the prompt would otherwise lose it.
 	if err := s.Flush(); err != nil {
+		var fe flushError
+		if errors.As(err, &fe) && fe.wroteDocs {
+			// Ruling T3-f. The task documents are written, so the lift has
+			// happened; only the dotdir state failed to persist. Restoring
+			// the legacy files here would put ledger.json back beside the
+			// document it was lifted into, and the next open would load the
+			// document *and* migrate the ledger again — two roots and two
+			// documents for one task, the duplicate the rename-first
+			// ordering exists to prevent. So nothing is put back and
+			// nothing is taken away: the aside stays aside, the documents
+			// stay written, the in-memory tree (with the turn and baseline
+			// the digests raised) stays as it is, and the failure is
+			// reported. The next open reads the documents, finds no
+			// ledger.json, and neither duplicates nor re-migrates.
+			return unsavedStateError{err}
+		}
 		return undo(err)
 	}
 	return nil
@@ -146,7 +175,11 @@ func (s *Store) setLegacyAside() ([]movedFile, error) {
 		// second wide, so two migrations in the same second would destroy
 		// the first one's copy. Nothing is deleted here (ruling T3-d), so
 		// the name has to be free before we use it.
-		to := freeName(from + ".migrated-" + at)
+		to, err := freeName(from + ".migrated-" + at)
+		if err != nil {
+			restoreLegacy(moved)
+			return nil, err
+		}
 		if err := os.Rename(from, to); err != nil {
 			restoreLegacy(moved)
 			return nil, err
@@ -157,11 +190,18 @@ func (s *Store) setLegacyAside() ([]movedFile, error) {
 }
 
 // freeName is path, or path-2, path-3 … — the first that nothing occupies.
-func freeName(path string) string {
+// A stat that fails for any other reason than "not there" is not an answer:
+// treating it as "occupied" would loop over an unreadable directory forever,
+// so it stops the migration instead and the legacy files stay where they are.
+func freeName(path string) (string, error) {
 	cand := path
 	for n := 2; ; n++ {
-		if _, err := os.Stat(cand); os.IsNotExist(err) {
-			return cand
+		_, err := os.Stat(cand)
+		if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		if err != nil {
+			return cand, nil
 		}
 		cand = fmt.Sprintf("%s-%d", path, n)
 	}

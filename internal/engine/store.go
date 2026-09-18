@@ -262,6 +262,15 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	ledger := filepath.Join(dir, "ledger.json")
 	if _, err := os.Stat(ledger); err == nil {
 		if err := s.migrateLedger(ledger); err != nil {
+			var unsaved unsavedStateError
+			if errors.As(err, &unsaved) {
+				// Ruling T3-f: the documents are written and the 0.10.0
+				// files stay aside, so the lift is on disk and the next
+				// open will neither duplicate it nor repeat it. Only the
+				// dotdir state was lost, which this session can rewrite.
+				fmt.Fprintf(os.Stderr, "warn: engine: the working memory was migrated but its state could not be saved (%v); the task documents are written and the 0.10.0 files are set aside\n", unsaved.err)
+				return s, nil
+			}
 			var retry retryableError
 			if errors.As(err, &retry) {
 				// The store was put back exactly as it was, so there is
@@ -485,12 +494,35 @@ func (s *Store) markDirtyLocked() {
 // from different goroutines can never rename each other's file.
 var tmpSeq uint64
 
+// flushError is what a failed Flush returns, carrying the one fact a caller
+// cannot recover afterwards: whether any task document had already reached
+// the workspace. The migration needs it (ruling T3-f) — once a document is
+// written the lift has happened and the legacy files must stay aside — and
+// every other caller sees an ordinary error, since Error and Unwrap defer to
+// the cause.
+type flushError struct {
+	err       error
+	wroteDocs bool
+}
+
+func (e flushError) Error() string { return e.err.Error() }
+func (e flushError) Unwrap() error { return e.err }
+
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomic.AddUint64(&tmpSeq, 1))
 	if err := os.WriteFile(tmp, data, mode); err != nil {
+		// A partial file may already be there, and nothing will ever come
+		// back for it: the name carries a sequence number no later write
+		// reuses. Leaving it turns every failed write into litter beside
+		// the file it was meant to replace.
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func relPath(p string) string { return filepath.ToSlash(filepath.Clean(p)) }
@@ -600,29 +632,31 @@ func (s *Store) Flush() error {
 	stateBytes, err := json.Marshal(s.stateLocked(docs))
 	if err != nil {
 		s.mu.Unlock()
-		return err
+		return flushError{err: err}
 	}
 	notes := []byte(s.notes)
 	s.mu.Unlock()
 
+	wroteDocs := false
 	if len(writes) > 0 {
 		tasks := filepath.Join(root, workspaceDir, "tasks")
 		if err := os.MkdirAll(tasks, 0o755); err != nil {
-			return err
+			return flushError{err: err}
 		}
 		ensureReadme(tasks)
 		for _, w := range writes {
 			if err := writeAtomic(filepath.Join(tasks, w.name), []byte(w.body), 0o644); err != nil {
-				return err
+				return flushError{err: err, wroteDocs: wroteDocs}
 			}
+			wroteDocs = true
 		}
 		ensureGitignore(root)
 	}
 	if err := writeAtomic(filepath.Join(dir, "state.json"), stateBytes, 0o600); err != nil {
-		return err
+		return flushError{err: err, wroteDocs: wroteDocs}
 	}
 	if err := writeAtomic(filepath.Join(dir, "notes.md"), notes, 0o600); err != nil {
-		return err
+		return flushError{err: err, wroteDocs: wroteDocs}
 	}
 
 	s.mu.Lock()
