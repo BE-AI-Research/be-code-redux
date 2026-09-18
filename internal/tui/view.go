@@ -1487,12 +1487,19 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.renderLocalNote("working memory is off (engine.enabled)")
 			return m, nil
 		}
-		if len(fields) > 1 && fields[1] == "clear" {
-			m.ag.Engine.ClearSession()
-			m.renderLocalNote("working memory cleared for this session")
-			return m, nil
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
 		}
-		m.renderLocalLines(strings.Split(m.ag.Engine.LedgerText(), "\n"))
+		switch {
+		case len(args) > 0 && args[0] == "clear":
+			m.ag.Engine.ClearSession()
+			m.renderLocalNote("this session's open work is closed as dropped (reason: cleared); the task documents are untouched")
+		case len(args) > 0 && args[0] == "open":
+			m.renderLocalNote(m.ag.Engine.TasksDir())
+		default:
+			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
+		}
 		return m, nil
 	case "/notes":
 		if m.ag.Engine == nil {

@@ -39,6 +39,19 @@ func newTestREPL(t *testing.T) *REPL {
 	return &REPL{Cfg: cfg, Agent: agent.New(cfg, nullProvider{}, "m", reg, ""), Provider: nullProvider{}}
 }
 
+// testStoreFor opens a working-memory store rooted at the REPL's own
+// workspace (never the real ~/.be-code) and wires it onto the agent, the
+// way attachEngine does for a real run.
+func testStoreFor(t *testing.T, r *REPL) *engine.Store {
+	t.Helper()
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, engine.Limits{NotesCap: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Agent.SetEngine(st)
+	return st
+}
+
 // capture runs fn with os.Stdout redirected and returns what it printed.
 func capture(t *testing.T, fn func()) string {
 	t.Helper()
@@ -383,7 +396,7 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	id := st.Plan("add flag", []string{"parse", "wire"})
 	st.SetStatusText(id+".1", "doing", "")
 	out = capture(t, func() { r.command(context.Background(), "/task") })
-	if !strings.Contains(out, "task: add flag") || !strings.Contains(out, "[>] 1. parse") {
+	if !strings.Contains(out, "1. add flag") || !strings.Contains(out, "[>] 1.1. parse") {
 		t.Fatalf("/task:\n%s", out)
 	}
 	capture(t, func() { r.command(context.Background(), "/notes add tests need go") })
@@ -396,8 +409,10 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 		t.Fatalf("after drop:\n%s", out)
 	}
 	capture(t, func() { r.command(context.Background(), "/task clear") })
-	if strings.Contains(st.LedgerText(), "add flag") {
-		t.Fatal("/task clear did not clear")
+	// Ruling T3-a: clear closes the open work, it does not erase it — the
+	// task and its steps still read back, now dropped with reason "cleared".
+	if !strings.Contains(st.TreeText(), "add flag") || !strings.Contains(st.TreeText(), "dropped: cleared") {
+		t.Fatalf("/task clear did not close the open work:\n%s", st.TreeText())
 	}
 	// Whatever spacing was typed, the note is the text after the add token.
 	capture(t, func() { r.command(context.Background(), "/notes  add  spaced text") })
@@ -406,6 +421,34 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	}
 	if out = capture(t, func() { r.command(context.Background(), "/notes drop") }); !strings.Contains(out, "usage: /notes drop N") {
 		t.Fatalf("bare drop:\n%s", out)
+	}
+}
+
+// TestPlainTaskCommands covers the tree-shaped /task surface Task 6 adds:
+// the whole tree, one branch, and the path to the document a human would
+// open by hand.
+func TestPlainTaskCommands(t *testing.T) {
+	r := newTestREPL(t)
+	// No engine: the off message, and nothing that looks like a crash.
+	out := capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "working memory is off (engine.enabled)") {
+		t.Fatalf("off message: %q", out)
+	}
+	st := testStoreFor(t, r) // helper: opens a store on the REPL's root
+	id := st.Plan("fix the parser", []string{"find the bug"})
+	st.SetStatusText(id+".1", "doing", "")
+
+	out = capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "fix the parser") || !strings.Contains(out, "find the bug") {
+		t.Fatalf("tree listing: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task show "+id) })
+	if !strings.Contains(out, "fix the parser") {
+		t.Fatalf("show: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task open") })
+	if !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open should print the document path: %q", out)
 	}
 }
 

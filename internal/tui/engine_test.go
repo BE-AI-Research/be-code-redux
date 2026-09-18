@@ -26,10 +26,25 @@ func TestTaskAndNotesAreViewLocal(t *testing.T) {
 	a.slashCommand("/task")
 	a.slashCommand("/notes add remember me")
 	a.slashCommand("/notes")
-	if !strings.Contains(a.rendered.String(), "task: add flag") || !strings.Contains(a.rendered.String(), "1. remember me") {
+	if !strings.Contains(a.rendered.String(), "1. add flag") || !strings.Contains(a.rendered.String(), "1. remember me") {
 		t.Fatalf("view a:\n%s", a.rendered.String())
 	}
 	if strings.Contains(b.rendered.String(), "add flag") {
 		t.Fatal("listing leaked to the other terminal")
+	}
+}
+
+// TestTaskIsViewLocal: /task is a private question about state, like
+// /coworkers — it never becomes a transcript entry every terminal needs.
+func TestTaskIsViewLocal(t *testing.T) {
+	s := newTestSession(t)
+	a, b := newTestView(t, s), newTestView(t, s)
+	before := b.transcriptText()
+	a.slashCommand("/task")
+	if a.transcriptText() == before {
+		t.Fatal("the asking view saw nothing")
+	}
+	if b.transcriptText() != before {
+		t.Fatal("/task leaked into another terminal; it is a private question about state")
 	}
 }

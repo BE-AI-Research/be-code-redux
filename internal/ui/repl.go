@@ -617,12 +617,21 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Println(dim("working memory is off (engine.enabled)"))
 			break
 		}
-		if len(fields) > 1 && fields[1] == "clear" {
-			r.Agent.Engine.ClearSession()
-			fmt.Println(dim("working memory cleared for this session"))
-			break
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
 		}
-		fmt.Println(r.Agent.Engine.LedgerText())
+		switch {
+		case len(args) > 0 && args[0] == "clear":
+			r.Agent.Engine.ClearSession()
+			fmt.Println(dim("this session's open work is closed as dropped (reason: cleared); the task documents are untouched"))
+		case len(args) > 0 && args[0] == "open":
+			fmt.Println(r.Agent.Engine.TasksDir())
+		default:
+			for _, line := range TaskLines(r.Agent.Engine, args) {
+				fmt.Println(line)
+			}
+		}
 	case "/notes":
 		if r.Agent.Engine == nil {
 			fmt.Println(dim("working memory is off (engine.enabled)"))

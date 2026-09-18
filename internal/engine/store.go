@@ -72,9 +72,9 @@ type Lookup struct {
 	Turn   int               `json:"turn"`
 }
 
-// Step and Ledger are the 0.10.0 flat shapes, kept because migration reads
-// them off disk (migrate.go) and LedgerText still projects the tree back
-// into them for the 0.10.0 /task listing. Nothing else writes them.
+// Step and Ledger are the 0.10.0 flat shapes, kept only because migration
+// reads them off disk (migrate.go) to lift a pre-0.11.0 store's ledger.json
+// into the tree. Nothing else writes or reads them.
 type Step struct {
 	Text   string `json:"text"`
 	Status string `json:"status"` // todo | doing | done | skip
@@ -607,6 +607,11 @@ func (s *Store) fileState(rel string) (data []byte, hash string, size, mtime int
 // Dir is the dotdir store directory.
 func (s *Store) Dir() string { return s.dir }
 
+// TasksDir is where the task documents live: inside the user's project,
+// never the dotdir Dir returns. s.root is set once at construction and
+// never changes, so this needs no lock.
+func (s *Store) TasksDir() string { return s.tasksDir() }
+
 // Flush writes every task document, the dotdir state and the durable notes
 // when anything changed. The whole snapshot is taken under the lock; the
 // file writes happen with it released, so a slow disk never blocks a tool
@@ -839,66 +844,6 @@ func ensureGitignore(root string) {
 		out += "\n"
 	}
 	writeAtomic(path, []byte(out+workspaceDir+"/\n"), mode)
-}
-
-// readmeText documents the format for both readers, human and model,
-// because both edit these files.
-const readmeText = `# Task records
-
-BE-Code keeps its working memory here: one Markdown document per top-level
-task, named ` + "`NNN-<slug>.md`" + `. These are ordinary files. Edit them.
-
-## The format
-
-    # 001 — fix the parser
-
-    - [x] 1. fix the parser
-      - [x] 1.1. find the bug
-        - files: lexer.go (lines 1–120)
-        - cmds: go test ./... — failed
-        - error: FAIL: TestLex
-      - [>] 1.2. fix and verify
-      - [-] 1.3. rewrite the scanner — dropped: not needed after all
-
-Status marks: ` + "`[ ]`" + ` todo, ` + "`[>]`" + ` doing, ` + "`[x]`" + ` done,
-` + "`[!]`" + ` blocked, ` + "`[-]`" + ` dropped. A blocked or dropped step
-carries its reason after an em dash.
-
-Ids are dotted paths that follow a node's position: ` + "`2.1.3`" + ` is the
-third child of the first child of the second task. Indentation is two
-spaces per level. Evidence lines sit under their node with the keys
-` + "`files:`" + `, ` + "`cmds:`" + `, ` + "`lookups:`" + `, ` + "`note:`" + `,
-` + "`decision:`" + ` and ` + "`error:`" + `.
-
-## Editing these files by hand
-
-Safe to change: any node's text, its status mark, its reason, and any note
-or decision line. Any line the engine does not recognise — prose, a heading
-of your own, a checklist — is preserved exactly and written back untouched.
-
-A top-level line is only a task when it carries an id, so a checklist you
-keep in the file (` + "`- [ ] buy milk`" + `) stays your own text. Give it a
-number — ` + "`- [ ] 2. buy milk`" + ` — and it becomes a task.
-
-The engine never renames or deletes a document. A task keeps its file for
-life, so a file name can fall out of step with a retitled task; the heading
-inside is regenerated and is the one to read.
-
-The engine repairs an id that disagrees with a node's position, and says so
-in a note on that node. A document it cannot parse at all is renamed
-` + "`NNN-<slug>.broken-<stamp>.md`" + ` with its content intact, and never
-overwritten.
-
-Exactly one node is ` + "`[>]`" + ` doing at a time. Deleting a document
-deletes that task from the engine's memory.
-`
-
-func ensureReadme(dir string) {
-	path := filepath.Join(dir, "README.md")
-	if _, err := os.Stat(path); err == nil {
-		return
-	}
-	writeAtomic(path, []byte(readmeText), 0o644)
 }
 
 // NextTurn advances the turn counter (one per model call) and returns it.
