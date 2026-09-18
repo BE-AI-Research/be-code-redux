@@ -362,3 +362,112 @@ func TestGitignoreEdgeCases(t *testing.T) {
 		t.Fatalf("an existing entry was duplicated: %q", b)
 	}
 }
+
+// TestAProseOnlyDocumentIsNotOverwritten: a document the user has emptied of
+// bullets, keeping their own notes, contributes no task — but the name is
+// still theirs, and the next task with that slug must not land on it.
+func TestAProseOnlyDocumentIsNotOverwritten(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	tasks := filepath.Join(root, ".be-code", "tasks")
+	os.MkdirAll(tasks, 0o755)
+	prose := "# 001 — a task\n\nI finished this one by hand. Keeping the notes:\nthe parser was fine, the scanner was not.\n"
+	os.WriteFile(filepath.Join(tasks, "001-a-task.md"), []byte(prose), 0o644)
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Tree().Roots) != 0 {
+		t.Fatalf("prose is not a task: %+v", s.Tree().Roots)
+	}
+	s.Plan("a task", nil) // the same slug
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(tasks, "001-a-task.md"))
+	if err != nil || string(b) != prose {
+		t.Fatalf("the user's prose-only document was overwritten:\n%s", b)
+	}
+}
+
+// TestDocumentNumbersAreNotReused: two files sharing an NNN read as one task
+// split in half, so a number is claimed as firmly as a name.
+func TestDocumentNumbersAreNotReused(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	tasks := filepath.Join(root, ".be-code", "tasks")
+	os.MkdirAll(tasks, 0o755)
+	os.WriteFile(filepath.Join(tasks, "001-alpha.md"), []byte("# 001 — alpha\n\n- [ ] 1. alpha\n"), 0o644)
+	os.WriteFile(filepath.Join(tasks, "003-beta-two.md"), []byte("# 003 — beta two\n\n- [ ] 2. beta two\n"), 0o644)
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Plan("gamma", nil)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := os.ReadDir(tasks)
+	byNum := map[string]string{}
+	for _, e := range ents {
+		if e.Name() == "README.md" {
+			continue
+		}
+		num := e.Name()[:3]
+		if prev, dup := byNum[num]; dup {
+			t.Fatalf("number %s used by both %s and %s", num, prev, e.Name())
+		}
+		byNum[num] = e.Name()
+	}
+	if len(byNum) != 3 {
+		t.Fatalf("documents: %v", byNum)
+	}
+}
+
+// TestAnEditedFileIsNotReportedAsAlreadyReadAcrossAReopen: the reopen must
+// not hand the newest hash to an older node's reference. Those ranges were
+// measured against content that has since been edited away, and dressing
+// them in the current hash is the false "already read" ruling T2-b exists to
+// prevent — the same failure as the edit_file fix, one reopen later.
+func TestAnEditedFileIsNotReportedAsAlreadyReadAcrossAReopen(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	old := "package a\nvar X = 1\n"
+	writeFile(t, root, "a.go", old)
+
+	s, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := s.Plan("change a.go", []string{"read it", "edit it"})
+	if err := s.SetStatus(id+".1", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.NextTurn()
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered(old, 1)})
+
+	// A different step does the editing, so the read and the edit end up on
+	// two different nodes' references to the same file.
+	if err := s.SetStatus(id+".2", StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.NextTurn()
+	writeFile(t, root, "a.go", "package a\nvar X = 2\n")
+	s.Observe(Event{Tool: "edit_file", Args: map[string]any{"path": "a.go"}, Content: "edited a.go"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again.NextTurn()
+	f := again.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"},
+		Content: numbered("package a\nvar X = 2\n", 1)})
+	if f != "" {
+		t.Fatalf("the reopen revived ranges describing text that is gone: %q", f)
+	}
+}

@@ -323,7 +323,11 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			lastDepth, last = depth, n
 			continue
 		}
-		if m := evidenceLine.FindStringSubmatch(line); m != nil && last != nil {
+		// !skipping: an evidence key written under a declined checklist item
+		// is part of that list, not evidence for the task above it. Adopting
+		// it would both invent a fact and move the line out of the user's
+		// own list on the next write.
+		if m := evidenceLine.FindStringSubmatch(line); m != nil && last != nil && !skipping {
 			addEvidence(last, m[2], strings.TrimSpace(m[3]))
 			continue
 		}

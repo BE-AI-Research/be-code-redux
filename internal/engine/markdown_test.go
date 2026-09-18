@@ -103,3 +103,29 @@ func TestAHandWrittenChecklistIsNotATask(t *testing.T) {
 		t.Fatalf("an id-carrying top-level line must be a task: %+v", tr2.Roots)
 	}
 }
+
+// TestEvidenceUnderAChecklistStaysInTheChecklist: an evidence key written
+// under a declined top-level bullet belongs to that list, not to the task
+// above it. Adopting it would invent a fact and move the line out of the
+// user's own list on the next write.
+func TestEvidenceUnderAChecklistStaysInTheChecklist(t *testing.T) {
+	tr, extra, err := ParseDoc(doc + "\n- [ ] buy milk\n  - note: the corner shop shuts at six\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stolen := false
+	tr.Walk(func(n *Node, _ int) {
+		for _, nt := range n.Evidence.Notes {
+			if strings.Contains(nt.Text, "corner shop") {
+				stolen = true
+			}
+		}
+	})
+	if stolen {
+		t.Fatal("a line from the user's checklist was adopted as a task's evidence")
+	}
+	out := RenderDocWithExtra("001", "fix the parser", tr.Roots[0], extra)
+	if !strings.Contains(out, "- [ ] buy milk\n  - note: the corner shop shuts at six") {
+		t.Fatalf("the line was relocated out of the checklist:\n%s", out)
+	}
+}

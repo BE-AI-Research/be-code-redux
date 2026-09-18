@@ -108,3 +108,44 @@ func TestMigrationCarriesDigestsAndLookups(t *testing.T) {
 		t.Fatalf("the file's hash, outline and turn did not survive the reopen: %+v", f)
 	}
 }
+
+// TestMigrationDoesNotRunTwiceAfterAnInterruptedTidyUp: the window between
+// the flush that writes the lifted tree and the removal of the legacy files.
+// Dying in there used to migrate the same ledger again on the next open,
+// giving two identical tasks and two documents.
+func TestMigrationDoesNotRunTwiceAfterAnInterruptedTidyUp(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	ledger := `{"task":"lift me","steps":[{"text":"one","status":"done"}],"session":"s0"}`
+	path := filepath.Join(dir, "ledger.json")
+	os.WriteFile(path, []byte(ledger), 0o600)
+
+	if _, err := OpenAt(dir, root, "s0", true, testLimits()); err != nil {
+		t.Fatal(err)
+	}
+	// Interrupted after the flush, before the removal: the ledger is still
+	// on disk exactly as it was.
+	os.WriteFile(path, []byte(ledger), 0o600)
+
+	again, err := OpenAt(dir, root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := again.Tree()
+	if len(tr.Roots) != 1 {
+		t.Fatalf("the ledger was migrated twice: %+v", tr.Roots)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the second open should have finished the tidying it interrupted")
+	}
+	ents, _ := os.ReadDir(filepath.Join(root, ".be-code", "tasks"))
+	var docs []string
+	for _, e := range ents {
+		if e.Name() != "README.md" {
+			docs = append(docs, e.Name())
+		}
+	}
+	if len(docs) != 1 {
+		t.Fatalf("documents: %v", docs)
+	}
+}

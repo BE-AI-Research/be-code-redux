@@ -115,6 +115,11 @@ type state struct {
 	Session   string               `json:"session,omitempty"`
 	Baseline  Baseline             `json:"baseline,omitempty"`
 	NotesHash string               `json:"notes_hash,omitempty"`
+	// Migrated records that the 0.10.0 ledger has been lifted and written
+	// out. It is set in the state before the flush that writes it, so an
+	// interrupt between that flush and the removal of the legacy files
+	// cannot migrate the same ledger a second time into a second task.
+	Migrated bool `json:"migrated,omitempty"`
 	// Files is what a Markdown document has no business carrying: the
 	// content hash and the outline of each file the record names. Without
 	// it the cross-session redundant-read check cannot fire at all (it
@@ -127,6 +132,12 @@ type fileMemo struct {
 	Hash    string   `json:"hash,omitempty"`
 	Outline []string `json:"outline,omitempty"`
 	Turn    int      `json:"turn,omitempty"`
+	// Node is the id of the node whose reference this hash belongs to. A
+	// hash says "these ranges describe this content"; handing the newest one
+	// to an older node's reference would make ranges that describe text
+	// since edited away read as current, which is precisely the false
+	// "already read" ruling T2-b exists to prevent.
+	Node string `json:"node,omitempty"`
 }
 
 // Store is one workspace's working memory. One mutex guards everything;
@@ -150,10 +161,15 @@ type Store struct {
 	// a human's own prose survives every rewrite.
 	extra [][]string
 
+	// reserved are document names that exist and belong to the user but
+	// carry no task — one they emptied of bullets, keeping their prose.
+	reserved map[string]bool
+
 	notes    string
 	baseline Baseline
 	session  string
 	turn     int
+	migrated bool
 
 	lookups []Lookup // newest last; in memory only
 	cached  map[string]string
@@ -216,7 +232,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	if b, err := os.ReadFile(filepath.Join(dir, "notes.md")); err == nil {
 		s.notes = string(b)
 	}
-	s.turn, s.baseline = st.Turn, st.Baseline
+	s.turn, s.baseline, s.migrated = st.Turn, st.Baseline, st.Migrated
 	for name, h := range st.Docs {
 		s.docs[name] = h
 	}
@@ -230,7 +246,11 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 
 	ledger := filepath.Join(dir, "ledger.json")
 	if _, err := os.Stat(ledger); err == nil {
-		if err := s.migrateLedger(ledger); err != nil {
+		if s.migrated {
+			// Already lifted and written out; the process died before it
+			// could tidy up. Finish the tidying, never migrate again.
+			s.dropLegacy(ledger)
+		} else if err := s.migrateLedger(ledger); err != nil {
 			aside := dir + ".broken-" + stamp()
 			if rerr := os.Rename(dir, aside); rerr != nil {
 				return nil, err
@@ -249,11 +269,12 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 
 func newStore(dir, root, sessionID string, lim Limits) *Store {
 	s := &Store{
-		dir:     dir,
-		root:    root,
-		lim:     lim.withDefaults(),
-		docs:    map[string]string{},
-		session: sessionID,
+		dir:      dir,
+		root:     root,
+		lim:      lim.withDefaults(),
+		docs:     map[string]string{},
+		reserved: map[string]bool{},
+		session:  sessionID,
 	}
 	s.rec = recorder{lim: s.lim, root: root, tree: &s.tree}
 	return s
@@ -300,6 +321,11 @@ func (s *Store) loadDocs() {
 			continue
 		}
 		if len(tr.Roots) == 0 {
+			// A document the user has emptied of bullets, keeping their own
+			// prose. It contributes no task, but the name is still theirs:
+			// reserving it stops the next task with the same slug being
+			// written straight over their file.
+			s.reserved[name] = true
 			continue
 		}
 		s.docs[name] = hashBytes(b)
@@ -341,6 +367,12 @@ func renumber(n *Node, id string) {
 // restoreFileMemos puts back what the documents do not carry: each file's
 // content hash, outline and turn. Only fields the document left empty are
 // filled, so a note or a range the user edited by hand still wins.
+//
+// The hash goes back only to the node that earned it. Every other node's
+// reference to that file keeps an empty hash and therefore never answers a
+// read — which is right, because its ranges were measured against content
+// that has since moved on. The outline and the turn are about the file
+// rather than about what any one node saw, so they are shared.
 func (s *Store) restoreFileMemos(memos map[string]fileMemo) {
 	if len(memos) == 0 {
 		return
@@ -352,7 +384,7 @@ func (s *Store) restoreFileMemos(memos map[string]fileMemo) {
 			if !ok {
 				continue
 			}
-			if f.Hash == "" {
+			if f.Hash == "" && m.Node == n.ID {
 				f.Hash = m.Hash
 			}
 			if len(f.Outline) == 0 {
@@ -380,7 +412,7 @@ func (s *Store) fileMemosLocked() map[string]fileMemo {
 			if f.Path == "" || (f.Hash == "" && len(f.Outline) == 0) {
 				continue
 			}
-			m := fileMemo{Hash: f.Hash, Outline: f.Outline, Turn: f.Turn}
+			m := fileMemo{Hash: f.Hash, Outline: f.Outline, Turn: f.Turn, Node: n.ID}
 			if at, ok := seen[f.Path]; ok {
 				if f.Turn >= all[at].memo.Turn {
 					all[at].memo = m
@@ -601,10 +633,22 @@ func (s *Store) Flush() error {
 func (s *Store) docNamesLocked() []string {
 	names := make([]string, len(s.tree.Roots))
 	used := map[string]bool{}
+	// A number identifies a document as surely as its name does, so both are
+	// claimed: two files sharing an NNN read as one task split in half.
+	usedNum := map[int]bool{}
+	claim := func(name string) {
+		used[name] = true
+		if n := leadingNumber(name); n > 0 {
+			usedNum[n] = true
+		}
+	}
+	for name := range s.reserved {
+		claim(name)
+	}
 	for i := range s.tree.Roots {
 		if i < len(s.files) && s.files[i] != "" && !used[s.files[i]] {
 			names[i] = s.files[i]
-			used[names[i]] = true
+			claim(names[i])
 		}
 	}
 	for i, r := range s.tree.Roots {
@@ -613,24 +657,35 @@ func (s *Store) docNamesLocked() []string {
 		}
 		for n := i + 1; ; n++ {
 			cand := fmt.Sprintf("%03d-%s.md", n, slug(r.Text))
-			if !used[cand] {
-				names[i], used[cand] = cand, true
-				break
+			if usedNum[n] || used[cand] {
+				continue
 			}
+			names[i] = cand
+			claim(cand)
+			break
 		}
 	}
 	return names
 }
 
-// docNumber is the NNN a document's heading carries: the one in its file
-// name, so the two never disagree, falling back to the root's position.
-func docNumber(name string, i int) string {
+// leadingNumber is the NNN a document name starts with, or 0.
+func leadingNumber(name string) int {
 	digits := 0
 	for digits < len(name) && name[digits] >= '0' && name[digits] <= '9' {
 		digits++
 	}
-	if digits > 0 {
-		return name[:digits]
+	n, err := strconv.Atoi(name[:digits])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// docNumber is the NNN a document's heading carries: the one in its file
+// name, so the two never disagree, falling back to the root's position.
+func docNumber(name string, i int) string {
+	if n := leadingNumber(name); n > 0 {
+		return fmt.Sprintf("%03d", n)
 	}
 	return fmt.Sprintf("%03d", i+1)
 }
@@ -651,6 +706,7 @@ func (s *Store) stateLocked(docs map[string]string) state {
 		Baseline:  s.baseline,
 		NotesHash: hashBytes([]byte(s.notes)),
 		Files:     s.fileMemosLocked(),
+		Migrated:  s.migrated,
 	}
 	if d := s.tree.Doing(); d != nil {
 		st.Active = d.ID

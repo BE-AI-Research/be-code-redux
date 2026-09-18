@@ -86,6 +86,11 @@ func (s *Store) migrateLedger(path string) error {
 		}
 	}
 
+	// Recorded before the flush that writes it, so the state on disk says
+	// "this ledger has been lifted" from the same moment the tree does. An
+	// interrupt after the flush and before the removal below then finds the
+	// flag and tidies up instead of migrating a second time.
+	s.migrated = true
 	s.markDirtyLocked()
 	// Write the lifted tree out before removing anything. Until this
 	// succeeds the migration exists only in memory, and the first Flush of a
