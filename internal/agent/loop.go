@@ -1003,7 +1003,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// /compact. That is not a backend failing to answer, it is a
 		// person asking to stop, and rewriting history under them is the
 		// opposite of what they asked for.
-		if cerr := ctx.Err(); cerr != nil {
+		if ctx.Err() != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "compaction: summary request failed: %v\n", err)
@@ -1029,6 +1029,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 	}
 	if strings.TrimSpace(summary) == "" {
+		// A cancellation is not a backend failure: it reaches here as an
+		// empty reply when the provider returns what it had, and the whole
+		// cancelled path is silent — no diagnostic, no rewritten history.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// An empty summary is the one compaction failure a user actually
 		// sees, and the reply's shape is the only clue to why: say what
 		// the backend reported, and keep the raw head on stderr (the host

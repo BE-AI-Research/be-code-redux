@@ -35,7 +35,10 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 
 	var roots []*Node
 	for _, r := range s.tree.Roots {
-		if s.tree.Terminal(r) {
+		// A spent unfiled root is a harness artefact, not work: it would
+		// otherwise report itself as "unfiled — dropped: adopted by 3.1",
+		// a phantom task in the model's own picture of what it has done.
+		if s.tree.Terminal(r) && !spentUnfiled(r) {
 			roots = append(roots, r)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -690,6 +691,42 @@ func TestCompactionDoesNotSwallowACancellation(t *testing.T) {
 	if !reflect.DeepEqual(ag.History.Messages, before) {
 		t.Fatalf("a cancelled compaction rewrote history:\n%+v", ag.History.Messages)
 	}
+
+	// A provider that hands back what it had rather than an error puts the
+	// same cancellation on the empty-summary path. It must be just as
+	// silent: no "empty summary" diagnostic in the host log for something
+	// the user chose.
+	ag.Provider = emptySummaryProvider()
+	stderr := captureAgentStderr(t, func() {
+		if err := ag.Compact(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a cancelled empty summary must return the cancellation, got %v", err)
+		}
+	})
+	if strings.Contains(stderr, "empty summary") {
+		t.Fatalf("the cancelled path logged a backend diagnostic: %q", stderr)
+	}
+	if !reflect.DeepEqual(ag.History.Messages, before) {
+		t.Fatalf("a cancelled empty summary rewrote history:\n%+v", ag.History.Messages)
+	}
+}
+
+// captureAgentStderr runs fn with os.Stderr redirected and returns what it
+// wrote. Compaction's diagnostics go there on purpose (the host log), so a
+// path that must be silent has to be checked there.
+func captureAgentStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	fn()
+	os.Stderr = orig
+	w.Close()
+	b, _ := io.ReadAll(r)
+	r.Close()
+	return string(b)
 }
 
 // TestTheEngineCannotFailATurn: advisory discipline, which every task in

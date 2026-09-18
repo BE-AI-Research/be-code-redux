@@ -626,6 +626,9 @@ func (s *Store) Flush() error {
 	writes := make([]docWrite, 0, len(names))
 	docs := map[string]string{}
 	for i, r := range s.tree.Roots {
+		if spentUnfiled(r) {
+			continue
+		}
 		body := RenderDocWithExtra(docNumber(names[i], i), r.Text, r, s.extraAt(i))
 		writes = append(writes, docWrite{name: names[i], body: body})
 		docs[names[i]] = hashBytes([]byte(body))
@@ -1218,6 +1221,20 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 	if len(unfiled) > 0 {
 		s.rec.capNode(n)
 	}
+}
+
+// spentUnfiled reports whether n is a root-level "unfiled" node that
+// adoption has already emptied. Such a node has to stay in the tree —
+// removing a root shifts every later task onto the previous one's document
+// — but it is an artefact of the harness, not a task anyone asked for, so
+// it gets no document of its own in the user's repository and no Task
+// Report in the prompt. Ruling T5-c: by ruling T3-a nothing would ever
+// delete either, so they must not be written in the first place.
+//
+// Only a childless one: anything filed under it is real work, and a node
+// that still has children is a task like any other.
+func spentUnfiled(n *Node) bool {
+	return n != nil && n.Text == unfiledText && len(n.Children) == 0
 }
 
 // isRootLocked reports whether n is a top-level task. A root owns a

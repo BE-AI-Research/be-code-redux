@@ -686,3 +686,53 @@ func TestAdoptionNeverRemovesARoot(t *testing.T) {
 		t.Fatalf("roots after the reload: %v", texts)
 	}
 }
+
+// TestAnAdoptedRootLeavesNoDocumentAndNoReport: a root-level unfiled node
+// is kept in the tree (removing one shifts every later task's document),
+// but it is an artefact of the harness, not a task the user asked for. It
+// must not become a file in their repository, and it must not become a
+// Task Report in the model's prompt — and by ruling T3-a nothing would
+// ever delete either.
+func TestAnAdoptedRootLeavesNoDocumentAndNoReport(t *testing.T) {
+	root := t.TempDir()
+	s, err := OpenAt(t.TempDir(), root, "s1", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := s.Plan("first thing", []string{"a"})
+	s.SetStatusText(first+".1", "done", "")
+	s.SetStatusText(first, "done", "")
+	s.NextTurn()
+	// Every root is terminal, so this opens a root-level unfiled node.
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "ls"}, Content: "a\n"})
+	second := s.Plan("second thing", []string{"b"})
+	if err := s.SetStatusText(second+".1", "doing", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(filepath.Join(root, workspaceDir, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+		if strings.Contains(e.Name(), unfiledText) {
+			t.Fatalf("adoption left a document the user never created: %v", names)
+		}
+	}
+	if len(names) < 3 { // README.md plus the two real tasks
+		t.Fatalf("the real tasks lost their documents: %v", names)
+	}
+	if block := s.Render(4096, nil); strings.Contains(block, unfiledText) {
+		t.Fatalf("a phantom task reached the prompt:\n%s", block)
+	}
+	// The evidence itself is still on the node that adopted it. Plan
+	// closed the unfiled node on its way past, so it arrives distilled
+	// rather than raw; either way it must not have gone with the document.
+	if n := s.Tree().Find(second + ".1"); n == nil || len(n.Evidence.Cmds) != 1 {
+		t.Fatalf("adoption lost the evidence: %s", s.TreeText())
+	}
+}
