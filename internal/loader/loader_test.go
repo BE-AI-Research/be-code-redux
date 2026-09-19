@@ -748,3 +748,85 @@ func TestThePlainApproverStillDecidesWhenThereIsNoContextAwareOne(t *testing.T) 
 		t.Fatalf("asked %d times", asked)
 	}
 }
+
+// S1. Since the consent modal can be withdrawn by its asker's deadline, a
+// false from the approver has two meanings: somebody said no, or nobody said
+// anything. Only the first is an answer. Latching the second turned two
+// minutes away from a hosted session into a refusal for the rest of it — the
+// next resolution raised no modal at all.
+func TestAWithdrawnQuestionIsAskedAgain(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	var notes []string
+	var asks int
+	answer := make(chan bool, 1)
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(s string) { notes = append(notes, s) })
+	l.SetApproverCtx(func() tools.ApproveCtxFunc {
+		// The shape of the shared modal: it waits for a person or for the
+		// asker's context, and a question nobody answered is never consent.
+		return func(ctx context.Context, _, _ string) bool {
+			asks++
+			select {
+			case yes := <-answer:
+				return yes
+			case <-ctx.Done():
+				return false
+			}
+		}
+	})
+
+	// Nobody is at the terminal; the deadline withdraws the question.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if w, err := l.Apply(ctx, "m"); err != nil || w != 8192 {
+		t.Fatalf("an unanswered question keeps the server's window; got %d err %v", w, err)
+	}
+	if asks != 1 {
+		t.Fatalf("asked %d times", asks)
+	}
+
+	// They are back, and this time they say yes.
+	answer <- true
+	w, err := l.Apply(context.Background(), "m")
+	if asks != 2 {
+		t.Fatalf("asked %d times; a withdrawn question was recorded as the user's refusal and never put again", asks)
+	}
+	if err != nil || w != 32768 {
+		t.Fatalf("the answer that was finally given did not reach the wire: window %d err %v", w, err)
+	}
+	// Nothing was ever refused, so nothing may say the window was kept: the
+	// withdrawal decided nothing, and its line would share a notice key with
+	// the real answer's.
+	if len(notes) != 0 {
+		t.Fatalf("a withdrawal explained itself as a decision: %v", notes)
+	}
+}
+
+// S1, the other half: not latching a withdrawal must not cost a real no its
+// latch. A refusal given while the asker was still waiting is an answer.
+func TestAGenuineRefusalStillLatchesUnderADeadline(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	var notes []string
+	asks := 0
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(s string) { notes = append(notes, s) })
+	l.SetApproverCtx(func() tools.ApproveCtxFunc {
+		return func(context.Context, string, string) bool { asks++; return false }
+	})
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		w, err := l.Apply(ctx, "m")
+		cancel()
+		if err != nil || w != 8192 {
+			t.Fatalf("a refusal keeps the server's window; got %d err %v", w, err)
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("asked %d times after a no", asks)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "clamped") {
+		t.Fatalf("the refusal did not explain itself once: %v", notes)
+	}
+}

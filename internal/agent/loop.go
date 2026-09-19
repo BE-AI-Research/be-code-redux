@@ -524,11 +524,6 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		}
 	}()
 	w, err := l.Apply(ctx, model)
-	if err != nil || w <= 0 {
-		// Every reason the loader has for declining is one it has already
-		// explained in its own words; repeating it here would say it twice.
-		return
-	}
 	// A switch that has been overtaken is not the session's model any more.
 	// Its window must not land on the model the user actually chose: the
 	// answers come back in whatever order the backend gives them.
@@ -540,12 +535,25 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 	// fast /model small ended with small running at big's 65536 while it
 	// was resident at 8192 for somebody else, which is a reload without
 	// consent: the exact thing the gate exists to stop.
+	//
+	// This comes before anything looks at what Apply returned, because an
+	// Apply that declined has touched the wire as well: a residency read
+	// that fails rewrites the endpoint's options to no window plus *its*
+	// model's passthrough map and returns (0, nil). Checked after the
+	// early return below, that left the current model with no window at
+	// all and the overtaken model's options on its requests. A superseded
+	// resolution hands the wire back whatever it came home with.
 	a.modelMu.Lock()
 	stale := gen != a.modelGen
 	a.modelMu.Unlock()
 	if stale {
 		a.clearWireWindow()
 		a.reapplyCurrent(ctx)
+		return
+	}
+	if err != nil || w <= 0 {
+		// Every reason the loader has for declining is one it has already
+		// explained in its own words; repeating it here would say it twice.
 		return
 	}
 	prev := a.Window()

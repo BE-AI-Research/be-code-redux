@@ -370,6 +370,19 @@ func (l *Loader) reconcile(ctx context.Context, model string, serverWindow int, 
 			"Reloading evicts anything else on this server using that model.",
 		model, serverWindow, p.Window)
 	ok := approve(ctx, "model_reload", detail)
+	if !ok && ctx.Err() != nil {
+		// A false with the context done is a question that was withdrawn —
+		// the asker's deadline closed the prompt — not one that was
+		// answered, and only an answer is remembered. Latching it would
+		// turn two minutes away from a hosted session into a refusal for
+		// the rest of it, with no modal ever raised again. So: the server's
+		// window for this caller, nothing latched, and no notice, because
+		// nothing was decided and the line would share its key with the
+		// real answer's. The next resolution asks again; so does any caller
+		// parked behind this one, which wakes to find no answer and claims
+		// the ask itself.
+		return keep()
+	}
 	l.mu.Lock()
 	l.asked[model] = true
 	l.agreed[model] = ok
