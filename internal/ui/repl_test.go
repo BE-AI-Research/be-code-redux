@@ -589,3 +589,85 @@ func TestLoaderConsentPromptIsWithdrawnWithItsContext(t *testing.T) {
 		t.Fatal("the consent prompt could not be withdrawn")
 	}
 }
+
+// R2. /model raised its consent question from the resolution's goroutine
+// while the main loop was already reading r.lines, so the two split the
+// user's keystrokes: in the probe the "y" arrived at the loop as a fresh
+// request to the model, and the prompt then swallowed a later line. A
+// consent failure and a wrong action on the user's behalf at once.
+//
+// The switch therefore resolves inline, on this goroutine, which is where
+// the reader already is. The test's signal is exactly that: /model must not
+// return while its consent is still pending.
+func TestModelSwitchAsksOnTheREPLGoroutine(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 4)
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	answered := make(chan bool, 1)
+	r.Agent.SetLoader(&replConsentLoader{
+		started: started, release: release, answered: answered, reg: r.Agent.Tools,
+	})
+
+	returned := make(chan struct{})
+	go func() {
+		out := capture(t, func() { r.command(context.Background(), "/model other") })
+		_ = out
+		close(returned)
+	}()
+
+	<-started
+	select {
+	case <-returned:
+		t.Fatal("/model returned while its consent was still pending; the prompt is left racing the main loop for the user's keystroke")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+
+	// The user types y. It must reach the prompt, not the agent.
+	r.lines <- lineEvent{line: "y"}
+	select {
+	case ok := <-answered:
+		if !ok {
+			t.Fatal("y did not reach the consent prompt")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consent prompt was never answered")
+	}
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("/model never finished")
+	}
+	if n := len(r.lines); n != 0 {
+		t.Fatalf("%d typed line(s) left unread; the answer went somewhere other than the prompt", n)
+	}
+	if r.Agent.Model != "other" {
+		t.Fatalf("model %q", r.Agent.Model)
+	}
+}
+
+// replConsentLoader asks through the registry, as the real loader does.
+type replConsentLoader struct {
+	started  chan struct{}
+	release  chan struct{}
+	answered chan bool
+	reg      *tools.Registry
+}
+
+func (l *replConsentLoader) Apply(ctx context.Context, _ string) (int, error) {
+	close(l.started)
+	<-l.release
+	ok := l.reg.ApproveCtx(ctx, "model_reload", "model other is loaded with an 8192-token window")
+	l.answered <- ok
+	if !ok {
+		return 0, nil
+	}
+	return 32768, nil
+}
+func (*replConsentLoader) OnEvicted(context.Context, string) {}
+func (*replConsentLoader) OnWindowChanged(string, int)       {}
+func (*replConsentLoader) KeepAlive(string) time.Duration    { return 0 }

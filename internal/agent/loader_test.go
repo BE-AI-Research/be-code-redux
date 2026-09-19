@@ -794,3 +794,117 @@ func TestTheBudgetAndItsReserveMoveTogether(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// R1. N5 took the *previous* model's window off the wire at the moment of
+// the switch, but a superseded resolution puts its own model's window there
+// when its Apply finally returns — Apply's whole job is to write it, and it
+// writes before anything checks whether it is still wanted. A slow
+// /model big followed by a fast /model small left small running at big's
+// 65536 while small was resident at 8192 for somebody else: a reload with
+// nobody asked.
+func TestASupersededResolutionLeavesNoWindowOnTheWire(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	p := &windowProvider{funcProvider: &funcProvider{}}
+	ag.Provider = p
+
+	slow := make(chan struct{})
+	l := &perModelLoader{
+		wire:    p,
+		windows: map[string]int{"big": 65536, "small": 8192},
+		gate:    map[string]chan struct{}{"big": slow},
+	}
+	ag.SetLoader(l)
+
+	ag.SetModel("big") // parks in Apply
+	waitFor(t, "the slow resolution to start", func() bool { return l.started("big") })
+	ag.SetModel("small") // overtakes it and resolves at once
+	waitFor(t, "the fast resolution to land", func() bool { return p.Window() == 8192 })
+
+	close(slow) // "big" finally answers, long after it stopped being the model
+	waitFor(t, "the superseded resolution to finish", func() bool { return l.finished("big") })
+
+	// It may take a moment to put the current model's window back.
+	waitFor(t, "the wire to settle on the current model", func() bool { return p.Window() == 8192 })
+	time.Sleep(50 * time.Millisecond)
+	if w := p.Window(); w != 8192 {
+		t.Fatalf("num_ctx %d on the wire for model %q; a superseded switch left its own window behind", w, ag.Model)
+	}
+}
+
+// perModelLoader answers with a per-model window, writing it to the wire as
+// the real loader does, and can be held up on any one model.
+type perModelLoader struct {
+	wire    *windowProvider
+	windows map[string]int
+	gate    map[string]chan struct{}
+	mu      sync.Mutex
+	begun   map[string]bool
+	ended   map[string]bool
+}
+
+func (l *perModelLoader) Apply(ctx context.Context, model string) (int, error) {
+	l.mark(&l.begun, model)
+	if g := l.gate[model]; g != nil {
+		select {
+		case <-g:
+		case <-ctx.Done():
+			l.mark(&l.ended, model)
+			return 0, ctx.Err()
+		}
+	}
+	// Exactly what the real loader does: the window goes on the wire here,
+	// before any caller can decide it is no longer wanted.
+	l.wire.SetWindow(l.windows[model])
+	l.mark(&l.ended, model)
+	return l.windows[model], nil
+}
+
+func (l *perModelLoader) mark(m *map[string]bool, model string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if *m == nil {
+		*m = map[string]bool{}
+	}
+	(*m)[model] = true
+}
+
+func (l *perModelLoader) started(model string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.begun[model]
+}
+
+func (l *perModelLoader) finished(model string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ended[model]
+}
+
+func (*perModelLoader) OnEvicted(context.Context, string) {}
+func (*perModelLoader) OnWindowChanged(string, int)       {}
+func (*perModelLoader) KeepAlive(string) time.Duration    { return 0 }
+
+// R4. Resume writes the handoff from a goroutine of its own, and /handoff
+// is busy-safe, so a UI reads it whenever it likes.
+func TestHandoffIsSafeToReadWhileAResumeWritesIt(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			ag.Resume(&store.Session{ID: "s", Code: "AAAAAA", Handoff: "briefing " + fmt.Sprint(i)})
+		}
+	}()
+	wg.Add(1)
+	go func() { // /handoff, and the per-turn system prompt
+		defer wg.Done()
+		for i := 0; i < 400; i++ {
+			_ = ag.Handoff()
+		}
+	}()
+	wg.Wait()
+	if ag.Handoff() == "" {
+		t.Fatal("the handoff was lost")
+	}
+}

@@ -202,6 +202,7 @@ func (s *Session) seedResumeLocked(sess *store.Session) {
 func wireEvents(s *Session) {
 	ag := s.ag
 	ag.Tools.Approve = s.approveFromAgent
+	ag.Tools.ApproveCtx = s.approveFromAgentCtx
 	ag.Events = agent.Events{
 		OnDelta:     s.onDelta,
 		OnToolStart: s.onToolStart,

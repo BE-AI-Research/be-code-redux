@@ -222,3 +222,32 @@ func TestSessionSwapsDoNotRaceTheHeader(t *testing.T) {
 		t.Fatal("no session after clearing")
 	}
 }
+
+// R3. The shared modal waited on the session's own lifetime, so a
+// resolution that gave up could not take its question off the screen: with
+// the deadline shortened the modal was still open well past it, on every
+// attached terminal, with nobody left waiting for an answer. The
+// context-aware approver hands the asker's deadline to Ask, which already
+// knows how to withdraw — CancelAsk, broadcast to every view.
+func TestAResolutionsDeadlineWithdrawsTheSharedModal(t *testing.T) {
+	s, a, b := twoViews(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	decided := make(chan bool, 1)
+	go func() {
+		decided <- s.ag.Tools.ApproveCtx(ctx, "model_reload",
+			"model m is loaded with an 8192-token window; config asks for 32768.")
+	}()
+	waitFor(t, func() bool { flush(a, b); return a.mode == modeAsk && b.mode == modeAsk })
+
+	select {
+	case ok := <-decided:
+		if ok {
+			t.Fatal("a question nobody answered must never count as consent")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the asker was left parked on a question its deadline had already given up on")
+	}
+	waitFor(t, func() bool { flush(a, b); return a.mode != modeAsk && b.mode != modeAsk })
+}

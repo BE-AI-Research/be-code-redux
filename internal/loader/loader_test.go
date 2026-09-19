@@ -694,3 +694,57 @@ func TestTheDeferredNoticeDoesNotSwallowTheRealOne(t *testing.T) {
 		t.Fatalf("the denial did not explain itself: %q", notes[1])
 	}
 }
+
+// A UI that can withdraw its own prompt is preferred, and it is handed this
+// caller's context so it can. A UI that cannot is still asked, exactly as
+// before — the plain approver is wrapped, not ignored.
+func TestTheContextAwareApproverIsPreferredAndGetsTheCallersContext(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+
+	var plainAsked, ctxAsked int
+	var seen context.Context
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(string) {})
+	l.SetApprover(func() tools.ApproveFunc {
+		return func(string, string) bool { plainAsked++; return true }
+	})
+	l.SetApproverCtx(func() tools.ApproveCtxFunc {
+		return func(ctx context.Context, _, _ string) bool { ctxAsked++; seen = ctx; return true }
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if w, err := l.Apply(ctx, "m"); err != nil || w != 32768 {
+		t.Fatalf("window %d err %v", w, err)
+	}
+	if ctxAsked != 1 || plainAsked != 0 {
+		t.Fatalf("asked ctx=%d plain=%d", ctxAsked, plainAsked)
+	}
+	if seen == nil {
+		t.Fatal("no context reached the approver")
+	}
+	if _, ok := seen.Deadline(); !ok {
+		t.Fatal("the approver got a context that can never expire; it could not withdraw its own prompt")
+	}
+}
+
+// With nothing context-aware wired, the plain approver still decides.
+func TestThePlainApproverStillDecidesWhenThereIsNoContextAwareOne(t *testing.T) {
+	srv, _ := stub(t, psLoaded8k, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	asked := 0
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, nil, func(string) {})
+	l.SetApprover(func() tools.ApproveFunc {
+		return func(string, string) bool { asked++; return false }
+	})
+	l.SetApproverCtx(func() tools.ApproveCtxFunc { return nil })
+
+	if w, _ := l.Apply(context.Background(), "m"); w != 8192 {
+		t.Fatalf("a denial keeps the server's window; got %d", w)
+	}
+	if asked != 1 {
+		t.Fatalf("asked %d times", asked)
+	}
+}

@@ -92,7 +92,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	defer cancel()
 	const capBytes = 16 * 1024
 	var b strings.Builder
-	if prior := priorBriefing(a.handoff); prior != "" {
+	if prior := priorBriefing(a.Handoff()); prior != "" {
 		fmt.Fprintf(&b, "Briefing from the session before this one:\n%s\n\n", prior)
 	}
 	b.WriteString("Transcript (most recent last):\n")
@@ -138,7 +138,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 // heuristicHandoff is the no-model fallback: task, files touched, last reply.
 func (a *Agent) heuristicHandoff() string {
 	var b strings.Builder
-	if prior := priorBriefing(a.handoff); prior != "" {
+	if prior := priorBriefing(a.Handoff()); prior != "" {
 		fmt.Fprintf(&b, "Previous briefing:\n%s\n\n", prior)
 	}
 	task, last := "", ""
@@ -199,7 +199,9 @@ func (a *Agent) Resume(s *store.Session) {
 	defer a.turnMu.Unlock()
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	a.sessionMu.Lock()
 	a.handoff = s.Handoff
+	a.sessionMu.Unlock()
 	// modelMu for the system prompt, in the order everything else takes
 	// them: turn lock first, then this one.
 	a.modelMu.Lock()
@@ -208,7 +210,15 @@ func (a *Agent) Resume(s *store.Session) {
 }
 
 // Handoff returns the briefing carried over from the resumed session.
-func (a *Agent) Handoff() string { return a.handoff }
+//
+// Under sessionMu, with every other read of the field: /handoff is
+// busy-safe, so a UI asks for it whenever it likes, while /resume writes it
+// from a goroutine of its own.
+func (a *Agent) Handoff() string {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.handoff
+}
 
 // ApplyWindow clamps the history budget to the backend's real context
 // window and reserves generation headroom. Returns true when the configured

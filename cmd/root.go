@@ -368,6 +368,9 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 			}
 		})
 		l.SetApprover(func() tools.ApproveFunc { return reg.Approve })
+		// Preferred when the UI offers it: it lets a resolution's deadline
+		// close the question it raised, on every attached terminal.
+		l.SetApproverCtx(func() tools.ApproveCtxFunc { return reg.ApproveCtx })
 		return l
 	}
 	agent.LoaderFactory = func(c *config.Config, prov provider.Provider) agent.ModelLoader {
@@ -611,17 +614,10 @@ func runInteractive(cmd *cobra.Command) error {
 		// Plain mode answers on the one input stream its own loop reads,
 		// so its half of the deferred consent runs inline, on the REPL
 		// goroutine, after the reader is up and before the first line is
-		// taken (see agent.ResolveModelNow). The deadline is applied here
-		// rather than inside the agent, on a context the REPL's own prompt
-		// waits on too: a resolution that has timed out has to be able to
-		// take its question off the screen.
-		repl.OnStart = func() {
-			rctx, cancel := context.WithTimeout(ctx, agent.ModelResolveTimeout)
-			defer cancel()
-			repl.SetPromptContext(rctx)
-			defer repl.SetPromptContext(nil)
-			ag.ResolveModelNow(rctx)
-		}
+		// taken. The REPL owns the bounding and the prompt context (see
+		// underPrompt), because a switch typed later needs exactly the
+		// same treatment.
+		repl.OnStart = func() { repl.ResolveModelParams(ctx) }
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)

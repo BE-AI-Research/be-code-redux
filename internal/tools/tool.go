@@ -36,6 +36,14 @@ type Tool interface {
 // ApproveFunc asks the user to approve a dangerous action; returns false to deny.
 type ApproveFunc func(action, detail string) bool
 
+// ApproveCtxFunc is ApproveFunc for an asker that can give up on its own
+// question — a model-parameter resolution under a deadline. A UI that
+// implements it withdraws the prompt when ctx ends, through whatever
+// withdrawal path it already has, so a question nobody answered does not
+// sit on every attached terminal after the goroutine behind it has gone.
+// Returning false on a withdrawal is right: nobody consented.
+type ApproveCtxFunc func(ctx context.Context, action, detail string) bool
+
 // ReviewDecision is the outcome of an editor-side review of a file change.
 type ReviewDecision int
 
@@ -60,6 +68,10 @@ type Registry struct {
 	maxOutput  atomic.Int64
 	mcpClients []*mcp.Client
 	Approve    ApproveFunc
+	// ApproveCtx, when set, is preferred by callers that have a context to
+	// give — today the model loader. Tools use Approve: a tool call's
+	// cancellation already reaches them another way.
+	ApproveCtx ApproveCtxFunc
 	// ApproveWrites gates write_file/edit_file behind a review of the
 	// change before it lands. It is the single switch for BOTH review
 	// paths: when set, the editor is asked first if ReviewWrite is wired

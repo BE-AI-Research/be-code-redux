@@ -306,6 +306,32 @@ var LoaderFactory func(cfg *config.Config, p provider.Provider) ModelLoader
 // itself is synchronous — the next request uses the new model whatever the
 // backend says — and the parameter resolution runs behind it.
 func (a *Agent) SetModel(model string) {
+	if l, gen := a.applySwitch(model); l != nil {
+		a.goResolve(l, model, gen)
+	}
+}
+
+// SetModelNow is SetModel with the parameter resolution on the caller's
+// goroutine. Plain mode needs it for the same reason it needs
+// ResolveModelNow: there is one input stream, the REPL loop is reading it,
+// and a consent prompt raised from anywhere else races the user's own
+// keystrokes for the answer. In the probe that cost both halves at once —
+// the "y" reached the main loop as a fresh request to the model, and the
+// prompt then swallowed a later line.
+//
+// The caller bounds ctx and makes its own prompts wait on it; see
+// REPL.underPrompt.
+func (a *Agent) SetModelNow(ctx context.Context, model string) {
+	if l, gen := a.applySwitch(model); l != nil {
+		a.resolveModel(ctx, l, model, gen)
+	}
+}
+
+// applySwitch is the synchronous half of a switch: everything the next
+// request needs whatever the backend later says. It returns the loader and
+// the generation for whoever resolves the parameters, or a nil loader when
+// nobody will.
+func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 	a.modelMu.Lock()
 	a.applyModelLocked(model)
 	if a.History != nil {
@@ -326,20 +352,19 @@ func (a *Agent) SetModel(model string) {
 		}
 		a.applyReserve(w) // takes modelMu itself, hence outside the block above
 	}
-	// The loader may prompt and may reload a model, so it never runs on the
-	// caller's goroutine: /model returns now, the window lands as a notice.
-	if l != nil {
-		// Nothing goes on the wire in the meantime. Options belong to the
-		// endpoint, not to a model, so until the resolution lands the
-		// provider would still be carrying the *previous* model's num_ctx
-		// — and a request sent in that gap reloads the new model at a
-		// window nobody consented to, which is precisely what the gate
-		// exists to prevent. Sending none at all leaves the server's own
-		// choice alone. Only when there is a loader to put one back:
-		// without one, nothing would ever restore it.
-		a.clearWireWindow()
-		a.goResolve(l, model, gen)
+	if l == nil {
+		return nil, 0
 	}
+	// Nothing goes on the wire in the meantime. Options belong to the
+	// endpoint, not to a model, so until the resolution lands the provider
+	// would still be carrying the *previous* model's num_ctx — and a
+	// request sent in that gap reloads the new model at a window nobody
+	// consented to, which is precisely what the gate exists to prevent.
+	// Sending none at all leaves the server's own choice alone. Only when
+	// there is a loader to put one back: without one, nothing would ever
+	// restore it.
+	a.clearWireWindow()
+	return l, gen
 }
 
 // clearWireWindow takes the context window off the wire, leaving the
@@ -350,6 +375,45 @@ func (a *Agent) clearWireWindow() {
 	if w, ok := a.Provider.(provider.WindowClearer); ok {
 		w.ClearWindow()
 	}
+}
+
+// maxResolveRetries bounds reapplyCurrent. Each round is one Apply, and
+// the only way to need another is a switch landing while it ran; a session
+// that switched models this many times inside one resolution is better off
+// with a bare wire than with a window chased round in circles.
+const maxResolveRetries = 8
+
+// reapplyCurrent puts the current model's window back on the wire after a
+// superseded resolution had to take its own off. It touches nothing else —
+// no budget, no compaction: the current model's resolution owns those and
+// is either still running or already done, and both callers would then say
+// the same thing twice.
+//
+// It re-checks after each Apply because the same thing can happen again:
+// another switch landing while this one was on the wire. Every exit leaves
+// either the current model's window there or none at all, never a window
+// belonging to a model the session is not running.
+func (a *Agent) reapplyCurrent(ctx context.Context) {
+	for i := 0; i < maxResolveRetries; i++ {
+		a.modelMu.Lock()
+		l, model, gen := a.loader, a.Model, a.modelGen
+		a.modelMu.Unlock()
+		if l == nil {
+			return
+		}
+		if _, err := l.Apply(ctx, model); err != nil || ctx.Err() != nil {
+			a.clearWireWindow()
+			return
+		}
+		a.modelMu.Lock()
+		current := gen == a.modelGen
+		a.modelMu.Unlock()
+		if current {
+			return
+		}
+		a.clearWireWindow()
+	}
+	a.clearWireWindow()
 }
 
 // goResolve starts one resolution on its own goroutine, under
@@ -468,10 +532,20 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 	// A switch that has been overtaken is not the session's model any more.
 	// Its window must not land on the model the user actually chose: the
 	// answers come back in whatever order the backend gives them.
+	//
+	// Returning is not enough. Apply has *already* put this model's window
+	// on the wire — that is what Apply is for — and options belong to the
+	// endpoint, not to a model, so leaving it there hands one model's
+	// window to another model's request. A slow /model big followed by a
+	// fast /model small ended with small running at big's 65536 while it
+	// was resident at 8192 for somebody else, which is a reload without
+	// consent: the exact thing the gate exists to stop.
 	a.modelMu.Lock()
 	stale := gen != a.modelGen
 	a.modelMu.Unlock()
 	if stale {
+		a.clearWireWindow()
+		a.reapplyCurrent(ctx)
 		return
 	}
 	prev := a.Window()
@@ -637,8 +711,8 @@ func (a *Agent) composeSystem(gitInfo string) string {
 			sys += "\n\nWorking memory:\n" + wm
 		}
 	}
-	if a.handoff != "" {
-		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
+	if h := a.Handoff(); h != "" {
+		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + h
 	}
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance

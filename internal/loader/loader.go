@@ -53,6 +53,12 @@ type Loader struct {
 	approve tools.ApproveFunc // nil means non-interactive: a refusal
 	notice  func(string)
 
+	// approverCtxFn, when set, supplies a context-aware approver, which is
+	// preferred over the plain one: it lets this caller's deadline close
+	// the question it raised. Without it a resolution that times out
+	// leaves its prompt on every attached terminal, answerable by somebody
+	// whose answer nothing is waiting for any more.
+	approverCtxFn func() tools.ApproveCtxFunc
 	// approverFn, when set (SetApprover), supplies the approver at the moment
 	// consent is needed rather than at construction. The UI wires
 	// Registry.Approve after the agent is built, so a loader constructed
@@ -95,6 +101,14 @@ func New(p provider.Provider, cfg *config.Config, approve tools.ApproveFunc, not
 func (l *Loader) SetApprover(f func() tools.ApproveFunc) {
 	l.mu.Lock()
 	l.approverFn = f
+	l.mu.Unlock()
+}
+
+// SetApproverCtx supplies a context-aware approver, preferred over the
+// plain one when it yields a non-nil function. Same locking, same reason.
+func (l *Loader) SetApproverCtx(f func() tools.ApproveCtxFunc) {
+	l.mu.Lock()
+	l.approverCtxFn = f
 	l.mu.Unlock()
 }
 
@@ -355,7 +369,7 @@ func (l *Loader) reconcile(ctx context.Context, model string, serverWindow int, 
 		"model %s is loaded with a %d-token window; config asks for %d.\n"+
 			"Reloading evicts anything else on this server using that model.",
 		model, serverWindow, p.Window)
-	ok := approve("model_reload", detail)
+	ok := approve(ctx, "model_reload", detail)
 	l.mu.Lock()
 	l.asked[model] = true
 	l.agreed[model] = ok
@@ -426,16 +440,32 @@ func (l *Loader) mode() string {
 	}
 }
 
-// approver resolves who to ask right now. Nil means nobody, which is a
-// refusal, never a silent yes.
-func (l *Loader) approver() tools.ApproveFunc {
+// approver resolves who to ask right now, as a function that takes this
+// caller's context. Nil means nobody, which is a refusal, never a silent
+// yes.
+//
+// A UI that offers a context-aware approver gets the real context and can
+// close its own prompt when this resolution gives up. One that does not is
+// wrapped, so the rest of reconcile has one shape to deal with — its
+// prompt simply outlives the deadline, which is the behaviour it had
+// before this existed.
+func (l *Loader) approver() tools.ApproveCtxFunc {
 	l.mu.Lock()
-	fn, fixed := l.approverFn, l.approve
+	ctxFn, fn, fixed := l.approverCtxFn, l.approverFn, l.approve
 	l.mu.Unlock()
-	if fn != nil {
-		return fn()
+	if ctxFn != nil {
+		if f := ctxFn(); f != nil {
+			return f
+		}
 	}
-	return fixed
+	plain := fixed
+	if fn != nil {
+		plain = fn()
+	}
+	if plain == nil {
+		return nil
+	}
+	return func(_ context.Context, action, detail string) bool { return plain(action, detail) }
 }
 
 func (l *Loader) providerName() string {

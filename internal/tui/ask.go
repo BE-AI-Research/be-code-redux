@@ -257,14 +257,28 @@ func (t *reviewTerminal) Withdraw(note string) { t.s.CancelAsk(int(t.gen.Load())
 
 // approveFromAgent bridges the agent goroutine into the shared ask: the
 // approval modal every attached terminal sees, and any of them may answer.
+// It waits on the session's own lifetime, which is right for a tool call:
+// the thing that raised it lives as long as the session does.
 func (s *Session) approveFromAgent(action, detail string) bool {
+	ctx := s.rootCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.approveFromAgentCtx(ctx, action, detail)
+}
+
+// approveFromAgentCtx is the same modal for an asker that can give up on
+// its own question — a model-parameter resolution under a deadline. Ask
+// already withdraws on ctx (CancelAsk, broadcast to every view), so the
+// prompt closes everywhere rather than outliving the goroutine waiting for
+// it. See tools.ApproveCtxFunc.
+func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string) bool {
 	if action == "shell" && s.cfg.AutoApproveShell {
 		return true
 	}
 	if action == "file_write" && !s.cfg.ApproveFileWrites {
 		return true
 	}
-	ctx := s.rootCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}

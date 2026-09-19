@@ -107,6 +107,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	}
 	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl}
 	ag.Tools.Approve = r.approve
+	ag.Tools.ApproveCtx = r.approveCtx
 	return r, nil
 }
 
@@ -118,8 +119,15 @@ func slashCompleterItems() []readline.PrefixCompleterInterface {
 	return items
 }
 
-// approve renders shell commands and file-write diffs and asks y/N/a.
+// approve renders shell commands and file-write diffs and asks y/N/a, on
+// this terminal's ambient prompt context (see SetPromptContext).
 func (r *REPL) approve(action, detail string) bool {
+	return r.approveCtx(r.promptContext(), action, detail)
+}
+
+// approveCtx is approve for an asker that can give up on its own question,
+// which waits on that asker's context instead. See tools.ApproveCtxFunc.
+func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	switch action {
 	case "shell":
 		if r.Cfg.AutoApproveShell {
@@ -139,7 +147,7 @@ func (r *REPL) approve(action, detail string) bool {
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	switch strings.ToLower(r.prompt(yell("approve? [y/N/a(lways)] "))) {
+	switch strings.ToLower(r.promptCtx(ctx, yell("approve? [y/N/a(lways)] "))) {
 	case "y", "yes":
 		return true
 	case "a", "always":
@@ -278,11 +286,35 @@ func (r *REPL) Run(ctx context.Context) error {
 // nobody did.
 func (r *REPL) prompt(q string) string { return r.promptCtx(r.promptContext(), q) }
 
+// underPrompt runs fn on this goroutine, bounded by
+// agent.ModelResolveTimeout, with one-off prompts waiting on the same
+// context — so a question whose asker has given up leaves the screen.
+//
+// On this goroutine is the point. Plain mode has one input stream and the
+// main loop is reading it; anything that raises a question from elsewhere
+// is a second reader, and the two split the user's keystrokes between them.
+// Every model-parameter resolution in this UI goes through here: the
+// startup consent (OnStart) and every /model and /provider switch.
+func (r *REPL) underPrompt(ctx context.Context, fn func(context.Context)) {
+	rctx, cancel := context.WithTimeout(ctx, agent.ModelResolveTimeout)
+	defer cancel()
+	r.SetPromptContext(rctx)
+	defer r.SetPromptContext(nil)
+	fn(rctx)
+}
+
+// ResolveModelParams resolves the current model's parameters inline: the
+// consent question startup could not put to anybody, asked once this
+// terminal is reading. See REPL.OnStart.
+func (r *REPL) ResolveModelParams(ctx context.Context) {
+	r.underPrompt(ctx, r.Agent.ResolveModelNow)
+}
+
 // SetPromptContext makes one-off prompts wait on ctx as well as on the
 // user, so a question whose asker has given up on it leaves the screen.
-// Passing nil restores the default. The model loader's startup consent is
-// the caller this exists for: it is bounded by agent.ModelResolveTimeout,
-// and that bound has to reach the prompt or it is not a bound at all.
+// Passing nil restores the default. The model loader's consent is the
+// caller this exists for: it is bounded by agent.ModelResolveTimeout, and
+// that bound has to reach the prompt or it is not a bound at all.
 func (r *REPL) SetPromptContext(ctx context.Context) {
 	r.mu.Lock()
 	r.promptCtx2 = ctx
@@ -573,7 +605,9 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Printf("current model: %s (profile %s)\n", r.Agent.Model, r.Agent.Profile.Family)
 			break
 		}
-		r.Agent.SetModel(fields[1])
+		// Inline, not on a goroutine: the consent question this may raise
+		// is answered through the one input stream this loop is reading.
+		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, fields[1]) })
 		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.Profile.Family)
 	case "/provider":
 		if len(fields) < 2 {
@@ -587,7 +621,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		r.Provider = p
 		r.Agent.SetProvider(p)
-		r.Agent.SetModel(provider.ResolveModel(r.Cfg, fields[1], ""))
+		model := provider.ResolveModel(r.Cfg, fields[1], "")
+		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, model) })
 		fmt.Printf("provider set to %s (model %s)\n", p.Name(), r.Agent.Model)
 	case "/sessions":
 		printSessions()
