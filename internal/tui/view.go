@@ -953,8 +953,10 @@ func (m *View) headerView() string {
 	box := m.st.Border.Render(m.st.Text.Bold(true).Render("BE-Code Redux"))
 	lines := strings.Split(box, "\n")
 	code := "—"
-	if m.ag.Session != nil {
-		code = m.ag.Session.ResumeCode()
+	// CurrentSession, not the field: /clear and /resume replace it from
+	// goroutines of their own.
+	if sess := m.ag.CurrentSession(); sess != nil {
+		code = sess.ResumeCode()
 	}
 	logo := m.st.Accent.Render("session " + code)
 	if len(lines) >= 2 {
@@ -1271,9 +1273,15 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		sess, name, model := m.Session, m.prov.Name(), m.ag.Model
 		go func() {
 			sess.ag.ClearHistory()
+			// Under the session lock from here: SetSession writes what
+			// headerView reads to draw the resume code, so the swap and
+			// the lines that report it land in one critical section rather
+			// than beside a repaint.
+			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
-			sess.appendEntry(entry{Kind: entryOK, Text: "history cleared; new session started"})
-			sess.finishTurn(nil, nil)
+			sess.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
+			sess.finishTurnLocked(nil, nil)
+			sess.mu.Unlock()
 		}()
 	case "/tools":
 		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
@@ -1651,15 +1659,26 @@ func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	if m.liveCodes()[code] && !m.ownCode(code) {
 		return m.joinLive(code, from)
 	}
-	m.ag.Resume(s)
-	m.seedResumeLocked(s)
+	// Off the event loop, for the reason /clear is: Resume waits for the
+	// turn lock, and whatever holds it writes to this session as it goes,
+	// which takes the lock Update is holding here.
+	m.setRunStateLocked(true, "resuming")
+	sess := m.Session
+	go func() {
+		sess.ag.Resume(s)
+		sess.mu.Lock()
+		sess.seedResumeLocked(s)
+		sess.finishTurnLocked(nil, nil)
+		sess.mu.Unlock()
+	}()
 	return m, nil
 }
 
 // ownCode reports whether code is this program's own session, which is live
 // by definition; resuming it is a no-op, not a switch to itself.
 func (m *View) ownCode(code string) bool {
-	return m.ag.Session != nil && m.ag.Session.ResumeCode() == code
+	sess := m.ag.CurrentSession()
+	return sess != nil && sess.ResumeCode() == code
 }
 
 // joinLive hands from's terminal to the host of a live code instead of

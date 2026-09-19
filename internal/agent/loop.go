@@ -186,6 +186,10 @@ type Agent struct {
 	modelMu  sync.Mutex
 	loader   ModelLoader
 	modelGen int
+	// sessionMu guards the Session pointer against a UI reading it while
+	// /clear or /resume swaps it from a goroutine of their own. It guards
+	// the pointer, never what it points at.
+	sessionMu sync.Mutex
 	// turnMu is held for the whole of run(). It exists for exactly one
 	// caller outside the loop: the compaction resolveModel does when a
 	// model switch lands a window smaller than the conversation. That is
@@ -325,8 +329,42 @@ func (a *Agent) SetModel(model string) {
 	// The loader may prompt and may reload a model, so it never runs on the
 	// caller's goroutine: /model returns now, the window lands as a notice.
 	if l != nil {
-		go a.resolveModel(context.Background(), l, model, gen)
+		// Nothing goes on the wire in the meantime. Options belong to the
+		// endpoint, not to a model, so until the resolution lands the
+		// provider would still be carrying the *previous* model's num_ctx
+		// — and a request sent in that gap reloads the new model at a
+		// window nobody consented to, which is precisely what the gate
+		// exists to prevent. Sending none at all leaves the server's own
+		// choice alone. Only when there is a loader to put one back:
+		// without one, nothing would ever restore it.
+		a.clearWireWindow()
+		a.goResolve(l, model, gen)
 	}
+}
+
+// clearWireWindow takes the context window off the wire, leaving the
+// passthrough options alone. It is the provider-agnostic half of "we do not
+// know this model's window yet": an endpoint that carries no window has
+// nothing to clear and does not implement the interface.
+func (a *Agent) clearWireWindow() {
+	if w, ok := a.Provider.(provider.WindowClearer); ok {
+		w.ClearWindow()
+	}
+}
+
+// goResolve starts one resolution on its own goroutine, under
+// ModelResolveTimeout. Both callers come through here, because the last
+// time they each carried their own copy of these three lines one of them
+// lost the deadline — and a resolution that cannot time out holds the turn
+// lock for the life of the process if its consent is never answered or its
+// compaction never returns, wedging every later request, /clear and
+// /compact behind it.
+func (a *Agent) goResolve(l ModelLoader, model string, gen int) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ModelResolveTimeout)
+		defer cancel()
+		a.resolveModel(ctx, l, model, gen)
+	}()
 }
 
 // ModelLoader is the one path to a model's runtime parameters: it resolves
@@ -386,11 +424,7 @@ func (a *Agent) ResolveModel() {
 	if l == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), ModelResolveTimeout)
-		defer cancel()
-		a.resolveModel(ctx, l, model, gen)
-	}()
+	a.goResolve(l, model, gen)
 }
 
 // ResolveModelNow is ResolveModel on the caller's goroutine. Plain mode
@@ -959,8 +993,24 @@ func (a *Agent) SaveGuard() (blocked bool, owner int) {
 // down from one session must still be able to save the next (/clear, a
 // resume after a blocked save).
 func (a *Agent) SetSession(s *store.Session) {
+	a.sessionMu.Lock()
 	a.Session = s
+	a.sessionMu.Unlock()
 	a.saveDisabled, a.saveOwner, a.saveWarned = false, 0, false
+}
+
+// CurrentSession is the session as a goroutine that is not the agent's own
+// reads it — a UI drawing the resume code in its header, or deciding
+// whether a picked row is this program's own session.
+//
+// The agent's own reads of the field stay bare, and can: every one of them
+// happens under the turn lock, which is also held by the two things that
+// replace the session out of band (ClearHistory's caller, Resume). A UI
+// holds no such lock, so it goes through here.
+func (a *Agent) CurrentSession() *store.Session {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.Session
 }
 
 // autosave persists the conversation; failures are non-fatal by design.

@@ -141,7 +141,15 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	} else {
 		a.unloadedNotified = false
 	}
-	if window > 0 && window != a.Window() {
+	// Only while it is loaded. Status reports the *Modelfile's* num_ctx for
+	// a model that is not resident, and a Modelfile describes the load that
+	// would happen by default, not one any client chose — so treating it as
+	// "another client changed the window" adapts to a number nobody set and
+	// hands it to OnWindowChanged, which puts it on the wire. That undoes
+	// what OnEvicted arranged two lines above: a configured 32768 becomes
+	// the Modelfile's 4096 on the next chat request and on the keep-alive
+	// touch, with no consent asked for either.
+	if loaded && window > 0 && window != a.Window() {
 		old := a.Window()
 		a.ApplyWindow(window)
 		budget, _, _ := a.History.Scalars()

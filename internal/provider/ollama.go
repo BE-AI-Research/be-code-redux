@@ -103,6 +103,15 @@ func (p *Ollama) Options() Options {
 	return o
 }
 
+// ClearWindow drops num_ctx from the wire while leaving the passthrough
+// options in place, so requests made before a model's window is known carry
+// no window rather than the last model's. See provider.WindowClearer.
+func (p *Ollama) ClearWindow() {
+	p.mu.Lock()
+	p.opts.NumCtx = 0
+	p.mu.Unlock()
+}
+
 // SetKeepAlive sets the keep_alive sent with every native request (a Go
 // duration string, "" to leave it to the server).
 func (p *Ollama) SetKeepAlive(d string) {

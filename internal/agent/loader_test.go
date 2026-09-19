@@ -10,6 +10,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/store"
 )
 
 // fakeLoader records what the agent asked of it and answers instantly (or
@@ -591,4 +592,205 @@ func TestKeepAliveFallsBackToConfig(t *testing.T) {
 	if got != 10*time.Minute {
 		t.Fatalf("refreshed for %s; config said 10m", got)
 	}
+}
+
+// N1. The switch's own goroutine must carry ModelResolveTimeout. It lost it
+// when the deadline moved out of resolveModel, and a resolution that cannot
+// time out is not a slow path: a consent nobody answers, or a post-switch
+// Compact that never returns, holds the turn lock for the life of the
+// process — and every later request, /clear, /compact and /resume queues
+// behind it.
+func TestAModelSwitchResolutionHasADeadline(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	got := make(chan context.Context, 2)
+	ag.SetLoader(deadlineLoader{seen: got})
+
+	ag.SetModel("other")
+	ag.ResolveModel()
+	for i := 0; i < 2; i++ {
+		select {
+		case ctx := <-got:
+			d, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("the resolution ran on a context that can never expire")
+			}
+			if until := time.Until(d); until <= 0 || until > ModelResolveTimeout+time.Second {
+				t.Fatalf("deadline in %s; want about %s", until, ModelResolveTimeout)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("the resolution never ran")
+		}
+	}
+}
+
+// deadlineLoader hands its caller's context back to the test.
+type deadlineLoader struct{ seen chan context.Context }
+
+func (l deadlineLoader) Apply(ctx context.Context, _ string) (int, error) {
+	l.seen <- ctx
+	return 0, nil
+}
+func (deadlineLoader) OnEvicted(context.Context, string) {}
+func (deadlineLoader) OnWindowChanged(string, int)       {}
+func (deadlineLoader) KeepAlive(string) time.Duration    { return 0 }
+
+// N2. Resume replaces the whole transcript, and it is no longer the only
+// rewrite that can be in flight. A post-switch compaction parked in its
+// model call is holding the *old* conversation's messages; finishing after
+// the resume, it would write that conversation's summary over the
+// transcript just loaded — and the next autosave would commit it to the
+// resumed session's own file. Cross-session corruption, from two commands
+// that look unrelated.
+func TestResumeIsNotOverwrittenByAParkedCompaction(t *testing.T) {
+	release := make(chan struct{})
+	p := &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		<-release
+		return &provider.ChatResponse{Content: "summary of the OLD conversation"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	for i := 0; i < 10; i++ {
+		ag.History.Messages = append(ag.History.Messages,
+			provider.Message{Role: provider.RoleUser, Content: "old conversation " + strings.Repeat("x", 300)},
+			provider.Message{Role: provider.RoleAssistant, Content: "old reply " + strings.Repeat("y", 300)})
+	}
+	compacted := make(chan error, 1)
+	go func() { compacted <- ag.CompactNow(context.Background()) }()
+	waitFor(t, "the compaction to reach its model call", func() bool { return len(p.requests()) > 0 })
+
+	resumed := make(chan struct{})
+	go func() {
+		ag.Resume(&store.Session{ID: "other", Code: "ZZZZZZ", Messages: []provider.Message{
+			{Role: provider.RoleUser, Content: "the resumed conversation"},
+		}})
+		close(resumed)
+	}()
+	// Resume must wait for the turn, not race it.
+	select {
+	case <-resumed:
+		t.Fatal("Resume replaced the transcript while a compaction held the turn")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-compacted
+	select {
+	case <-resumed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Resume never completed")
+	}
+
+	for _, m := range ag.History.Messages {
+		if strings.Contains(m.Content, "OLD conversation") || strings.Contains(m.Content, "old reply") {
+			t.Fatalf("the resumed transcript carries the other conversation: %q", m.Content)
+		}
+	}
+	if len(ag.History.Messages) != 1 || ag.History.Messages[0].Content != "the resumed conversation" {
+		t.Fatalf("resumed transcript: %+v", ag.History.Messages)
+	}
+	if s := ag.CurrentSession(); s == nil || s.ID != "other" {
+		t.Fatalf("session: %+v", s)
+	}
+}
+
+// N4. Status reports the Modelfile's num_ctx for a model that is not
+// resident, and a Modelfile describes the load that *would* happen by
+// default — not one any client chose. Treating it as "another client
+// changed the window" adapts to a number nobody set and hands it to
+// OnWindowChanged, which puts it on the wire, undoing the parameters
+// OnEvicted just arranged for the reload that is coming.
+func TestAnUnloadedModelsModelfileIsNotAWindowChange(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	ag.ApplyWindow(32768)
+	l := &fakeLoader{window: 32768}
+	ag.SetLoader(l)
+	// Not loaded, and Status answers with the Modelfile's 4096.
+	ag.Provider = &statusProvider{funcProvider: &funcProvider{}, window: 4096, loaded: false}
+
+	ag.checkBackend(context.Background())
+
+	if len(l.evictedModels()) != 1 {
+		t.Fatalf("the eviction was not reported: %v", l.evictedModels())
+	}
+	if got := l.changedWindows(); len(got) != 0 {
+		t.Fatalf("a Modelfile default was reported as another client's window change: %v", got)
+	}
+	if ag.Window() != 32768 {
+		t.Fatalf("window %d; the configured one was replaced by a Modelfile default", ag.Window())
+	}
+}
+
+// N5. Options belong to the endpoint, not to a model. Between a switch and
+// the loader's answer the provider was still carrying the previous model's
+// num_ctx, so a request sent in that gap reloaded the new model at a window
+// nobody consented to — on a shared server, evicting whoever was using it.
+func TestASwitchTakesThePreviousModelsWindowOffTheWire(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	p := &windowProvider{funcProvider: &funcProvider{}}
+	ag.Provider = p
+	p.SetWindow(32768) // resolved for the model we are leaving
+
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	ag.SetLoader(gateLoader{hold: hold, window: 8192})
+
+	ag.SetModel("other") // consent for "other" is still pending
+	if w := p.Window(); w != 0 {
+		t.Fatalf("num_ctx %d is still on the wire for the model we just left; "+
+			"a request now reloads the new one without consent", w)
+	}
+}
+
+// windowProvider is a backend that carries a context window, as Ollama does.
+type windowProvider struct {
+	*funcProvider
+	mu sync.Mutex
+	w  int
+}
+
+func (p *windowProvider) SetWindow(n int) { p.mu.Lock(); p.w = n; p.mu.Unlock() }
+func (p *windowProvider) Window() int     { p.mu.Lock(); defer p.mu.Unlock(); return p.w }
+func (p *windowProvider) ClearWindow()    { p.SetWindow(0) }
+
+// gateLoader never answers, standing in for a consent prompt on screen.
+type gateLoader struct {
+	hold   chan struct{}
+	window int
+}
+
+func (l gateLoader) Apply(ctx context.Context, _ string) (int, error) {
+	select {
+	case <-l.hold:
+	case <-ctx.Done():
+	}
+	return l.window, nil
+}
+func (gateLoader) OnEvicted(context.Context, string) {}
+func (gateLoader) OnWindowChanged(string, int)       {}
+func (gateLoader) KeepAlive(string) time.Duration    { return 0 }
+
+// N6. Budget and Reserve were written in two critical sections, so a reader
+// between them saw the new budget beside the old reserve — or, shrinking, a
+// reserve larger than the budget, which Limit reports as its 512 floor.
+func TestTheBudgetAndItsReserveMoveTogether(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	ag.ApplyWindow(131072)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; n < 3000; n++ {
+			ag.ApplyWindow(131072)
+			ag.ApplyWindow(4096)
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for n := 0; n < 6000; n++ {
+			if l := ag.History.Limit(); l == 512 {
+				t.Errorf("Limit collapsed to its floor: the budget and the reserve were read between writes")
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

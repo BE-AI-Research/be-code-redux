@@ -182,11 +182,29 @@ func (a *Agent) heuristicHandoff() string {
 
 // Resume loads a saved conversation into this agent's history, carrying the
 // previous session's handoff into the system prompt.
+//
+// It takes the turn lock, and it must: replacing the transcript is the
+// largest rewrite there is, and it is no longer the only one that can be in
+// flight. A post-switch compaction parked in its model call is holding the
+// old conversation's messages; without this lock it would finish *after*
+// the resume and write that conversation's summary over the transcript the
+// user just loaded — which the next autosave would then commit to the
+// resumed session's own file. Cross-session corruption, from two commands
+// that look unrelated.
+//
+// Like ClearHistory and CompactNow it must therefore never be called from
+// inside a Bubble Tea Update; see the note on those.
 func (a *Agent) Resume(s *store.Session) {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
 	a.handoff = s.Handoff
+	// modelMu for the system prompt, in the order everything else takes
+	// them: turn lock first, then this one.
+	a.modelMu.Lock()
 	a.History.System.Content = a.composeSystem("")
+	a.modelMu.Unlock()
 }
 
 // Handoff returns the briefing carried over from the resumed session.
@@ -207,13 +225,20 @@ func (a *Agent) ApplyWindow(window int) bool {
 	if a.Cfg.ContextTokens > 0 && target > a.Cfg.ContextTokens {
 		target = a.Cfg.ContextTokens
 	}
-	// Under the history's lock: a consultation started from a UI goroutine
-	// reads these through History.Scalars while this runs.
+	// Both scalars in one critical section, and the reserve computed before
+	// it (reserveFor takes modelMu, and the order is always modelMu then
+	// this one). Two separate sections would leave a window in which the
+	// new budget stands beside the old reserve — or, going the other way, a
+	// reserve larger than the budget, which Limit would report as its 512
+	// floor to whatever UI or notice happened to read it just then.
+	reserve := a.reserveFor(window)
 	a.History.mu.Lock()
 	clamped := a.History.Budget > window
 	a.History.Budget = target
+	a.History.Reserve = reserve
+	limit := a.History.Budget - a.History.Reserve
 	a.History.mu.Unlock()
-	a.applyReserve(window)
+	a.capToolOutput(limit)
 	return clamped
 }
 
@@ -260,18 +285,28 @@ func (a *Agent) applyReserve(window int) {
 	reserve := a.reserveFor(window)
 	a.History.mu.Lock()
 	a.History.Reserve = reserve
+	limit := a.History.Budget - reserve
 	a.History.mu.Unlock()
-	// Limit locks too, so it is read after the write above rather than
-	// inside it: a model switch resolves its window on a goroutine of its
-	// own, so two applyReserve calls really can overlap.
-	if a.Tools != nil {
-		capBytes := a.History.Limit() * 3 / 4
-		if capBytes > 24*1024 {
-			capBytes = 24 * 1024
-		}
-		if capBytes < 4*1024 {
-			capBytes = 4 * 1024
-		}
-		a.Tools.SetMaxOutput(capBytes)
+	a.capToolOutput(limit)
+}
+
+// capToolOutput scales the per-call tool-output cap to the usable limit. It
+// takes the limit as a number rather than calling History.Limit, so its
+// caller can read it in the same critical section that wrote the scalars it
+// is derived from.
+func (a *Agent) capToolOutput(limit int) {
+	if limit < 512 {
+		limit = 512 // History.Limit's floor: never trim into nothing
 	}
+	if a.Tools == nil {
+		return
+	}
+	capBytes := limit * 3 / 4
+	if capBytes > 24*1024 {
+		capBytes = 24 * 1024
+	}
+	if capBytes < 4*1024 {
+		capBytes = 4 * 1024
+	}
+	a.Tools.SetMaxOutput(capBytes)
 }

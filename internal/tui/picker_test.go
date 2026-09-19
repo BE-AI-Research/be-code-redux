@@ -67,9 +67,12 @@ func TestSessionPickerMarksLiveRowsAndSwitches(t *testing.T) {
 	if len(switched) != 0 {
 		t.Fatalf("switch on a cold session: %v", switched)
 	}
-	if m.ag.Session == nil || m.ag.Session.ID != "2" {
-		t.Fatalf("cold session was not resumed: %+v", m.ag.Session)
-	}
+	// Resume runs on a goroutine of its own now: it waits for the turn
+	// lock, which Update must never do.
+	waitFor(t, func() bool {
+		sess := m.ag.CurrentSession()
+		return sess != nil && sess.ID == "2"
+	})
 }
 
 // An in-process TUI (--no-host) has no host to switch through, so it says

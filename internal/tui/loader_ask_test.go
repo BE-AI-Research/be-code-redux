@@ -186,3 +186,39 @@ func TestClearDoesNotWaitForTheTurnLockInsideUpdate(t *testing.T) {
 	}
 	cancel()
 }
+
+// N3. /clear and /resume swap the session from goroutines of their own
+// now, and the header draws the resume code from it on every frame. Under
+// -race that is a write against a read unless the swap goes through the
+// session lock and the header reads through the agent's accessor.
+//
+// Everything a terminal does stays on one goroutine here, as Bubble Tea
+// guarantees: the second party is the /clear goroutine that Update itself
+// spawns, which is the whole point.
+func TestSessionSwapsDoNotRaceTheHeader(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	v := s.NewView(0, "local")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	flush(v)
+
+	idle := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return !s.running
+	}
+	for i := 0; i < 40; i++ {
+		v.Update(runes("/clear"))
+		v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		// Repaint while the swap is in flight: the header reads the session
+		// on every frame.
+		for n := 0; n < 100 && !idle(); n++ {
+			v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			_ = v.View()
+		}
+		waitFor(t, func() bool { flush(v); return idle() })
+	}
+	if s.ag.CurrentSession() == nil {
+		t.Fatal("no session after clearing")
+	}
+}

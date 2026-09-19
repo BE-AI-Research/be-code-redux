@@ -118,6 +118,19 @@ type KeepAliver interface {
 	KeepAlive(ctx context.Context, model string, d time.Duration) error
 }
 
+// WindowClearer is implemented by providers that carry a context window on
+// the wire (Ollama's num_ctx). Clearing it means "send no window", which is
+// not the same as sending zero: the server keeps whatever the model is
+// already loaded with, and nothing reloads.
+//
+// The agent uses it for the gap between a model switch and the loader's
+// answer for the new model. Options belong to the endpoint, so in that gap
+// the provider is still carrying the previous model's window, and putting
+// that on the wire would reload the new model without anybody being asked.
+type WindowClearer interface {
+	ClearWindow()
+}
+
 // ModelDetailer is implemented by providers that can say more about their
 // models than a name and a size: the window each one is currently loaded
 // with, and whether it is resident at all. That is what a model picker is
