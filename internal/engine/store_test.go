@@ -416,6 +416,36 @@ func TestTheRedundantReadFooterSurvivesAReopen(t *testing.T) {
 	}
 }
 
+// TestTheRedundantReadFooterFiresOnAFileBiggerThanTheItemCap: item_cap
+// bounds the verbatim buffer, not the record of what was read. A file whose
+// numbered output is larger than the cap is the ordinary case, not the
+// exotic one, so if the cap could shorten the recorded range the footer
+// would effectively never fire in a real session.
+func TestTheRedundantReadFooterFiresOnAFileBiggerThanTheItemCap(t *testing.T) {
+	root := t.TempDir()
+	dir := t.TempDir()
+	var src strings.Builder
+	src.WriteString("package a\n")
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&src, "// line %d\n", i)
+	}
+	writeFile(t, root, "a.go", src.String())
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	s.EnsureRoot("look at a.go")
+	s.NextTurn()
+	read := Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered(src.String(), 1)}
+	if len(read.Content) <= testLimits().ItemCap {
+		t.Fatalf("the test file is not larger than the item cap (%d bytes)", len(read.Content))
+	}
+	if f := s.Observe(read); f != "" {
+		t.Fatalf("first read footer: %q", f)
+	}
+	s.NextTurn()
+	if f := s.Observe(read); !strings.Contains(f, "already read at turn 1") {
+		t.Fatalf("a re-read of the whole file was not recognised as redundant: %q", f)
+	}
+}
+
 // TestGitignoreEdgeCases: the line we add must not join theirs, we never
 // invent a .gitignore outside a repository, and another spelling of the
 // same entry is recognised rather than duplicated.

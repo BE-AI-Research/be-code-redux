@@ -140,4 +140,12 @@ nothing is wrong with either one alone, only with having two — so instead
 the engine prints a line to the terminal every time it loads the record
 while more than one is marked doing, naming the documents involved. Nothing
 about your files changes; fixing it is one status mark away.
+
+## The long form
+
+Everything above is what you need to read and edit these files. The full
+specification of the format — every evidence key, how a Task Report is
+rolled up when a task finishes, and what the engine keeps in its own dotdir
+rather than here — is ` + "`docs/task-format.md`" + ` in the BE-Code source
+tree.
 `

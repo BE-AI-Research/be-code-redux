@@ -80,15 +80,25 @@ func (r *recorder) recordWith(n *Node, ev Event, turn int, snap fileSnap) string
 	if ev.IsError {
 		return ""
 	}
+	// The durable record is merged from the *whole* result, never from the
+	// buffered excerpt. ItemCap bounds how much verbatim text a node carries
+	// in the prompt; it says nothing about how much of the file the model
+	// was shown. Merging the excerpt instead recorded a 300-line read as
+	// lines 1–221 — enough to make every later read of that file look like
+	// new ground, which is precisely the re-reading the record exists to
+	// stop. distill still works from the buffer (that is all a restored one
+	// has), and its range merges into this one rather than over it.
+	full := item
+	full.Out = ev.Content
 	switch ev.Tool {
 	case "read_file":
 		// The footer is decided before the read is merged in, or every read
 		// would look like a repeat of itself.
 		footer := r.readFooter(n, rel, seenRange(ev, countLines(ev.Content)), snap)
-		r.mergeFile(n, item, snap)
+		r.mergeFile(n, full, snap)
 		return footer
 	case "write_file", "edit_file":
-		r.mergeFile(n, item, snap)
+		r.mergeFile(n, full, snap)
 	}
 	return ""
 }

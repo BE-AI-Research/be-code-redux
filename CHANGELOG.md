@@ -1,5 +1,116 @@
 # BE-Code Changelog
 
+## v0.11.0 — context handling
+
+Two failures with one cause — the model losing its grip on a long task — fixed
+as one piece of work: how much room the model has, and what it keeps when the
+room runs out.
+
+- **The task tree.** Working memory is no longer a flat ledger of a task, its
+  steps and two lists. It is a tree: a node is one line of work with a status
+  (`todo`, `doing`, `done`, `blocked`, `dropped`), a reason for the last two,
+  children to unbounded depth, and the evidence recorded while it was the node
+  being worked on — files with the ranges actually seen, commands with their
+  outcomes, lookups, notes and decisions, and the first line of each error.
+  Exactly one node is `doing`; marking a node `doing` closes the previous one
+  and adopts anything recorded while nothing was. The `doing` node keeps its
+  tool calls and output **verbatim**, capped per item (`engine.item_cap`,
+  4 KiB) and per node (`engine.node_cap`, 32 KiB) with drops counted in the
+  record, and is distilled in place from that buffer — never from the
+  transcript — when it closes. A finished top-level task rolls up into a
+  deterministic **Task Report**: what was done in order, files touched,
+  commands, decisions, and what was left blocked or dropped. Nothing in it
+  comes from a model call.
+
+- **The record lives in your project.** One Markdown document per top-level
+  task under `<project>/.be-code/tasks/`, written atomically, with a
+  `README.md` explaining the format to whoever opens the folder. In a git
+  repository (or wherever a `.gitignore` already exists) the first document
+  written adds `.be-code/` to it — untracked by default, and deleting that one
+  line is how you commit the record; nothing invents a `.gitignore` outside a
+  repository. Documents are
+  parsed tolerantly: unknown lines round-trip untouched, a hand-edited status,
+  text or note is respected as your intent, ids are repaired by position with a
+  note left in the file, and a document that cannot be parsed at all is
+  quarantined as `NNN-<slug>.broken-<stamp>.md` rather than half-read. Two
+  `[>]` marks are a warning naming the documents, not a repair: neither file is
+  changed. Nothing here is ever deleted — `/task clear` closes open work as
+  `dropped` with the reason `cleared` and leaves every document alone, and the
+  0.10.0 store is migrated into a tree with its old files renamed aside as
+  `*.migrated-<stamp>`. Only the disposable half — the verbatim buffers, the
+  turn counter, per-file hashes and outlines — stays in
+  `~/.be-code/engine/<key>/state.json`. The long form of the format is
+  `docs/task-format.md`.
+
+- **The prompt block is a task view.** `Working memory:` is composed fresh
+  every turn: Task Reports for finished branches oldest first, then the active
+  branch from the top-level task down to the `doing` node with sibling statuses,
+  then that node's verbatim buffer, then the durable notes. Under
+  `engine.budget` (6144 bytes) reports render in full; over it they condense
+  oldest first — full, then headline with outcomes and decisions, then one
+  line, then a `task show <id>` pointer — and only then are dropped. **The
+  active branch and its verbatim step are never what gets cut**; the block says
+  `(reports condensed)` instead.
+
+- **A compaction that produces no summary keeps the thread.** The tree is
+  always current, so compaction has no harvest to do: it trims the transcript
+  and asks the model for a fresh prose summary as a periodic prompt rewrite.
+  When that call fails or comes back empty — the failure reported from the
+  validation VM — the session now continues from the task record with the
+  notice `compaction: the model returned no summary; continuing from the task
+  record`, instead of falling back to blind trimming. An empty summary also
+  reports what the backend said about it (finish reason, token counts, reply
+  size) and keeps the raw reply head in the host log. A compaction you cancel
+  still stops rather than rewriting the transcript you were keeping.
+
+- **One `task` tool, five actions.** `plan` records a task and its steps in one
+  call (small local models do badly at chatty multi-call setup), `add` creates a
+  node under `parent` and returns its id, `status` moves one node to `doing`,
+  `done`, `blocked` or `dropped` with a reason, `note` records a fact or
+  decision against a node (`file:` ties it to a file, `keep: true` remembers it
+  across sessions), and `show` renders a node, a branch or the whole tree — the
+  escape hatch when a report has condensed to a pointer. Argument parsing stays
+  forgiving, and 0.10.0's `step` verb still works. For people: `/task`,
+  `/task show <id>`, `/task open` and `/task clear`; `engine.tools: minimal`
+  still registers `task` alone with the git lookups dropped.
+
+- **Full native Ollama.** `type: ollama` now talks to `/api/chat` for every
+  request — streaming, tool calls, thinking, and an options block the harness
+  controls (`num_ctx`, `keep_alive`, and a passthrough map from config). The
+  OpenAI-compatible endpoint remains for `type: openai` and as the fallback for
+  a server that does not serve the native route (a 404 whose body is not
+  Ollama's own JSON error, or a 405 or 501 — a model that simply has not been
+  pulled is an ordinary error and does not downgrade anything), with one notice
+  saying the session can no longer set a window. `context_window` is a real
+  setting, per provider and per model (`models: {"<name>": {...}}`), and an
+  explicit one means **no probe**: no `/api/ps` read, no Modelfile parse, and no
+  loading the model to find out, which was the multi-minute startup stall.
+  `context_tokens` is derived from the window when absent; set, it still wins,
+  and the window it leaves unused is now reported instead of disappearing
+  silently. **Sending a `num_ctx` that differs from how a model is loaded makes
+  Ollama reload it, evicting every other user of that server**, so it goes
+  through the approval seam as `model_reload`: `reload_on_mismatch` is `ask`
+  (the default), `always` or `never`, a headless or non-interactive run never
+  prompts and clamps instead, a refusal is remembered per model for the session,
+  and a question withdrawn by its own deadline is not recorded as an answer at
+  all.
+
+- **Model switching goes through the loader.** `internal/loader` is the only
+  code that loads a model or puts `num_ctx` on the wire — startup, `/model`, a
+  pick from `/models`, a keep-alive touch, and recovery after the backend-status
+  check trips. A switch applies the profile at once and resolves the new model's
+  parameters off the UI thread, so the command returns immediately and the
+  window lands as a notice; window, budget and reserve are re-derived together,
+  and a new model whose window is smaller than the conversation already occupies
+  compacts once on the spot rather than letting the next request truncate. A
+  switch never loads a model just to read its window, and a resolution overtaken
+  by a later switch hands the wire back rather than leaving one model's window
+  on another model's requests. When another client reloads the model underneath
+  us the harness adapts to their window and never reloads it back — except under
+  standing consent — because a reload war on a shared server is the worst
+  outcome available. `/models` shows size, family, quantization, the window each
+  model is loaded with and whether it is resident.
+
 ## v0.10.0 — working memory
 
 - **Reasoning effort.** `reasoning_effort` (config, default `medium`) is sent

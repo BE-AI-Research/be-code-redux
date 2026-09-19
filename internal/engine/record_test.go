@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -132,6 +133,28 @@ func TestRedundantReadFooterSurvivesTheRewrite(t *testing.T) {
 	f := r.record(n, ev, 2)
 	if !strings.Contains(f, "already read at turn 1") {
 		t.Fatalf("footer: %q", f)
+	}
+}
+
+// TestAReadLongerThanTheItemCapIsRecordedWhole: item_cap bounds the
+// verbatim buffer, not the record of what the model was shown. A read whose
+// output is larger than the cap must still record every line it returned,
+// or the second read of the same file reads as new ground and the footer
+// that exists to stop re-reading never fires — which is most real files.
+func TestAReadLongerThanTheItemCapIsRecordedWhole(t *testing.T) {
+	r := newRec(256, 32768)
+	n := &Node{ID: "1", Status: StatusDoing}
+	var b strings.Builder
+	for i := 1; i <= 300; i++ {
+		fmt.Fprintf(&b, "%5d\t// line %d\n", i, i)
+	}
+	ev := Event{Tool: "read_file", Args: map[string]any{"path": "big.go"}, Content: b.String()}
+	r.record(n, ev, 1)
+	if got := n.Evidence.Files[0].Ranges; len(got) != 1 || got[0] != (Range{From: 1, To: 300}) {
+		t.Fatalf("ranges cut to the buffer excerpt: %+v", got)
+	}
+	if !strings.Contains(n.Evidence.Raw[0].Out, "… (truncated)") {
+		t.Fatal("the buffer itself should still be capped")
 	}
 }
 
