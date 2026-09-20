@@ -497,19 +497,49 @@ namespace BECode.VisualStudio
 
             public int OnMove()
             {
+                // Fix round 1, I-8: fenced like OnShow's siblings, even
+                // though nothing in the body itself can throw today — a
+                // future change here must not have to remember to add this.
                 ThreadHelper.ThrowIfNotOnUIThread();
+
+                try
+                {
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnMove), ex.ToString());
+                }
+
                 return VSConstants.S_OK;
             }
 
             public int OnSize()
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
+
+                try
+                {
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnSize), ex.ToString());
+                }
+
                 return VSConstants.S_OK;
             }
 
             public int OnDockableChange(int fDockable)
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
+
+                try
+                {
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnDockableChange), ex.ToString());
+                }
+
                 return VSConstants.S_OK;
             }
         }
