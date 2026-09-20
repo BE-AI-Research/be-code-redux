@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
@@ -328,5 +333,183 @@ func TestASecondaryProviderSendsTheWindowTheServerHolds(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&stub.generate); n != 0 {
 		t.Fatalf("a secondary provider loaded a model %d time(s)", n)
+	}
+}
+
+// --- chooseIDELock: quiet-path Visual Studio auto-attach (spec §6) ---
+
+// writeIDELock stores a lock as <pid>-<port>.json, matching internal/ide's
+// own test fixtures, so chooseIDELock (via ide.Discover/DiscoverCovering)
+// finds it.
+func writeIDELock(t *testing.T, dir string, l ide.Lock, mtime time.Time) string {
+	t.Helper()
+	b, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, strconv.Itoa(l.PID)+"-"+strconv.Itoa(l.Port)+".json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// A live Visual Studio lock covering the workspace attaches on the quiet
+// path (no --ide, no TERM_PROGRAM=vscode) — spec §6.
+func TestChooseIDELockAttachesToCoveringVisualStudioQuietly(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{"/tmp/proj"}}, time.Now())
+
+	lock, warn, err := chooseIDELock(dir, "/tmp/proj/sub", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock == nil || lock.IDEName != "visualstudio" {
+		t.Fatalf("got lock=%+v", lock)
+	}
+	if warn {
+		t.Fatal("quiet path must never warn")
+	}
+}
+
+// A VS Code lock does not auto-attach on the quiet path: VS Code still
+// needs its own terminal (TERM_PROGRAM=vscode) or --ide.
+func TestChooseIDELockIgnoresVSCodeLockQuietly(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/proj"}}, time.Now())
+
+	lock, warn, err := chooseIDELock(dir, "/tmp/proj", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock != nil {
+		t.Fatalf("got lock=%+v, want nil", lock)
+	}
+	if warn {
+		t.Fatal("quiet path must never warn")
+	}
+}
+
+// A Visual Studio lock for a different workspace does not attach: covering
+// is required, not just "some Visual Studio is open somewhere".
+func TestChooseIDELockIgnoresVisualStudioForOtherWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{"/tmp/other"}}, time.Now())
+
+	lock, _, err := chooseIDELock(dir, "/tmp/proj", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock != nil {
+		t.Fatalf("got lock=%+v, want nil", lock)
+	}
+}
+
+// --ide still attaches to either kind of lock, using Discover's ordinary
+// fallback-to-newest behaviour.
+func TestChooseIDELockFlagAttachesToEitherKind(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{"/tmp/proj"}}, time.Now())
+
+	// warnIfMissing only matters to the caller when lock is nil (attachIDE
+	// checks it under `lock == nil`), so it is not asserted here.
+	lock, _, err := chooseIDELock(dir, "/tmp/proj", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock == nil || lock.IDEName != "visualstudio" {
+		t.Fatalf("got lock=%+v", lock)
+	}
+
+	dir2 := t.TempDir()
+	writeIDELock(t, dir2, ide.Lock{PID: me, Port: 2, Token: "b", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/proj"}}, time.Now())
+	lock2, _, err := chooseIDELock(dir2, "/tmp/proj", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock2 == nil || lock2.IDEName != "vscode" {
+		t.Fatalf("got lock=%+v", lock2)
+	}
+}
+
+// --ide with nothing listening still warns (today's behaviour, unchanged).
+func TestChooseIDELockFlagWarnsWhenNothingListening(t *testing.T) {
+	dir := t.TempDir()
+	lock, warn, err := chooseIDELock(dir, "/tmp/proj", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock != nil {
+		t.Fatalf("got lock=%+v, want nil", lock)
+	}
+	if !warn {
+		t.Fatal("--ide with no lock found must warn")
+	}
+}
+
+// TERM_PROGRAM=vscode keeps today's exact behaviour: Discover's
+// fallback-to-newest, not the quiet path's visualstudio-only filter.
+func TestChooseIDELockVSCodeTerminalUsesOrdinaryDiscover(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	// Nothing covers /tmp/proj, so ordinary Discover falls back to newest.
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/elsewhere"}}, time.Now())
+
+	lock, warn, err := chooseIDELock(dir, "/tmp/proj", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock == nil || lock.Port != 1 {
+		t.Fatalf("got lock=%+v, want the fallback lock", lock)
+	}
+	if warn {
+		t.Fatal("TERM_PROGRAM=vscode without --ide must not warn when nothing covers")
+	}
+}
+
+// Extra case beyond the brief: a newer vscode lock and an older
+// visualstudio lock both cover the workspace; on the quiet path the
+// visualstudio one wins, since a covering vscode lock never auto-attaches
+// without its own terminal or --ide.
+func TestChooseIDELockPrefersVisualStudioOverNewerCoveringVSCodeQuietly(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	now := time.Now()
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 1, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{"/tmp/proj"}}, now.Add(-time.Hour))
+	writeIDELock(t, dir, ide.Lock{PID: me, Port: 2, Token: "b", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/proj"}}, now)
+
+	lock, warn, err := chooseIDELock(dir, "/tmp/proj", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock == nil || lock.IDEName != "visualstudio" || lock.Port != 1 {
+		t.Fatalf("got lock=%+v, want the visualstudio lock", lock)
+	}
+	if warn {
+		t.Fatal("quiet path must never warn")
+	}
+}
+
+// --no-ide is handled entirely in attachIDE before chooseIDELock would ever
+// be consulted; this documents that attachIDE's early return means
+// chooseIDELock's decision is never reached, rather than duplicating the
+// flag inside chooseIDELock itself.
+func TestNoIDEFlagShortCircuitsAttachIDE(t *testing.T) {
+	origIDE, origNoIDE := flagIDE, flagNoIDE
+	t.Cleanup(func() { flagIDE, flagNoIDE = origIDE, origNoIDE })
+	flagIDE = true
+	flagNoIDE = true
+
+	cfg := config.Default()
+	reg := &tools.Registry{Root: t.TempDir()}
+	if sess := attachIDE(cfg, reg, nil, false); sess != nil {
+		t.Fatalf("got session %+v, want nil", sess)
 	}
 }

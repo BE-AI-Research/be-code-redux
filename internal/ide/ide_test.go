@@ -77,6 +77,45 @@ func TestDiscoverRemovesZeroPIDLock(t *testing.T) {
 	}
 }
 
+// DiscoverCovering never falls back to an unrelated workspace's lock, and
+// returns every covering lock newest first.
+func TestDiscoverCoveringReturnsOnlyCoveringLocksNewestFirst(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	now := time.Now()
+	writeLock(t, dir, Lock{PID: me, Port: 1, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/other"}}, now)
+	writeLock(t, dir, Lock{PID: me, Port: 2, Token: "b", IDEName: "visualstudio", WorkspaceFolders: []string{"/tmp/proj"}}, now.Add(-time.Hour))
+	writeLock(t, dir, Lock{PID: me, Port: 3, Token: "c", IDEName: "vscode", WorkspaceFolders: []string{"/tmp/proj"}}, now)
+
+	locks, err := DiscoverCovering(dir, "/tmp/proj/sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 2 || locks[0].Port != 3 || locks[1].Port != 2 {
+		t.Fatalf("got %+v", locks)
+	}
+}
+
+func TestDiscoverCoveringEmptyWhenNoneCover(t *testing.T) {
+	dir := t.TempDir()
+	me := os.Getpid()
+	writeLock(t, dir, Lock{PID: me, Port: 1, Token: "a", WorkspaceFolders: []string{"/tmp/other"}}, time.Now())
+	locks, err := DiscoverCovering(dir, "/tmp/proj")
+	if err != nil || len(locks) != 0 {
+		t.Fatalf("got %+v err=%v", locks, err)
+	}
+}
+
+func TestLockCovers(t *testing.T) {
+	l := &Lock{WorkspaceFolders: []string{"/tmp/proj"}}
+	if !l.Covers("/tmp/proj") || !l.Covers("/tmp/proj/sub") {
+		t.Fatal("expected coverage")
+	}
+	if l.Covers("/tmp/projother") || l.Covers("/tmp/other") {
+		t.Fatal("expected no coverage")
+	}
+}
+
 func TestLockDirCreatesDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

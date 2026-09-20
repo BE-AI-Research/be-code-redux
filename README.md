@@ -760,8 +760,11 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   Since 0.11.1 this is a ceiling: the map is built to at most a fifth of the usable
   context and rebuilt when the window changes, with a notice when the budget was cut.
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
-- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the VS Code
-  editor bridge; see "VS Code"
+- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the editor
+  bridge; see "VS Code". With `ide.enabled` on, BE-Code auto-attaches in `TERM_PROGRAM=vscode`
+  terminals as before, and also (without needing `--ide`) to a running Visual Studio whose
+  advertised workspace covers the current one — a covering VS Code lock never auto-attaches
+  outside its own terminal.
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for

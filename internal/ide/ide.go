@@ -50,10 +50,23 @@ func LockDir() (string, error) {
 	return d, os.MkdirAll(d, 0o700)
 }
 
-// Discover picks the live lock whose workspace folder contains workspace,
-// else the newest live lock. Locks of dead processes are deleted.
-// Returns nil, nil when no editor is listening.
-func Discover(dir, workspace string) (*Lock, error) {
+// Covers reports whether workspace is, or is nested under, one of the
+// lock's advertised workspace folders.
+func (l *Lock) Covers(workspace string) bool {
+	ws := filepath.Clean(workspace)
+	for _, f := range l.WorkspaceFolders {
+		f = filepath.Clean(f)
+		if ws == f || strings.HasPrefix(ws, f+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// liveLocks reads every *.json lock in dir, newest first, pruning locks
+// whose process is dead, malformed, or missing a port. It is the shared
+// discovery/pruning pass behind Discover and DiscoverCovering.
+func liveLocks(dir string) ([]*Lock, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -61,7 +74,6 @@ func Discover(dir, workspace string) (*Lock, error) {
 		}
 		return nil, err
 	}
-	ws := filepath.Clean(workspace)
 	var live []*Lock
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -94,19 +106,45 @@ func Discover(dir, workspace string) (*Lock, error) {
 		l.path = p
 		live = append(live, &l)
 	}
+	sort.Slice(live, func(i, j int) bool { return live[i].mtime > live[j].mtime })
+	return live, nil
+}
+
+// Discover picks the live lock whose workspace folder contains workspace,
+// else the newest live lock. Locks of dead processes are deleted.
+// Returns nil, nil when no editor is listening.
+func Discover(dir, workspace string) (*Lock, error) {
+	live, err := liveLocks(dir)
+	if err != nil {
+		return nil, err
+	}
 	if len(live) == 0 {
 		return nil, nil
 	}
-	sort.Slice(live, func(i, j int) bool { return live[i].mtime > live[j].mtime })
 	for _, l := range live {
-		for _, f := range l.WorkspaceFolders {
-			f = filepath.Clean(f)
-			if ws == f || strings.HasPrefix(ws, f+string(filepath.Separator)) {
-				return l, nil
-			}
+		if l.Covers(workspace) {
+			return l, nil
 		}
 	}
 	return live[0], nil
+}
+
+// DiscoverCovering returns every live lock whose workspace folder covers
+// workspace, newest first. Unlike Discover, it never falls back to a lock
+// of an unrelated workspace — callers that must not attach to "whatever
+// editor happens to be open elsewhere" use this instead.
+func DiscoverCovering(dir, workspace string) ([]*Lock, error) {
+	live, err := liveLocks(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []*Lock
+	for _, l := range live {
+		if l.Covers(workspace) {
+			out = append(out, l)
+		}
+	}
+	return out, nil
 }
 
 // Session is a live connection to the editor bridge.

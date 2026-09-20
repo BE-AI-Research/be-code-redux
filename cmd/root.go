@@ -270,6 +270,36 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	return p, ag, nil
 }
 
+// chooseIDELock decides which live lock (if any) attachIDE should connect
+// to, and whether the --ide "nothing listening" warning is due, without
+// dialing anything. vscodeTerminal is TERM_PROGRAM=="vscode"; ideFlag is
+// --ide.
+//
+// With --ide or a VS Code terminal, this is today's exact rule: ide.Discover
+// (the lock covering workspace, else the newest live lock of any workspace),
+// and the warning fires whenever --ide finds nothing.
+//
+// On the quiet path (neither), only a live lock that COVERS workspace and
+// whose IDEName is "visualstudio" auto-attaches (spec §6) — a covering VS
+// Code lock does not, since VS Code still needs its own terminal or --ide —
+// and nothing is ever warned about, since silent terminals are the default.
+func chooseIDELock(dir, workspace string, vscodeTerminal, ideFlag bool) (lock *ide.Lock, warnIfMissing bool, err error) {
+	if ideFlag || vscodeTerminal {
+		l, err := ide.Discover(dir, workspace)
+		return l, ideFlag, err
+	}
+	locks, err := ide.DiscoverCovering(dir, workspace)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, l := range locks {
+		if l.IDEName == "visualstudio" {
+			return l, false, nil
+		}
+	}
+	return nil, false, nil
+}
+
 // attachIDE connects to an editor bridge when one is advertised and wanted,
 // registers its tools as ide_*, and wires context and review. Returns nil
 // (and prints nothing beyond an explicit --ide failure) when there is no
@@ -277,8 +307,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 //
 // Wanting an editor is decided in this order: --no-ide always wins; --ide
 // then forces a connection attempt even when ide.enabled is false or the
-// run is headless; otherwise config must allow it, the run must be
-// interactive, and the terminal must be VS Code's own.
+// run is headless; otherwise config must allow it and the run must be
+// interactive. From there chooseIDELock decides whether the terminal is VS
+// Code's own (today's discovery, unchanged) or the quiet path, where only a
+// covering Visual Studio lock attaches.
 func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
 	if flagNoIDE {
 		return nil
@@ -292,17 +324,15 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 		if headless {
 			return nil
 		}
-		if os.Getenv("TERM_PROGRAM") != "vscode" {
-			return nil
-		}
 	}
 	dir, err := ide.LockDir()
 	if err != nil {
 		return nil
 	}
-	lock, err := ide.Discover(dir, reg.Root)
+	vscodeTerminal := os.Getenv("TERM_PROGRAM") == "vscode"
+	lock, warnIfMissing, err := chooseIDELock(dir, reg.Root, vscodeTerminal, flagIDE)
 	if err != nil || lock == nil {
-		if flagIDE {
+		if warnIfMissing {
 			fmt.Fprintln(os.Stderr, "warn: --ide given but no editor bridge is listening (is the BE-Code extension installed and active?)")
 		}
 		return nil
