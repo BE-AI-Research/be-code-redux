@@ -555,6 +555,23 @@ prints the current mode, `/review <mode>` changes it for the session.
 the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
 end-to-end checklist.
 
+## Visual Studio
+
+`visualstudio/` is the same bridge for Visual Studio 2022 (17.6 or later) and 2026: one
+`.vsix`, built on Windows with `visualstudio\build.ps1`, giving BE-Code the same `ide_*`
+tools — context, the Error List, definition/references/hover for C# and VB, the debugger —
+and a diff of each proposed write in Visual Studio's own difference viewer with Accept,
+Accept all and Reject. Visual Studio's terminals do not announce themselves the way VS
+Code's do, so there is nothing to pass: run `be-code` in any terminal under the solution
+and it attaches to the running Visual Studio whose solution covers that directory.
+`--ide`, `--no-ide`, `ide.enabled` and `ide.review` mean what they mean for VS Code; from
+a separate terminal `ide.review: auto` resolves to `both`, so the terminal prompt and the
+editor diff are both live and the first answer wins.
+
+**As of 0.12.0 the Visual Studio layer compiles against the real SDK but has never been
+run**; `visualstudio/README.md` says which parts are proven and what this version does not
+do, and `visualstudio/WINDOWS-CHECKLIST.md` is how it gets proven.
+
 ## Shell safety & background processes
 
 Commands are matched against `shell_deny` (never runs, never prompts) and `shell_allow`

@@ -1,8 +1,8 @@
 BINARY := be-code
-VERSION := 0.11.1
+VERSION := 0.12.0
 LDFLAGS := -s -w -X github.com/brown-enterprises/be-code/cmd.Version=$(VERSION)
 
-.PHONY: build test vet verify clean release vscode
+.PHONY: build test vet verify clean release vscode visualstudio-test
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -22,6 +22,9 @@ clean:
 vscode: ## build and package the VS Code extension into dist/
 	mkdir -p dist
 	cd vscode && npm install --no-audit --no-fund && npm test && npm run package
+
+visualstudio-test: ## compile the Visual Studio bridge (VSIX layer included) and run its tests; needs the .NET SDK, not part of verify
+	cd visualstudio && dotnet build --no-incremental && dotnet test --no-build
 
 release: verify vscode
 	mkdir -p dist
