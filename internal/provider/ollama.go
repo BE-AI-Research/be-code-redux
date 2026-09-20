@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Ollama talks to an Ollama server over its native /api/chat endpoint, which
@@ -199,7 +200,10 @@ type nativeChunk struct {
 	DoneReason      string `json:"done_reason"`
 	PromptEvalCount int    `json:"prompt_eval_count"`
 	EvalCount       int    `json:"eval_count"`
-	Error           string `json:"error"`
+	// Nanoseconds, on the final chunk.
+	PromptEvalDuration int64  `json:"prompt_eval_duration"`
+	LoadDuration       int64  `json:"load_duration"`
+	Error              string `json:"error"`
 }
 
 // nativeMessages converts history to Ollama's message shape. Tool call
@@ -498,6 +502,12 @@ func (p *Ollama) consumeNative(r io.Reader, onDelta, onReasoning StreamFunc) (*C
 		}
 		if chunk.EvalCount > 0 {
 			out.Usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.PromptEvalDuration > 0 {
+			out.Usage.PromptDuration = time.Duration(chunk.PromptEvalDuration)
+		}
+		if chunk.LoadDuration > 0 {
+			out.Usage.LoadDuration = time.Duration(chunk.LoadDuration)
 		}
 		if chunk.Done {
 			out.FinishReason = chunk.DoneReason

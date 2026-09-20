@@ -82,6 +82,10 @@ var runCmd = &cobra.Command{
 				"prompt_tokens":     ag.Usage().PromptTokens,
 				"completion_tokens": ag.Usage().CompletionTokens,
 				"elapsed_seconds":   ag.Usage().Elapsed.Seconds(),
+				// The server's own account (native Ollama; 0 elsewhere).
+				"prompt_processing_seconds": ag.Usage().PromptTime.Seconds(),
+				"model_loading_seconds":     ag.Usage().LoadTime.Seconds(),
+				"uncached_prompt_reads":     ag.Usage().SlowReads,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")

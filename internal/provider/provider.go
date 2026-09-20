@@ -69,6 +69,13 @@ type ChatRequest struct {
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	// PromptDuration is how long the server spent reading the prompt and
+	// LoadDuration how long loading the model, where it says (native
+	// Ollama). PromptTokens is the whole prompt whether or not the server's
+	// prompt cache covered it, so the duration is the only evidence of a
+	// cache miss: 19k tokens read in 0.3s was cached, in 43s was not.
+	PromptDuration time.Duration `json:"-"`
+	LoadDuration   time.Duration `json:"-"`
 }
 
 // ChatResponse is the final assembled result of a (streamed) completion.

@@ -1364,6 +1364,9 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
 			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), budget)})
+		if line := agent.PromptCostLine(s); line != "" {
+			m.appendEntryLocked(entry{Kind: entryDim, Text: line})
+		}
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})

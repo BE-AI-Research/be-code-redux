@@ -50,7 +50,17 @@ type Stats struct {
 	Requests         int // model round-trips
 	ToolCalls        int
 	Elapsed          time.Duration
+	// PromptTime and LoadTime are the server's own account of reading
+	// prompts and loading the model (native Ollama); SlowReads counts the
+	// requests whose prompt the server's cache plainly did not cover.
+	PromptTime time.Duration
+	LoadTime   time.Duration
+	SlowReads  int
 }
+
+// slowPromptRead is the prompt-processing time past which a request is
+// reported: below it the cache did its job or the prompt was small.
+const slowPromptRead = 8 * time.Second
 
 // add folds another usage record into s.
 func (s *Stats) add(d Stats) {
@@ -59,6 +69,9 @@ func (s *Stats) add(d Stats) {
 	s.Requests += d.Requests
 	s.ToolCalls += d.ToolCalls
 	s.Elapsed += d.Elapsed
+	s.PromptTime += d.PromptTime
+	s.LoadTime += d.LoadTime
+	s.SlowReads += d.SlowReads
 }
 
 // Agent binds a provider, tool registry, and conversation history.
@@ -1464,7 +1477,13 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
-	used := Stats{Requests: 1}
+	used := Stats{Requests: 1, PromptTime: resp.Usage.PromptDuration, LoadTime: resp.Usage.LoadDuration}
+	if d := resp.Usage.PromptDuration; d >= slowPromptRead {
+		// A status line, not a transcript entry: it is a fact about the
+		// server's cache, worth seeing while it happens and in /stats after.
+		used.SlowReads = 1
+		a.transient("the server read %d prompt tokens in %s: its prompt cache did not cover this request", resp.Usage.PromptTokens, d.Round(time.Second))
+	}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
 		used.PromptTokens = resp.Usage.PromptTokens
 		used.CompletionTokens = resp.Usage.CompletionTokens

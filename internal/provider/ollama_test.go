@@ -118,7 +118,7 @@ func TestNativeChatStreamsAndCarriesOptions(t *testing.T) {
 		for _, line := range []string{
 			`{"message":{"content":"hel"},"done":false}`,
 			`{"message":{"content":"lo"},"done":false}`,
-			`{"message":{"content":""},"done":true,"done_reason":"stop","prompt_eval_count":11,"eval_count":2}`,
+			`{"message":{"content":""},"done":true,"done_reason":"stop","prompt_eval_count":11,"eval_count":2,"prompt_eval_duration":43510000000,"load_duration":9000000000}`,
 		} {
 			w.Write([]byte(line + "\n"))
 			fl.Flush()
@@ -135,6 +135,11 @@ func TestNativeChatStreamsAndCarriesOptions(t *testing.T) {
 	}
 	if resp.Content != "hello" || resp.FinishReason != "stop" || resp.Usage.PromptTokens != 11 {
 		t.Fatalf("resp: %+v", resp)
+	}
+	// How long the server spent reading the prompt, and loading the model:
+	// the only way to see whether its prompt cache covered the request.
+	if resp.Usage.PromptDuration != 43510*time.Millisecond || resp.Usage.LoadDuration != 9*time.Second {
+		t.Fatalf("durations: %+v", resp.Usage)
 	}
 	if len(deltas) < 2 {
 		t.Fatalf("not streamed: %v", deltas)
