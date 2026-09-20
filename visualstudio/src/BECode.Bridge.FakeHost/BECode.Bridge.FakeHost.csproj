@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <!-- Controller ruling (Task 4): this machine has both the 8.0 and 10.0
+         runtimes installed; RollForward lets this net8.0 app start on a
+         10-only machine too, the same reasoning BECode.Bridge.Tests.csproj
+         already documents for its own net8.0 target. -->
+    <RollForward>Major</RollForward>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>BECode.Bridge.FakeHost</RootNamespace>
+    <AssemblyName>BECode.Bridge.FakeHost</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BECode.Bridge\BECode.Bridge.csproj" />
+  </ItemGroup>
+
+</Project>
