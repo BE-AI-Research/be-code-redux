@@ -71,14 +71,34 @@ namespace BECode.VisualStudio
         private void OnEnterBreakMode(dbgEventReason reason, ref dbgExecutionAction executionAction)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            Resolve(new StopResult(StopKind.Stopped, DebugReason.ForBreak(reason.ToString())));
+
+            // Fix round 1, I-8: Visual Studio invokes DebuggerEvents
+            // handlers directly as part of its own debugger dispatch while
+            // entering break mode — an unhandled exception here is not just
+            // a lost stop result, it runs inside that dispatch.
+            try
+            {
+                Resolve(new StopResult(StopKind.Stopped, DebugReason.ForBreak(reason.ToString())));
+            }
+            catch (Exception ex)
+            {
+                ActivityLog.LogError(nameof(OnEnterBreakMode), ex.ToString());
+            }
         }
 
         private void OnEnterDesignMode(dbgEventReason reason)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            var kind = DebugReason.IsNormalExit(reason.ToString()) ? StopKind.Exited : StopKind.Terminated;
-            Resolve(new StopResult(kind));
+
+            try
+            {
+                var kind = DebugReason.IsNormalExit(reason.ToString()) ? StopKind.Exited : StopKind.Terminated;
+                Resolve(new StopResult(kind));
+            }
+            catch (Exception ex)
+            {
+                ActivityLog.LogError(nameof(OnEnterDesignMode), ex.ToString());
+            }
         }
 
         private void Resolve(StopResult result)
@@ -95,7 +115,14 @@ namespace BECode.VisualStudio
 
         private TaskCompletionSource<StopResult> Arm()
         {
-            var tcs = new TaskCompletionSource<StopResult>();
+            // Fix round 1, C-3: same reasoning as DiffReview's tcs — resolved
+            // by OnEnterBreakMode/OnEnterDesignMode on the UI thread inside
+            // Visual Studio's own debugger-event dispatch; without
+            // RunContinuationsAsynchronously, every awaiter of this Task
+            // (WaitBoundedAsync and everything after it) would resume INLINE
+            // on that call stack, running while Visual Studio is itself
+            // entering break/design mode.
+            var tcs = new TaskCompletionSource<StopResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_gate)
             {
                 _pendingStop = tcs;

@@ -73,15 +73,30 @@ namespace BECode.VisualStudio
         {
             try
             {
-                return await body().ConfigureAwait(true);
+                var result = await body().ConfigureAwait(true);
+
+                // Fix round 1, I-1: every host member's body runs to
+                // completion on whatever thread it left off on — usually
+                // the UI thread, since the last thing most bodies do is a
+                // literal SwitchToMainThreadAsync before touching a COM
+                // type. Without this hop, the bridge's JSON serialisation
+                // and socket write for the reply run ON the UI thread too.
+                // SwitchToBackgroundAsync is a plain background hop (no
+                // analyzer rule requires it to be a literal call the way
+                // SwitchToMainThreadAsync does), so routing it through the
+                // shared helper is fine here.
+                await Threading.SwitchToBackgroundAsync();
+                return result;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                await Threading.SwitchToBackgroundAsync();
                 throw;
             }
             catch (Exception ex)
             {
                 ActivityLog.LogError(name, ex.ToString());
+                await Threading.SwitchToBackgroundAsync();
                 throw new InvalidOperationException(name + ": " + ex.Message, ex);
             }
         }

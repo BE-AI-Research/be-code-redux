@@ -145,10 +145,13 @@ namespace BECode.VisualStudio
 
         // IVsSolutionEvents — every mutation republishes (debounced); every
         // "query" callback is a plain S_OK/no-op, this sink never vetoes
-        // anything.
+        // anything. Fix round 1, I-8: every method's body is fenced —
+        // Visual Studio invokes these directly as part of its own solution
+        // load/unload dispatch, and an unhandled exception there is exactly
+        // the "fail package load" outcome host design §1.3 rules out.
         public int OnAfterOpenProject(IVsHierarchy pHierarchy, int fAdded)
         {
-            Republish();
+            SafeRepublish(nameof(OnAfterOpenProject));
             return VSConstants.S_OK;
         }
 
@@ -156,13 +159,13 @@ namespace BECode.VisualStudio
 
         public int OnBeforeCloseProject(IVsHierarchy pHierarchy, int fRemoved)
         {
-            Republish();
+            SafeRepublish(nameof(OnBeforeCloseProject));
             return VSConstants.S_OK;
         }
 
         public int OnAfterLoadProject(IVsHierarchy pStubHierarchy, IVsHierarchy pRealHierarchy)
         {
-            Republish();
+            SafeRepublish(nameof(OnAfterLoadProject));
             return VSConstants.S_OK;
         }
 
@@ -170,13 +173,13 @@ namespace BECode.VisualStudio
 
         public int OnBeforeUnloadProject(IVsHierarchy pRealHierarchy, IVsHierarchy pStubHierarchy)
         {
-            Republish();
+            SafeRepublish(nameof(OnBeforeUnloadProject));
             return VSConstants.S_OK;
         }
 
         public int OnAfterOpenSolution(object pUnkReserved, int fNewSolution)
         {
-            Republish();
+            SafeRepublish(nameof(OnAfterOpenSolution));
             return VSConstants.S_OK;
         }
 
@@ -186,15 +189,23 @@ namespace BECode.VisualStudio
 
         public int OnAfterCloseSolution(object pUnkReserved)
         {
-            Republish();
+            SafeRepublish(nameof(OnAfterCloseSolution));
             return VSConstants.S_OK;
         }
 
         // IVsSolutionEvents7 — Open Folder mode.
         public void OnAfterOpenFolder(string folderPath)
         {
-            _openFolder = folderPath;
-            Republish();
+            try
+            {
+                _openFolder = folderPath;
+            }
+            catch (Exception ex)
+            {
+                ActivityLog.LogError(nameof(OnAfterOpenFolder), ex.ToString());
+            }
+
+            SafeRepublish(nameof(OnAfterOpenFolder));
         }
 
         public void OnBeforeCloseFolder(string folderPath)
@@ -203,8 +214,16 @@ namespace BECode.VisualStudio
 
         public void OnAfterCloseFolder(string folderPath)
         {
-            _openFolder = null;
-            Republish();
+            try
+            {
+                _openFolder = null;
+            }
+            catch (Exception ex)
+            {
+                ActivityLog.LogError(nameof(OnAfterCloseFolder), ex.ToString());
+            }
+
+            SafeRepublish(nameof(OnAfterCloseFolder));
         }
 
         public void OnQueryCloseFolder(string folderPath, ref int pfCancel)
@@ -213,7 +232,26 @@ namespace BECode.VisualStudio
 
         public void OnAfterLoadAllDeferredProjects()
         {
-            Republish();
+            SafeRepublish(nameof(OnAfterLoadAllDeferredProjects));
+        }
+
+        /// <summary>
+        /// Fix round 1, I-8: <see cref="Republish"/> itself only ever calls
+        /// <see cref="Debouncer.Trigger"/>, which does not throw under
+        /// ordinary use — this fences the call anyway so every one of the
+        /// callbacks above stays true to "the whole body is fenced" even as
+        /// this method's own implementation changes.
+        /// </summary>
+        private void SafeRepublish(string context)
+        {
+            try
+            {
+                Republish();
+            }
+            catch (Exception ex)
+            {
+                ActivityLog.LogError(context, ex.ToString());
+            }
         }
 
         /// <summary>

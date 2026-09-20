@@ -50,45 +50,65 @@ namespace BECode.VisualStudio
             // main-thread no-op because the caller already switched.
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
+            // Fix round 1, M-2: the path is computed here, but the directory
+            // itself is created INSIDE the try below — TryDeleteDirectory in
+            // the finally is a no-op (via its own catch-all) against a path
+            // that was never created, so this is still safe to reference
+            // there even if CreateDirectory itself never ran.
             var tempDir = Path.Combine(Path.GetTempPath(), "becode-review-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-
-            string leftPath;
-            bool leftIsTemp;
-            if (request.Original != null)
-            {
-                // Left side: the ORIGINAL text supplied, written to a temp
-                // file named after the real file so the language service
-                // still colours it.
-                leftPath = Path.Combine(tempDir, Path.GetFileName(request.Path));
-                File.WriteAllText(leftPath, request.Original);
-                leftIsTemp = true;
-            }
-            else if (File.Exists(request.Path))
-            {
-                // Else: the file on disk, unmodified.
-                leftPath = request.Path;
-                leftIsTemp = false;
-            }
-            else
-            {
-                // Else (a new file): an empty temp file.
-                leftPath = Path.Combine(tempDir, Path.GetFileName(request.Path));
-                File.WriteAllText(leftPath, string.Empty);
-                leftIsTemp = true;
-            }
-
-            var rightPath = Path.Combine(tempDir, DiffTempFiles.ProposedFileName(request.Path));
-            File.WriteAllText(rightPath, request.Proposed);
 
             IVsWindowFrame? frame = null;
             IVsInfoBarUIElement? infoBarElement = null;
             uint infoBarCookie = 0;
             uint frameNotifyCookie = 0;
-            var tcs = new TaskCompletionSource<ReviewDecision>();
+            // Fix round 1, C-3: without RunContinuationsAsynchronously, a
+            // TrySetResult from an info-bar click handler (itself running on
+            // the UI thread — host design §2.3) runs every continuation of
+            // tcs.Task INLINE on that same call stack: the unadvises, a
+            // re-entrant CloseFrame, a recursive Directory.Delete, then the
+            // bridge's own JSON serialisation and socket write, all inside
+            // OnActionItemClicked. ConfigureAwait(false) on the await below
+            // does not help — it only controls which context is preferred
+            // for resuming, not whether TrySetResult itself runs the
+            // continuation inline.
+            var tcs = new TaskCompletionSource<ReviewDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             try
             {
+                // Fix round 1, M-2: the directory and both temp files are
+                // created HERE, inside the try, so a failed write (or the
+                // CreateDirectory call itself) cannot leak a directory the
+                // finally never learns to clean up.
+                Directory.CreateDirectory(tempDir);
+
+                string leftPath;
+                bool leftIsTemp;
+                if (request.Original != null)
+                {
+                    // Left side: the ORIGINAL text supplied, written to a temp
+                    // file named after the real file so the language service
+                    // still colours it.
+                    leftPath = Path.Combine(tempDir, Path.GetFileName(request.Path));
+                    File.WriteAllText(leftPath, request.Original);
+                    leftIsTemp = true;
+                }
+                else if (File.Exists(request.Path))
+                {
+                    // Else: the file on disk, unmodified.
+                    leftPath = request.Path;
+                    leftIsTemp = false;
+                }
+                else
+                {
+                    // Else (a new file): an empty temp file.
+                    leftPath = Path.Combine(tempDir, Path.GetFileName(request.Path));
+                    File.WriteAllText(leftPath, string.Empty);
+                    leftIsTemp = true;
+                }
+
+                var rightPath = Path.Combine(tempDir, DiffTempFiles.ProposedFileName(request.Path));
+                File.WriteAllText(rightPath, request.Proposed);
+
                 var diffService = await _package.GetServiceAsync(typeof(SVsDifferenceService)).ConfigureAwait(true) as IVsDifferenceService;
                 if (diffService == null)
                 {
@@ -123,7 +143,12 @@ namespace BECode.VisualStudio
                 // always be able to close it.
                 frame.Show();
 
-                var infoBarText = request.Summary ?? "Apply this change?";
+                // Fix round 1, I-7: the relative path is now UNCONDITIONALLY
+                // part of the bar's text — several concurrent reviews (one
+                // per file) are otherwise indistinguishable, since the
+                // summary alone ("Apply this change?") looks identical on
+                // every bar.
+                var infoBarText = RelativePath(request.Path) + ": " + (request.Summary ?? "Apply this change?");
                 if (request.Shared)
                 {
                     infoBarText += " — also waiting in the terminal";
@@ -206,6 +231,28 @@ namespace BECode.VisualStudio
                     catch (Exception ex)
                     {
                         ActivityLog.LogError(nameof(ReviewDiffAsync), ex.ToString());
+                    }
+                }
+
+                if (infoBarElement != null)
+                {
+                    // Fix round 1, I-7: the finally previously unadvised but
+                    // never closed the bar. On the main-window fallback host
+                    // (used when the comparison frame itself has no info bar
+                    // host) every cancelled review left a dead "Apply this
+                    // change?" bar pinned to the top of Visual Studio, and
+                    // they accumulated across reviews. Close() after the bar
+                    // already closed itself (the ordinary Accept/Reject path,
+                    // which calls Close() in OnActionItemClicked) is expected
+                    // to be a harmless no-op — same defensive shape as
+                    // frame.CloseFrame() below.
+                    try
+                    {
+                        infoBarElement.Close();
+                    }
+                    catch
+                    {
+                        // already closed
                     }
                 }
 
@@ -321,18 +368,95 @@ namespace BECode.VisualStudio
                 // synchronous callback Visual Studio itself invokes).
                 ThreadHelper.ThrowIfNotOnUIThread();
 
-                if (actionItem.ActionContext is ReviewDecision decision)
+                // Fix round 1, I-8: the whole body is fenced — a callback
+                // Visual Studio itself invokes must never let an exception
+                // escape back into its own dispatch.
+                try
                 {
-                    _tcs.TrySetResult(decision);
-                }
+                    // Fix round 1, M-11: ActionContext may marshal across
+                    // this COM boundary as the raw underlying int rather
+                    // than the ReviewDecision enum value; fall back to the
+                    // int, then to the button's own Text — a click must
+                    // never do nothing.
+                    var decision = ResolveDecision(actionItem);
 
-                infoBarUIElement.Close();
+                    // Fix round 1, I-8: decide -> Close() the bar -> TrySetResult,
+                    // in that order (previously TrySetResult ran BEFORE
+                    // Close(), so tcs.Task's continuations — everything the
+                    // caller does after its own await — could run while the
+                    // bar was still showing).
+                    infoBarUIElement.Close();
+
+                    if (decision.HasValue)
+                    {
+                        _tcs.TrySetResult(decision.Value);
+                    }
+                    else
+                    {
+                        ActivityLog.LogWarning(nameof(OnActionItemClicked), "could not resolve a ReviewDecision from ActionContext or Text=\"" + actionItem.Text + "\"");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnActionItemClicked), ex.ToString());
+                }
             }
 
             public void OnClosed(IVsInfoBarUIElement infoBarUIElement)
             {
-                // The user dismissed the bar without clicking a button: the
-                // diff stays open (host design §3.5) — nothing to do here.
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                try
+                {
+                    // The user dismissed the bar without clicking a button:
+                    // the diff stays open (host design §3.5) — nothing to
+                    // do here.
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnClosed), ex.ToString());
+                }
+            }
+
+            /// <summary>
+            /// Fix round 1, M-11: <see cref="IVsInfoBarActionItem.ActionContext"/>
+            /// is typed <c>object</c> and may marshal as the ReviewDecision
+            /// enum value itself, as the plain <c>int</c> underneath it, or —
+            /// if neither survives the COM round trip — not at all; the
+            /// button's own <see cref="IVsInfoBarActionItem.Text"/> (set
+            /// verbatim in <see cref="ReviewOnMainThreadAsync"/>'s
+            /// <c>InfoBarButton</c> construction) is the last resort.
+            /// </summary>
+            private static ReviewDecision? ResolveDecision(IVsInfoBarActionItem actionItem)
+            {
+                // Design correction (report, item 2): a synchronous private
+                // method needs its OWN assertion — the analyzer does not
+                // reason across the call from OnActionItemClicked, which is
+                // itself only known to be on the main thread because Visual
+                // Studio invokes it there.
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                if (actionItem.ActionContext is ReviewDecision decision)
+                {
+                    return decision;
+                }
+
+                if (actionItem.ActionContext is int intValue && Enum.IsDefined(typeof(ReviewDecision), intValue))
+                {
+                    return (ReviewDecision)intValue;
+                }
+
+                switch (actionItem.Text)
+                {
+                    case "Accept":
+                        return ReviewDecision.Accept;
+                    case "Accept all this session":
+                        return ReviewDecision.AcceptAll;
+                    case "Reject":
+                        return ReviewDecision.Reject;
+                    default:
+                        return null;
+                }
             }
         }
 
@@ -348,19 +472,46 @@ namespace BECode.VisualStudio
 
             public int OnShow(int fShow)
             {
-                if (fShow == (int)__FRAMESHOW.FRAMESHOW_WinClosed)
+                // Fix round 1, I-8: Visual Studio invokes this synchronously
+                // on the main thread as part of the frame's own
+                // notification dispatch — fence the body so an exception
+                // here (e.g. TrySetResult never throws, but a future change
+                // to this method might add something that can) cannot
+                // escape into that dispatch.
+                ThreadHelper.ThrowIfNotOnUIThread();
+
+                try
                 {
-                    _tcs.TrySetResult(ReviewDecision.Cancelled);
+                    if (fShow == (int)__FRAMESHOW.FRAMESHOW_WinClosed)
+                    {
+                        _tcs.TrySetResult(ReviewDecision.Cancelled);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnShow), ex.ToString());
                 }
 
                 return VSConstants.S_OK;
             }
 
-            public int OnMove() => VSConstants.S_OK;
+            public int OnMove()
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                return VSConstants.S_OK;
+            }
 
-            public int OnSize() => VSConstants.S_OK;
+            public int OnSize()
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                return VSConstants.S_OK;
+            }
 
-            public int OnDockableChange(int fDockable) => VSConstants.S_OK;
+            public int OnDockableChange(int fDockable)
+            {
+                ThreadHelper.ThrowIfNotOnUIThread();
+                return VSConstants.S_OK;
+            }
         }
     }
 }
