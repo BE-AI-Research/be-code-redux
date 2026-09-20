@@ -1,6 +1,8 @@
-# Visual Studio Host — Design for the layer that cannot be built here
+# Visual Studio Host — Design for the layer that cannot be run here
 
-Companion to `2026-09-20-visual-studio-extension-design.md`. Written before Task 6 is implemented, because Task 6 is the one part of this work that tests cannot rescue: it is C# against the Visual Studio SDK, no machine here can compile it, and the first time it runs is on the owner's Windows box. The implementer transcribes this document; it does not explore.
+Companion to `2026-09-20-visual-studio-extension-design.md`. Written before Task 6 is implemented, because Task 6 is the part of this work that tests cannot rescue: it is C# against the Visual Studio SDK, it cannot be *run* anywhere but Windows, and the first time it runs is on the owner's machine. The implementer transcribes this document; it does not explore.
+
+**It can, however, be compiled here** (found by a spike after this document was first written, and it changes the risk a great deal): the Visual Studio SDK ships on NuGet as plain reference assemblies, so an SDK-style `net472` project referencing `Microsoft.VisualStudio.SDK`, `Microsoft.VisualStudio.LanguageServices` and `Microsoft.NETFramework.ReferenceAssemblies` builds with `dotnet build` on Linux. A wrong property name is a compile error on this machine, and the SDK's own analyzers — unchecked `GetService` results, UI-thread misuse (the `VSTHRD` rules) — run here too. Only two things need Windows: packaging the `.vsix` (the `Microsoft.VSSDK.BuildTools` targets, referenced under an `'$(OS)' == 'Windows_NT'` condition) and *behaviour*. So "unbuilt" is wrong and "blind" is half wrong: this layer is type-checked and analyzer-checked, and unproven only in what it does at run time.
 
 Everything below the seam is already built and tested on Linux (`BECode.Bridge`: 206 tests, plus the Go contract test). This document covers only `src/BECode.VisualStudio/`: what implements `IEditorHost`/`IDebugHost`, which Visual Studio API backs each member, on which thread, and what happens when it fails.
 
@@ -10,19 +12,23 @@ Everything below the seam is already built and tested on Linux (`BECode.Bridge`:
 
 ### 1.1 `System.Text.Json` inside `devenv.exe` — **Risk, and the most likely first failure**
 
-`BECode.Bridge` references `System.Text.Json` 8.0.5 (plus `System.Memory`, `System.Threading.Channels`, `Microsoft.Bcl.AsyncInterfaces`). Visual Studio is a .NET Framework 4.7.2 process that already loads its own copies of these, with its own binding redirects in `devenv.exe.config`. An extension cannot edit that file. If the version the VSIX carries is *newer* than the one Visual Studio redirects to, the load fails with `FileLoadException` at package load; if it is older or equal, Visual Studio's copy is used and all is well.
+`BECode.Bridge` referenced `System.Text.Json` 8.0.5 when this was written (plus `System.Memory`, `System.Threading.Channels`, `Microsoft.Bcl.AsyncInterfaces`). Visual Studio is a .NET Framework 4.7.2 process that already loads its own copies of these, with its own binding redirects in `devenv.exe.config`. An extension cannot edit that file. If the version the VSIX carries is *newer* than the one Visual Studio redirects to, the load fails with `FileLoadException` at package load; if it is older or equal, Visual Studio's copy is used and all is well.
 
 Visual Studio 2022 17.0 shipped a 5.x/6.x `System.Text.Json`; only later 17.x servicing releases moved to 8.x. So 8.0.5 is too new for the floor the manifest declares.
 
-Decision: **`BECode.Bridge` drops to `System.Text.Json` 6.0.x** (with the matching 6.0.0 `Microsoft.Bcl.AsyncInterfaces` and `System.Threading.Channels`), the VSIX does **not** ship those assemblies (`ExcludeAssets="runtime"` / `Private=false`), and the manifest floor rises from 17.0 to **17.6** — the first long-term-servicing 2022 release, and comfortably inside what ships 6.x or later. Nothing in the bridge uses an API newer than 6.0 (it uses `JsonDocument`, `JsonElement`, `JsonSerializer`, `JavaScriptEncoder`, `JsonPropertyName`); the Linux suite proves that the moment the version is lowered. If the owner's checklist still shows a `FileLoadException`, the fallback is `[ProvideCodeBase]` on the package for the carried assemblies — named here so it is a known move, not a discovery.
+Decision: **`BECode.Bridge` drops to `System.Text.Json` 6.0.x** (with the matching 6.0.0 `Microsoft.Bcl.AsyncInterfaces` and `System.Threading.Channels`), the VSIX does **not** ship those assemblies (`ExcludeAssets="runtime"` / `Private=false`), and the manifest floor rises from 17.0 to **17.6** (agreed with the owner) — the first long-term-servicing 2022 release, and comfortably inside what ships 6.x or later. Nothing in the bridge uses an API newer than 6.0 (it uses `JsonDocument`, `JsonElement`, `JsonSerializer`, `JavaScriptEncoder`, `JsonPropertyName`); and that is now proven: it compiles against 6.0.11 with no warnings, with all 206 tests and the Go contract test green (the compile is the proof — the net8.0 test host runs the in-box copy). If the owner's checklist still shows a `FileLoadException`, the fallback is `[ProvideCodeBase]` on the package for the carried assemblies — named here so it is a known move, not a discovery.
 
 ### 1.2 Roslyn versions across 2022 and 2026 — **Check**
 
 `definition`/`references`/`hover` use Roslyn. The VSIX compiles against the **lowest** supported Roslyn (`Microsoft.VisualStudio.LanguageServices` 4.6.0, matching 17.6) with `ExcludeAssets="runtime"`, and never ships Roslyn. Only public, long-stable surface is used (§3.3), so a newer Roslyn in 2026 binds forward without change.
 
-### 1.3 Blind code — **Risk, accepted and bounded**
+### 1.3 Code that has never run — **Risk, accepted and bounded**
 
-Nothing here has ever run. The bound on that risk: every member either returns data or throws; every throw is caught at one place (`Guard`, §2.3) and becomes an `isError` tool result with the exception's message, logged to the Activity Log. A wrong property name therefore costs one tool its answer and tells the owner exactly which one. **No failure in this layer may take down Visual Studio, hang its UI thread, or fail package load** — those are the three outcomes the design is organised around avoiding.
+Nothing here has ever executed. Two bounds on that. First, it compiles on this machine against the real SDK with warnings as errors and the SDK analyzers on, so names, signatures, nullability and the most common threading mistakes are settled before the owner ever sees it; what remains unknown is behaviour (an indexing base, which events fire, whether a frame has an info bar host). Second, every member either returns data or throws; every throw is caught at one place (`Guard`, §2.3) and becomes an `isError` tool result with the exception's message, logged to the Activity Log. A wrong assumption therefore costs one tool its answer and tells the owner exactly which one. **No failure in this layer may take down Visual Studio, hang its UI thread, or fail package load** — those are the three outcomes the design is organised around avoiding.
+
+### 1.4 What the owner asked for
+
+The goal is the harness having as full access to the IDE as possible, on Visual Studio 2022 (17.6 and later) and 2026. Where this design stops short of that (§5) it is because a stable public API does not exist or could not be trusted unrun, never for convenience; each limit is stated in the README, and each is a candidate for a later version once the base is proven on Windows.
 
 ## 2. Shape
 
