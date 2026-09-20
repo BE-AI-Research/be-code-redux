@@ -21,7 +21,13 @@ namespace BECode.Bridge.Tools
             {
                 context = await host.GetContextAsync(ct).ConfigureAwait(false);
             }
-            catch (System.Exception ex)
+            // Fix round 1, F8: this blanket catch swallowed
+            // OperationCanceledException — a connection going away while a
+            // path was being resolved came back as isError:true "context:
+            // The operation was canceled.", an ordinary-looking tool failure,
+            // instead of propagating so BridgeServer's own cancelled-call
+            // handling (no reply at all) applies.
+            catch (System.Exception ex) when (!(ex is System.OperationCanceledException))
             {
                 return (null, new ToolResult($"context: {ex.Message}", true));
             }

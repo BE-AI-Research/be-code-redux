@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -164,7 +165,15 @@ namespace BECode.Bridge.Tools
                         var frames = await _host.Debug.StackAsync(3, ct).ConfigureAwait(false);
                         return $"stopped ({r.Reason ?? "unknown"})\n{FormatStack(frames)}";
                     }
-                    catch
+                    // Fix round 1, F8: a bare `catch` here swallowed
+                    // OperationCanceledException along with a genuinely dead
+                    // session, turning a cancelled request (the connection
+                    // going away while this read was in flight) into ordinary
+                    // success text — BridgeServer's own "a cancelled in-
+                    // flight call gets no reply" handling never sees it,
+                    // because CallAsync returns normally instead of
+                    // propagating the cancellation. Let cancellation through.
+                    catch (Exception ex) when (!(ex is OperationCanceledException))
                     {
                         return $"stopped ({r.Reason ?? "unknown"})\n(session ended before the stack could be read)";
                     }

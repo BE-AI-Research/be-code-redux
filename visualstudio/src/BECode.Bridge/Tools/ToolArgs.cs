@@ -33,6 +33,29 @@ namespace BECode.Bridge.Tools
             return false;
         }
 
+        /// <summary>
+        /// Like <see cref="TryRequireString"/>, but an empty string is a
+        /// legal value (fix round 1, F4: <c>review_diff</c>'s <c>proposed</c>
+        /// argument — proposing an emptied file is legal, "the argument is
+        /// missing" and "the argument is the empty string" are different
+        /// facts). Only the argument's presence and type are required.
+        /// </summary>
+        public static bool TryRequireAnyString(JsonElement args, string name, out string value, out ToolResult? error)
+        {
+            if (args.ValueKind == JsonValueKind.Object
+                && args.TryGetProperty(name, out var el)
+                && el.ValueKind == JsonValueKind.String)
+            {
+                value = el.GetString() ?? "";
+                error = null;
+                return true;
+            }
+
+            value = "";
+            error = new ToolResult($"'{name}' is required", true);
+            return false;
+        }
+
         public static bool TryRequireInt(JsonElement args, string name, out int value, out ToolResult? error)
         {
             if (args.ValueKind == JsonValueKind.Object

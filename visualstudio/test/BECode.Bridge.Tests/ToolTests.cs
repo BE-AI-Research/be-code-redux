@@ -536,6 +536,233 @@ namespace BECode.Bridge.Tests
         }
 
         [Fact]
+        public async Task ConnectionClosedCancelsAPendingReviewDiffsToken()
+        {
+            // F1: ConnectionClosed used to drop _pending[connection] without
+            // cancelling those CancellationTokenSources — the host was never
+            // told, and the pending review_diff call could hang forever.
+            var hostCalled = new TaskCompletionSource<bool>();
+            var hostObservedCancellation = new TaskCompletionSource<bool>();
+            var host = new FakeEditorHost
+            {
+                OnReviewDiff = async (req, ct) =>
+                {
+                    var tcs = new TaskCompletionSource<bool>();
+                    using (ct.Register(() => { hostObservedCancellation.TrySetResult(true); tcs.TrySetResult(true); }))
+                    {
+                        hostCalled.SetResult(true);
+                        await tcs.Task;
+                    }
+
+                    return ReviewDecision.Cancelled;
+                },
+            };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            var diffTask = registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            await hostCalled.Task;
+
+            registry.ConnectionClosed(conn);
+
+            // The host must have observed cancellation, and the pending
+            // review_diff task must complete (its result is discarded by the
+            // caller — the connection is gone — but it must not hang).
+            await hostObservedCancellation.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var diffResult = await diffTask.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("{\"decision\":\"cancelled\"}", diffResult.Text);
+        }
+
+        [Fact]
+        public async Task ConnectionClosedDoesNotLetAStillRunningReviewDiffResurrectAcceptAllForTheDroppedConnection()
+        {
+            // F1 (coordinator's note): a still-running review_diff for a
+            // connection ConnectionClosed already tore down must not
+            // re-create per-connection state — here, a misbehaving host that
+            // ignores cancellation and answers AcceptAll anyway must not get
+            // to write _acceptAll for a connection that is already gone.
+            var hostCalled = new TaskCompletionSource<bool>();
+            var host = new FakeEditorHost
+            {
+                OnReviewDiff = async (req, ct) =>
+                {
+                    var tcs = new TaskCompletionSource<bool>();
+                    using (ct.Register(() => tcs.TrySetResult(true)))
+                    {
+                        hostCalled.SetResult(true);
+                        await tcs.Task;
+                    }
+
+                    // Misbehaving: answers AcceptAll despite the token firing.
+                    return ReviewDecision.AcceptAll;
+                },
+            };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            var diffTask = registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            await hostCalled.Task;
+
+            registry.ConnectionClosed(conn);
+            await diffTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // A fresh review_diff on the SAME connection object (its
+            // per-connection state should have been dropped, not silently
+            // repopulated by the call above) must still ask the host, not
+            // short-circuit to "accept" via a resurrected accept-all.
+            var askedAgain = false;
+            host.OnReviewDiff = (req, ct) => { askedAgain = true; return Task.FromResult(ReviewDecision.Reject); };
+            var second = await registry.CallAsync("review_diff", Args("{\"path\":\"b.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+
+            Assert.True(askedAgain);
+            Assert.Equal("{\"decision\":\"reject\"}", second.Text);
+        }
+
+        [Theory]
+        [InlineData("{\"path\":\"a.txt\"}")]
+        [InlineData("{\"path\":\"a.txt\",\"proposed\":123}")]
+        public async Task ReviewDiffProposedMissingOrWrongTypeIsErrorNamingIt(string argsJson)
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var result = await registry.CallAsync("review_diff", Args(argsJson), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("proposed", result.Text, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task ReviewDiffAcceptsAnEmptyProposedString()
+        {
+            // F4: TryRequireString treated "" as absent. An emptied file is a
+            // legal proposal (VS Code accepts it: typeof "" === "string"),
+            // and the Go side maps isError to "review unavailable", silently
+            // skipping the editor diff — so rejecting "" here silently broke
+            // reviewing a file being emptied.
+            ReviewRequest? captured = null;
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => { captured = req; return Task.FromResult(ReviewDecision.Accept); } };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"\"}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Equal("{\"decision\":\"accept\"}", result.Text);
+            Assert.NotNull(captured);
+            Assert.Equal("", captured!.Proposed);
+        }
+
+        [Fact]
+        public async Task ReviewDiffStillRequiresPathNonEmpty()
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var result = await registry.CallAsync("review_diff", Args("{\"path\":\"\",\"proposed\":\"new\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("path", result.Text, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task ReviewCancelResolvesAPendingReviewDiffAsCancelledWhenTheHostThrowsOperationCanceledException()
+        {
+            // S1: the host may answer a cancelled review either by returning
+            // ReviewDecision.Cancelled or by throwing
+            // OperationCanceledException; ReviewTools must treat both the
+            // same way.
+            var hostCalled = new TaskCompletionSource<bool>();
+            var host = new FakeEditorHost
+            {
+                OnReviewDiff = async (req, ct) =>
+                {
+                    hostCalled.SetResult(true);
+                    await Task.Delay(Timeout.Infinite, ct);
+                    return ReviewDecision.Reject; // unreachable
+                },
+            };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            var diffTask = registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            await hostCalled.Task;
+
+            var cancelResult = await registry.CallAsync("review_cancel", Args("{\"path\":\"a.txt\"}"), conn, CancellationToken.None);
+            Assert.Equal("{\"cancelled\":true}", cancelResult.Text);
+
+            var diffResult = await diffTask;
+            Assert.Equal("{\"decision\":\"cancelled\"}", diffResult.Text);
+        }
+
+        [Fact]
+        public async Task ReviewCancelAndAFastAcceptingHostNeverDisagreeOnTheOutcome()
+        {
+            // F7 regression: pending.Resolved was set outside the lock that
+            // ReviewCancel reads-and-claims it under, so a cancel racing a
+            // fast "accept" answer could report {"cancelled":true} for a
+            // review that had actually resolved "accept". Run many
+            // genuinely-concurrent iterations (Task.Run onto the thread pool,
+            // plus a real await point in the host) so the two calls can
+            // actually interleave; the invariant below must hold every time.
+            for (var i = 0; i < 500; i++)
+            {
+                var host = new FakeEditorHost
+                {
+                    OnReviewDiff = async (req, ct) =>
+                    {
+                        await Task.Yield();
+                        return ReviewDecision.Accept;
+                    },
+                };
+                var registry = new ToolRegistry(host);
+                var conn = new object();
+                var path = $"race-{i}.txt";
+
+                var diffTask = Task.Run(() => registry.CallAsync("review_diff", Args($"{{\"path\":\"{path}\",\"proposed\":\"new\"}}"), conn, CancellationToken.None));
+                var cancelTask = Task.Run(() => registry.CallAsync("review_cancel", Args($"{{\"path\":\"{path}\"}}"), conn, CancellationToken.None));
+
+                var diffResult = await diffTask;
+                var cancelResult = await cancelTask;
+
+                if (cancelResult.Text == "{\"cancelled\":true}")
+                {
+                    Assert.Equal("{\"decision\":\"cancelled\"}", diffResult.Text);
+                }
+                else
+                {
+                    Assert.Equal("{\"decision\":\"accept\"}", diffResult.Text);
+                }
+            }
+        }
+
+        [Fact]
+        public async Task DebugStartPropagatesCancellationFromTheStackReadInsteadOfSwallowingIt()
+        {
+            // F8: Describe's bare `catch` turned a cancelled connection into
+            // ordinary "session ended before the stack could be read" success
+            // text instead of letting the cancellation propagate.
+            var host = NewHost();
+            host.DebugHost.OnStart = (config, ct) => Task.FromResult(new StopResult(StopKind.Stopped, "step"));
+            host.DebugHost.OnStack = (depth, ct) => throw new OperationCanceledException();
+            var registry = new ToolRegistry(host);
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => registry.CallAsync("debug_start", Args("{}"), new object(), CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task OpenPropagatesCancellationFromPathResolutionInsteadOfReportingAnError()
+        {
+            // F8: ToolPaths.ResolveAsync's blanket catch turned a cancelled
+            // connection into isError:true "context: ..." instead of letting
+            // the cancellation propagate so BridgeServer's own cancelled-call
+            // handling (no reply at all) applies.
+            var host = new FakeEditorHost { OnGetContext = ct => throw new OperationCanceledException() };
+            var registry = new ToolRegistry(host);
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => registry.CallAsync("open", Args("{\"path\":\"sample.go\"}"), new object(), CancellationToken.None));
+        }
+
+        [Fact]
         public void BothReviewToolsAreOmittedFromList()
         {
             var registry = new ToolRegistry(NewHost());

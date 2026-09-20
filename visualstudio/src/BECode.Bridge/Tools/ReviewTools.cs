@@ -56,7 +56,7 @@ namespace BECode.Bridge.Tools
                 return errPath!;
             }
 
-            if (!ToolArgs.TryRequireString(args, "proposed", out var proposed, out var errProposed))
+            if (!ToolArgs.TryRequireAnyString(args, "proposed", out var proposed, out var errProposed))
             {
                 return errProposed!;
             }
@@ -99,14 +99,40 @@ namespace BECode.Bridge.Tools
                     decision = ReviewDecision.Cancelled;
                 }
 
-                // Whichever way the host answered, the decision is now final:
-                // a review_cancel arriving after this point must not claim to
-                // have changed it (mirrors vscode's `handle.resolved = true`,
-                // set the instant the race is decided).
-                pending.Resolved = true;
-
-                if (decision == ReviewDecision.AcceptAll)
+                // Fix round 1, F7: Resolved must be read AND set atomically
+                // with ReviewCancel's own read-and-claim — the same lock.
+                // Setting it unlocked (the original code) let a
+                // review_cancel racing a fast answer see Resolved still
+                // false, claim the pending review as its own (reporting
+                // {"cancelled":true} to ITS caller), while this call went on
+                // to return the host's actual decision (e.g. "accept") to
+                // ITS OWN caller — two callers asking about the exact same
+                // review getting contradictory answers. Reading the OLD
+                // value here (before overwriting it true) is what tells this
+                // call whether review_cancel got there first: if so, it must
+                // agree and answer "cancelled" too, regardless of what the
+                // host actually decided.
+                bool claimedByCancel;
+                lock (_lock)
                 {
+                    claimedByCancel = pending.Resolved;
+                    pending.Resolved = true;
+                }
+
+                if (claimedByCancel)
+                {
+                    decision = ReviewDecision.Cancelled;
+                }
+                else if (decision == ReviewDecision.AcceptAll && !cts.IsCancellationRequested)
+                {
+                    // Fix round 1, per the coordinator's note on the
+                    // BridgeServer rework: ConnectionClosed may have
+                    // cancelled this review's token directly (not via
+                    // review_cancel — e.g. the socket simply closed) while a
+                    // misbehaving host still answers AcceptAll despite that.
+                    // A still-running review_diff must not re-create
+                    // per-connection state for a connection already known
+                    // gone.
                     lock (_lock)
                     {
                         _acceptAll.Add(connection);
@@ -168,10 +194,53 @@ namespace BECode.Bridge.Tools
 
         public void ConnectionClosed(object connection)
         {
+            // Fix round 1, F1: this used to drop _pending[connection]
+            // without cancelling those CancellationTokenSources, so a still-
+            // running review_diff was never told the connection is gone —
+            // the host's difference viewer stayed open and the tool call
+            // hung until (if ever) the host's own logic gave up. Cancel every
+            // pending CTS for this connection first, then drop the map entry;
+            // ReviewDiff's own `finally` still runs and finds nothing left to
+            // remove, which is fine — this is the one place responsible for
+            // telling the host, so it must not skip a review by racing
+            // ReviewDiff's cleanup. Cancelling is done OUTSIDE the lock:
+            // CancellationTokenSource.Cancel() runs registered callbacks
+            // synchronously, and a host's callback must never be invoked
+            // while this lock is held.
+            List<CancellationTokenSource>? toCancel = null;
             lock (_lock)
             {
                 _acceptAll.Remove(connection);
-                _pending.Remove(connection);
+                if (_pending.TryGetValue(connection, out var byConn))
+                {
+                    toCancel = new List<CancellationTokenSource>(byConn.Count);
+                    foreach (var pending in byConn.Values)
+                    {
+                        toCancel.Add(pending.Cts);
+                    }
+
+                    _pending.Remove(connection);
+                }
+            }
+
+            if (toCancel != null)
+            {
+                foreach (var cts in toCancel)
+                {
+                    try
+                    {
+                        cts.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // ReviewDiff's own `finally` already disposed this
+                        // CTS: its host call happened to finish (or it was
+                        // separately cancelled by review_cancel) in the
+                        // narrow window between the snapshot above and this
+                        // call. Either way the review is already resolved;
+                        // there is nothing left to cancel.
+                    }
+                }
             }
         }
 
