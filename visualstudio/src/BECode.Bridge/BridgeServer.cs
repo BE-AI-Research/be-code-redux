@@ -381,7 +381,16 @@ namespace BECode.Bridge
                             break;
 
                         case "tools/call":
-                            await HandleToolsCallAsync(state, id, paramsElement, ct).ConfigureAwait(false);
+                            // R-7 (task 3a): dispatched in order — we reach
+                            // this line in strict per-connection order, same
+                            // as every other case — but NOT awaited here. It
+                            // runs on its own task and replies whenever that
+                            // task completes, so a slow call no longer delays
+                            // a later request's reply on this connection.
+                            // Deliberately fire-and-forget for now: per-
+                            // connection cancellation and bounded teardown
+                            // land in the next checkpoint.
+                            _ = HandleToolsCallAsync(state, id, paramsElement, ct);
                             break;
 
                         default:

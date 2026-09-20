@@ -276,16 +276,26 @@ namespace BECode.Bridge.Tests
             Assert.Equal("unknown tool nope", result.GetProperty("content")[0].GetProperty("text").GetString());
         }
 
+        // Task 3a / R-7: the wire contract changed. "Requests on one
+        // connection are handled in order" (the premise this test used to
+        // assert for tools/call replies) is no longer true — tools/call now
+        // runs on its own task and its reply may arrive out of request
+        // order. REPLACES PipelinedCallsReplyInRequestOrderDespiteADelayedFirstCall;
+        // see ASlowToolsCallDoesNotDelayALaterCallsReplyOnTheSameConnection
+        // below, which asserts the opposite of what this test used to: the
+        // later, faster call's reply arrives WHILE the slow one is still
+        // pending.
         [Fact]
-        public async Task PipelinedCallsReplyInRequestOrderDespiteADelayedFirstCall()
+        public async Task ASlowToolsCallDoesNotDelayALaterCallsReplyOnTheSameConnection()
         {
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var dispatcher = new FakeToolDispatcher
             {
                 OnCall = async (name, args, conn, ct) =>
                 {
                     if (name == "slow")
                     {
-                        await Task.Delay(200, ct);
+                        await gate.Task;
                     }
 
                     return new ToolResult(name, false);
@@ -299,28 +309,190 @@ namespace BECode.Bridge.Tests
             using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
             await InitializeAsync(stream, reader, Token);
 
-            // Both requests are written before either reply is read: this is
-            // the pipelining the ordering guarantee has to survive.
-            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"slow\",\"arguments\":{}}}");
-            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"fast\",\"arguments\":{}}}");
+            // The gate is force-opened in `finally` regardless of outcome:
+            // under today's sequential code the "slow" call is stuck on the
+            // gate with nothing else able to cancel it, and DisposeAsync
+            // (the `await using` above) would otherwise hang forever waiting
+            // for it during test cleanup on a RED run — a hang, not a bounded
+            // failure.
+            try
+            {
+                // Both requests are written before either reply is read: this
+                // is the pipelining the concurrency guarantee has to survive.
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"slow\",\"arguments\":{}}}");
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"fast\",\"arguments\":{}}}");
 
-            var stopwatch = Stopwatch.StartNew();
-            var firstLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
-            var secondLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
-            stopwatch.Stop();
+                // RED today (sequential processing): id 11 never arrives
+                // before the gate opens — this read times out.
+                var secondLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(secondLine);
+                var secondRoot = JsonDocument.Parse(secondLine!).RootElement;
+                Assert.Equal(11, secondRoot.GetProperty("id").GetInt32());
 
-            Assert.NotNull(firstLine);
-            Assert.NotNull(secondLine);
-            var firstRoot = JsonDocument.Parse(firstLine!).RootElement;
-            var secondRoot = JsonDocument.Parse(secondLine!).RootElement;
+                gate.TrySetResult(true);
 
-            Assert.Equal(10, firstRoot.GetProperty("id").GetInt32());
-            Assert.Equal(11, secondRoot.GetProperty("id").GetInt32());
-            // The 200ms delay on the *first* call is the behaviour under
-            // test, not a synchronisation sleep: it proves the second
-            // request's processing genuinely waited for the first to finish
-            // rather than the two racing to reply.
-            Assert.True(stopwatch.ElapsedMilliseconds >= 180, $"expected the delayed first call to gate the second reply, elapsed={stopwatch.ElapsedMilliseconds}ms");
+                var firstLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(firstLine);
+                var firstRoot = JsonDocument.Parse(firstLine!).RootElement;
+                Assert.Equal(10, firstRoot.GetProperty("id").GetInt32());
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+            }
+        }
+
+        // R-7: review_diff/review_cancel in miniature — call A blocks until
+        // call B's own handler unblocks it, both dispatched on ONE
+        // connection before either reply is read. RED today: sequential
+        // processing means B never even gets dispatched (it queues behind
+        // A's still-pending call), so this is a genuine deadlock — reads use
+        // a 3s timeout here (not the default 5s ReplyTimeout) purely so RED
+        // shows up as a bounded TimeoutException, never a hang.
+        [Fact]
+        public async Task ACallCanBeUnblockedByAnotherCallOnTheSameConnectionWhileBothArePending()
+        {
+            var deadlockTimeout = TimeSpan.FromSeconds(3);
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    if (name == "review_diff")
+                    {
+                        await gate.Task;
+                        return new ToolResult("diff-result", false);
+                    }
+
+                    // review_cancel unblocks the pending review_diff call.
+                    gate.TrySetResult(true);
+                    return new ToolResult("cancel-result", false);
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            // Force-open the gate in `finally`: under today's sequential
+            // code review_cancel never gets dispatched at all, so nothing
+            // ever opens it — without this, DisposeAsync (the `await using`
+            // above) would hang the test process forever during cleanup
+            // instead of the RED failure being a bounded timeout.
+            try
+            {
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"review_diff\",\"arguments\":{}}}");
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"review_cancel\",\"arguments\":{}}}");
+
+                var seenIds = new HashSet<int>();
+                for (var i = 0; i < 2; i++)
+                {
+                    var line = await ReadLineWithTimeoutAsync(reader, deadlockTimeout);
+                    Assert.NotNull(line);
+                    var root = JsonDocument.Parse(line!).RootElement;
+                    seenIds.Add(root.GetProperty("id").GetInt32());
+                }
+
+                Assert.Equal(new HashSet<int> { 1, 2 }, seenIds);
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+            }
+        }
+
+        // Ordering that must survive concurrent tools/call: everything else
+        // is still handled, and replied to, strictly in dispatch order.
+        [Fact]
+        public async Task ToolsListAfterAPendingSlowCallIsAnsweredImmediately()
+        {
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    await gate.Task;
+                    return new ToolResult(name, false);
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            // Force-open the gate in `finally`: under today's sequential
+            // code tools/list never gets dispatched (it queues behind the
+            // still-pending slow call), so nothing else would ever open it —
+            // without this, DisposeAsync (the `await using` above) would
+            // hang the test process during cleanup instead of the RED
+            // failure being a bounded timeout.
+            try
+            {
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"slow\",\"arguments\":{}}}");
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+
+                var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(line);
+                var root = JsonDocument.Parse(line!).RootElement;
+                Assert.Equal(2, root.GetProperty("id").GetInt32());
+                Assert.True(root.TryGetProperty("result", out _));
+
+                gate.TrySetResult(true);
+                var slowLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(slowLine);
+                Assert.Equal(1, JsonDocument.Parse(slowLine!).RootElement.GetProperty("id").GetInt32());
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+            }
+        }
+
+        [Fact]
+        public async Task InitializeThenToolsListStillReplyInOrder()
+        {
+            var (server, port) = await StartServerAsync();
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+
+            await SendLineAsync(stream, $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"auth\":{{\"token\":\"{Token}\"}}}}}}");
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}");
+
+            var first = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            var second = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.Equal(1, JsonDocument.Parse(first!).RootElement.GetProperty("id").GetInt32());
+            Assert.Equal(2, JsonDocument.Parse(second!).RootElement.GetProperty("id").GetInt32());
+        }
+
+        [Fact]
+        public async Task ToolsCallBeforeInitializeIsRefusedEvenThoughALaterInitializeSucceeds()
+        {
+            var (server, port) = await StartServerAsync();
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
+            var first = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(first);
+            var firstRoot = JsonDocument.Parse(first!).RootElement;
+            Assert.Equal(-32002, firstRoot.GetProperty("error").GetProperty("code").GetInt32());
+
+            var initRoot = await InitializeAsync(stream, reader, Token, id: 2);
+            Assert.False(initRoot.TryGetProperty("error", out _));
         }
 
         [Fact]
