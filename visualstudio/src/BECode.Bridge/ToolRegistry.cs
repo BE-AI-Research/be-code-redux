@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using BECode.Bridge.Tools;
 
 namespace BECode.Bridge
 {
@@ -54,22 +55,23 @@ namespace BECode.Bridge
 
         private static Dictionary<string, ToolHandler> BuildHandlers(IEditorHost host)
         {
-            // Checkpoint 1 placeholder: no family classes exist yet, so every
-            // name resolves to the same "not implemented" handler. `host` is
-            // deliberately unused here — nothing at this checkpoint calls it.
-            _ = host;
+            var editorTools = new EditorTools(host);
+            var diagnosticsTools = new DiagnosticsTools(host);
 
+            // Checkpoints 3/4 replace the remaining placeholders with
+            // ReviewTools/DebugTools; debug_* and review_* still resolve to
+            // "not implemented" until then.
             ToolHandler notImplemented = (args, connection, ct) =>
                 Task.FromResult(new ToolResult("not implemented", true));
 
             return new Dictionary<string, ToolHandler>(StringComparer.Ordinal)
             {
-                ["context"] = notImplemented,
-                ["open"] = notImplemented,
-                ["definition"] = notImplemented,
-                ["references"] = notImplemented,
-                ["hover"] = notImplemented,
-                ["diagnostics"] = notImplemented,
+                ["context"] = editorTools.Context,
+                ["open"] = editorTools.Open,
+                ["definition"] = editorTools.Definition,
+                ["references"] = editorTools.References,
+                ["hover"] = editorTools.Hover,
+                ["diagnostics"] = diagnosticsTools.Diagnostics,
                 ["debug_configs"] = notImplemented,
                 ["debug_start"] = notImplemented,
                 ["debug_breakpoint"] = notImplemented,
