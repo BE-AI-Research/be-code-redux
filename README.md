@@ -811,7 +811,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.12.1 — an approved model reload now actually happens, a request never goes out with no
+v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
+for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or
 explained. v0.12.0 — a Visual Studio 2022/2026 extension beside the VS Code one (compiled against the
 real SDK, not yet run: see `visualstudio/README.md`), and an editor review that can be

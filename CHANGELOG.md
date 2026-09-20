@@ -1,5 +1,34 @@
 # BE-Code Changelog
 
+## v0.13.0 — pacing and a clock
+
+Watching a 27B model work overnight: it took whole milestones on as one step, went round
+the same failing approach, and had no way to know that a step had run for forty minutes.
+The owner was typing "remember the small work loads" by hand at the start of each request.
+
+- **Pacing guidance.** A paragraph beside the task guidance (which stays verbatim — its
+  wording is measured): plan steps small enough for about ten tool calls, one at a time,
+  the narrowest check after a step that changed files, re-plan after two failures of the
+  same approach. It also says *why* small steps pay: only the current step's tool output
+  is kept in full, and it is condensed the moment the step is marked done.
+- **A step open too long is nudged.** Past `engine.step_nudge` tool calls (20) Working
+  memory says `! step 3.2 has been open for 27 tool calls: finish it, split it into smaller
+  steps (task add, parent 3.2), or note why`. It is part of the active-branch header, so it
+  survives compaction and is never a rung of the budget ladder.
+- **The same call with the same answer is called out.** `toolFailStreak` only saw
+  failures; a loop of successful reads and greps is just as stuck. The third identical
+  result to an identical call says so. A call whose result changed — tests re-run after an
+  edit — starts the count over; `task`, `consult` and `process` are exempt.
+- **Time awareness** (`time_awareness`, on by default). Every tool result ends
+  `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each user message with when
+  it was sent. Appended text only — a line in the system prompt that changes every turn
+  makes the server re-process the whole conversation behind it. Steps record when they
+  started and how many tool calls they took (`state.json`, matched on the step's text; the
+  Markdown documents stay the user's), and a finished step reads `— done (18m, 31 tool calls)`.
+- **Compaction no longer calls the model to save a few dozen tokens.** Once every old tool
+  result is a stub, a history within a tenth of the compressible room above its target
+  counts as compacted: the summary cannot shrink the floor or the newest exchange either.
+
 ## v0.12.1 — an approved reload that never happened
 
 A shared session on the validation VM died on 2026-09-20 with `HTTP 400 … exceeds the
