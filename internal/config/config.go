@@ -225,7 +225,11 @@ type Config struct {
 	// session is resumed, so the person sees where they left off. On by
 	// default; ResumeReplayTurns caps the replay to the last N user turns
 	// (0 = everything the saved history holds).
-	ResumeReplay      bool `json:"resume_replay"`
+	ResumeReplay bool `json:"resume_replay"`
+	// TimeAwareness gives the model a clock: a footer on every tool result
+	// (time, what the call took, how long the current step has been open,
+	// context used) and an arrival time on each user message.
+	TimeAwareness     bool `json:"time_awareness"`
 	ResumeReplayTurns int  `json:"resume_replay_turns"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
@@ -337,6 +341,7 @@ func Default() *Config {
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
+		TimeAwareness:    true,
 		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, ItemCap: 4096, NodeCap: 32768, Tools: "full"},
 	}
 }

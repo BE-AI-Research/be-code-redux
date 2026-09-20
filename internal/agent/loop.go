@@ -1001,6 +1001,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			expanded = note + "\n\n" + expanded
 		}
 	}
+	if newTurn {
+		expanded = a.stampUser(expanded)
+	}
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
 
 	emptyRetries, lengthRetries := 0, 0
@@ -1336,9 +1339,11 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			})
 		}
 	}
+	began := timeNow()
 	if !served {
 		res = a.Tools.Dispatch(ctx, call)
 	}
+	took := timeNow().Sub(began)
 	if a.engine() != nil && !served {
 		// The same tolerant parse Dispatch used, so a double-encoded call
 		// is observed exactly as it ran; arguments no tool could run are
@@ -1391,6 +1396,12 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
 				name, call.Name, advice)
 		}
+	}
+	// Last of all, and on the model's copy only: after the engine has
+	// recorded the result and the repeat check has compared it (a clock in
+	// either would make every result unique), and after the UI has shown it.
+	if footer := a.timeFooter(took); footer != "" {
+		res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 	}
 	return res
 }

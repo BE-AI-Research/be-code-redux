@@ -274,7 +274,24 @@ func (h *History) CollapseOldToolResults() bool {
 			}
 		}
 	}
-	return h.Tokens() <= h.Target()
+	return h.Tokens() <= h.Target()+h.collapseSlack()
+}
+
+// collapseSlack is how far above Target a fully collapsed history may land
+// and still count as compacted. Target is an aim, not a limit: once every old
+// tool result is a stub, what is left is the floor and the newest exchange,
+// and neither a second pass nor the model's summary makes those smaller. A
+// summary call there costs minutes of model time to save a few dozen tokens
+// — measured at an 8192 window, 80 tokens over target with 1,500 to spare
+// below the limit triggered one on every pass. A tenth of the compressible
+// room still leaves two fifths of it free, which is the runway Target exists
+// to guarantee.
+func (h *History) collapseSlack() int {
+	room := h.Limit() - h.Floor()
+	if room <= 0 {
+		return 0
+	}
+	return room / 10
 }
 
 // CollapseToolResults stubs the bodies of all tool results except the
