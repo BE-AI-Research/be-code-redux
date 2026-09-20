@@ -30,9 +30,13 @@ namespace BECode.Bridge.Tests
 
             public Func<string, JsonElement, object, CancellationToken, Task<ToolResult>>? OnCall { get; set; }
 
+            // C1 (review round 1): lets a test make List() throw, to prove
+            // the server survives it instead of zombifying the connection.
+            public Func<IReadOnlyList<ToolInfo>>? OnList { get; set; }
+
             public List<object> ClosedConnections { get; } = new List<object>();
 
-            public IReadOnlyList<ToolInfo> List() => _tools;
+            public IReadOnlyList<ToolInfo> List() => OnList != null ? OnList() : _tools;
 
             public Task<ToolResult> CallAsync(string name, JsonElement args, object connection, CancellationToken ct)
             {
@@ -53,11 +57,31 @@ namespace BECode.Bridge.Tests
             }
         }
 
-        private static async Task<(BridgeServer server, int port)> StartServerAsync(IToolDispatcher? dispatcher = null)
+        private static async Task<(BridgeServer server, int port)> StartServerAsync(
+            IToolDispatcher? dispatcher = null,
+            int maxLineBytes = 16 * 1024 * 1024)
         {
-            var server = new BridgeServer(dispatcher ?? new FakeToolDispatcher(), Token, "1.0.0-test");
+            var server = new BridgeServer(dispatcher ?? new FakeToolDispatcher(), Token, "1.0.0-test", maxLineBytes);
             var port = await server.StartAsync(0);
             return (server, port);
+        }
+
+        // Polls a condition up to a deadline rather than using a fixed sleep
+        // as the synchronisation mechanism — the poll interval is just how
+        // often it rechecks, not how long the test waits when the condition
+        // is met early.
+        private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (!condition())
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"condition not met within {timeout}");
+                }
+
+                await Task.Delay(20);
+            }
         }
 
         private static async Task<TcpClient> ConnectAsync(int port)
@@ -220,10 +244,22 @@ namespace BECode.Bridge.Tests
             Assert.Equal("hello from ping", first.GetProperty("text").GetString());
         }
 
+        // I3 (review round 1): this does NOT prove the server recognises
+        // "unknown tool nope" — there is no registry in this project at
+        // all, that is Task 3's obligation (ToolRegistry, built against
+        // IToolDispatcher). What it actually proves is narrower and still
+        // load-bearing: BridgeServer passes a dispatcher's ToolResult
+        // through to the wire unchanged (isError and text both), whatever
+        // that result says. FakeToolDispatcher's default behaviour —
+        // returning isError:true "unknown tool <name>" for anything with no
+        // OnCall configured — merely mimics the shape Task 3's real
+        // ToolRegistry is expected to produce for an unrecognised name, so
+        // this test doubles as a fixture for that shape without asserting
+        // the server itself implements it.
         [Fact]
-        public async Task UnknownToolIsErrorWithUnknownToolMessage()
+        public async Task ToolsCallPassesADispatchersIsErrorResultThroughUnchanged()
         {
-            var (server, port) = await StartServerAsync(); // default dispatcher: everything is "unknown tool"
+            var (server, port) = await StartServerAsync(); // default dispatcher stands in for Task 3's ToolRegistry answering "no such tool"
             await using var serverLifetime = server;
 
             using var client = await ConnectAsync(port);
@@ -346,6 +382,280 @@ namespace BECode.Bridge.Tests
 
             Assert.NotEmpty(matches);
             Assert.All(matches, ep => Assert.Equal(IPAddress.Loopback, ep.Address));
+        }
+
+        // C1 (review round 1): a dispatcher whose List() throws must not
+        // zombify the connection — the request that hit it gets an internal
+        // error, and a later request on the same connection is still
+        // answered normally.
+        [Fact]
+        public async Task AThrowingToolListGetsInternalErrorAndTheConnectionKeepsWorking()
+        {
+            var shouldThrow = true;
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnList = () => shouldThrow
+                    ? throw new InvalidOperationException("boom-list")
+                    : (IReadOnlyList<ToolInfo>)new List<ToolInfo>(),
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"tools/list\"}");
+            var firstLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(firstLine);
+            var firstRoot = JsonDocument.Parse(firstLine!).RootElement;
+            Assert.Equal(-32603, firstRoot.GetProperty("error").GetProperty("code").GetInt32());
+            Assert.Contains("boom-list", firstRoot.GetProperty("error").GetProperty("message").GetString());
+
+            // The connection itself must still be usable afterward.
+            shouldThrow = false;
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/list\"}");
+            var secondLine = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(secondLine);
+            var secondRoot = JsonDocument.Parse(secondLine!).RootElement;
+            Assert.False(secondRoot.TryGetProperty("error", out _));
+            Assert.Equal(0, secondRoot.GetProperty("result").GetProperty("tools").GetArrayLength());
+
+            Assert.Contains(errors, e => e.Exception.Message == "boom-list");
+        }
+
+        // I1 (review round 1), server-level: the per-connection LineFramer
+        // cap is wired through the optional trailing BridgeServer
+        // constructor parameter, and exceeding it closes the connection
+        // rather than growing the buffer forever.
+        [Fact]
+        public async Task PendingBytesBeyondTheServerSideCapClosesTheConnection()
+        {
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(maxLineBytes: 64);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+
+            // No newline at all: an unterminated "line" well past the
+            // 64-byte cap, sent before authentication (the cap has to apply
+            // there too, since the framer runs before auth).
+            var chunk = Encoding.UTF8.GetBytes(new string('x', 200));
+            await stream.WriteAsync(chunk, 0, chunk.Length);
+
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.Null(line); // closed, not merely idle
+
+            await WaitForAsync(() => errors.Count > 0, TimeSpan.FromSeconds(5));
+            Assert.Contains(errors, e => e.Exception is System.IO.InvalidDataException);
+        }
+
+        // Test gap closed (review round 1): ConnectionCount across a real
+        // connect/disconnect, polled with a deadline rather than a sleep.
+        [Fact]
+        public async Task ConnectionCountTracksConnectAndDisconnect()
+        {
+            var (server, port) = await StartServerAsync();
+            await using var serverLifetime = server;
+
+            Assert.Equal(0, server.ConnectionCount);
+
+            var client = await ConnectAsync(port);
+            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+            Assert.Equal(1, server.ConnectionCount);
+
+            client.Close();
+            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+            Assert.Equal(0, server.ConnectionCount);
+        }
+
+        // Test gap closed: DisposeAsync on a server with a live connection
+        // must close it, and by the time DisposeAsync returns,
+        // ConnectionClosed must already have fired — not "eventually".
+        [Fact]
+        public async Task DisposeAsyncClosesALiveConnectionAndConnectionClosedHasFiredByTheTimeItReturns()
+        {
+            var dispatcher = new FakeToolDispatcher();
+            var server = new BridgeServer(dispatcher, Token, "1.0.0-test");
+            var port = await server.StartAsync(0);
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+            await server.DisposeAsync();
+
+            Assert.Single(dispatcher.ClosedConnections);
+        }
+
+        // Test gap closed: the bad-token path must call ConnectionClosed
+        // exactly once, and a later DisposeAsync must not call it again.
+        [Fact]
+        public async Task BadTokenClosesTheConnectionExactlyOnceAndALaterDisposeDoesNotCallItAgain()
+        {
+            var dispatcher = new FakeToolDispatcher();
+            var server = new BridgeServer(dispatcher, Token, "1.0.0-test");
+            var port = await server.StartAsync(0);
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"auth\":{\"token\":\"wrong\"}}}");
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(line);
+
+            await WaitForAsync(() => dispatcher.ClosedConnections.Count > 0, TimeSpan.FromSeconds(5));
+            Assert.Single(dispatcher.ClosedConnections);
+
+            await server.DisposeAsync();
+
+            Assert.Single(dispatcher.ClosedConnections);
+        }
+
+        // Test gap closed: a JSON-RPC id can be any JSON value, and a
+        // string id specifically must come back as a string, not be
+        // coerced.
+        [Fact]
+        public async Task StringIdIsEchoedAsAString()
+        {
+            var (server, port) = await StartServerAsync();
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":\"abc-123\",\"method\":\"initialize\",\"params\":{\"auth\":{\"token\":\"" + Token + "\"}}}");
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(line);
+            var root = JsonDocument.Parse(line!).RootElement;
+
+            Assert.Equal(JsonValueKind.String, root.GetProperty("id").ValueKind);
+            Assert.Equal("abc-123", root.GetProperty("id").GetString());
+        }
+
+        // M4: DisposeAsync must not throw when called more than once, or
+        // when two calls race concurrently.
+        [Fact]
+        public async Task DisposeAsyncIsIdempotent()
+        {
+            var (server, _) = await StartServerAsync();
+
+            await server.DisposeAsync();
+            var ex = await Record.ExceptionAsync(async () => await server.DisposeAsync());
+
+            Assert.Null(ex);
+        }
+
+        [Fact]
+        public async Task DisposeAsyncIsSafeUnderConcurrentCalls()
+        {
+            var (server, _) = await StartServerAsync();
+
+            var first = server.DisposeAsync().AsTask();
+            var second = server.DisposeAsync().AsTask();
+            var ex = await Record.ExceptionAsync(async () => await Task.WhenAll(first, second));
+
+            Assert.Null(ex);
+        }
+
+        // "Also fix" (review round 1): a failed write must be reported
+        // through OnError and stop the connection, not silently keep trying
+        // to write into a dead socket. Forcing a real write failure
+        // deterministically: the dispatcher itself closes the connection's
+        // socket (the same TcpClient CallAsync receives as `connection`)
+        // before returning, so the reply HandleToolsCallAsync then tries to
+        // write is guaranteed to fail.
+        [Fact]
+        public async Task AWriteFailureIsReportedThroughOnError()
+        {
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = (name, args, conn, ct) =>
+                {
+                    ((TcpClient)conn).Close();
+                    return Task.FromResult(new ToolResult("won't be delivered", false));
+                },
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
+
+            await WaitForAsync(() => errors.Any(e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase)), TimeSpan.FromSeconds(5));
+            Assert.Contains(errors, e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // M10: the default JSON encoder escapes '<', '>', '&' and every
+        // non-ASCII character as \uXXXX. Confirms the relaxed encoder is in
+        // effect (content is readable on the wire, not just round-trippable
+        // — \uXXXX also round-trips, so that alone would not catch a
+        // regression back to the default encoder) and that this still frames
+        // as exactly one line.
+        [Fact]
+        public async Task ReplyWithNonAsciiAndEmbeddedNewlineStaysOneLineAndRoundTrips()
+        {
+            const string text = "<é>\nmore text & more <tags>"; // "<é>\nmore text & more <tags>"
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = (name, args, conn, ct) => Task.FromResult(new ToolResult(text, false)),
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/call\",\"params\":{\"name\":\"echo\",\"arguments\":{}}}");
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(line);
+
+            Assert.Contains("<é>", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("\\u003C", line, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("\\u00e9", line, StringComparison.OrdinalIgnoreCase);
+
+            var decoded = JsonDocument.Parse(line!).RootElement
+                .GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+            Assert.Equal(text, decoded);
+
+            // And it really is exactly one line: nothing more arrives.
+            var extra = await Record.ExceptionAsync(async () => await ReadLineWithTimeoutAsync(reader, TimeSpan.FromMilliseconds(300)));
+            Assert.IsType<TimeoutException>(extra);
         }
     }
 }

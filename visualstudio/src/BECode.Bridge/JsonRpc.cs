@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -43,6 +44,11 @@ namespace BECode.Bridge
         public const int BadToken = -32001;
         public const int NotInitialized = -32002;
         public const int MethodNotFound = -32601;
+
+        // Standard JSON-RPC 2.0 "internal error": used by BridgeServer's
+        // per-line guard for any exception that escapes request dispatch
+        // (e.g. IToolDispatcher.List() throwing) — review round 1, C1.
+        public const int InternalError = -32603;
     }
 
     /// <summary>
@@ -53,7 +59,15 @@ namespace BECode.Bridge
     /// </summary>
     internal static class JsonRpcWriter
     {
-        private static readonly JsonSerializerOptions Options = new JsonSerializerOptions();
+        // Review round 1, M10: the default encoder escapes '<', '>', '&'
+        // and every non-ASCII character as \uXXXX. Diffs and source text
+        // go through this in later tasks, so use the relaxed encoder —
+        // still safe here, since this is a loopback JSON-RPC wire, not
+        // HTML being embedded in a page.
+        private static readonly JsonSerializerOptions Options = new JsonSerializerOptions
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        };
 
         public static byte[] EncodeResult(JsonElement id, object? result)
         {
