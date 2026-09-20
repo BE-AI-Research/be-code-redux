@@ -1,0 +1,339 @@
+[
+  {
+    "name": "context",
+    "description": "What the user is looking at: active file, cursor line, selection, open files, workspace folders (JSON).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "hidden": false
+  },
+  {
+    "name": "open",
+    "description": "Reveal a file in the editor, optionally at a line.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "definition",
+    "description": "Where the symbol at path:line:col is defined (language server).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "col": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "col"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "references",
+    "description": "References to the symbol at path:line:col, as path:line: text.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "col": {
+          "type": "integer"
+        },
+        "max": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "col"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "hover",
+    "description": "Type or signature information for the symbol at path:line:col (language server hover).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "col": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "col"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "diagnostics",
+    "description": "Errors and warnings from the editor's language servers, as path:line:col severity source: message. Optional path filters to one file; severity: error, warning or all (default: errors and warnings).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "all"
+          ]
+        }
+      }
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_configs",
+    "description": "Launch configurations available (launch.json). debug_start also accepts program + type directly.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_start",
+    "description": "Start debugging and wait until it stops at a breakpoint or exits (60s max). Use config (launch.json name) or program + type (go|python) + args.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "config": {
+          "type": "string"
+        },
+        "program": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "go",
+            "python"
+          ]
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_breakpoint",
+    "description": "Add or remove a breakpoint at path:line, optionally with a condition. Returns the breakpoints in that file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "add",
+            "remove"
+          ]
+        },
+        "condition": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_continue",
+    "description": "Continue and wait for the next stop.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_step",
+    "description": "Step over, into or out, and wait for the stop.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "type": "string",
+          "enum": [
+            "over",
+            "into",
+            "out"
+          ]
+        }
+      },
+      "required": [
+        "step"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_stack",
+    "description": "Current call stack.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "depth": {
+          "type": "integer"
+        }
+      }
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_variables",
+    "description": "Variables in a frame. frame: the number shown as [frame N] by debug_stack (default: top frame). scope: locals, args or all.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "frame": {
+          "type": "integer"
+        },
+        "scope": {
+          "type": "string"
+        }
+      }
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_evaluate",
+    "description": "Evaluate an expression in a frame. frame: the number shown as [frame N] by debug_stack (default: top frame).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        },
+        "frame": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expression"
+      ]
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_output",
+    "description": "Debug console output since the last read (pass the returned cursor next time).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "since": {
+          "type": "integer"
+        }
+      }
+    },
+    "hidden": false
+  },
+  {
+    "name": "debug_stop",
+    "description": "Stop the debug session.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "hidden": false
+  },
+  {
+    "name": "review_diff",
+    "description": "(used by BE-Code, not by the model) Show a proposed file change as an editor diff and return the user's decision.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "original": {
+          "type": "string"
+        },
+        "proposed": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "shared": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "proposed"
+      ]
+    },
+    "hidden": true
+  },
+  {
+    "name": "review_cancel",
+    "description": "(used by BE-Code, not by the model) Withdraw a pending review for a path.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "hidden": true
+  }
+]

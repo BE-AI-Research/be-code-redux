@@ -2,7 +2,7 @@
   "name": "be-code",
   "displayName": "BE-Code",
   "description": "Editor bridge for BE-Code: diagnostics, symbols, debugger and diff review for the local coding agent.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "be-ai-research",
   "license": "MIT",
   "repository": {

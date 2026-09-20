@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <Identity Id="BECode.VisualStudio.4f0c8f6a-3b2f-4c2b-9e6a-8a2c1c7a9d5e" Version="0.1.0" Language="en-US" Publisher="BE-Code" />
+    <DisplayName>BE-Code</DisplayName>
+    <Description xml:space="preserve">Connects BE-Code (an offline-first agentic coding CLI for local LLMs) to Visual Studio: active file/selection, diagnostics, go-to-definition/references/hover, a diff review of every proposed write, and the debugger.</Description>
+  </Metadata>
+  <Installation>
+    <!-- Manifest floor 17.6: the first
+         long-term-servicing 2022 release, and the first to carry a
+         System.Text.Json new enough that the bridge's own dependency does
+         not fail package load (host design §1.1). Ceiling 19.0 (exclusive)
+         covers 2022 and 2026. -->
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.6,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.6,19.0)">
+      <ProductArchitecture>arm64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.6,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.6,19.0)">
+      <ProductArchitecture>arm64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.6,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.6,19.0)">
+      <ProductArchitecture>arm64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" d:Source="Manual" Version="[4.7.2,)" />
+  </Dependencies>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.6,19.0)" DisplayName="Visual Studio core editor" />
+  </Prerequisites>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+  </Assets>
+</PackageManifest>

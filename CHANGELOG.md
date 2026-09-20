@@ -1,5 +1,47 @@
 # BE-Code Changelog
 
+## v0.12.0 — Visual Studio, and an editor review that can be cancelled
+
+BE-Code's editor bridge existed only for VS Code. This release adds the same bridge for
+Visual Studio 2022 and 2026 — and building it turned up a defect in the VS Code extension
+that had been live since shared reviews shipped.
+
+- **A pending review blocked its own cancel (VS Code extension 1.1.1).** The bridge
+  finished one request on a connection before starting the next. The harness multiplexes
+  calls on one connection and sends `review_cancel` on the same connection as the
+  `review_diff` it withdraws, so the cancel queued behind the call it was meant to cancel.
+  With `ide.review` resolving to `both`, a terminal that answered first left the editor's
+  diff tab open, and every later `ide_*` call waited behind it until somebody closed the
+  tab by hand. Tool calls now run concurrently per connection and reply by id;
+  `initialize`, `tools/list` and refusals stay ordered. Reinstall the extension.
+- **Visual Studio 2022 (17.6+) and 2026** (`visualstudio/`). One `.vsix`, the same sixteen
+  advertised tools from one manifest shared with the VS Code extension
+  (`vscode/tools.manifest.json`, with a test on each side that fails on drift), and the
+  proposed-write diff in Visual Studio's own difference viewer with Accept, Accept all and
+  Reject in an information bar. **The Visual Studio layer compiles against the real SDK —
+  on Linux, warnings as errors, SDK analyzers on — and has never been run.** The protocol,
+  the lock file and every tool underneath it are tested (272 tests), and
+  `internal/ide/contract_test.go` drives the real Go client against the real bridge, every
+  tool, including a review cancelled mid-flight. `visualstudio/WINDOWS-CHECKLIST.md` is
+  what proves the rest, and `visualstudio/README.md` lists what this version does not do:
+  navigation is C# and VB only, launch profiles are listed but not selectable, diagnostics
+  are what the Error List currently shows.
+- **`be-code` attaches to a running Visual Studio without `--ide`.** Visual Studio's
+  terminals set no `TERM_PROGRAM`, so with `ide.enabled` on, a live `visualstudio` lock
+  whose folders cover the workspace is attached to automatically. A VS Code lock still
+  attaches only inside VS Code's own terminal or with `--ide`, and a Visual Studio open on
+  some other project is never picked up: the quiet path uses only locks that cover the
+  directory (`ide.DiscoverCovering`), where `--ide` keeps its newest-lock fallback. Every
+  interactive launch now reads and prunes `~/.be-code/ide`. On Windows that coverage
+  comparison now ignores case: Visual Studio, a PowerShell `cd` and VS Code each report the
+  same directory in a different case, which the newest-lock fallback had always hidden.
+- The attached editor is named for what it is (`Visual Studio connected: 16 tools`,
+  `answered in Visual Studio`), and with Visual Studio attached the system prompt points the
+  model at `ide_debug_configs` instead of the `program` form Visual Studio refuses.
+- `make -f build.mk visualstudio-test` compiles the Visual Studio projects and runs their
+  tests where the .NET SDK is installed. `verify` does not need it: the contract test
+  skips without `dotnet`, and under `-short`.
+
 ## v0.11.1 — a compaction target that can be reached
 
 Compaction can only shrink the conversation; the system prompt and the tools schema go

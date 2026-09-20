@@ -1,0 +1,442 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using BECode.Bridge.Hosting;
+using Xunit;
+
+namespace BECode.Bridge.Tests
+{
+    // The pure-logic helpers extracted from the Visual Studio host
+    // design because they need no Visual Studio type. net472 xunit tests
+    // cannot run on this Linux
+    // checkout (no Mono, no .NET Framework runtime installed) so
+    // these live in BECode.Bridge/Hosting and are
+    // tested here instead, against the existing net8.0 test project.
+    public class ErrorSourceTests
+    {
+        [Theory]
+        [InlineData("CS1002: ; expected", "CS1002")]
+        [InlineData("C2065: 'foo': undeclared identifier", "C2065")]
+        [InlineData("MSB3073: The command exited with code 1", "MSB3073")]
+        public void ParsesALeadingErrorCode(string description, string expected)
+        {
+            Assert.Equal(expected, ErrorSource.ParseCode(description));
+        }
+
+        [Theory]
+        [InlineData("something went wrong: no code here")]
+        [InlineData("no colon at all")]
+        [InlineData("")]
+        [InlineData(null)]
+        [InlineData(" CS1002: leading space before the code")]
+        [InlineData("1002: starts with a digit, not a letter")]
+        [InlineData("CS: letters with no digits")]
+        public void ReturnsNullWhenThereIsNoLeadingCode(string? description)
+        {
+            Assert.Null(ErrorSource.ParseCode(description));
+        }
+    }
+
+    public class DebugReasonTests
+    {
+        [Theory]
+        [InlineData("dbgEventReasonBreakpoint", "breakpoint")]
+        [InlineData("dbgEventReasonStep", "step")]
+        [InlineData("dbgEventReasonExceptionThrown", "exception")]
+        [InlineData("dbgEventReasonExceptionNotHandled", "exception")]
+        [InlineData("dbgEventReasonUserBreak", "pause")]
+        [InlineData("dbgEventReasonNone", "stopped")]
+        [InlineData("somethingUnrecognised", "stopped")]
+        public void MapsBreakReasons(string dteName, string expected)
+        {
+            Assert.Equal(expected, DebugReason.ForBreak(dteName));
+        }
+
+        [Fact]
+        public void OnlyEndProgramIsANormalExit()
+        {
+            Assert.True(DebugReason.IsNormalExit("dbgEventReasonEndProgram"));
+            Assert.False(DebugReason.IsNormalExit("dbgEventReasonStopDebugging"));
+            Assert.False(DebugReason.IsNormalExit("dbgEventReasonAttachProgram"));
+        }
+    }
+
+    public class OutputCursorTests
+    {
+        [Fact]
+        public void ReturnsLinesSinceTheCursorAndTheNewCursor()
+        {
+            var (lines, cursor) = OutputCursor.Since("a\nb\nc\n", 1);
+            Assert.Equal(new[] { "b", "c" }, lines);
+            Assert.Equal(3, cursor);
+        }
+
+        [Fact]
+        public void EmptyTextIsZeroLines()
+        {
+            var (lines, cursor) = OutputCursor.Since("", 0);
+            Assert.Empty(lines);
+            Assert.Equal(0, cursor);
+        }
+
+        [Fact]
+        public void ACursorAtTheEndReturnsNothingButTheSameCursor()
+        {
+            var (lines, cursor) = OutputCursor.Since("a\nb\n", 2);
+            Assert.Empty(lines);
+            Assert.Equal(2, cursor);
+        }
+
+        [Fact]
+        public void ACursorPastAClearedShorterPaneRestartsFromZero()
+        {
+            // The pane was cleared and only "x" has been printed since:
+            // since=10 no longer makes sense against a 1-line pane.
+            var (lines, cursor) = OutputCursor.Since("x\n", 10);
+            Assert.Equal(new[] { "x" }, lines);
+            Assert.Equal(1, cursor);
+        }
+
+        [Fact]
+        public void CarriageReturnsAreNormalised()
+        {
+            var (lines, cursor) = OutputCursor.Since("a\r\nb\rc\n", 0);
+            Assert.Equal(new[] { "a", "b", "c" }, lines);
+            Assert.Equal(3, cursor);
+        }
+    }
+
+    public class DocCommentSummaryTests
+    {
+        [Fact]
+        public void ExtractsAndNormalisesASummary()
+        {
+            var xml = "<member name=\"M:Foo.Bar\">\n    <summary>\n    Does the thing.\n    Really.\n    </summary>\n</member>";
+            Assert.Equal("Does the thing. Really.", DocCommentSummary.Extract(xml));
+        }
+
+        [Fact]
+        public void ASummaryElementAtTheRootIsAlsoAccepted()
+        {
+            Assert.Equal("Hello.", DocCommentSummary.Extract("<summary>\nHello.\n</summary>"));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        [InlineData("not xml at all <")]
+        [InlineData("<member name=\"M:Foo.Bar\"><returns>an int</returns></member>")]
+        public void ReturnsNullWhenThereIsNoUsableSummary(string? xml)
+        {
+            Assert.Null(DocCommentSummary.Extract(xml));
+        }
+    }
+
+    public class DiffTempFilesTests
+    {
+        [Theory]
+        [InlineData("Foo.cs", "Foo.proposed.cs")]
+        [InlineData("/repo/src/Foo.cs", "Foo.proposed.cs")]
+        [InlineData("Makefile", "Makefile.proposed")]
+        [InlineData("archive.tar.gz", "archive.tar.proposed.gz")]
+        public void NamesTheProposedSideAfterTheOriginalWithAMarkerBeforeTheExtension(string path, string expected)
+        {
+            // Path.GetFileName only recognises '/' as a separator on Linux
+            // (this test project's own runtime); DiffReview.cs runs on
+            // Windows, where '\' is recognised too — the transform itself
+            // (strip directory, insert ".proposed" before the extension) is
+            // identical either way, this just avoids a platform-dependent
+            // assertion in a test that runs on Linux.
+            Assert.Equal(expected, DiffTempFiles.ProposedFileName(path));
+        }
+    }
+
+    public class LaunchProfilesTests
+    {
+        [Fact]
+        public void ParsesTheProfileNamesInDocumentOrder()
+        {
+            var json = "{\"profiles\":{\"IIS Express\":{\"commandName\":\"IISExpress\"},\"MyApp\":{\"commandName\":\"Project\"}}}";
+            Assert.Equal(new[] { "IIS Express", "MyApp" }, LaunchProfiles.ParseNames(json));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("not json")]
+        [InlineData("{}")]
+        [InlineData("{\"profiles\": []}")]
+        public void ReturnsEmptyForAnythingUnusable(string? json)
+        {
+            Assert.Empty(LaunchProfiles.ParseNames(json));
+        }
+    }
+
+    public class DebouncerTests
+    {
+        [Fact]
+        public async Task ABurstOfTriggersFiresTheActionOnce()
+        {
+            var fired = 0;
+            var gate = new SemaphoreSlim(0);
+            using var debouncer = new Debouncer(
+                TimeSpan.FromMilliseconds(20),
+                () =>
+                {
+                    Interlocked.Increment(ref fired);
+                    gate.Release();
+                    return Task.CompletedTask;
+                });
+
+            debouncer.Trigger();
+            debouncer.Trigger();
+            debouncer.Trigger();
+
+            var signalled = await gate.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.True(signalled, "the debounced action never fired");
+
+            // Give any (incorrect) extra firing a moment to show up.
+            await Task.Delay(100);
+            Assert.Equal(1, fired);
+        }
+
+        [Fact]
+        public async Task TwoWellSeparatedTriggersFireTwice()
+        {
+            var fired = 0;
+            using var debouncer = new Debouncer(
+                TimeSpan.FromMilliseconds(10),
+                () =>
+                {
+                    Interlocked.Increment(ref fired);
+                    return Task.CompletedTask;
+                });
+
+            debouncer.Trigger();
+            await Task.Delay(100);
+            debouncer.Trigger();
+            await Task.Delay(100);
+
+            Assert.Equal(2, fired);
+        }
+
+        [Fact]
+        public async Task DisposeCancelsAPendingFiring()
+        {
+            var fired = 0;
+            var debouncer = new Debouncer(
+                TimeSpan.FromMilliseconds(50),
+                () =>
+                {
+                    Interlocked.Increment(ref fired);
+                    return Task.CompletedTask;
+                });
+
+            debouncer.Trigger();
+            debouncer.Dispose();
+
+            await Task.Delay(150);
+            Assert.Equal(0, fired);
+        }
+
+        [Fact]
+        public async Task AThrowingActionDoesNotBreakLaterTriggers()
+        {
+            var attempts = 0;
+            using var debouncer = new Debouncer(
+                TimeSpan.FromMilliseconds(10),
+                () =>
+                {
+                    Interlocked.Increment(ref attempts);
+                    throw new InvalidOperationException("boom");
+                });
+
+            debouncer.Trigger();
+            await Task.Delay(100);
+            debouncer.Trigger();
+            await Task.Delay(100);
+
+            Assert.Equal(2, attempts);
+        }
+    }
+
+    // The lock-republish ordering guard.
+    public class GenerationGateTests
+    {
+        [Fact]
+        public void NextIsStrictlyIncreasing()
+        {
+            var gate = new GenerationGate();
+            var a = gate.Next();
+            var b = gate.Next();
+            var c = gate.Next();
+
+            Assert.True(a < b);
+            Assert.True(b < c);
+        }
+
+        [Fact]
+        public void InOrderGenerationsAllCommit()
+        {
+            var gate = new GenerationGate();
+            var g1 = gate.Next();
+            var g2 = gate.Next();
+
+            Assert.True(gate.TryCommit(g1));
+            Assert.True(gate.TryCommit(g2));
+        }
+
+        [Fact]
+        public void AnOlderGenerationArrivingAfterANewerOneIsRejected()
+        {
+            var gate = new GenerationGate();
+            var older = gate.Next();
+            var newer = gate.Next();
+
+            // The newer write finishes first (e.g. a faster disk write for
+            // a later-started recompute)...
+            Assert.True(gate.TryCommit(newer));
+
+            // ...and the older one, finishing late, must never win.
+            Assert.False(gate.TryCommit(older));
+        }
+
+        [Fact]
+        public void TheSameGenerationCommittedTwiceOnlySucceedsOnce()
+        {
+            var gate = new GenerationGate();
+            var g = gate.Next();
+
+            Assert.True(gate.TryCommit(g));
+            Assert.False(gate.TryCommit(g));
+        }
+
+        [Fact]
+        public void ANeverIssuedGenerationOfZeroIsRejectedOnceAnythingHasCommitted()
+        {
+            var gate = new GenerationGate();
+            var g1 = gate.Next();
+            Assert.True(gate.TryCommit(g1));
+
+            // Generation 0 (or any value <= the committed high-water mark)
+            // must never be accepted, even though Next() itself never
+            // returns 0 (Interlocked.Increment starts at 1) — defends
+            // against a caller passing an uninitialised default(long).
+            Assert.False(gate.TryCommit(0));
+        }
+    }
+
+    // The plain-file Activity Log mirror.
+    public class DiagnosticsLogTests
+    {
+        [Fact]
+        public void PathIsRootedUnderTheGivenHome()
+        {
+            Assert.Equal(
+                System.IO.Path.Combine("/tmp/home-for-test", ".be-code", "visualstudio.log"),
+                DiagnosticsLog.PathFor("/tmp/home-for-test"));
+        }
+
+        [Fact]
+        public void FormatsATabSeparatedLineWithTheException()
+        {
+            var ts = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+            var line = DiagnosticsLog.FormatLine(ts, "ERROR", 4242, "BECodePackage", "boom", "System.Exception: boom");
+
+            Assert.Equal(ts.ToString("O") + "\tERROR\t4242\tBECodePackage\tboom\tSystem.Exception: boom", line);
+        }
+
+        [Fact]
+        public void OmitsTheTrailingFieldWhenThereIsNoException()
+        {
+            var ts = DateTimeOffset.UtcNow;
+            var line = DiagnosticsLog.FormatLine(ts, "INFO", 1, "ctx", "hello");
+
+            Assert.Equal(ts.ToString("O") + "\tINFO\t1\tctx\thello", line);
+        }
+
+        [Fact]
+        public void FlattensEmbeddedNewlinesAndTabsSoOneEntryIsOneLine()
+        {
+            var ts = DateTimeOffset.UtcNow;
+            var line = DiagnosticsLog.FormatLine(ts, "ERROR", 1, "ctx", "line one\nline two\r\nline three\ttabbed");
+
+            Assert.DoesNotContain("\n", line.Substring(line.IndexOf("ctx", StringComparison.Ordinal)));
+            Assert.Contains("line one line two line three tabbed", line);
+        }
+
+        [Theory]
+        [InlineData(0, false)]
+        [InlineData(1024 * 1024, false)]
+        [InlineData(1024 * 1024 + 1, true)]
+        [InlineData(5 * 1024 * 1024, true)]
+        public void ShouldTruncateOnlyOverOneMebibyte(long sizeBytes, bool expected)
+        {
+            Assert.Equal(expected, DiagnosticsLog.ShouldTruncate(sizeBytes));
+        }
+    }
+
+    // Rooting a diagnostic's project-relative FileName.
+    public class PathRootingTests
+    {
+        [Fact]
+        public void AnAlreadyRootedPathIsReturnedUnchanged()
+        {
+            var result = PathRooting.Root("/repo/src/Foo.cs", new[] { "/repo/other" }, _ => false);
+            Assert.Equal("/repo/src/Foo.cs", result);
+        }
+
+        [Fact]
+        public void PicksTheFirstCandidateWhoseCombinedPathExists()
+        {
+            var existing = new HashSet<string> { System.IO.Path.Combine("/repo/proj2", "Foo.cs") };
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj1", "/repo/proj2" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj2", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void PrefersTheProjectDirectoryOverTheSolutionDirectoryWhenBothExist()
+        {
+            var existing = new HashSet<string>
+            {
+                System.IO.Path.Combine("/repo/proj", "Foo.cs"),
+                System.IO.Path.Combine("/repo", "Foo.cs"),
+            };
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj", "/repo" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void FallsBackToTheFirstCandidateWhenNoneExist()
+        {
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj", "/repo" }, _ => false);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void EmptyCandidateDirectoriesAreSkipped()
+        {
+            var existing = new HashSet<string> { System.IO.Path.Combine("/repo", "Foo.cs") };
+            var result = PathRooting.Root("Foo.cs", new[] { null, "", "/repo" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo", "Foo.cs"), result);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public void ANullOrEmptyFileNameIsReturnedAsIs(string? fileName)
+        {
+            var result = PathRooting.Root(fileName, new[] { "/repo" }, _ => true);
+            Assert.Equal(fileName, result);
+        }
+
+        [Fact]
+        public void NoCandidateDirectoriesAtAllReturnsTheBareFileName()
+        {
+            var result = PathRooting.Root("Foo.cs", Array.Empty<string>(), _ => false);
+            Assert.Equal("Foo.cs", result);
+        }
+    }
+}

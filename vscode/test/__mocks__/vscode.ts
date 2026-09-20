@@ -53,3 +53,14 @@ export const window = {
 export const workspace = {
   registerTextDocumentContentProvider: vi.fn(() => ({ dispose() {} })),
 };
+
+// Only what DebugManager's constructor touches when registerDebugTools runs
+// (registerDebugAdapterTrackerFactory, onDidStartDebugSession,
+// onDidTerminateDebugSession) — enough for manifest.test.ts to build the
+// registry without a real extension host. None of debug.ts's handler bodies
+// run in that test, so nothing else here is needed yet.
+export const debug = {
+  registerDebugAdapterTrackerFactory: vi.fn(() => ({ dispose() {} })),
+  onDidStartDebugSession: vi.fn(() => ({ dispose() {} })),
+  onDidTerminateDebugSession: vi.fn(() => ({ dispose() {} })),
+};

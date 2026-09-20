@@ -1,0 +1,110 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <OutputType>Library</OutputType>
+    <RootNamespace>BECode.VisualStudio</RootNamespace>
+    <AssemblyName>BECode.VisualStudio</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <!-- This project is compiled here (Linux) but never RUN here: only
+         .vsix packaging and behaviour need Windows/devenv.exe. See the host
+         design, section 0/§1.3. -->
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The .NET Framework 4.7.2 reference assemblies, so the compiler
+         resolves System.* against net472 rather than whatever framework
+         happens to be installed on this Linux machine. Never shipped
+         (PrivateAssets="all"). -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+
+    <!-- The Visual Studio SDK itself: DTE/EnvDTE, the shell, the text
+         manager, the difference service, the Error List, IVsInfoBar*, MEF
+         host services, etc. — everything BECodePackage/VisualStudioEditorHost/
+         VisualStudioDebugHost/RoslynNavigator/ErrorListReader/DiffReview
+         need. ExcludeAssets="runtime": these assemblies ship WITH Visual
+         Studio itself; a VSIX must never carry its own copies (host design
+         §1.1/§1.2 — the exact failure mode this avoids is a FileLoadException
+         at package load when the VSIX's copy conflicts with devenv.exe's
+         own binding redirects). -->
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.6.36389" ExcludeAssets="runtime" />
+
+    <!-- Roslyn (VisualStudioWorkspace, SymbolFinder, ...) for
+         RoslynNavigator's definition/references/hover. Pinned to the LOWEST
+         supported Roslyn (matching the 17.6 manifest floor); a newer Roslyn
+         hosted by 2026 binds forward against this since only long-stable
+         public surface is used (host design §1.2). Never shipped — Visual
+         Studio's own Roslyn is what actually runs. -->
+    <PackageReference Include="Microsoft.VisualStudio.LanguageServices" Version="4.6.0" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BECode.Bridge's own BCL package references (System.Text.Json
+         6.0.11 and friends) SHIP inside the VSIX. This looks like it
+         contradicts host design §1.1's "do not ship them", but that
+         guidance is about the Visual Studio SDK/Roslyn assemblies below,
+         not these: ExcludeAssets="runtime" on this ProjectReference would
+         withhold not just BECode.Bridge.dll's transitively-flowed packages
+         but leave devenv.exe with nothing on its probing path to resolve
+         them from at all — UseCodebase (below) registers a CodeBase for
+         the package assembly ONLY, not its dependencies. Shipping 6.0.x is
+         safe: these are OLDER than anything Visual Studio 17.6+ redirects
+         to, so for every assembly devenv's own config redirects, its newer
+         copy still wins and ours is ignored; for one it does not carry or
+         redirect at all (System.Threading.Channels is the doubtful one),
+         ours is found on the binding path ([ProvideBindingPath] below)
+         instead of the load failing. Roslyn and the Visual Studio SDK
+         assemblies still stay OUT — see the two PackageReferences above,
+         both ExcludeAssets="runtime". -->
+    <ProjectReference Include="..\BECode.Bridge\BECode.Bridge.csproj" />
+  </ItemGroup>
+
+  <!-- VSIX packaging: Windows-only. Microsoft.VSSDK.BuildTools brings in the
+       MSBuild targets that turn this class library into a .vsix (pkgdef
+       generation, the VSIX container, the manifest, deployment) and are not
+       resolvable/buildable on Linux (they shell out to VSIXInstaller.exe
+       etc.); gating the whole PackageReference keeps `dotnet build` a
+       plain class-library compile on this machine, so CI and Linux
+       development never need the VSSDK tooling. -->
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.6.2164" PrivateAssets="all" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <UseCodebase>true</UseCodebase>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <CreateVsixContainer>true</CreateVsixContainer>
+    <DeployExtension>false</DeployExtension>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>
+    <!-- The Microsoft.VSSDK.BuildTools NuGet package auto-imports its own
+         Microsoft.VsSDK.targets (an SDK-style project needs no explicit
+         "$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" <Import> the way an
+         old-style VSIX .csproj did); adding one back would duplicate the
+         import and break the build. -->
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <!-- Update, not Include — the SDK's default glob
+         already includes source.extension.vsixmanifest as a None item;
+         Include would duplicate it (CS2002-equivalent MSBuild warning). -->
+    <!-- The MIT notice has to travel with the .NET assemblies the container
+         carries. -->
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md">
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <None Update="source.extension.vsixmanifest">
+      <SubType>Designer</SubType>
+    </None>
+  </ItemGroup>
+
+</Project>

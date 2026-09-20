@@ -555,6 +555,23 @@ prints the current mode, `/review <mode>` changes it for the session.
 the extension's own commands/settings and `docs/vscode-live-checklist.md` for a manual
 end-to-end checklist.
 
+## Visual Studio
+
+`visualstudio/` is the same bridge for Visual Studio 2022 (17.6 or later) and 2026: one
+`.vsix`, built on Windows with `visualstudio\build.ps1`, giving BE-Code the same `ide_*`
+tools — context, the Error List, definition/references/hover for C# and VB, the debugger —
+and a diff of each proposed write in Visual Studio's own difference viewer with Accept,
+Accept all and Reject. Visual Studio's terminals do not announce themselves the way VS
+Code's do, so there is nothing to pass: run `be-code` in any terminal under the solution
+and it attaches to the running Visual Studio whose solution covers that directory.
+`--ide`, `--no-ide`, `ide.enabled` and `ide.review` mean what they mean for VS Code; from
+a separate terminal `ide.review: auto` resolves to `both`, so the terminal prompt and the
+editor diff are both live and the first answer wins.
+
+**As of 0.12.0 the Visual Studio layer compiles against the real SDK but has never been
+run**; `visualstudio/README.md` says which parts are proven and what this version does not
+do, and `visualstudio/WINDOWS-CHECKLIST.md` is how it gets proven.
+
 ## Shell safety & background processes
 
 Commands are matched against `shell_deny` (never runs, never prompts) and `shell_allow`
@@ -760,8 +777,11 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   Since 0.11.1 this is a ceiling: the map is built to at most a fifth of the usable
   context and rebuilt when the window changes, with a notice when the budget was cut.
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
-- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the VS Code
-  editor bridge; see "VS Code"
+- `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the editor
+  bridge; see "VS Code". With `ide.enabled` on, BE-Code auto-attaches in `TERM_PROGRAM=vscode`
+  terminals as before, and also (without needing `--ide`) to a running Visual Studio whose
+  advertised workspace covers the current one — a covering VS Code lock never auto-attaches
+  outside its own terminal.
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for
@@ -788,12 +808,19 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.11.0 — context handling: a task record that survives compaction, native Ollama
-with a configurable window, and a model loader gated on consent (see the changelog).
+v0.12.0 — a Visual Studio 2022/2026 extension beside the VS Code one (compiled against the
+real SDK, not yet run: see `visualstudio/README.md`), and an editor review that can be
+withdrawn without wedging the bridge. v0.11.x — context handling: a task record that survives
+compaction, native Ollama with a configurable window, a model loader gated on consent, and a
+compaction target that can be reached (see the changelog).
 Earlier milestones, from v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
 think-filtering, model compaction, plan mode, git awareness + /commit + /init, custom
 commands + hooks, MCP client, reviewer routing, shell allow/deny + background processes,
 bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Earlier:
 v0.2.0 (dual UI, wizard, diff approvals, sessions), v0.1.0 (core loop + verification).
-4-platform builds; 15 tested packages plus scripted-model e2e (repair loop, MCP attach,
+4-platform builds; 21 tested Go packages, the two editor extensions' own suites, and scripted-model e2e (repair loop, MCP attach,
 undo, JSON mode, bench harness) driven through the real binary.
+
+## License
+
+MIT — see `LICENSE`.

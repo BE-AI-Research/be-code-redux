@@ -270,16 +270,55 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	return p, ag, nil
 }
 
-// attachIDE connects to an editor bridge when one is advertised and wanted,
-// registers its tools as ide_*, and wires context and review. Returns nil
-// (and prints nothing beyond an explicit --ide failure) when there is no
-// bridge to connect to, so ordinary terminal runs stay silent.
+// chooseIDELock decides which live lock (if any) attachIDE should connect
+// to, and whether the --ide "nothing listening" warning is due, without
+// dialing anything. vscodeTerminal is TERM_PROGRAM=="vscode"; ideFlag is
+// --ide.
 //
-// Wanting an editor is decided in this order: --no-ide always wins; --ide
-// then forces a connection attempt even when ide.enabled is false or the
-// run is headless; otherwise config must allow it, the run must be
-// interactive, and the terminal must be VS Code's own.
-func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+// With --ide or a VS Code terminal, this is today's exact rule: ide.Discover
+// (the lock covering workspace, else the newest live lock of any workspace),
+// and the warning fires whenever --ide finds nothing.
+//
+// On the quiet path (neither), only a live lock that COVERS workspace and
+// whose IDEName is "visualstudio" auto-attaches (spec §6) — a covering VS
+// Code lock does not, since VS Code still needs its own terminal or --ide —
+// and nothing is ever warned about, since silent terminals are the default.
+func chooseIDELock(dir, workspace string, vscodeTerminal, ideFlag bool) (lock *ide.Lock, warnIfMissing bool, err error) {
+	if ideFlag || vscodeTerminal {
+		l, err := ide.Discover(dir, workspace)
+		return l, ideFlag, err
+	}
+	locks, err := ide.DiscoverCovering(dir, workspace)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, l := range locks {
+		if l.IDEName == "visualstudio" {
+			return l, false, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// ideLockToAttach decides, before any network dial, which live lock (if
+// any) attachIDE should connect to. It owns every gate attachIDE used to
+// apply inline: --no-ide always wins; --ide then forces a discovery attempt
+// even when ide.enabled is false or the run is headless; otherwise
+// ide.enabled must be on and the run must be interactive. From there it
+// reads TERM_PROGRAM and hands the lock directory to chooseIDELock, which
+// decides whether the terminal is VS Code's own (today's discovery,
+// unchanged) or the quiet path, where only a covering Visual Studio lock
+// attaches. It also owns the "--ide given but nothing is listening" warning
+// (never printed on the quiet path) since that is part of the same
+// before-dialling decision.
+//
+// Every interactive launch with ide.enabled on now reaches ide.LockDir()
+// and prunes it — previously only a VS Code terminal or --ide did. That is
+// safe: both the VS Code and Visual Studio extensions write their lock file
+// atomically (temp file + rename), and the *.json suffix filter here can
+// never match an in-progress temp file, so there is nothing to race with a
+// partially written lock.
+func ideLockToAttach(cfg *config.Config, headless bool, workspace string) *ide.Lock {
 	if flagNoIDE {
 		return nil
 	}
@@ -292,19 +331,29 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 		if headless {
 			return nil
 		}
-		if os.Getenv("TERM_PROGRAM") != "vscode" {
-			return nil
-		}
 	}
 	dir, err := ide.LockDir()
 	if err != nil {
 		return nil
 	}
-	lock, err := ide.Discover(dir, reg.Root)
+	vscodeTerminal := os.Getenv("TERM_PROGRAM") == "vscode"
+	lock, warnIfMissing, err := chooseIDELock(dir, workspace, vscodeTerminal, flagIDE)
 	if err != nil || lock == nil {
-		if flagIDE {
+		if warnIfMissing {
 			fmt.Fprintln(os.Stderr, "warn: --ide given but no editor bridge is listening (is the BE-Code extension installed and active?)")
 		}
+		return nil
+	}
+	return lock
+}
+
+// attachIDE connects to an editor bridge when one is advertised and wanted
+// (ideLockToAttach), registers its tools as ide_*, and wires context and
+// review. Returns nil when there is no bridge to connect to, so ordinary
+// terminal runs stay silent.
+func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+	lock := ideLockToAttach(cfg, headless, reg.Root)
+	if lock == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -316,6 +365,7 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 	}
 	names := reg.AttachMCPPrefixed(sess.Client, "ide_")
 	ag.IDEName = lock.IDEName
+	reg.EditorName = agent.EditorLabel(lock.IDEName)
 	if ag.IDEName == "" {
 		ag.IDEName = "ide"
 	}
@@ -327,13 +377,13 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 	if cfg.IDE.AutoContext && !headless {
 		ag.ContextProvider = sess.ContextNote
 	}
-	ag.SetGuidance(agent.IDEGuidance)
+	ag.SetGuidance(agent.IDEGuidanceFor(lock.IDEName))
 	ag.RefreshSystem() // rebuilds the known-tool list (for embedded tool-call parsing) now that ide_* tools are attached, and recomposes the system prompt
 	// The TUI prints this itself (a dimmed transcript line) because stderr
 	// written before the alt screen opens is wiped; plain and headless
 	// runs have no alt screen, so stderr is the right place there.
 	if headless || usePlainUI(cfg) {
-		fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+		fmt.Fprintf(os.Stderr, "%s connected: %d tools\n", agent.EditorLabel(lock.IDEName), len(names))
 	}
 	return sess
 }
@@ -611,6 +661,7 @@ func runInteractive(cmd *cobra.Command) error {
 		}
 		// In-process: no client roster, so auto resolves to the editor.
 		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
+		coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 		repl.SetReview(coord)
 		ag.Tools.ReviewWrite = coord.Decide
 		// The "reviewing change in VS Code…" note belongs to reviews that
@@ -628,6 +679,7 @@ func runInteractive(cmd *cobra.Command) error {
 	}
 	s := tui.NewSession(cfg, ag, p)
 	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
+	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }

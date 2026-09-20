@@ -43,7 +43,7 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 		// and the note would be a lie the user cannot act on.
 		inEditor := r.ReviewInvolvesEditor == nil || r.ReviewInvolvesEditor()
 		if r.OnStatus != nil && inEditor {
-			r.OnStatus("reviewing change in VS Code…")
+			r.OnStatus("reviewing change in " + r.editorName() + "…")
 		}
 		d := r.ReviewWrite(ctx, rel, oldContent, newContent)
 		if r.OnStatus != nil && inEditor {
