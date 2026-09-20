@@ -21,6 +21,13 @@ namespace BECode.VisualStudio
     [Guid(PackageGuidString)]
     [ProvideAutoLoad(UIContextGuids80.NoSolution, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
+    // Fix round 1, C-2: joins this package's own folder onto devenv's
+    // assembly probing path, so BECode.Bridge.dll and the BCL assemblies
+    // shipped alongside it (System.Text.Json and friends — see the csproj's
+    // ProjectReference comment) are resolvable at load time. UseCodebase
+    // (in the csproj) registers a CodeBase for BECode.VisualStudio.dll
+    // ITSELF only; it does nothing for what that assembly references.
+    [ProvideBindingPath]
     public sealed class BECodePackage : AsyncPackage
     {
         public const string PackageGuidString = "4f0c8f6a-3b2f-4c2b-9e6a-8a2c1c7a9d5e";
