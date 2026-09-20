@@ -93,13 +93,31 @@ func NewHistory(system string, budget int) *History {
 	}
 }
 
+// Floor is what no compaction can remove: the system prompt and the tools
+// schema go out whole with every request.
+func (h *History) Floor() int {
+	return h.MessageTokens(h.System) + h.Extra
+}
+
 // Target is the token count compression aims for once triggered.
+//
+// It is measured over what can actually shrink. Compaction only touches the
+// conversation, so a target of "half the limit" is unreachable the moment the
+// fixed floor is bigger than that — a 36 KB system prompt at a 32k window put
+// the floor at 16.7k tokens against a target of 10.9k, and every compaction
+// reported "compacted to 18569 tokens (target 10982)" and fired again a few
+// turns later. The target is the floor plus TargetFraction of the room above
+// it, so it is always reachable and always leaves real runway.
 func (h *History) Target() int {
 	f := h.TargetFraction
 	if f <= 0 || f >= 1 {
 		f = 0.5
 	}
-	return int(float64(h.Limit()) * f)
+	limit, floor := h.Limit(), h.Floor()
+	if floor >= limit {
+		return limit // nothing compressible fits; the caller is told why elsewhere
+	}
+	return floor + int(float64(limit-floor)*f)
 }
 
 // Limit is the budget available to System+Messages+Extra after reserving

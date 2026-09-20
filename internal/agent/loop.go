@@ -150,6 +150,11 @@ type Agent struct {
 	saveDisabled bool
 	saveOwner    int
 	saveWarned   bool
+	// repoMapBuilt is the byte budget the current repo map was built to, and
+	// repoMapNoticed the cut the user has already been told about.
+	repoMapBuilt       int
+	repoMapNoticed     int
+	heavyPromptNoticed bool
 	// queuedNotices are warnings raised during wiring, before a UI existed.
 	queuedNotices []string
 	queuedMu      sync.Mutex
@@ -226,9 +231,8 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 		Tools:        reg,
 		projectNotes: TrimProjectNotes(projectNotes),
 	}
-	if cfg.RepoMap {
-		a.repoMap = repomap.Build(reg.Root, cfg.RepoMapBudget)
-	}
+	// The repo map is built once the History exists (below), to a budget the
+	// window decides: see fitRepoMap.
 	a.retryBase = 2 * time.Second
 	a.stallAfter = 45 * time.Second
 	if cfg.StallNoticeSeconds > 0 {
@@ -241,6 +245,13 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	// against a 16k budget until the real window arrives.
 	budget, _, _ := a.History.Scalars()
 	a.applyReserve(budget) // until a real window is detected
+	// Now that there is a budget to measure against, build the repo map to
+	// what it allows. fitRepoMap rebuilds it if the real window differs.
+	if cfg.RepoMap {
+		a.repoMapBuilt = a.repoMapBudget()
+		a.repoMap = repomap.Build(reg.Root, a.repoMapBuilt)
+		a.History.System.Content = a.composeSystem("")
+	}
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}
@@ -772,7 +783,8 @@ func (a *Agent) RepoMap() string { return a.repoMap }
 // RefreshRepoMap rebuilds the outline (files changed since session start).
 func (a *Agent) RefreshRepoMap() {
 	if a.Cfg.RepoMap {
-		a.repoMap = repomap.Build(a.Tools.Root, a.Cfg.RepoMapBudget)
+		a.repoMapBuilt = a.repoMapBudget()
+		a.repoMap = repomap.Build(a.Tools.Root, a.repoMapBuilt)
 	}
 }
 
@@ -892,6 +904,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.RefreshRepoMap()
 		a.History.System.Content = a.composeSystem("")
 	}
+	// The window may have been resolved, or changed, since the map was built.
+	a.fitRepoMap()
+	a.warnHeavyPrompt()
 	if gi := gitctx.Summary(ctx, a.Tools.Root); gi != "" {
 		a.lastGitInfo = gi
 		a.History.System.Content = a.composeSystem(gi)

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/repomap"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -82,6 +83,76 @@ func (a *Agent) memoryBudget() int {
 		b = max
 	}
 	return b
+}
+
+const (
+	// repoMapShare is the repo map's slice of the usable context. With the
+	// working-memory block's quarter that leaves the conversation at least
+	// half, which is the half compaction has to work with.
+	repoMapShare = 0.20
+	repoMapFloor = 2048
+)
+
+// repoMapBudget is the byte cap the repo map is built to: repo_map_budget is
+// a ceiling, and the window decides how much of it there is room for. A fixed
+// 32 KB at a 32k window was 70% of the usable context before the first
+// message.
+func (a *Agent) repoMapBudget() int {
+	max := a.Cfg.RepoMapBudget
+	if max <= 0 || a.History == nil {
+		return max
+	}
+	_, _, ratio := a.History.Scalars()
+	if ratio <= 0 {
+		ratio = defaultCharsPerToken
+	}
+	b := int(float64(a.History.Limit()) * ratio * repoMapShare)
+	if b < repoMapFloor {
+		b = repoMapFloor
+	}
+	if b > max {
+		b = max
+	}
+	return b
+}
+
+// fitRepoMap rebuilds the repo map when the budget it was built to no longer
+// matches the window, and says once when the configured budget was cut. It
+// runs on the agent goroutine at the top of a request: a rebuild walks the
+// workspace, which has no business on a UI thread.
+func (a *Agent) fitRepoMap() {
+	if !a.Cfg.RepoMap {
+		return
+	}
+	want := a.repoMapBudget()
+	if want == a.repoMapBuilt {
+		return
+	}
+	a.repoMap = repomap.Build(a.Tools.Root, want)
+	a.repoMapBuilt = want
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem(a.lastGitInfo)
+	}
+	if want < a.Cfg.RepoMapBudget && want != a.repoMapNoticed {
+		a.repoMapNoticed = want
+		a.notice("repo map built to %d bytes, not the configured repo_map_budget of %d: this window leaves room for that much of it", want, a.Cfg.RepoMapBudget)
+	}
+}
+
+// warnHeavyPrompt says once when the fixed prompt alone takes more than half
+// the usable context. Compaction cannot shrink it, so it will fire often, and
+// the user has the knobs that would help.
+func (a *Agent) warnHeavyPrompt() {
+	if a.heavyPromptNoticed || a.History == nil {
+		return
+	}
+	floor, limit := a.History.Floor(), a.History.Limit()
+	if floor*2 <= limit {
+		return
+	}
+	a.heavyPromptNoticed = true
+	a.notice("the fixed prompt is %d of %d usable tokens, more than half: compaction cannot shrink it and will fire often. "+
+		"A larger context_window, or a smaller repo_map_budget or engine.budget, gives the conversation more room", floor, limit)
 }
 
 // workingMemory is the block as the prompt and the compaction request both
