@@ -300,18 +300,25 @@ func chooseIDELock(dir, workspace string, vscodeTerminal, ideFlag bool) (lock *i
 	return nil, false, nil
 }
 
-// attachIDE connects to an editor bridge when one is advertised and wanted,
-// registers its tools as ide_*, and wires context and review. Returns nil
-// (and prints nothing beyond an explicit --ide failure) when there is no
-// bridge to connect to, so ordinary terminal runs stay silent.
+// ideLockToAttach decides, before any network dial, which live lock (if
+// any) attachIDE should connect to. It owns every gate attachIDE used to
+// apply inline: --no-ide always wins; --ide then forces a discovery attempt
+// even when ide.enabled is false or the run is headless; otherwise
+// ide.enabled must be on and the run must be interactive. From there it
+// reads TERM_PROGRAM and hands the lock directory to chooseIDELock, which
+// decides whether the terminal is VS Code's own (today's discovery,
+// unchanged) or the quiet path, where only a covering Visual Studio lock
+// attaches. It also owns the "--ide given but nothing is listening" warning
+// (never printed on the quiet path) since that is part of the same
+// before-dialling decision.
 //
-// Wanting an editor is decided in this order: --no-ide always wins; --ide
-// then forces a connection attempt even when ide.enabled is false or the
-// run is headless; otherwise config must allow it and the run must be
-// interactive. From there chooseIDELock decides whether the terminal is VS
-// Code's own (today's discovery, unchanged) or the quiet path, where only a
-// covering Visual Studio lock attaches.
-func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+// Every interactive launch with ide.enabled on now reaches ide.LockDir()
+// and prunes it — previously only a VS Code terminal or --ide did. That is
+// safe: both the VS Code and Visual Studio extensions write their lock file
+// atomically (temp file + rename), and the *.json suffix filter here can
+// never match an in-progress temp file, so there is nothing to race with a
+// partially written lock.
+func ideLockToAttach(cfg *config.Config, headless bool, workspace string) *ide.Lock {
 	if flagNoIDE {
 		return nil
 	}
@@ -330,11 +337,23 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 		return nil
 	}
 	vscodeTerminal := os.Getenv("TERM_PROGRAM") == "vscode"
-	lock, warnIfMissing, err := chooseIDELock(dir, reg.Root, vscodeTerminal, flagIDE)
+	lock, warnIfMissing, err := chooseIDELock(dir, workspace, vscodeTerminal, flagIDE)
 	if err != nil || lock == nil {
 		if warnIfMissing {
 			fmt.Fprintln(os.Stderr, "warn: --ide given but no editor bridge is listening (is the BE-Code extension installed and active?)")
 		}
+		return nil
+	}
+	return lock
+}
+
+// attachIDE connects to an editor bridge when one is advertised and wanted
+// (ideLockToAttach), registers its tools as ide_*, and wires context and
+// review. Returns nil when there is no bridge to connect to, so ordinary
+// terminal runs stay silent.
+func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headless bool) *ide.Session {
+	lock := ideLockToAttach(cfg, headless, reg.Root)
+	if lock == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

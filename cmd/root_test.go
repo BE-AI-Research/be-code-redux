@@ -497,10 +497,10 @@ func TestChooseIDELockPrefersVisualStudioOverNewerCoveringVSCodeQuietly(t *testi
 	}
 }
 
-// --no-ide is handled entirely in attachIDE before chooseIDELock would ever
-// be consulted; this documents that attachIDE's early return means
-// chooseIDELock's decision is never reached, rather than duplicating the
-// flag inside chooseIDELock itself.
+// --no-ide is handled entirely in ideLockToAttach before chooseIDELock would
+// ever be consulted; this documents that attachIDE's own early return (via
+// ideLockToAttach) means chooseIDELock's decision is never reached, rather
+// than duplicating the flag inside chooseIDELock itself.
 func TestNoIDEFlagShortCircuitsAttachIDE(t *testing.T) {
 	origIDE, origNoIDE := flagIDE, flagNoIDE
 	t.Cleanup(func() { flagIDE, flagNoIDE = origIDE, origNoIDE })
@@ -511,5 +511,198 @@ func TestNoIDEFlagShortCircuitsAttachIDE(t *testing.T) {
 	reg := &tools.Registry{Root: t.TempDir()}
 	if sess := attachIDE(cfg, reg, nil, false); sess != nil {
 		t.Fatalf("got session %+v, want nil", sess)
+	}
+}
+
+// --- ideLockToAttach: the wiring attachIDE relies on before it ever dials
+// anything (TERM_PROGRAM, ide.enabled, headless, ide.LockDir() itself) ---
+//
+// These tests write real lock files into the package's isolated
+// ide.LockDir() (HOME is pointed at a throwaway directory for the whole
+// package by TestMain in testmain_test.go) rather than passing a directory
+// in, specifically so a typo in the TERM_PROGRAM comparison or a swapped
+// gate is caught: chooseIDELock's own unit tests take vscodeTerminal as a
+// parameter and so can never exercise the os.Getenv call or the gates ahead
+// of it.
+
+// requireIsolatedIDELockDir returns ide.LockDir(), first asserting it is
+// underneath the package's isolated test HOME. These tests write real lock
+// files, so this must fail loudly rather than ever reach a developer's
+// actual ~/.be-code/ide.
+func requireIsolatedIDELockDir(t *testing.T) string {
+	t.Helper()
+	dir, err := ide.LockDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := os.Getenv("HOME")
+	if home == "" || !strings.HasPrefix(dir, home) || !strings.Contains(dir, "be-code-test-home") {
+		t.Fatalf("refusing to write a lock file: ide.LockDir() = %q is not under the isolated test HOME (HOME=%q); is testmain_test.go's TestMain guard still in place?", dir, home)
+	}
+	return dir
+}
+
+// writeLiveIDELock writes a lock file into dir (the isolated ide.LockDir())
+// and removes it when the test ends, so lock files from one test never leak
+// into another sharing the same package-wide temp HOME.
+func writeLiveIDELock(t *testing.T, dir string, l ide.Lock, mtime time.Time) {
+	t.Helper()
+	b, err := json.Marshal(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, strconv.Itoa(l.PID)+"-"+strconv.Itoa(l.Port)+".json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Remove(p) })
+}
+
+// setIDEFlags sets flagIDE/flagNoIDE for the duration of the test and
+// restores them on cleanup.
+func setIDEFlags(t *testing.T, ideFlag, noIDEFlag bool) {
+	t.Helper()
+	origIDE, origNoIDE := flagIDE, flagNoIDE
+	t.Cleanup(func() { flagIDE, flagNoIDE = origIDE, origNoIDE })
+	flagIDE, flagNoIDE = ideFlag, noIDEFlag
+}
+
+// captureStderr (used below) is already declared in engine_test.go.
+
+// TERM_PROGRAM="" + ide.enabled + a live visualstudio lock covering the
+// workspace: attaches. This is the case the quiet path exists for.
+func TestIDELockToAttachQuietPathAttachesToCoveringVisualStudio(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "")
+	setIDEFlags(t, false, false)
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41101, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{ws}}, time.Now())
+
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+
+	lock := ideLockToAttach(cfg, false, ws)
+	if lock == nil || lock.IDEName != "visualstudio" {
+		t.Fatalf("got %+v, want the visualstudio lock", lock)
+	}
+}
+
+// TERM_PROGRAM="" + ide.enabled + only a covering vscode lock: does not
+// attach — VS Code still needs its own terminal or --ide.
+func TestIDELockToAttachQuietPathIgnoresCoveringVSCode(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "")
+	setIDEFlags(t, false, false)
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41102, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{ws}}, time.Now())
+
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+
+	lock := ideLockToAttach(cfg, false, ws)
+	if lock != nil {
+		t.Fatalf("got %+v, want nil", lock)
+	}
+}
+
+// TERM_PROGRAM="vscode" + ide.enabled + a covering vscode lock: attaches,
+// exactly as before this change.
+func TestIDELockToAttachVSCodeTerminalAttachesToCoveringVSCode(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "vscode")
+	setIDEFlags(t, false, false)
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41103, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{ws}}, time.Now())
+
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+
+	lock := ideLockToAttach(cfg, false, ws)
+	if lock == nil || lock.IDEName != "vscode" {
+		t.Fatalf("got %+v, want the vscode lock", lock)
+	}
+}
+
+// ide.enabled=false blocks discovery entirely unless --ide overrides it.
+func TestIDELockToAttachRespectsEnabledAndIDEFlag(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "")
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41104, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{ws}}, time.Now())
+	cfg := config.Default()
+	cfg.IDE.Enabled = false
+
+	setIDEFlags(t, false, false)
+	if lock := ideLockToAttach(cfg, false, ws); lock != nil {
+		t.Fatalf("ide.enabled=false without --ide: got %+v, want nil", lock)
+	}
+
+	setIDEFlags(t, true, false)
+	lock := ideLockToAttach(cfg, false, ws)
+	if lock == nil || lock.IDEName != "visualstudio" {
+		t.Fatalf("--ide with ide.enabled=false: got %+v, want the visualstudio lock", lock)
+	}
+}
+
+// A headless run never discovers unless --ide overrides it (existing guard,
+// unchanged).
+func TestIDELockToAttachRespectsHeadlessAndIDEFlag(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "")
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41105, Token: "a", IDEName: "visualstudio", WorkspaceFolders: []string{ws}}, time.Now())
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+
+	setIDEFlags(t, false, false)
+	if lock := ideLockToAttach(cfg, true, ws); lock != nil {
+		t.Fatalf("headless without --ide: got %+v, want nil", lock)
+	}
+
+	setIDEFlags(t, true, false)
+	lock := ideLockToAttach(cfg, true, ws)
+	if lock == nil || lock.IDEName != "visualstudio" {
+		t.Fatalf("headless with --ide: got %+v, want the visualstudio lock", lock)
+	}
+}
+
+// --no-ide wins over --ide, ide.enabled, and a covering lock that would
+// otherwise attach on any path.
+func TestIDELockToAttachNoIDEBeatsEverything(t *testing.T) {
+	dir := requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "vscode")
+	ws := t.TempDir()
+	writeLiveIDELock(t, dir, ide.Lock{PID: os.Getpid(), Port: 41106, Token: "a", IDEName: "vscode", WorkspaceFolders: []string{ws}}, time.Now())
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+	setIDEFlags(t, true, true) // both --ide and --no-ide given
+
+	if lock := ideLockToAttach(cfg, false, ws); lock != nil {
+		t.Fatalf("--no-ide must win: got %+v, want nil", lock)
+	}
+}
+
+// The quiet path with no live lock at all attaches nothing and prints
+// nothing to stderr — silent terminals are the default.
+func TestIDELockToAttachQuietPathNothingLiveIsSilent(t *testing.T) {
+	requireIsolatedIDELockDir(t)
+	t.Setenv("TERM_PROGRAM", "")
+	setIDEFlags(t, false, false)
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.IDE.Enabled = true
+
+	var lock *ide.Lock
+	stderr := captureStderr(t, func() {
+		lock = ideLockToAttach(cfg, false, ws)
+	})
+	if lock != nil {
+		t.Fatalf("got %+v, want nil", lock)
+	}
+	if stderr != "" {
+		t.Fatalf("quiet path printed to stderr: %q", stderr)
 	}
 }
