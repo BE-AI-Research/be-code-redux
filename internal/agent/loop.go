@@ -1002,6 +1002,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 
 	emptyRetries, lengthRetries := 0, 0
 	effort := a.Cfg.ReasoningEffort
+	overflowTried := false // one recovery from a context-window refusal per run
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
 		a.engineDo("turn", func(st *engine.Store) { st.NextTurn() })
 		// Anything the user typed while tools were running goes in now,
@@ -1048,6 +1049,19 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 				a.compat = true
 				a.notice("backend rejected native tool calls; switching to embedded format")
 				continue
+			}
+			// A prompt larger than the model's loaded window: one attempt to
+			// fix it per run, and an explanation rather than the server's
+			// JSON when it cannot be (see overflow.go).
+			if pt, sw, over := contextOverflow(err); over {
+				if !overflowTried {
+					overflowTried = true
+					if a.recoverFromOverflow(ctx, pt, sw) {
+						continue
+					}
+				}
+				a.autosave(userInput)
+				return "", a.overflowError(pt, sw)
 			}
 			a.autosave(userInput) // keep the progress made before the failure
 			return "", err
