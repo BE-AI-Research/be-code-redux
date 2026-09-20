@@ -19,11 +19,6 @@ namespace BECode.VisualStudio
     /// </summary>
     internal static class Threading
     {
-        public static async Task SwitchToMainThreadAsync(CancellationToken ct)
-        {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-        }
-
         /// <summary>
         /// Hops off the main thread before a wait that must not block the
         /// UI (a debugger stop, an info-bar click, ...). <c>await
@@ -36,6 +31,19 @@ namespace BECode.VisualStudio
         /// <c>using</c> above brings into scope. That package is already a
         /// transitive dependency of <c>Microsoft.VisualStudio.SDK</c>, so no
         /// extra reference was needed.
+        ///
+        /// Design correction (see the report): there is deliberately NO
+        /// <c>Threading.SwitchToMainThreadAsync</c> counterpart to this
+        /// method any more. The VSTHRD010/VSTHRD108 analyzers only accept a
+        /// LITERAL <c>await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct)</c>
+        /// in the same lexical scope that then touches a main-thread-only
+        /// COM type as proof the thread was actually switched — routing it
+        /// through a wrapper method (as this file originally did, and as
+        /// the host design's prose reads) hides that literal call from the
+        /// analyzer and every caller then gets flagged. So every member
+        /// below calls <c>ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct)</c>
+        /// directly, in its own body (or the <see cref="Guard"/> lambda that
+        /// is its body) — never through this class.
         /// </summary>
         public static async Task SwitchToBackgroundAsync()
         {
@@ -45,23 +53,27 @@ namespace BECode.VisualStudio
 
     /// <summary>
     /// Host design §2.3: wraps every <c>IEditorHost</c>/<c>IDebugHost</c>
-    /// member. Switches to the main thread first (rule 1 above), runs the
-    /// body, and on the way out: an <see cref="OperationCanceledException"/>
-    /// caused by THIS call's own <paramref name="ct"/> passes through
-    /// unchanged (<c>IEditorHost</c>'s Ruling D4); anything else — including
-    /// an <see cref="OperationCanceledException"/> from some other cause —
-    /// is logged to the Activity Log and rethrown as
+    /// member's body for exception handling only (see
+    /// <see cref="Threading.SwitchToBackgroundAsync"/>'s doc comment for why
+    /// it no longer also performs the main-thread switch): an
+    /// <see cref="OperationCanceledException"/> caused by THIS call's own
+    /// <paramref name="ct"/> passes through unchanged (<c>IEditorHost</c>'s
+    /// Ruling D4); anything else — including an
+    /// <see cref="OperationCanceledException"/> from some other cause — is
+    /// logged to the Activity Log and rethrown as
     /// <see cref="InvalidOperationException"/>("&lt;name&gt;: &lt;message&gt;"),
-    /// which the tools layer reports as <c>isError</c>.
+    /// which the tools layer reports as <c>isError</c>. Every caller's own
+    /// <paramref name="body"/> lambda still begins with the literal
+    /// <c>await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct)</c>
+    /// the design's rule 1 asks for — Guard does not do it for them.
     /// </summary>
     internal static class Guard
     {
-        public static async Task<T> RunAsync<T>(string name, CancellationToken ct, Func<CancellationToken, Task<T>> body)
+        public static async Task<T> RunAsync<T>(string name, CancellationToken ct, Func<Task<T>> body)
         {
-            await Threading.SwitchToMainThreadAsync(ct).ConfigureAwait(true);
             try
             {
-                return await body(ct).ConfigureAwait(true);
+                return await body().ConfigureAwait(true);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -74,11 +86,11 @@ namespace BECode.VisualStudio
             }
         }
 
-        public static Task RunAsync(string name, CancellationToken ct, Func<CancellationToken, Task> body)
+        public static Task RunAsync(string name, CancellationToken ct, Func<Task> body)
         {
-            return RunAsync<object?>(name, ct, async c =>
+            return RunAsync<object?>(name, ct, async () =>
             {
-                await body(c).ConfigureAwait(true);
+                await body().ConfigureAwait(true);
                 return null;
             });
         }

@@ -106,6 +106,33 @@ namespace BECode.Bridge.Tests
         }
     }
 
+    public class DocCommentSummaryTests
+    {
+        [Fact]
+        public void ExtractsAndNormalisesASummary()
+        {
+            var xml = "<member name=\"M:Foo.Bar\">\n    <summary>\n    Does the thing.\n    Really.\n    </summary>\n</member>";
+            Assert.Equal("Does the thing. Really.", DocCommentSummary.Extract(xml));
+        }
+
+        [Fact]
+        public void ASummaryElementAtTheRootIsAlsoAccepted()
+        {
+            Assert.Equal("Hello.", DocCommentSummary.Extract("<summary>\nHello.\n</summary>"));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        [InlineData("not xml at all <")]
+        [InlineData("<member name=\"M:Foo.Bar\"><returns>an int</returns></member>")]
+        public void ReturnsNullWhenThereIsNoUsableSummary(string? xml)
+        {
+            Assert.Null(DocCommentSummary.Extract(xml));
+        }
+    }
+
     public class DiffTempFilesTests
     {
         [Theory]
