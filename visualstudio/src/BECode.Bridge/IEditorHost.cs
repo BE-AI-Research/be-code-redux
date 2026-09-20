@@ -21,6 +21,33 @@ namespace BECode.Bridge
     /// handler does (against <c>folders()</c>). <see cref="Selection"/> is the
     /// RAW, untruncated selection text (Ruling S6): the 2048-character cut
     /// vscode applies is the tool's job now, not the host's.
+    ///
+    /// Fix round 2, D8 — what each field is, matching vscode's own
+    /// <c>editor.ts</c> "context" handler field for field, so the Visual
+    /// Studio host's behaviour is a straight port rather than a guess:
+    /// <list type="bullet">
+    /// <item><see cref="File"/> is <c>""</c> when there is no active
+    /// document, or the active document is not a file on disk (e.g. a diff
+    /// view, an output pane, an untitled buffer) — never a partial or
+    /// best-effort path. <see cref="Line"/> is the 1-based line the caret
+    /// currently sits on (the "active" end of the selection — where the
+    /// caret is, which may be either end of a highlighted range) and is 0
+    /// only alongside an empty <see cref="File"/>.</item>
+    /// <item><see cref="SelStart"/> and <see cref="SelEnd"/> describe the
+    /// PRIMARY selection (Visual Studio, like vscode, may have several; only
+    /// the primary/active one is reported). When nothing is selected (a bare
+    /// caret) both are 0 and <see cref="Selection"/> is <c>""</c> — not
+    /// <see cref="Line"/> repeated. When something is selected, both are
+    /// 1-based line numbers (<see cref="SelStart"/> &lt;= <see cref="SelEnd"/>
+    /// regardless of which direction the user dragged) and
+    /// <see cref="Selection"/> is the selected text, RAW/untruncated (Ruling
+    /// S6).</item>
+    /// <item><see cref="Open"/> lists file-backed documents only — every
+    /// document currently loaded in an editor buffer (not just the visible
+    /// tabs) whose content is a real file on disk; skip diff views, output/
+    /// tool windows, untitled buffers, and anything else with no path on
+    /// disk. Absolute paths (Ruling S3).</item>
+    /// </list>
     /// </summary>
     public sealed record EditorContext(
         string File,
@@ -33,7 +60,8 @@ namespace BECode.Bridge
     /// <summary>
     /// A source location. <see cref="Path"/> is an ABSOLUTE path (Ruling S3);
     /// the tool relativises it for output, exactly where vscode's own
-    /// <c>definition</c>/<c>references</c> handlers do. <see cref="Text"/> is
+    /// <c>definition</c>/<c>references</c> handlers do. <see cref="Line"/>/
+    /// <see cref="Col"/> are 1-based (Ruling D1). <see cref="Text"/> is
     /// only populated by <see cref="IEditorHost.ReferencesAsync"/> (the
     /// source line's raw text, matching vscode's <c>references</c>
     /// formatting of <c>path:line: text</c>); <see cref="IEditorHost.DefinitionAsync"/>
@@ -49,6 +77,7 @@ namespace BECode.Bridge
     /// is one of "error", "warning", "info", "hint". <see cref="Path"/> is an
     /// ABSOLUTE path (Ruling S3); <c>DiagnosticsTools</c> relativises it for
     /// output, exactly where vscode's own <c>diagnostics</c> handler does.
+    /// <see cref="Line"/>/<see cref="Col"/> are 1-based (Ruling D1).
     /// </summary>
     public sealed record Diagnostic(string Path, int Line, int Col, string Severity, string Source, string Message);
 
@@ -74,22 +103,76 @@ namespace BECode.Bridge
     /// Visual Studio implementation (Task 6, over DTE / the text manager / the
     /// Error List / EnvDTE.Debugger / IVsDifferenceService) cannot be compiled
     /// on this machine, so nothing in this project may depend on anything
-    /// beyond this interface.
+    /// beyond this interface, and nothing in this project has ever exercised
+    /// a real implementation of it. Four conventions hold for EVERY member
+    /// below, stated once here rather than repeated verbatim on each one
+    /// (fix round 2, R-12):
     ///
-    /// The dividing line (Ruling R-8, review round 1): everything decidable
-    /// without Visual Studio lives in the tools, not here. Every method below
+    /// <list type="number">
+    /// <item><b>Everything decidable without Visual Studio lives in the
+    /// tools, not here (Ruling R-8, review round 1).</b> Every method
     /// returns raw, absolute, unfiltered, untruncated data and does
     /// UI-thread work only; filtering, truncation, path relativisation and
-    /// text formatting are the tools' job.
+    /// text formatting are the tools' job. A null return from
+    /// <see cref="DefinitionAsync"/>, <see cref="ReferencesAsync"/> or
+    /// <see cref="HoverAsync"/> means "no language service for this file
+    /// type" (Visual Studio's design deviates here from vscode, which
+    /// always has *a* provider result, possibly empty — this project adds
+    /// the "not available for this file type" case the design spec's
+    /// section 4 calls for, distinguished from a provider that ran and
+    /// found nothing, which is an empty list / empty string instead).</item>
     ///
-    /// A null return from <see cref="DefinitionAsync"/>, <see cref="ReferencesAsync"/>
-    /// or <see cref="HoverAsync"/> means "no language service for this file
-    /// type" (Visual Studio's design deviates here: vscode always has *a*
-    /// provider result, possibly empty, so those three vscode tools only ever
-    /// say "no definition/references found" or "no hover information" — this
-    /// project adds the "not available for this file type" case the design
-    /// spec's section 4 calls for, distinguished from a provider that ran and
-    /// found nothing, which is an empty list / empty string instead).
+    /// <item><b>Lines and columns are 1-BASED everywhere across the seam, in
+    /// BOTH directions (Ruling D1).</b> Every argument that names a line or
+    /// column (<see cref="OpenAsync"/>, <see cref="DefinitionAsync"/>,
+    /// <see cref="ReferencesAsync"/>, <see cref="HoverAsync"/>,
+    /// <see cref="IDebugHost.SetBreakpointAsync"/>) and every result field
+    /// that reports one (<see cref="Location"/>'s Line/Col,
+    /// <see cref="Diagnostic"/>'s Line/Col, <see cref="StackFrameInfo"/>'s
+    /// Line, <see cref="EditorContext"/>'s Line/SelStart/SelEnd) is 1-based.
+    /// The TOOLS clamp an incoming line/col to a minimum of 1 before this
+    /// interface ever sees it (vscode's own editor.ts clamps with
+    /// <c>Math.max(0, line-1)</c> one layer further in, converting to its
+    /// own 0-based <c>Position</c> — the C# seam stops at "never less than
+    /// 1", the conversion below is the host's own problem to solve). What
+    /// this means concretely for a Visual Studio host: DTE's own
+    /// <c>TextSelection</c>/<c>TextPoint</c> (<c>ActivePoint.Line</c>,
+    /// <c>ActivePoint.LineCharOffset</c>, …) are ALREADY 1-based — no
+    /// conversion needed going through DTE. Roslyn's <c>LinePosition</c>
+    /// and the editor's own <c>ITextSnapshotLine</c> (and
+    /// <c>SnapshotPoint</c>) are 0-based — the host must add 1 converting a
+    /// Roslyn/text-buffer position OUT to this interface, and subtract 1
+    /// converting an incoming 1-based argument IN before calling
+    /// Roslyn/text-buffer APIs with it.</item>
+    ///
+    /// <item><b>Threading (Ruling D3).</b> Every member may be called from a
+    /// thread-pool thread, and calls are CONCURRENT: <c>BridgeServer</c> runs
+    /// <c>tools/call</c> concurrently per connection, and every connection to
+    /// this bridge shares the ONE <see cref="IEditorHost"/> instance. The
+    /// host implementation must marshal to Visual Studio's UI thread itself
+    /// (e.g. via <c>JoinableTaskFactory.SwitchToMainThreadAsync</c>) for
+    /// anything that needs it — DTE, the text buffer, the debugger — and
+    /// must be safe under concurrent calls, including two calls touching the
+    /// same file or the same debug session at once. Nothing about this
+    /// interface's shape enforces serialisation; the host provides
+    /// whatever internal locking its own state (e.g. <see cref="IDebugHost"/>'s
+    /// single active session) needs.</item>
+    ///
+    /// <item><b>Cancellation (Ruling D4).</b> Every member observes
+    /// <paramref name="ct"/>-equivalent parameters and MAY throw
+    /// <see cref="System.OperationCanceledException"/> — but only when its
+    /// own <c>ct</c> is the reason. A review that must be abandoned for any
+    /// OTHER reason (Visual Studio shutting down, the document closed
+    /// underneath it, the debug session torn down externally) is not a
+    /// cancellation of the caller's request and must not be reported as one
+    /// via a token that was never cancelled; <see cref="ReviewDiffAsync"/>
+    /// specifically returns <see cref="ReviewDecision.Cancelled"/> for that
+    /// case (see its own doc comment). That said, <c>ReviewTools.ReviewDiff</c>
+    /// is tolerant of a host that gets this distinction wrong: ANY
+    /// <see cref="System.OperationCanceledException"/> it throws, whatever
+    /// the reason, is treated as <see cref="ReviewDecision.Cancelled"/>
+    /// rather than being allowed to escape uncaught.</item>
+    /// </list>
     /// </summary>
     public interface IEditorHost
     {
@@ -108,6 +191,20 @@ namespace BECode.Bridge
         /// </summary>
         Task<IReadOnlyList<string>> GetWorkspaceFoldersAsync(CancellationToken ct);
 
+        /// <summary>
+        /// Brings <paramref name="path"/> (absolute, already confined) to
+        /// the front of the editor, scrolled to <paramref name="line"/>
+        /// (1-based, Ruling D1) when given. Ruling D9: do this without
+        /// taking keyboard focus away from wherever the user is currently
+        /// typing, if Visual Studio allows it (vscode's own analogue is
+        /// <c>{ preserveFocus: true }</c> on <c>showTextDocument</c>) — the
+        /// point is to let the model show the user something without
+        /// interrupting them. When <paramref name="path"/> does not exist,
+        /// throw <see cref="System.IO.FileNotFoundException"/>;
+        /// <c>EditorTools.Open</c> catches it and answers
+        /// <c>isError:true, "file not found: &lt;path&gt;"</c> rather than
+        /// letting the exception escape.
+        /// </summary>
         Task OpenAsync(string path, int? line, CancellationToken ct);
         Task<IReadOnlyList<Location>?> DefinitionAsync(string path, int line, int col, CancellationToken ct);
 
@@ -118,13 +215,33 @@ namespace BECode.Bridge
         /// (<c>res.length</c> read before <c>.slice()</c>).
         /// </summary>
         Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, CancellationToken ct);
+
+        /// <summary>
+        /// Type/signature information for the symbol at <paramref name="path"/>:<paramref name="line"/>:<paramref name="col"/>,
+        /// as PLAIN TEXT — no markup (no Markdown, no HTML). Ruling D10: when
+        /// the language service offers more than one part (e.g. a type
+        /// signature plus documentation), join them with a BLANK LINE
+        /// between (<c>"\n\n"</c>), matching vscode's own
+        /// <c>res.flatMap(...).join("\n\n")</c>. Null means "no language
+        /// service for this file type" (<c>EditorTools</c> answers "not
+        /// available for this file type"); <c>""</c> means the provider ran
+        /// and found nothing at that position (<c>EditorTools</c> answers
+        /// "no hover information"); the tool also trims whatever is
+        /// returned, so leading/trailing whitespace either way is harmless.
+        /// </summary>
         Task<string?> HoverAsync(string path, int line, int col, CancellationToken ct);
 
         /// <summary>
         /// Every diagnostic for <paramref name="path"/> (absolute), or for
         /// the whole solution when <paramref name="path"/> is null — no
         /// severity filtering here (Ruling S4): <c>DiagnosticsTools</c>
-        /// filters with the ported <c>severitiesFor</c>.
+        /// filters with the ported <c>severitiesFor</c>. Ruling D11: a
+        /// non-null <paramref name="path"/> is matched EXACTLY, as an
+        /// absolute path (case-insensitively on Windows, matching
+        /// <see cref="Paths"/>'s own comparison rule) — never a substring
+        /// match, and never matched against a display name (a project item
+        /// caption, a solution-relative label, …); compare the actual
+        /// on-disk paths.
         /// </summary>
         Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, CancellationToken ct);
         IDebugHost Debug { get; }
@@ -140,7 +257,15 @@ namespace BECode.Bridge
         /// treats both the same way, as "cancelled" (Ruling S1). There is
         /// exactly one cancellation mechanism: this token. (An earlier draft
         /// of this interface also had <c>ReviewCancelAsync(string path)</c>;
-        /// it was removed in fix round 1 — nothing ever called it.)
+        /// it was removed in fix round 1 — nothing ever called it.) Ruling
+        /// D4: a review abandoned for a reason that has NOTHING to do with
+        /// this token (Visual Studio shutting down, the document closed
+        /// underneath it) should still be reported as
+        /// <see cref="ReviewDecision.Cancelled"/> — <c>ReviewTools</c> treats
+        /// any <see cref="System.OperationCanceledException"/> from this
+        /// method as "cancelled" regardless of whether <paramref name="ct"/>
+        /// itself was ever cancelled, so throwing it is always safe even
+        /// when the token is not the actual cause.
         /// </summary>
         Task<ReviewDecision> ReviewDiffAsync(ReviewRequest request, CancellationToken ct);
     }
@@ -153,7 +278,9 @@ namespace BECode.Bridge
     /// (not the host) turns this into text, calling
     /// <see cref="IDebugHost.StackAsync"/> itself for a top-of-stack summary
     /// when <see cref="Kind"/> is <see cref="StopKind.Stopped"/> — the same
-    /// two-step vscode's <c>DebugManager.describe()</c> takes.
+    /// two-step vscode's <c>DebugManager.describe()</c> takes. See
+    /// <see cref="IDebugHost.StartAsync"/>'s doc comment (Ruling D2) for
+    /// exactly which real-world outcome maps to which <see cref="StopKind"/>.
     /// </summary>
     public sealed record StopResult(StopKind Kind, string? Reason = null, int? ExitCode = null);
 
@@ -162,10 +289,19 @@ namespace BECode.Bridge
     /// debug configurations — the design spec's stand-in for vscode's
     /// <c>launch.json</c> entries (<c>debug_configs</c> "lists the solution's
     /// startup projects and launch profiles rather than launch.json entries").
+    /// Ruling D6: <see cref="Kind"/> is free display text, printed VERBATIM
+    /// by <c>DebugTools.Configs</c> as <c>"{Name} ({Kind})"</c> — no parsing,
+    /// no validation. The two values Task 6 is expected to use are
+    /// <c>"startup project"</c> (a project set as the solution's startup
+    /// project, or one of several in a multi-project startup) and
+    /// <c>"launch profile"</c> (an entry from that project's
+    /// launchSettings.json/debug profile list); anything more specific
+    /// Visual Studio's own UI uses for these is fine too — it is display
+    /// text only, never matched against by any tool.
     /// </summary>
     public sealed record DebugConfigInfo(string Name, string Kind);
 
-    /// <summary>A breakpoint in one file, as it stands after debug_breakpoint's add/remove.</summary>
+    /// <summary>A breakpoint in one file, as it stands after debug_breakpoint's add/remove. <see cref="Line"/> is 1-based (Ruling D1).</summary>
     public sealed record BreakpointInfo(int Line, string? Condition);
 
     /// <summary>
@@ -191,7 +327,8 @@ namespace BECode.Bridge
     /// (Ruling S3; <c>DebugTools</c> relativises it for output, exactly
     /// where vscode's own <c>debug_stack</c> handler does), or null when the
     /// frame has no source (matches vscode's <c>f.source?.path ? … : "?"</c>
-    /// fallback, rendered by the tool).
+    /// fallback, rendered by the tool). <see cref="Line"/> is 1-based
+    /// (Ruling D1).
     /// </summary>
     public sealed record StackFrameInfo(string Name, string? Path, int Line, int FrameId);
 
@@ -208,7 +345,15 @@ namespace BECode.Bridge
     /// </summary>
     public sealed record VariableInfo(string Name, string Value, string? Type, IReadOnlyList<VariableInfo>? Children = null);
 
-    /// <summary>One DAP scope ("Locals", "Arguments", …) and its variables.</summary>
+    /// <summary>
+    /// One DAP-equivalent scope ("Locals", "Arguments", …) and its
+    /// variables. Ruling D5: <see cref="Name"/> is what
+    /// <c>DebugTools.Variables</c> filters on — a name containing "local"
+    /// (case-insensitively) is treated as the locals scope, one containing
+    /// "arg" as the arguments scope; the host SHOULD name them "Locals" and
+    /// "Arguments" (matching Visual Studio's own Locals/Autos/Watch window
+    /// naming) so that filtering behaves as expected.
+    /// </summary>
     public sealed record VariableScope(string Name, IReadOnlyList<VariableInfo> Variables);
 
     /// <summary>The result of evaluating an expression in a frame.</summary>
@@ -223,14 +368,55 @@ namespace BECode.Bridge
     /// ("use the top frame when none is given", vscode's <c>topFrameId()</c>)
     /// is the host's job here, since <see cref="VariablesAsync"/> and
     /// <see cref="EvaluateAsync"/> take a nullable frame rather than the tool
-    /// resolving it first.
+    /// resolving it first. Only one debug session is ever active through
+    /// this interface at a time — <see cref="StartAsync"/> replaces
+    /// whatever was running, exactly as vscode's own <c>DebugManager.start()</c>
+    /// stops a prior session first.
     /// </summary>
     public interface IDebugHost
     {
         Task<IReadOnlyList<DebugConfigInfo>> ConfigsAsync(CancellationToken ct);
+
+        /// <summary>
+        /// Starts <paramref name="config"/> (a name <see cref="ConfigsAsync"/>
+        /// listed — a startup project or launch profile) or, when null, the
+        /// solution's current startup project as-is, replacing any prior
+        /// session. Ruling D2: this method — and <see cref="ContinueAsync"/>
+        /// and <see cref="StepAsync"/>, which share this exact contract —
+        /// starts or resumes execution and then WAITS for the next stop
+        /// (breakpoint hit, step complete, an unhandled exception pausing
+        /// execution, or the process exiting), for AT MOST 60 SECONDS,
+        /// before returning. <c>DebugTools</c> prints
+        /// <c>"still running after 60s"</c> from the timeout case; it does
+        /// not itself enforce any timeout — the host owns the full 60
+        /// seconds. Exactly which <see cref="StopKind"/> each real-world
+        /// outcome maps to:
+        /// <list type="bullet">
+        /// <item><see cref="StopKind.Stopped"/> — a breakpoint was hit, a
+        /// step finished, or an unhandled exception paused execution, all
+        /// within the 60s window. Set <see cref="StopResult.Reason"/> to a
+        /// short word describing why (e.g. <c>"breakpoint"</c>,
+        /// <c>"step"</c>, <c>"exception"</c>) — free text, printed verbatim
+        /// by the tool as <c>"stopped ({reason})"</c>; there is no fixed
+        /// vocabulary to match.</item>
+        /// <item><see cref="StopKind.Timeout"/> — none of the above happened
+        /// within 60 seconds and the debuggee is still running.</item>
+        /// <item><see cref="StopKind.Exited"/> — the debuggee process ran to
+        /// completion (normally or with a non-zero exit code) within the
+        /// window; set <see cref="StopResult.ExitCode"/> when known.</item>
+        /// <item><see cref="StopKind.Terminated"/> — the debug session ended
+        /// some other way within the window: the debugger detached, Visual
+        /// Studio tore the session down, or anything else that is not a
+        /// normal process exit.</item>
+        /// </list>
+        /// </summary>
         Task<StopResult> StartAsync(string? config, CancellationToken ct);
         Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, BreakpointAction action, string? condition, CancellationToken ct);
+
+        /// <summary>Resumes and waits for the next stop — see <see cref="StartAsync"/>'s doc comment (Ruling D2) for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
         Task<StopResult> ContinueAsync(CancellationToken ct);
+
+        /// <summary>Steps (<paramref name="step"/>: over/into/out) and waits for the next stop — see <see cref="StartAsync"/>'s doc comment (Ruling D2) for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
         Task<StopResult> StepAsync(DebugStepKind step, CancellationToken ct);
         Task<IReadOnlyList<StackFrameInfo>> StackAsync(int depth, CancellationToken ct);
 
@@ -238,16 +424,14 @@ namespace BECode.Bridge
         /// Every scope's every variable, for <paramref name="frame"/> (the
         /// top frame when null) — <c>scope</c> is NOT a parameter here
         /// (fix round 2, D5): the host returns everything it has, and
-        /// <c>DebugTools</c> filters to locals/args/all by scope NAME (a
-        /// scope whose <see cref="VariableScope.Name"/> contains "local",
-        /// case-insensitively, is locals; one containing "arg" is
-        /// arguments — the host SHOULD name them "Locals" and "Arguments").
-        /// Children (<see cref="VariableInfo.Children"/>) are resolved by
-        /// the host at most ONE level deep, and only for a scope with ten
-        /// or fewer variables in total (Ruling S7) — never walk the object
-        /// graph beyond that. The tool then prints at most 60 variables per
-        /// scope and 20 children per variable; it never asks for more than
-        /// the host already resolved.
+        /// <c>DebugTools</c> filters to locals/args/all by scope name (see
+        /// <see cref="VariableScope"/>'s doc comment for the exact naming
+        /// rule). Children (<see cref="VariableInfo.Children"/>) are
+        /// resolved by the host at most ONE level deep, and only for a
+        /// scope with ten or fewer variables in total (Ruling S7) — never
+        /// walk the object graph beyond that. The tool then prints at most
+        /// 60 variables per scope and 20 children per variable; it never
+        /// asks for more than the host already resolved.
         /// </summary>
         Task<IReadOnlyList<VariableScope>> VariablesAsync(int? frame, CancellationToken ct);
         Task<EvaluateResult> EvaluateAsync(string expression, int? frame, CancellationToken ct);

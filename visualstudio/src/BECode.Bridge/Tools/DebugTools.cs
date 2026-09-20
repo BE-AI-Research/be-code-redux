@@ -19,8 +19,9 @@ namespace BECode.Bridge.Tools
     public sealed class DebugTools
     {
         // Text only: the 60s wait itself is IDebugHost's job (vscode's own
-        // WAIT_MS), not the tool's — see StartAsync/ContinueAsync/StepAsync's
-        // doc comment on IEditorHost.
+        // WAIT_MS), not the tool's — see IDebugHost.StartAsync's doc comment
+        // (Ruling D2), which ContinueAsync and StepAsync's own doc comments
+        // point back to.
         private const int WaitSeconds = 60;
 
         private readonly IEditorHost _host;
