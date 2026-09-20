@@ -365,7 +365,7 @@ var doctorCmd = &cobra.Command{
 		if cfg.WebSearch.Enabled() {
 			keyState := "key set"
 			if os.Getenv(cfg.WebSearch.APIKeyEnv) == "" {
-				keyState = "KEY MISSING: export " + cfg.WebSearch.APIKeyEnv
+				keyState = "KEY MISSING: export " + tools.EnvNameForDisplay(cfg.WebSearch.APIKeyEnv)
 			}
 			fmt.Printf("web search: google pse cx=%s (%s)\n", cfg.WebSearch.CX, keyState)
 		} else {

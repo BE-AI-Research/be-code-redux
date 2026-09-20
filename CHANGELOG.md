@@ -1,5 +1,39 @@
 # BE-Code Changelog
 
+## v0.12.1 — an approved reload that never happened
+
+A shared session on the validation VM died on 2026-09-20 with `HTTP 400 … exceeds the
+available context size (8192 tokens)` on every request, and stayed dead across restarts
+until the model server was rebooted. Three defects in a row, each making the next one fatal.
+
+- **A request in the gap after `/model` named no context window.** The switch takes the old
+  model's `num_ctx` off the wire at once and resolves the new one behind it; a request in
+  between carried none. On a real Ollama that is not "leave the model alone" — the server's
+  default applies (8192 on the owner's box) and the model is loaded, or reloaded, there.
+  Requests, the handoff summary, `/commit` and `/init` now wait for the resolution
+  (`Agent.awaitWindow`; bounded by the resolution's own two minutes and by the caller).
+- **An approved reload was undone before it reached the server.** Saying yes to
+  `model_reload` puts the configured window on the wire; the model itself reloads when the
+  next request carries it. The backend check that runs before every request saw the old
+  window against ours, read it as *another client's* change, adapted back down and told the
+  loader — so the reload the user approved never happened, with only a status line that
+  vanishes to say so. A window the loader has just resolved is now *unconfirmed* until one
+  request succeeds with it (`Agent.ApplyResolvedWindow`), and a window that grows is
+  announced in the transcript like one that shrinks. Adapting to a genuine change by
+  another client — never fighting it — is unchanged.
+- **A prompt larger than the window failed for ever, in escaped JSON.** Ollama 0.34 refuses
+  such a prompt (older servers truncated it silently). The run now asks the loader once
+  more — a larger answer goes on the wire and the retry reloads the model — else compacts
+  and retries, else stops with an error that says what does not fit (how much of it is
+  system prompt and tool schemas, which no compaction removes) and what fixes it:
+  `ollama stop <model>`, `reload_on_mismatch: "always"`, or `/clear`.
+- **An API key pasted into `web_search.api_key_env` was printed at every start** — to
+  stderr, into the session host's log on disk, and from the tool's own error into the
+  model's context and the saved session. That setting holds the *name* of a variable;
+  a value that does not look like one is now described, never repeated
+  (`tools.EnvNameForDisplay`). If a key was ever there, rotate it and delete
+  `~/.be-code/live/*.log`.
+
 ## v0.12.0 — Visual Studio, and an editor review that can be cancelled
 
 BE-Code's editor bridge existed only for VS Code. This release adds the same bridge for

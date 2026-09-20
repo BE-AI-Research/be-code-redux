@@ -66,7 +66,7 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	key := os.Getenv(t.cfg.APIKeyEnv)
 	if key == "" {
-		return Result{IsError: true, Content: fmt.Sprintf("web_search is configured but the API key env var %s is not set; export it and restart", t.cfg.APIKeyEnv)}
+		return Result{IsError: true, Content: fmt.Sprintf("web_search is configured but the API key env var %s is not set; export it and restart", EnvNameForDisplay(t.cfg.APIKeyEnv))}
 	}
 	n := argInt(args, t.cfg.MaxResults, "num", "count", "max_results")
 	if n < 1 {

@@ -170,7 +170,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			reg.AddTool(tools.NewWebFetch())
 		}
 		if os.Getenv(cfg.WebSearch.APIKeyEnv) == "" {
-			fmt.Fprintf(os.Stderr, "warn: web_search configured but %s is not set; searches will fail until it is exported\n", cfg.WebSearch.APIKeyEnv)
+			fmt.Fprintf(os.Stderr, "warn: web_search configured but %s is not set; searches will fail until it is exported\n", tools.EnvNameForDisplay(cfg.WebSearch.APIKeyEnv))
 		}
 	}
 
