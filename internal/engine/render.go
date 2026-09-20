@@ -304,7 +304,7 @@ func newActiveParts(t *Tree, inMap func(string) bool, changed func(FileRef) bool
 	// Part of the header, so it is never a rung of the budget ladder: the
 	// step it is about is the one thing the block always keeps.
 	if calls := len(doing.Evidence.Raw) + doing.Evidence.Dropped; t.nudge > 0 && calls > t.nudge {
-		fmt.Fprintf(&b, "! step %s has been open for %d tool calls: finish it, split it into smaller steps, or note why it is taking this long\n", doing.ID, calls)
+		fmt.Fprintf(&b, "! step %s has been open for %d tool calls: finish it, split it into smaller steps (task add, parent %s), or note why it is taking this long\n", doing.ID, calls, doing.ID)
 	}
 	p := &activeParts{
 		id:      doing.ID,

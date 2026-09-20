@@ -503,7 +503,7 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	if !strings.Contains(ag.History.System.Content, taskGuidance+" "+pacingGuidance) {
 		t.Fatal("pacing guidance missing, or the task paragraph was reworded")
 	}
-	for _, want := range []string{"Work in small steps", "about ten tool calls", "narrowest check", "failed twice"} {
+	for _, want := range []string{"Work in small steps", "about ten tool calls", "keeps your context free", "task add with parent", "narrowest check", "failed twice"} {
 		if !strings.Contains(pacingGuidance, want) {
 			t.Fatalf("pacing guidance lost %q", want)
 		}

@@ -35,7 +35,7 @@ func TestALongOpenStepIsNudged(t *testing.T) {
 	}
 	observeN(s, 2)
 	out := s.Render(0, nil)
-	want := "step " + id + ".1 has been open for 6 tool calls: finish it, split it into smaller steps, or note why"
+	want := "step " + id + ".1 has been open for 6 tool calls: finish it, split it into smaller steps (task add, parent " + id + ".1), or note why"
 	if !strings.Contains(out, want) {
 		t.Fatalf("no nudge %q in:\n%s", want, out)
 	}

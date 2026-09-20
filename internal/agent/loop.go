@@ -201,7 +201,10 @@ type Agent struct {
 	// results the model was waiting on rather than in the middle of them.
 	autoVerifyUsed bool
 	toolFailStreak toolFailStreak
-	pendingAdvice  string
+	// repeats notices the same call returning the same result again and
+	// again (repeat.go). Agent goroutine only, like toolFailStreak.
+	repeats       repeatTracker
+	pendingAdvice string
 
 	// Model parameters (see the ModelLoader block below). modelMu guards
 	// the model identity a switch rewrites — Model, Profile, compat,
@@ -1345,6 +1348,11 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 			}
 		}
+	}
+	// Measured before the footer below is added, so the footer itself never
+	// makes two results differ. A cached answer counts: it is the same call.
+	if footer := a.repeats.note(call, res); footer != "" {
+		res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 	}
 	// The automatic tool-failure consultation's question, decided here but
 	// asked below, after OnToolEnd has put the failure on screen.

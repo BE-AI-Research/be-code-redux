@@ -50,7 +50,7 @@ const taskGuidance = "Context is limited and does not survive compaction; your n
 // and the user ends up typing "remember the small work loads" by hand at the
 // start of every request. It is its own paragraph so that taskGuidance, whose
 // wording is measured, stays verbatim.
-const pacingGuidance = "Work in small steps. Before anything that takes more than a few tool calls, plan it with the task tool as steps small enough to finish in about ten tool calls each. Do one step at a time and mark it done before you start the next. When a step that changed files is done, run the narrowest check that proves it (one test file, one build) before moving on. If the same approach has failed twice, stop: record what you learned as a task note and re-plan the step instead of trying a third variation."
+const pacingGuidance = "Work in small steps. Before anything that takes more than a few tool calls, plan it with the task tool as steps small enough to finish in about ten tool calls each. Do one step at a time and mark it done before you start the next. Small steps are also what keeps your context free: only the current step's tool output is kept in full, and it is condensed to a few lines the moment you mark the step done. If a step turns out bigger than you planned, split it (task add with parent set to its id) rather than pushing on. When a step that changed files is done, run the narrowest check that proves it (one test file, one build) before moving on. If the same approach has failed twice, stop: record what you learned as a task note and re-plan the step instead of trying a third variation."
 
 // gitGuidance keys each sentence to the git tool it advertises (Task 6),
 // appended to the task guidance paragraph when that tool is registered.
