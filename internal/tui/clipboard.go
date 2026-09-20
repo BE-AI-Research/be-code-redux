@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/brown-enterprises/be-code/internal/procattr"
 )
 
 // Clipboard access from a TUI has no single reliable path, so copy uses
@@ -55,6 +57,7 @@ func writeClipboardTools(s string) error {
 			continue
 		}
 		cmd := exec.Command(t[0], t[1:]...)
+		procattr.Hide(cmd)
 		cmd.Stdin = strings.NewReader(s)
 		if err := cmd.Run(); err == nil {
 			return nil
@@ -75,6 +78,7 @@ func readClipboard() (string, error) {
 		}
 		var out bytes.Buffer
 		cmd := exec.Command(t[0], t[1:]...)
+		procattr.Hide(cmd)
 		cmd.Stdout = &out
 		if err := cmd.Run(); err == nil {
 			return strings.TrimRight(out.String(), "\r\n"), nil

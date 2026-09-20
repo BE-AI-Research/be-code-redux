@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/procattr"
 )
 
 // ToolDef is a tool advertised by a server.
@@ -68,6 +70,7 @@ var ClientVersion = "dev"
 
 func Dial(ctx context.Context, name, command string, args []string, env map[string]string) (*Client, error) {
 	cmd := exec.Command(command, args...)
+	procattr.Hide(cmd)
 	cmd.Env = os.Environ()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)

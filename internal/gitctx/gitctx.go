@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/procattr"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -97,6 +98,7 @@ const SnapshotPrefix = "be-code/pre-init/"
 func gitEnv(ctx context.Context, root string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
+	procattr.Hide(cmd) // this runs before every request; on Windows it would flash a console each time
 	cmd.Env = append(os.Environ(), env...)
 	out, err := cmd.CombinedOutput()
 	s := strings.TrimSpace(string(out))

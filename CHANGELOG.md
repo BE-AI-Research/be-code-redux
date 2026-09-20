@@ -1,5 +1,18 @@
 # BE-Code Changelog
 
+## v0.14.3 — Windows: commands run without opening a window
+
+- **Every command the agent ran opened a console window.** A hosted session runs in a
+  detached process with no console, so that closing its terminal cannot take it down — and
+  when a process with no console starts a console program (`powershell`, `git`, `go`,
+  `python`), Windows gives that program a new, visible window of its own. The shell and
+  `process` tools did it, and so did every verification check, MCP server, clipboard helper
+  and the git summary taken before each request. Every child process is now started with
+  `CREATE_NO_WINDOW` (`internal/procattr.Hide`): it still has a console to write to, it is
+  simply never shown, and the harness reads its output through pipes as before. A test
+  reads the source and fails if a file starts a child process without it. Nothing changes
+  on Linux or macOS.
+
 ## v0.14.2 — Windows: the real terminal size, and an installer that runs
 
 First run on Windows by the owner. It worked — including the approved reload to a 49,152
