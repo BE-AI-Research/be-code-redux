@@ -899,7 +899,10 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
 	}
-	if a.systemOverride == "" {
+	// Working memory and the git summary change from turn to turn. In the
+	// cached layout they ride at the end of the request (volatileTail), so
+	// that nothing in front of the conversation ever changes mid-run.
+	if a.systemOverride == "" && !a.cachedLayout() {
 		if wm := a.workingMemory(); wm != "" {
 			sys += "\n\nWorking memory:\n" + wm
 		}
@@ -910,7 +913,10 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance
 	}
-	if gitInfo != "" {
+	// A scratch agent (plan mode, a consultation) keeps the summary here: it
+	// is fixed for the few turns such an agent lives, so it costs the cache
+	// nothing, and its prompt stays in one piece.
+	if gitInfo != "" && (!a.cachedLayout() || a.systemOverride != "") {
 		sys += "\n\n" + gitInfo
 	}
 	return sys
@@ -1090,11 +1096,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// working-memory block has to reflect the reads made earlier in
 		// this same turn, and compaction has to measure the prompt it is
 		// actually about to send.
-		a.History.System.Content = a.composeSystem(a.lastGitInfo)
+		a.recomposeSystem(a.lastGitInfo)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
-		req := a.requestFor(effort)
+		req := a.requestFor(effort, true)
 
 		resp, err := a.chatWithRetry(ctx, req)
 		if err != nil {

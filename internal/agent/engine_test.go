@@ -64,7 +64,7 @@ func TestReadsAreDigestedAndTheBlockReachesTheSystemPrompt(t *testing.T) {
 	if !strings.Contains(toolMsg, "already read at turn 1 (unchanged)") {
 		t.Fatalf("no footer:\n%s", toolMsg)
 	}
-	sys := p.reqs[2].Messages[0].Content
+	sys := requestState(p.reqs[2])
 	// read_file numbers the trailing empty line after the final newline, so
 	// a three-line file reads as lines 1–4; the digest records what the
 	// model was actually shown.
@@ -145,7 +145,7 @@ func TestResumeRebuildsTheBlockAndHandoffCarriesStoppedAt(t *testing.T) {
 		t.Fatalf("stopped-at lines accumulated:\n%s", h2)
 	}
 	ag.Resume(ag.Session)
-	if !strings.Contains(ag.History.System.Content, "one — doing") {
+	if !strings.Contains(shownBeyondTheConversation(ag), "one — doing") {
 		t.Fatal("resume did not rebuild the block")
 	}
 }
@@ -221,8 +221,8 @@ func TestRunFullRefreshesTheTaskLineBetweenRequests(t *testing.T) {
 	if got := activeTask(st); got != "second thing" {
 		t.Fatalf("task %q", got)
 	}
-	if !strings.Contains(ag.History.System.Content, "second thing — todo") {
-		t.Fatalf("block did not follow the new request:\n%s", ag.History.System.Content)
+	if !strings.Contains(shownBeyondTheConversation(ag), "second thing — todo") {
+		t.Fatalf("block did not follow the new request:\n%s", shownBeyondTheConversation(ag))
 	}
 	// A plan in flight keeps its own task line.
 	planID := st.Plan("the plan", []string{"one", "two"})
@@ -364,8 +364,8 @@ func TestCompactContinuesFromTheRecordOnAFilesOnlySummary(t *testing.T) {
 	if !reflect.DeepEqual(ag.History.Messages[1:], tail) {
 		t.Fatalf("the newest exchange was not kept: %+v", ag.History.Messages)
 	}
-	if !strings.Contains(ag.History.System.Content, "read a.go") {
-		t.Fatalf("the tree did not survive compaction:\n%s", ag.History.System.Content)
+	if !strings.Contains(shownBeyondTheConversation(ag), "read a.go") {
+		t.Fatalf("the tree did not survive compaction:\n%s", shownBeyondTheConversation(ag))
 	}
 	if filesOf(st)[0].Note != "defines A" {
 		t.Fatalf("file note not applied: %+v", filesOf(st))
@@ -488,19 +488,19 @@ func (s stubTool) Run(context.Context, map[string]any) tools.Result {
 
 func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
-	if strings.Contains(ag.History.System.Content, "record a plan with the task tool") || strings.Contains(ag.History.System.Content, "Work in small steps") {
+	if strings.Contains(shownBeyondTheConversation(ag), "record a plan with the task tool") || strings.Contains(shownBeyondTheConversation(ag), "Work in small steps") {
 		t.Fatal("guidance without the tool")
 	}
 	st := withEngine(t, ag)
 	ag.Tools.AddTool(tools.NewTask(st))
 	ag.RefreshSystem()
-	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") || !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
+	if !strings.Contains(shownBeyondTheConversation(ag), "record a plan with the task tool") || !strings.Contains(shownBeyondTheConversation(ag), "Context is limited and does not survive compaction") {
 		t.Fatal("guidance missing")
 	}
 	// The pacing paragraph rides with the task tool — without the tool there
 	// is nothing to plan small steps in — and leaves the measured paragraph
 	// before it verbatim.
-	if !strings.Contains(ag.History.System.Content, taskGuidance+" "+pacingGuidance) {
+	if !strings.Contains(shownBeyondTheConversation(ag), taskGuidance+" "+pacingGuidance) {
 		t.Fatal("pacing guidance missing, or the task paragraph was reworded")
 	}
 	for _, want := range []string{"Work in small steps", "about ten tool calls", "keeps your context free", "task add with parent", "narrowest check", "failed twice"} {
@@ -508,12 +508,12 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 			t.Fatalf("pacing guidance lost %q", want)
 		}
 	}
-	if strings.Contains(ag.History.System.Content, "call lookup") {
+	if strings.Contains(shownBeyondTheConversation(ag), "call lookup") {
 		t.Fatal("git guidance without the git tools")
 	}
 	ag.Tools.AddTool(stubTool("lookup")) // Task 6 adds the real one; the prompt keys on the name
 	ag.RefreshSystem()
-	sys := ag.History.System.Content
+	sys := shownBeyondTheConversation(ag)
 	if !strings.Contains(sys, "call lookup") || strings.Contains(sys, "call history") || strings.Contains(sys, "call changes") {
 		t.Fatalf("minimal git guidance wrong:\n%s", sys)
 	}
@@ -724,7 +724,7 @@ func TestCompactionSurvivesAnEmptySummary(t *testing.T) {
 	if err := ag.Compact(context.Background()); err != nil {
 		t.Fatalf("an empty summary must not fail compaction: %v", err)
 	}
-	sys := ag.History.System.Content
+	sys := shownBeyondTheConversation(ag)
 	if !strings.Contains(sys, "fix the parser") {
 		t.Fatalf("the tree did not survive compaction:\n%s", sys)
 	}

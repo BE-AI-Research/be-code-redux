@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,7 +100,7 @@ func (a *Agent) nextPromptLocked() (provider.ChatRequest, bool) {
 	// modelMu, from a UI goroutine, whenever the user likes.
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
-	return a.requestFor(""), true
+	return a.requestFor("", false), true // no tail: it rides on a message nobody has typed yet
 }
 
 // recomposeSystem rebuilds the system prompt under modelMu: a model switch
@@ -131,19 +132,84 @@ func (a *Agent) refreshSystemForRequest(ctx context.Context) {
 	}
 }
 
-// requestFor builds the chat request from the history as it stands.
-func (a *Agent) requestFor(effort string) provider.ChatRequest {
+// requestFor builds the chat request from the history as it stands. withTail
+// adds the volatile block to the copy that is sent — never to the history.
+func (a *Agent) requestFor(effort string, withTail bool) provider.ChatRequest {
+	msgs := a.History.Prompt()
+	tail := ""
+	if withTail {
+		tail = a.volatileTail()
+	}
+	if tail != "" && len(msgs) > 0 {
+		msgs = append([]provider.Message(nil), msgs...)
+		if last := &msgs[len(msgs)-1]; last.Role == provider.RoleUser || last.Role == provider.RoleTool {
+			last.Content = strings.TrimRight(last.Content, "\n") + tail
+		} else {
+			msgs = append(msgs, provider.Message{Role: provider.RoleUser, Content: strings.TrimLeft(tail, "\n")})
+		}
+	}
 	req := provider.ChatRequest{
 		Model:           a.Model,
-		Messages:        a.History.Prompt(),
+		Messages:        msgs,
 		Temperature:     a.temperature(),
 		MaxTokens:       a.Cfg.MaxTokens,
 		ReasoningEffort: a.effortFor(effort),
 	}
+	// Extra is everything sent that the history does not hold: the tools
+	// schema and the tail. Both are part of the floor no compaction removes.
 	a.History.Extra = 0
+	if tail != "" {
+		a.History.Extra = a.History.est(tail)
+	}
 	if !a.compat {
 		req.Tools = a.Tools.Specs()
-		a.History.Extra = a.specsTokens()
+		a.History.Extra += a.specsTokens()
 	}
 	return req
+}
+
+// The prompt layout (config prompt_layout: "cached", the default, or
+// "classic").
+//
+// A server's prompt cache is a prefix cache: it survives from one request to
+// the next exactly as far as the two prompts are identical. Working memory
+// used to sit in the middle of the system prompt and changes after nearly
+// every tool call, so every request differed from the last one a few thousand
+// tokens in, and the server re-read the entire conversation behind it each
+// turn — measured on a real five-read task at 225 of 296 seconds, nine cache
+// misses in nine requests.
+//
+// In the cached layout the system prompt holds only what is stable for the
+// length of a request, and what changes — the git summary and Working memory
+// — is appended to the last message of the copy that is sent. The history
+// itself never carries it, so last turn's copy of that message is what the
+// server cached, and the next request re-reads only what is new.
+
+func (a *Agent) cachedLayout() bool {
+	return a.Cfg == nil || !strings.EqualFold(strings.TrimSpace(a.Cfg.PromptLayout), "classic")
+}
+
+// tailHeader separates the volatile block from the message it rides on.
+const tailHeader = "\n\n---\nHarness state, refreshed on every request (not part of the message above):\n\n"
+
+// volatileTail is the git summary and the Working memory block, or "" in the
+// classic layout, where composeSystem carries them.
+func (a *Agent) volatileTail() string {
+	if !a.cachedLayout() {
+		return ""
+	}
+	if a.systemOverride != "" {
+		return "" // a scratch agent: no Working memory, and git stays in its system prompt
+	}
+	var parts []string
+	if a.lastGitInfo != "" {
+		parts = append(parts, a.lastGitInfo)
+	}
+	if wm := a.workingMemory(); wm != "" {
+		parts = append(parts, "Working memory:\n"+wm)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return tailHeader + strings.Join(parts, "\n\n")
 }

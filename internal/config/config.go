@@ -234,8 +234,14 @@ type Config struct {
 	// time, with generation off, after anything that emptied its prompt
 	// cache (a model load or reload, a resume), so the real request pays
 	// only for what is new. Native Ollama only.
-	PromptPrefill     bool `json:"prompt_prefill"`
-	ResumeReplayTurns int  `json:"resume_replay_turns"`
+	PromptPrefill bool `json:"prompt_prefill"`
+	// PromptLayout is "cached" (default) or "classic". Cached keeps the
+	// system prompt stable for the length of a request and sends Working
+	// memory and the git summary at the end of it, so the server's prompt
+	// cache survives from turn to turn; classic keeps them in the system
+	// prompt, as every version before 0.14 did.
+	PromptLayout      string `json:"prompt_layout,omitempty"`
+	ResumeReplayTurns int    `json:"resume_replay_turns"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
 	// Programmable Search Engine. Off unless CX is set; the API key comes

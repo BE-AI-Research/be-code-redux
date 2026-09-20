@@ -50,6 +50,22 @@ state = {"n": 0, "consult_n": 0}
 # The stub History.trim/CollapseToolResults leave behind (collapsedStub in
 # internal/agent/history.go: "[old tool result removed to save context]").
 TRIM_STUB = "old tool result removed"
+
+# Since the cached prompt layout, Working memory and the git summary are not
+# in the system prompt: they ride at the end of the last message, after this
+# header (tailHeader in internal/agent/prefill.go), so that nothing in front
+# of the conversation changes from turn to turn. harness_state is the system
+# prompt plus whatever follows that header — and nothing before it, so a tool
+# result the same message carries can never satisfy an assertion about the
+# engine's block.
+TAIL_HEADER = "Harness state, refreshed on every request"
+
+def harness_state(body):
+    sys_prompt = body["messages"][0].get("content") or ""
+    last = body["messages"][-1].get("content") or ""
+    if len(body["messages"]) > 1 and TAIL_HEADER in last:
+        return sys_prompt + "\n" + last.split(TAIL_HEADER, 1)[1]
+    return sys_prompt
 ENG = {"n": 0, "summarized": False}
 
 def engine_chunks(body):
@@ -62,7 +78,8 @@ def engine_chunks(body):
         return [tool_call_chunk("read_file", {"path": "main.go"})]
     last = body["messages"][-1].get("content") or ""
     footer = "FOOTER:yes" if "already read at turn" in last else "FOOTER:no"
-    wm = "WM:yes" if "Working memory:" in sys_prompt and "main.go (lines" in sys_prompt else "WM:no"
+    state = harness_state(body)
+    wm = "WM:yes" if "Working memory:" in state and "main.go (lines" in state else "WM:no"
     trimmed = any(TRIM_STUB in (m.get("content") or "") for m in body["messages"])
     trim = "TRIM:yes" if trimmed else "TRIM:no"
     summ = "SUM:yes" if ENG["summarized"] else "SUM:no"
@@ -78,7 +95,7 @@ def engine_chunks(body):
 # every turn is over the limit and collapsing tool traffic cannot reach the
 # target, so the fourth call compacts with the model — and the model (this
 # mock) returns an empty summary, which is the failure under test. The
-# assertions are read off the *system prompt* alone, never the transcript,
+# assertions are read off the harness's own state (harness_state), never the transcript,
 # because the transcript's kept tail still holds the shell result.
 SENTINEL = "PARSER-SENTINEL-4F2A"
 TASK_TEXT = "fix the parser"
@@ -109,7 +126,7 @@ def task_chunks(body):
     # the sentinel and the task line must be *inside* "Working memory:",
     # which is the one section no request, guidance paragraph or project
     # note can write into.
-    wm = sys_prompt.split("Working memory:", 1)
+    wm = harness_state(body).split("Working memory:", 1)
     tree = "yes" if len(wm) == 2 and SENTINEL in wm[1] and TASK_TEXT in wm[1] else "no"
     compacted = any(NO_SUMMARY in (m.get("content") or "") for m in body["messages"])
     return [text_chunk("TREE:%s COMPACT:%s" % (tree, "yes" if compacted else "no"))]
