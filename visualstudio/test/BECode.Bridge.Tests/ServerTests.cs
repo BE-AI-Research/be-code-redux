@@ -495,6 +495,164 @@ namespace BECode.Bridge.Tests
             Assert.False(initRoot.TryGetProperty("error", out _));
         }
 
+        // Per-connection cancellation + prompt teardown: a call that blocks
+        // ONLY on its CancellationToken (never on a test gate) must be told
+        // as soon as the client socket closes, and teardown must not wait
+        // for it. RED today: ConnectionCount stays 1 (HandleConnectionAsync's
+        // finally awaits the processor, which awaits this call, before ever
+        // removing the client or calling ConnectionClosed).
+        [Fact]
+        public async Task ClosingTheSocketCancelsAnInFlightCallsTokenAndTearsDownPromptly()
+        {
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    try
+                    {
+                        await Task.Delay(Timeout.Infinite, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        cancelled.TrySetResult(true);
+                        throw;
+                    }
+
+                    return new ToolResult("unreachable", false);
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            var client = await ConnectAsync(port);
+            var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"blocking\",\"arguments\":{}}}");
+            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+            // No gate is ever opened: the token itself is what unblocks the call.
+            client.Close();
+
+            var cancelledInTime = await Task.WhenAny(cancelled.Task, Task.Delay(TimeSpan.FromSeconds(5))) == cancelled.Task;
+            Assert.True(cancelledInTime, "the in-flight call's token was never cancelled");
+
+            await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+            Assert.Single(dispatcher.ClosedConnections);
+
+            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+            Assert.Equal(0, server.ConnectionCount);
+        }
+
+        // Dispose with an in-flight call: DisposeAsync itself must cancel
+        // the token (via the server-wide CTS the connection's token is
+        // linked to) and return, having called ConnectionClosed exactly
+        // once.
+        [Fact]
+        public async Task DisposeAsyncCancelsAnInFlightCallsTokenAndReturns()
+        {
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    try
+                    {
+                        await Task.Delay(Timeout.Infinite, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        cancelled.TrySetResult(true);
+                        throw;
+                    }
+
+                    return new ToolResult("unreachable", false);
+                },
+            };
+            var server = new BridgeServer(dispatcher, Token, "1.0.0-test");
+            var port = await server.StartAsync(0);
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"blocking\",\"arguments\":{}}}");
+            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+            var disposeTask = server.DisposeAsync().AsTask();
+            var completed = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(disposeTask, completed);
+            await disposeTask;
+
+            Assert.True(await cancelled.Task);
+            Assert.Single(dispatcher.ClosedConnections);
+        }
+
+        // A call that ignores its token entirely (blocks on a gate the test
+        // controls, opened only at the very end): teardown must not hang on
+        // it. ConnectionClosed/ConnectionCount must still resolve promptly,
+        // and both DisposeAsync and the connection's own teardown must give
+        // up on the straggler within a bound and report it through OnError —
+        // using a short, test-only bound via the public InFlightDrainTimeout
+        // member so this test does not take 5s.
+        [Fact]
+        public async Task AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError()
+        {
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var callReturned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    await gate.Task; // deliberately ignores ct
+                    callReturned.TrySetResult(true);
+                    return new ToolResult("late", false);
+                },
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.InFlightDrainTimeout = TimeSpan.FromMilliseconds(200);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+
+            var client = await ConnectAsync(port);
+            var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
+            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+            client.Close();
+
+            await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+            Assert.Single(dispatcher.ClosedConnections);
+            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+
+            await WaitForAsync(
+                () => errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0),
+                TimeSpan.FromSeconds(5));
+
+            var disposeTask = server.DisposeAsync().AsTask();
+            var completed = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(disposeTask, completed);
+            await disposeTask;
+
+            // Only now let the abandoned call finish — proving it does not
+            // hang or throw once teardown has already moved on without it.
+            gate.TrySetResult(true);
+            var completedCall = await Task.WhenAny(callReturned.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(callReturned.Task, completedCall);
+        }
+
         [Fact]
         public async Task ThrownExceptionInAToolIsErrorNotAJsonRpcError()
         {

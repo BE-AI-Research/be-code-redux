@@ -64,6 +64,16 @@ namespace BECode.Bridge
         /// </summary>
         public Action<string, Exception>? OnError { get; set; }
 
+        /// <summary>
+        /// Task 3a: how long connection teardown waits for in-flight
+        /// <c>tools/call</c> tasks to finish, once the connection's token has
+        /// already been cancelled, before abandoning them and reporting a
+        /// straggler through <see cref="OnError"/> instead of blocking on it.
+        /// Default 5 s per the wire contract; additive public member, tests
+        /// may shorten it. None of the pinned signatures change.
+        /// </summary>
+        public TimeSpan InFlightDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
         public int ConnectionCount
         {
             get
@@ -140,17 +150,41 @@ namespace BECode.Bridge
         }
 
         /// <summary>
+        /// Per-<c>tools/call</c> marker, created before the call's task
+        /// starts and handed into it. Set by <see cref="DrainInFlightAsync"/>
+        /// only for a task it gave up waiting on at connection teardown — a
+        /// straggler that ignored its cancellation token. Not yet consulted
+        /// anywhere (that lands with the late-reply-quietness checkpoint);
+        /// for now it just lets DrainInFlightAsync tell which of the
+        /// stragglers it reported are still actually running.
+        /// </summary>
+        private sealed class InFlightCall
+        {
+            public volatile bool Abandoned;
+        }
+
+        /// <summary>
         /// Everything one connection needs: the socket, the framing and
         /// dispatch state, and the lock serialising writes to it. Review
         /// round 1 folded stream/writeLock/client/state (previously five
         /// separate parameters threaded through every handler) into this
         /// one object — see M11.
+        ///
+        /// Task 3a additions: <see cref="Cts"/> is this connection's own
+        /// cancellation source, linked to the server's — it is the token
+        /// handed to <see cref="IToolDispatcher.CallAsync"/>, so a socket
+        /// close, a bad token, the line cap or server disposal can tell an
+        /// in-flight <c>tools/call</c> without waiting for it. In-flight call
+        /// tasks are tracked here (<see cref="TrackInFlight"/>), paired with
+        /// their <see cref="InFlightCall"/> marker, and pruned as they
+        /// complete, so teardown can await them bounded rather than forever.
         /// </summary>
         private sealed class ConnectionState : IDisposable
         {
             public readonly TcpClient Client;
             public readonly NetworkStream Stream;
             public readonly SemaphoreSlim WriteLock = new SemaphoreSlim(1, 1);
+            public readonly CancellationTokenSource Cts;
 
             // Authed is only ever touched by the single processor task.
             // ShouldClose is written there too but read from the read loop
@@ -158,15 +192,70 @@ namespace BECode.Bridge
             public bool Authed;
             public volatile bool ShouldClose;
 
-            public ConnectionState(TcpClient client, NetworkStream stream)
+            private readonly object _inFlightLock = new object();
+            private readonly Dictionary<Task, InFlightCall> _inFlight = new Dictionary<Task, InFlightCall>();
+
+            public ConnectionState(TcpClient client, NetworkStream stream, CancellationTokenSource cts)
             {
                 Client = client;
                 Stream = stream;
+                Cts = cts;
+            }
+
+            /// <summary>
+            /// Registers a forked <c>tools/call</c> task (paired with the
+            /// <see cref="InFlightCall"/> marker already handed into it) and
+            /// prunes it the instant it completes, so a long session never
+            /// accumulates an unbounded list of finished calls.
+            /// </summary>
+            public void TrackInFlight(Task task, InFlightCall handle)
+            {
+                lock (_inFlightLock)
+                {
+                    _inFlight[task] = handle;
+                }
+
+                task.ContinueWith(
+                    t =>
+                    {
+                        lock (_inFlightLock)
+                        {
+                            _inFlight.Remove(t);
+                        }
+
+                        if (t.IsFaulted)
+                        {
+                            // Observe it: HandleToolsCallAsync already
+                            // catches everything it can, so this should
+                            // never actually be faulted, but a stray fault
+                            // here must not become an unobserved task
+                            // exception.
+                            _ = t.Exception;
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            public List<(Task Task, InFlightCall Handle)> SnapshotInFlight()
+            {
+                lock (_inFlightLock)
+                {
+                    var snapshot = new List<(Task, InFlightCall)>(_inFlight.Count);
+                    foreach (var pair in _inFlight)
+                    {
+                        snapshot.Add((pair.Key, pair.Value));
+                    }
+
+                    return snapshot;
+                }
             }
 
             public void Dispose()
             {
                 WriteLock.Dispose();
+                Cts.Dispose();
             }
         }
 
@@ -184,14 +273,21 @@ namespace BECode.Bridge
             try
             {
                 var stream = client.GetStream();
-                state = new ConnectionState(client, stream);
+
+                // Task 3a / R-7: this connection's own cancellation source,
+                // linked to the server's — cancelling either cancels it. It
+                // is the token IToolDispatcher.CallAsync receives, so a
+                // socket close, a bad token, the line cap or server disposal
+                // can tell an in-flight tools/call without waiting for it.
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(serverCt);
+                state = new ConnectionState(client, stream, cts);
                 var framer = new LineFramer(_maxLineBytes);
 
-                // Requests on a connection are handled strictly in order:
-                // the read loop only frames lines and enqueues them, a
-                // single consumer task processes and replies to one at a
-                // time, so a slow tool call never lets a later request's
-                // reply overtake it.
+                // Requests are READ and DISPATCHED in order: the read loop
+                // only frames lines and enqueues them, a single consumer task
+                // processes them one at a time, in order. tools/call is the
+                // one exception (R-7): it is dispatched in order but RUNS on
+                // its own task, so its reply may arrive out of order.
                 channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
                 {
                     SingleReader = true,
@@ -253,6 +349,14 @@ namespace BECode.Bridge
             }
             finally
             {
+                // Task 3a / requirement 2 and 3: cancel the connection's
+                // token FIRST — before anything else — so any in-flight
+                // tools/call is told immediately, on every path that reaches
+                // here (normal disconnect, bad token, line cap, a write
+                // failure, or the server disposing with this connection
+                // still live).
+                state?.Cts.Cancel();
+
                 if (channel != null)
                 {
                     channel.Writer.TryComplete();
@@ -270,11 +374,10 @@ namespace BECode.Bridge
                     }
                 }
 
-                lock (_clientsLock)
-                {
-                    _clients.Remove(client);
-                }
-
+                // ConnectionClosed exactly once, before the in-flight drain
+                // below — teardown must not wait for a pending tool call to
+                // finish before telling the dispatcher the connection is
+                // gone.
                 try
                 {
                     _tools.ConnectionClosed(client);
@@ -282,6 +385,11 @@ namespace BECode.Bridge
                 catch (Exception ex)
                 {
                     ReportError("IToolDispatcher.ConnectionClosed threw", ex);
+                }
+
+                lock (_clientsLock)
+                {
+                    _clients.Remove(client);
                 }
 
                 try
@@ -293,8 +401,87 @@ namespace BECode.Bridge
                     // already closed
                 }
 
-                // M4: dispose the per-connection SemaphoreSlim.
+                // Only now — after ConnectionClosed and removal from
+                // _clients, both of which must not wait on it — await any
+                // still-running tools/call tasks, bounded so a call that
+                // ignores its token cannot hang this forever.
+                if (state != null)
+                {
+                    await DrainInFlightAsync(state).ConfigureAwait(false);
+                }
+
+                // M4: dispose the per-connection SemaphoreSlim (and, task
+                // 3a, the connection's CancellationTokenSource) only after
+                // the in-flight tasks above are done or abandoned.
                 state?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Task 3a, requirement 3: waits for a connection's in-flight
+        /// tools/call tasks up to <see cref="InFlightDrainTimeout"/> (the
+        /// token was already cancelled by the caller before this runs, so a
+        /// well-behaved call should already be unwinding). A call that
+        /// ignores its token and is still running when the bound elapses is
+        /// abandoned — not awaited further — and reported once through
+        /// <see cref="OnError"/> as a straggler, rather than blocking
+        /// connection teardown (and, transitively, <see cref="DisposeAsync"/>)
+        /// on it.
+        /// </summary>
+        private async Task DrainInFlightAsync(ConnectionState state)
+        {
+            var stragglers = state.SnapshotInFlight();
+            if (stragglers.Count == 0)
+            {
+                return;
+            }
+
+            var stragglerTasks = new Task[stragglers.Count];
+            for (var i = 0; i < stragglers.Count; i++)
+            {
+                stragglerTasks[i] = stragglers[i].Task;
+            }
+
+            var allTask = Task.WhenAll(stragglerTasks);
+            var timeoutTask = Task.Delay(InFlightDrainTimeout);
+            var completed = await Task.WhenAny(allTask, timeoutTask).ConfigureAwait(false);
+
+            if (completed != allTask)
+            {
+                // Mark only the ones still actually running: a call that
+                // ignored its token and is still going when the bound
+                // elapses.
+                foreach (var straggler in stragglers)
+                {
+                    if (!straggler.Task.IsCompleted)
+                    {
+                        straggler.Handle.Abandoned = true;
+                    }
+                }
+
+                ReportError(
+                    $"in-flight tool call(s) did not complete within {InFlightDrainTimeout}; abandoning at connection teardown",
+                    new TimeoutException("in-flight tools/call task(s) ignored connection cancellation"));
+
+                // Don't block on the stragglers, but don't leave their
+                // eventual faults unobserved either.
+                _ = allTask.ContinueWith(
+                    t => { _ = t.Exception; },
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                return;
+            }
+
+            try
+            {
+                await allTask.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Each call already handled its own exception internally
+                // (HandleToolsCallAsync never lets one escape); this is a
+                // last-resort guard, not a reportable teardown failure.
             }
         }
 
@@ -306,7 +493,7 @@ namespace BECode.Bridge
                 {
                     while (reader.TryRead(out var line))
                     {
-                        await ProcessLineAsync(line, state, ct).ConfigureAwait(false);
+                        await ProcessLineAsync(line, state).ConfigureAwait(false);
                         if (state.ShouldClose)
                         {
                             try
@@ -328,7 +515,7 @@ namespace BECode.Bridge
             }
         }
 
-        private async Task ProcessLineAsync(string line, ConnectionState state, CancellationToken ct)
+        private async Task ProcessLineAsync(string line, ConnectionState state)
         {
             JsonDocument doc;
             try
@@ -381,16 +568,18 @@ namespace BECode.Bridge
                             break;
 
                         case "tools/call":
-                            // R-7 (task 3a): dispatched in order — we reach
-                            // this line in strict per-connection order, same
-                            // as every other case — but NOT awaited here. It
-                            // runs on its own task and replies whenever that
-                            // task completes, so a slow call no longer delays
-                            // a later request's reply on this connection.
-                            // Deliberately fire-and-forget for now: per-
-                            // connection cancellation and bounded teardown
-                            // land in the next checkpoint.
-                            _ = HandleToolsCallAsync(state, id, paramsElement, ct);
+                            // R-7: dispatched in order — we reach this line
+                            // in strict per-connection order, same as every
+                            // other case — but NOT awaited here. It runs on
+                            // its own task and replies whenever that task
+                            // completes. The connection's own token (not the
+                            // server's) is what IToolDispatcher.CallAsync
+                            // receives, and the task is tracked (with its own
+                            // InFlightCall marker) so teardown can await it
+                            // bounded instead of forever.
+                            var callHandle = new InFlightCall();
+                            var callTask = HandleToolsCallAsync(state, id, paramsElement, state.Cts.Token, callHandle);
+                            state.TrackInFlight(callTask, callHandle);
                             break;
 
                         default:
@@ -408,7 +597,10 @@ namespace BECode.Bridge
                     // ReadAsync forever, no later request on this
                     // connection is ever answered, and ConnectionClosed
                     // never fires. Reply with an internal-error frame and
-                    // keep the connection alive instead.
+                    // keep the connection alive instead. (tools/call itself
+                    // can no longer land here since it isn't awaited above —
+                    // any exception from it is handled inside its own task,
+                    // by HandleToolsCallAsync.)
                     ReportError($"unhandled exception processing method '{method}'", ex);
                     await WriteErrorAsync(state, id, JsonRpcCodes.InternalError, ex.Message).ConfigureAwait(false);
                 }
@@ -450,7 +642,7 @@ namespace BECode.Bridge
             await WriteResultAsync(state, id, new { tools }).ConfigureAwait(false);
         }
 
-        private async Task HandleToolsCallAsync(ConnectionState state, JsonElement id, JsonElement paramsElement, CancellationToken ct)
+        private async Task HandleToolsCallAsync(ConnectionState state, JsonElement id, JsonElement paramsElement, CancellationToken ct, InFlightCall handle)
         {
             var name = "";
             var args = EmptyArgs;
@@ -472,6 +664,13 @@ namespace BECode.Bridge
             try
             {
                 result = await _tools.CallAsync(name, args, state.Client, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Task 3a, requirement 6: the connection's own token fired —
+                // this connection is tearing down. No reply, no OnError: a
+                // cancelled in-flight call is expected, not a failure.
+                return;
             }
             catch (Exception ex)
             {
