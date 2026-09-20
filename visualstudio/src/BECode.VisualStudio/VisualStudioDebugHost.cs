@@ -38,6 +38,14 @@ namespace BECode.VisualStudio
         private readonly object _gate = new object();
         private TaskCompletionSource<StopResult>? _pendingStop;
 
+        // Fix round 1, I-6: held across Start/Continue/Step/Stop — the seam's
+        // own doc comment (IDebugHost.StartAsync's Ruling D2 paragraph)
+        // requires debug-session mutation to be serialised, and StartAsync's
+        // "already debugging" branch awaits up to 10s, during which a second
+        // concurrent StartAsync could otherwise arm ITS OWN waiter over the
+        // first one's.
+        private readonly SemaphoreSlim _debugGate = new SemaphoreSlim(1, 1);
+
         private VisualStudioDebugHost(AsyncPackage package, DTE2 dte, Debugger debugger, DebuggerEvents debuggerEvents)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -113,6 +121,31 @@ namespace BECode.VisualStudio
             tcs?.TrySetResult(result);
         }
 
+        /// <summary>
+        /// Fix round 1, I-5: resolves <paramref name="expected"/> only if it
+        /// is STILL the currently-armed waiter — used by
+        /// <see cref="CheckBuildFailureAsync"/>, whose 5s-delayed check can
+        /// otherwise fire after a NEWER call (e.g. a second StartAsync that
+        /// stopped-and-rearmed) has already replaced <see cref="_pendingStop"/>
+        /// with its own waiter; resolving that unconditionally, the way
+        /// <see cref="Resolve"/> does for a genuine debugger-event
+        /// transition, would complete the wrong request.
+        /// </summary>
+        private bool ResolveIfCurrent(TaskCompletionSource<StopResult> expected, StopResult result)
+        {
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_pendingStop, expected))
+                {
+                    return false;
+                }
+
+                _pendingStop = null;
+            }
+
+            return expected.TrySetResult(result);
+        }
+
         private TaskCompletionSource<StopResult> Arm()
         {
             // Fix round 1, C-3: same reasoning as DiffReview's tcs — resolved
@@ -137,12 +170,30 @@ namespace BECode.VisualStudio
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-                string? startupUniqueName = null;
+                // Fix round 1, I-4 (Ruling R-14): list EVERY loaded project
+                // that is not a solution folder, via the SAME enumeration
+                // WorkspaceFolders already uses (IVsSolution.GetProjectEnum),
+                // not solution.Projects — which the design forbids AND
+                // cannot see projects inside solution folders. I-3: the old
+                // OutputType/"IsStartable" heuristic is deleted; over-listing
+                // is harmless (debug_start on a class library fails with
+                // Visual Studio's own clear message), under-listing hides a
+                // project the model then never tries.
+                var solutionService = await _package.GetServiceAsync(typeof(SVsSolution)).ConfigureAwait(true) as IVsSolution;
+                var projects = WorkspaceFolders.EnumerateLoadedProjects(solutionService);
+
+                var startupUniqueNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
-                    if (_dte.Solution?.SolutionBuild?.StartupProjects is object[] startupProjects && startupProjects.Length > 0)
+                    if (_dte.Solution?.SolutionBuild?.StartupProjects is object[] startupProjects)
                     {
-                        startupUniqueName = startupProjects[0] as string;
+                        foreach (var startupProject in startupProjects)
+                        {
+                            if (startupProject is string uniqueName)
+                            {
+                                startupUniqueNames.Add(uniqueName);
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -150,51 +201,34 @@ namespace BECode.VisualStudio
                     ActivityLog.LogWarning(nameof(ConfigsAsync), ex.ToString());
                 }
 
-                var startable = new List<DebugConfigInfo>();
+                // Fix round 1, I-11: project names/dirs are already collected
+                // (on the UI thread, above); hop off before reading each
+                // project's launchSettings.json — ordinary file I/O that
+                // does not need the UI thread.
+                await TaskScheduler.Default;
+
+                var startupFirst = new List<DebugConfigInfo>();
+                var rest = new List<DebugConfigInfo>();
                 var launchProfiles = new List<DebugConfigInfo>();
-                DebugConfigInfo? startupFirst = null;
 
-                var solution = _dte.Solution;
-                if (solution != null)
+                foreach (var project in projects)
                 {
-                    foreach (Project project in solution.Projects)
+                    var info = new DebugConfigInfo(project.Name, "startup project");
+                    if (startupUniqueNames.Contains(project.UniqueName))
                     {
-                        if (!IsStartable(project))
-                        {
-                            continue;
-                        }
-
-                        var info = new DebugConfigInfo(project.Name, "startup project");
-                        bool isStartup;
-                        try
-                        {
-                            isStartup = startupUniqueName != null && string.Equals(project.UniqueName, startupUniqueName, StringComparison.OrdinalIgnoreCase);
-                        }
-                        catch
-                        {
-                            isStartup = false;
-                        }
-
-                        if (isStartup && startupFirst == null)
-                        {
-                            startupFirst = info;
-                        }
-                        else
-                        {
-                            startable.Add(info);
-                        }
-
-                        launchProfiles.AddRange(LaunchProfilesFor(project));
+                        startupFirst.Add(info);
                     }
+                    else
+                    {
+                        rest.Add(info);
+                    }
+
+                    launchProfiles.AddRange(LaunchProfilesFor(project));
                 }
 
-                var result = new List<DebugConfigInfo>();
-                if (startupFirst != null)
-                {
-                    result.Add(startupFirst);
-                }
-
-                result.AddRange(startable);
+                var result = new List<DebugConfigInfo>(startupFirst.Count + rest.Count + launchProfiles.Count);
+                result.AddRange(startupFirst);
+                result.AddRange(rest);
                 result.AddRange(launchProfiles);
 
                 return (IReadOnlyList<DebugConfigInfo>)result;
@@ -205,59 +239,104 @@ namespace BECode.VisualStudio
         {
             return Guard.RunAsync(nameof(StartAsync), ct, async () =>
             {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-
-                if (_debugger.CurrentMode != dbgDebugMode.dbgDesignMode)
-                {
-                    var stopTcs = Arm();
-                    _debugger.Stop(false);
-                    await TaskScheduler.Default;
-                    await WaitBoundedAsync(stopTcs.Task, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
-                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-                }
-
-                if (config != null)
-                {
-                    if (config.Contains(LaunchProfileSeparator))
-                    {
-                        throw new InvalidOperationException(
-                            "\"" + config + "\" is a launch profile; select it in Visual Studio's own toolbar first — switching it programmatically is not supported (host design §4)");
-                    }
-
-                    var project = FindStartableProjectByName(config);
-                    if (project == null)
-                    {
-                        throw new InvalidOperationException("no startup project named \"" + config + "\"");
-                    }
-
-                    _dte.Solution.SolutionBuild.StartupProjects = project.UniqueName;
-                }
-
-                var tcs = Arm();
-                _dte.ExecuteCommand("Debug.Start");
-                await TaskScheduler.Default;
-
-                // Alongside the 60s stop wait, a 5s "did we leave design
-                // mode" check (host design §4): ExecuteCommand returns at
-                // once, and a build failure never enters run mode.
-                using var buildCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var buildCheck = CheckBuildFailureAsync(buildCheckCts.Token);
-
-                var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
-                buildCheckCts.Cancel();
+                // Fix round 1, I-6: held for the whole method — the
+                // "already debugging" branch below awaits up to 10s, during
+                // which a second concurrent StartAsync must not be able to
+                // arm its own waiter over this one's.
+                await _debugGate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    await buildCheck.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-                return result ?? new StopResult(StopKind.Timeout);
+                    if (_debugger.CurrentMode != dbgDebugMode.dbgDesignMode)
+                    {
+                        var stopTcs = Arm();
+                        _debugger.Stop(false);
+                        await TaskScheduler.Default;
+                        await WaitBoundedAsync(stopTcs.Task, TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+                        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
+                    }
+
+                    if (config != null)
+                    {
+                        if (config.Contains(LaunchProfileSeparator))
+                        {
+                            throw new InvalidOperationException(
+                                "\"" + config + "\" is a launch profile; select it in Visual Studio's own toolbar first — switching it programmatically is not supported (host design §4)");
+                        }
+
+                        // Fix round 1, I-4: resolved through the shared
+                        // enumeration, no longer filtered by the deleted
+                        // IsStartable heuristic (I-3) — a name ConfigsAsync
+                        // just listed is always resolvable here.
+                        var solutionService = await _package.GetServiceAsync(typeof(SVsSolution)).ConfigureAwait(true) as IVsSolution;
+                        var projects = WorkspaceFolders.EnumerateLoadedProjects(solutionService);
+
+                        ProjectEntry match = default;
+                        var found = false;
+                        foreach (var project in projects)
+                        {
+                            if (string.Equals(project.Name, config, StringComparison.OrdinalIgnoreCase))
+                            {
+                                match = project;
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        if (!found)
+                        {
+                            throw new InvalidOperationException("no project named \"" + config + "\"");
+                        }
+
+                        _dte.Solution.SolutionBuild.StartupProjects = match.UniqueName;
+                    }
+
+                    var tcs = Arm();
+                    _dte.ExecuteCommand("Debug.Start");
+                    await TaskScheduler.Default;
+
+                    // Alongside the 60s stop wait, a 5s "did we leave design
+                    // mode" check (host design §4): ExecuteCommand returns at
+                    // once, and a build failure never enters run mode.
+                    using var buildCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var buildCheck = CheckBuildFailureAsync(tcs, buildCheckCts.Token);
+
+                    var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                    buildCheckCts.Cancel();
+                    try
+                    {
+                        await buildCheck.ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+
+                    return result ?? new StopResult(StopKind.Timeout);
+                }
+                finally
+                {
+                    _debugGate.Release();
+                }
             });
         }
 
-        private async Task CheckBuildFailureAsync(CancellationToken ct)
+        /// <summary>
+        /// Fix round 1, I-5: previously fired ONCE at a fixed 5s and read
+        /// <c>LastBuildInfo</c>, which is the PREVIOUS build's failure count
+        /// — the normal state of an agent fixing compile errors, so this
+        /// could report "build failed" for a build that was in fact still
+        /// running, then (via the old unconditional <c>Resolve</c>) clear
+        /// the pending stop and lose the breakpoint hit that followed. Now
+        /// polls <c>SolutionBuild.BuildState</c> until it leaves
+        /// <c>vsBuildStateInProgress</c> (bounded by the caller's own 60s
+        /// wait/<paramref name="ct"/>, off the UI thread between polls),
+        /// decides only once the build has actually finished, and resolves
+        /// only <paramref name="tcs"/> — the SPECIFIC waiter this call was
+        /// armed for (<see cref="ResolveIfCurrent"/>) — so a late check can
+        /// never complete a newer request's waiter.
+        /// </summary>
+        private async Task CheckBuildFailureAsync(TaskCompletionSource<StopResult> tcs, CancellationToken ct)
         {
             try
             {
@@ -268,7 +347,37 @@ namespace BECode.VisualStudio
                 return;
             }
 
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
+
+                var buildState = vsBuildState.vsBuildStateDone;
+                try
+                {
+                    buildState = _dte.Solution?.SolutionBuild?.BuildState ?? vsBuildState.vsBuildStateDone;
+                }
+                catch
+                {
+                }
+
+                if (buildState != vsBuildState.vsBuildStateInProgress)
+                {
+                    break;
+                }
+
+                await TaskScheduler.Default;
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+            }
 
             if (_debugger.CurrentMode != dbgDebugMode.dbgDesignMode)
             {
@@ -286,7 +395,7 @@ namespace BECode.VisualStudio
 
             if (lastBuildInfo > 0)
             {
-                Resolve(new StopResult(StopKind.Terminated, "build failed (" + lastBuildInfo + " projects)"));
+                ResolveIfCurrent(tcs, new StopResult(StopKind.Terminated, "build failed (" + lastBuildInfo + " projects)"));
             }
         }
 
@@ -294,19 +403,27 @@ namespace BECode.VisualStudio
         {
             return Guard.RunAsync(nameof(ContinueAsync), ct, async () =>
             {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-
-                if (_debugger.CurrentMode != dbgDebugMode.dbgBreakMode)
+                await _debugGate.WaitAsync(ct).ConfigureAwait(false);
+                try
                 {
-                    throw new InvalidOperationException("not stopped at a breakpoint");
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
+
+                    if (_debugger.CurrentMode != dbgDebugMode.dbgBreakMode)
+                    {
+                        throw new InvalidOperationException("not stopped at a breakpoint");
+                    }
+
+                    var tcs = Arm();
+                    _debugger.Go(false);
+                    await TaskScheduler.Default;
+
+                    var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                    return result ?? new StopResult(StopKind.Timeout);
                 }
-
-                var tcs = Arm();
-                _debugger.Go(false);
-                await TaskScheduler.Default;
-
-                var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
-                return result ?? new StopResult(StopKind.Timeout);
+                finally
+                {
+                    _debugGate.Release();
+                }
             });
         }
 
@@ -314,31 +431,39 @@ namespace BECode.VisualStudio
         {
             return Guard.RunAsync(nameof(StepAsync), ct, async () =>
             {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-
-                if (_debugger.CurrentMode != dbgDebugMode.dbgBreakMode)
+                await _debugGate.WaitAsync(ct).ConfigureAwait(false);
+                try
                 {
-                    throw new InvalidOperationException("not stopped at a breakpoint");
-                }
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-                var tcs = Arm();
-                switch (step)
+                    if (_debugger.CurrentMode != dbgDebugMode.dbgBreakMode)
+                    {
+                        throw new InvalidOperationException("not stopped at a breakpoint");
+                    }
+
+                    var tcs = Arm();
+                    switch (step)
+                    {
+                        case DebugStepKind.Over:
+                            _debugger.StepOver(false);
+                            break;
+                        case DebugStepKind.Into:
+                            _debugger.StepInto(false);
+                            break;
+                        case DebugStepKind.Out:
+                            _debugger.StepOut(false);
+                            break;
+                    }
+
+                    await TaskScheduler.Default;
+
+                    var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                    return result ?? new StopResult(StopKind.Timeout);
+                }
+                finally
                 {
-                    case DebugStepKind.Over:
-                        _debugger.StepOver(false);
-                        break;
-                    case DebugStepKind.Into:
-                        _debugger.StepInto(false);
-                        break;
-                    case DebugStepKind.Out:
-                        _debugger.StepOut(false);
-                        break;
+                    _debugGate.Release();
                 }
-
-                await TaskScheduler.Default;
-
-                var result = await WaitBoundedAsync(tcs.Task, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
-                return result ?? new StopResult(StopKind.Timeout);
             });
         }
 
@@ -350,12 +475,14 @@ namespace BECode.VisualStudio
 
                 if (action == BreakpointAction.Add)
                 {
+                    // Fix round 1, M-3: both ternary arms were the same
+                    // value — dropped.
                     _debugger.Breakpoints.Add(
                         File: path,
                         Line: line,
                         Column: 1,
                         Condition: condition ?? string.Empty,
-                        ConditionType: string.IsNullOrEmpty(condition) ? dbgBreakpointConditionType.dbgBreakpointConditionTypeWhenTrue : dbgBreakpointConditionType.dbgBreakpointConditionTypeWhenTrue);
+                        ConditionType: dbgBreakpointConditionType.dbgBreakpointConditionTypeWhenTrue);
                 }
                 else
                 {
@@ -374,10 +501,15 @@ namespace BECode.VisualStudio
                     }
                 }
 
+                // Fix round 1, M-5: a bound breakpoint can appear more than
+                // once in _debugger.Breakpoints for the same file/line
+                // (Visual Studio's own binding mechanics) — dedupe by line
+                // so the reported list matches what the user would see.
                 var remaining = new List<BridgeBreakpointInfo>();
+                var seenLines = new HashSet<int>();
                 foreach (Breakpoint bp in _debugger.Breakpoints)
                 {
-                    if (string.Equals(bp.File, path, StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(bp.File, path, StringComparison.OrdinalIgnoreCase) && seenLines.Add(bp.FileLine))
                     {
                         remaining.Add(new BridgeBreakpointInfo(bp.FileLine, string.IsNullOrEmpty(bp.Condition) ? null : bp.Condition));
                     }
@@ -404,17 +536,30 @@ namespace BECode.VisualStudio
                 var count = Math.Min(depth, frames.Count);
                 for (var i = 1; i <= count; i++)
                 {
-                    var frame = frames.Item(i);
+                    // Fix round 1, M-4: fenced PER FRAME — one bad frame
+                    // (a COM call that throws for it specifically, e.g. a
+                    // frame with no symbols) degrades to Path=null, Line=0
+                    // rather than losing every frame after it.
+                    var name = "?";
                     string? path = null;
                     var lineNumber = 0;
-
-                    if (frame is StackFrame2 frame2)
+                    try
                     {
-                        path = string.IsNullOrEmpty(frame2.FileName) ? null : frame2.FileName;
-                        lineNumber = (int)frame2.LineNumber;
+                        var frame = frames.Item(i);
+                        name = frame.FunctionName;
+
+                        if (frame is StackFrame2 frame2)
+                        {
+                            path = string.IsNullOrEmpty(frame2.FileName) ? null : frame2.FileName;
+                            lineNumber = (int)frame2.LineNumber;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        ActivityLog.LogWarning(nameof(StackAsync), ex.ToString());
                     }
 
-                    result.Add(new StackFrameInfo(frame.FunctionName, path, lineNumber, i));
+                    result.Add(new StackFrameInfo(name, path, lineNumber, i));
                 }
 
                 return (IReadOnlyList<StackFrameInfo>)result;
@@ -485,14 +630,22 @@ namespace BECode.VisualStudio
         {
             return Guard.RunAsync(nameof(StopAsync), ct, async () =>
             {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
-
-                if (_debugger.CurrentMode == dbgDebugMode.dbgDesignMode)
+                await _debugGate.WaitAsync(ct).ConfigureAwait(false);
+                try
                 {
-                    return;
-                }
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-                _debugger.Stop(false);
+                    if (_debugger.CurrentMode == dbgDebugMode.dbgDesignMode)
+                    {
+                        return;
+                    }
+
+                    _debugger.Stop(false);
+                }
+                finally
+                {
+                    _debugGate.Release();
+                }
             });
         }
 
@@ -539,35 +692,55 @@ namespace BECode.VisualStudio
 
             foreach (Expression expr in expressions)
             {
-                IReadOnlyList<VariableInfo>? children = null;
-
-                if (resolveChildren)
+                // Fix round 1, M-4: fenced PER VARIABLE — one bad variable
+                // (evaluating it, or a child's DataMembers, throws) degrades
+                // to Value="<unavailable>" rather than losing every
+                // variable after it in the scope.
+                try
                 {
-                    Expressions? members = null;
-                    try
-                    {
-                        members = expr.DataMembers;
-                    }
-                    catch
-                    {
-                        members = null;
-                    }
+                    IReadOnlyList<VariableInfo>? children = null;
 
-                    if (members != null && members.Count > 0)
+                    if (resolveChildren)
                     {
-                        var childList = new List<VariableInfo>();
-                        var childCount = Math.Min(20, members.Count);
-                        for (var i = 1; i <= childCount; i++)
+                        Expressions? members = null;
+                        try
                         {
-                            var child = members.Item(i);
-                            childList.Add(new VariableInfo(child.Name, child.Value, child.Type));
+                            members = expr.DataMembers;
+                        }
+                        catch
+                        {
+                            members = null;
                         }
 
-                        children = childList;
-                    }
-                }
+                        if (members != null && members.Count > 0)
+                        {
+                            var childList = new List<VariableInfo>();
+                            var childCount = Math.Min(20, members.Count);
+                            for (var i = 1; i <= childCount; i++)
+                            {
+                                try
+                                {
+                                    var child = members.Item(i);
+                                    childList.Add(new VariableInfo(child.Name, child.Value, child.Type));
+                                }
+                                catch (Exception ex)
+                                {
+                                    ActivityLog.LogWarning(nameof(CollectScope), ex.ToString());
+                                    childList.Add(new VariableInfo("?", "<unavailable>", null));
+                                }
+                            }
 
-                variables.Add(new VariableInfo(expr.Name, expr.Value, expr.Type, children));
+                            children = childList;
+                        }
+                    }
+
+                    variables.Add(new VariableInfo(expr.Name, expr.Value, expr.Type, children));
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogWarning(nameof(CollectScope), ex.ToString());
+                    variables.Add(new VariableInfo("?", "<unavailable>", null));
+                }
             }
 
             return variables;
@@ -638,92 +811,33 @@ namespace BECode.VisualStudio
             return null;
         }
 
+        // Fix round 1, I-3: the OutputType-based IsStartable heuristic (and
+        // FindStartableProjectByName, which filtered through it) are
+        // deleted — superseded by I-4's rule (ConfigsAsync/StartAsync now
+        // list/resolve EVERY loaded project via WorkspaceFolders.EnumerateLoadedProjects).
+        // The heuristic also read the numeric OutputType backwards
+        // (VSLangProj.prjOutputType has WinExe=0, Exe=1, Library=2 — the old
+        // code accepted "0" and "2", so it listed class libraries and hid
+        // console apps).
+
         /// <summary>
-        /// Host design §4, <c>ConfigsAsync</c>: "simpler and what v1 does" —
-        /// every project whose <c>OutputType</c> is Exe/WinExe, or an
-        /// ASP.NET web site project (which does not carry that property the
-        /// same way). This is a best-effort classification, not a claim
-        /// that every project system's own notion of "startable" is
-        /// captured exactly.
+        /// Fix round 1, I-11: no longer asserts the UI thread — the caller
+        /// (<see cref="ConfigsAsync"/>) now hops OFF it (<c>await
+        /// TaskScheduler.Default</c>) before calling this for each project,
+        /// since launchSettings.json is ordinary file I/O that does not
+        /// need it. <paramref name="project"/>'s <see cref="ProjectEntry.Dir"/>
+        /// was collected on the UI thread by the shared enumeration.
         /// </summary>
-        private static bool IsStartable(Project project)
+        private static List<DebugConfigInfo> LaunchProfilesFor(ProjectEntry project)
         {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            try
-            {
-                if (string.Equals(project.Kind, WebSiteProjectKind, StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var props = project.Properties;
-                var value = props?.Item("OutputType")?.Value;
-                if (value == null)
-                {
-                    return false;
-                }
-
-                var text = value.ToString();
-                return text == "0" || text == "2"
-                    || string.Equals(text, "Exe", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(text, "WinExe", StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private const string WebSiteProjectKind = "{E24C65DC-7377-472B-9ABA-BC803B73C61A}";
-
-        private Project? FindStartableProjectByName(string name)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
-            var solution = _dte.Solution;
-            if (solution == null)
-            {
-                return null;
-            }
-
-            foreach (Project project in solution.Projects)
-            {
-                if (IsStartable(project) && string.Equals(project.Name, name, StringComparison.OrdinalIgnoreCase))
-                {
-                    return project;
-                }
-            }
-
-            return null;
-        }
-
-        private static List<DebugConfigInfo> LaunchProfilesFor(Project project)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-
             var result = new List<DebugConfigInfo>();
-            string? projectDir = null;
-            try
-            {
-                projectDir = Path.GetDirectoryName(project.FullName);
-            }
-            catch
-            {
-            }
 
-            if (string.IsNullOrEmpty(projectDir))
+            if (string.IsNullOrEmpty(project.Dir))
             {
                 return result;
             }
 
-            var launchSettingsPath = Path.Combine(projectDir!, "Properties", "launchSettings.json");
+            var launchSettingsPath = Path.Combine(project.Dir, "Properties", "launchSettings.json");
             if (!File.Exists(launchSettingsPath))
             {
                 return result;
