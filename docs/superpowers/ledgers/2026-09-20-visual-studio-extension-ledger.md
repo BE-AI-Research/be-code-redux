@@ -32,7 +32,6 @@ The same deadlock was live in the shipped VS Code extension (1.1.0) and is fixed
 | R-13 | The VSIX **ships** the 6.0.x BCL set and carries `[ProvideBindingPath]` — reversing the host design's first answer. | Nothing put `BECode.Bridge.dll` on `devenv.exe`'s probing path, and betting Visual Studio carries every dependency was unverifiable. 6.0.x is older than anything 17.6+ redirects to, so Visual Studio's copy still wins where it has one. | A slightly larger package. |
 | R-14 | `debug_configs` lists every loaded project that is not a solution folder; the startability heuristic is gone. | The heuristic read `OutputType` backwards and could not see projects in solution folders. Over-listing is harmless; under-listing hides a project. | `debug_start` on a class library fails with Visual Studio's own message. |
 | R-15 | Every Activity Log entry is mirrored to `~/.be-code/visualstudio.log`. | The Activity Log may not be writable from a background thread, and it is the owner's only diagnostic surface. | One more file in the dotdir. |
-
 | R-16 | `Lock.Covers` folds case on Windows. | Found by the whole-branch review: Visual Studio, a PowerShell `cd` and VS Code each report the same directory in a different case. The byte-exact comparison had always been there, hidden by `Discover`'s newest-lock fallback; attaching without `--ide` has no fallback and is silent when it misses. | None on Linux or macOS; on Windows two directories differing only in case are one directory anyway. |
 
 ## The whole-branch review
