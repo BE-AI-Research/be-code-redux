@@ -614,3 +614,39 @@ func TestWarmOmitsAnEmptyOptionsBlock(t *testing.T) {
 		t.Fatalf("sent an options block with nothing in it: %v", body)
 	}
 }
+
+// TestPrefillReadsThePromptAndGeneratesNothing: the same request the next
+// turn will send — same messages, same tools, same window — with num_predict
+// 0, so the server's prompt cache is warm when the real one arrives. Probed
+// against Ollama 0.34: accepted, costs one token, and a cancelled prefill
+// keeps what it had read.
+func TestPrefillReadsThePromptAndGeneratesNothing(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Write([]byte(`{"message":{"content":""},"done":true,"done_reason":"length","prompt_eval_count":9747,"prompt_eval_duration":21110000000}` + "\n"))
+	}))
+	defer srv.Close()
+	p := NewOllama("t", srv.URL, "")
+	p.SetOptions(Options{NumCtx: 32768})
+	var pf Prefiller = p
+	resp, err := pf.Prefill(context.Background(), ChatRequest{
+		Model:     "m",
+		Messages:  []Message{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "hi"}},
+		Tools:     []ToolSpec{{Name: "read_file", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)}},
+		MaxTokens: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, _ := body["options"].(map[string]any)
+	if opts["num_predict"] != float64(0) || opts["num_ctx"] != float64(32768) {
+		t.Fatalf("options: %v", opts)
+	}
+	if _, ok := body["tools"]; !ok {
+		t.Fatal("the tools are part of the prompt the server renders; a prefill without them warms a different prefix")
+	}
+	if resp.Usage.PromptTokens != 9747 || resp.Usage.PromptDuration != 21110*time.Millisecond {
+		t.Fatalf("usage: %+v", resp.Usage)
+	}
+}

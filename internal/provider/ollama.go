@@ -143,6 +143,9 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	for k, v := range o.Extra {
 		m[k] = v
 	}
+	if req.PrefillOnly {
+		m["num_predict"] = 0 // after Extra: nothing configured may turn a prefill into a generation
+	}
 	return m
 }
 
@@ -357,6 +360,18 @@ func (p *Ollama) Chat(ctx context.Context, req ChatRequest, onDelta StreamFunc) 
 // is running on the OpenAI-compatible endpoint, where num_ctx cannot be set.
 // The agent turns it into one notice: a degraded session must not look
 // exactly like a healthy one.
+// Prefill warms the server's prompt cache with req and generates nothing. It
+// is only meaningful on the native path; a server that has fallen back to the
+// OpenAI route has no num_predict of 0 to ask for.
+func (p *Ollama) Prefill(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if p.nativeBroken.Load() {
+		return nil, fmt.Errorf("%s: prefill needs the native endpoint", p.ProviderName)
+	}
+	req.PrefillOnly = true
+	req.OnReasoning = nil
+	return p.nativeChat(ctx, req, nil)
+}
+
 func (p *Ollama) NativeFallback() bool { return p.nativeBroken.Load() }
 
 func (p *Ollama) thinkState(model string) (cannotThink, noLevels bool) {

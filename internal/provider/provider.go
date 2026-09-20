@@ -63,6 +63,9 @@ type ChatRequest struct {
 	// "low", "medium" or "high" ("" leaves the backend's default). Sent as
 	// OpenAI's reasoning_effort; backends that do not know it ignore it.
 	ReasoningEffort string
+	// PrefillOnly asks the server to read the prompt and generate nothing
+	// (Prefiller). Set by Prefill, never by a caller.
+	PrefillOnly bool `json:"-"`
 }
 
 // Usage reports token accounting when the backend supplies it.
@@ -123,6 +126,16 @@ type NativeFallbacker interface {
 // evict it and force a slow reload plus prompt re-processing.
 type KeepAliver interface {
 	KeepAlive(ctx context.Context, model string, d time.Duration) error
+}
+
+// Prefiller is implemented by providers whose server keeps a prompt cache
+// that a request can warm without generating anything (native Ollama). The
+// agent sends the request the next turn will send, ahead of time, after
+// anything that emptied the cache — a model load, a reload, a resume — so the
+// real request pays only for what is new. The request must be the real one in
+// every part the server renders into the prompt: messages, tools, window.
+type Prefiller interface {
+	Prefill(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 }
 
 // WindowClearer is implemented by providers that carry a context window on
