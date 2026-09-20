@@ -49,14 +49,17 @@ describe("tools.manifest.json", () => {
     expect(built.filter((t) => t.hidden).map((t) => t.name)).toEqual(["review_diff", "review_cancel"]);
     expect(built.every((t) => typeof t.hidden === "boolean")).toBe(true);
 
-    // GENERATE_MANIFEST=1 regenerates tools.manifest.json from this same,
-    // live registry instead of comparing against the committed one. This is
-    // the only path that writes the file, and it never runs on a plain
-    // `npm test` / `vitest run` — only when explicitly requested, e.g.:
-    //   GENERATE_MANIFEST=1 npx vitest run test/manifest.test.ts
-    if (process.env.GENERATE_MANIFEST) {
+    // GENERATE_MANIFEST=write regenerates tools.manifest.json from this same,
+    // live registry. It is the only path that writes the file:
+    //   GENERATE_MANIFEST=write npx vitest run test/manifest.test.ts
+    // It takes that exact word, not any value, and it does not return early:
+    // a variable left exported in a shell must not be able to turn the drift
+    // check into a pass, and whatever was written is compared like any other
+    // manifest.
+    if (process.env.GENERATE_MANIFEST === "write") {
       writeFileSync(manifestPath, JSON.stringify(built, null, 2) + "\n");
-      return;
+    } else if (process.env.GENERATE_MANIFEST) {
+      throw new Error(`GENERATE_MANIFEST=${process.env.GENERATE_MANIFEST}: to regenerate the manifest set it to "write"; otherwise unset it`);
     }
 
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));

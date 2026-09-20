@@ -12,7 +12,7 @@ BE-Code's editor bridge gives the model the editor's own view of a project: the 
 - **Topology:** BE-Code runs natively on the same Windows machine as Visual Studio (`be-code-windows-amd64.exe`), on the same checkout. WSL and remote attach are out of scope.
 - **Scope:** full parity with the VS Code extension: the same tools, the same names, the same input shapes, so the model and the harness see no difference.
 - **Extension model:** one classic in-process VSIX (`AsyncPackage`, VSSDK). The newer out-of-process `VisualStudio.Extensibility` model does not reach the debugger or the diff viewer well enough for parity, and does not cover older 2022 builds.
-- **Versions:** one package declaring `[17.0,19.0)`, which covers Visual Studio 2022 (17.x) and 2026 (18.x), for `amd64` and `arm64`.
+- **Versions:** one package declaring `[17.6,19.0)`, which covers Visual Studio 2022 (17.6 and later) and 2026 (18.x), for `amd64` and `arm64`. *(First written as `[17.0,19.0)`; the floor rose to 17.6 with the host design's §1.1, agreed with the owner: the bridge runs inside `devenv.exe` against Visual Studio's own `System.Text.Json`.)*
 - **Build:** the Visual Studio layer can only be built on Windows. Everything else is built and tested on Linux with the .NET SDK (10.0.401 is installed here).
 
 ## 3. The wire contract (unchanged, restated so the C# side can be checked against it)

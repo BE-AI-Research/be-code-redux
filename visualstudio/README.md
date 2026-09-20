@@ -10,7 +10,7 @@ It has no window of its own. Install it, open a solution or a folder, and run `b
 
 | Part | State |
 |---|---|
-| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 271 tests |
+| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 272 tests |
 | The real BE-Code client against the real bridge, every tool (`internal/ide/contract_test.go`) | Tested on Linux through a scripted host |
 | The Visual Studio host (`src/BECode.VisualStudio`) | **Compiles; never run** |
 | Packaging the `.vsix` (`build.ps1`) | **Never executed** |
@@ -65,7 +65,7 @@ These are limits of this version, not bugs:
 
 ## Privacy
 
-The server listens on loopback only and requires the random token in the lock file, which is readable only by you. Nothing leaves the machine; there is no telemetry.
+The server listens on loopback only and requires the random token in the lock file. That file lives under your user profile and gets the profile's permissions — other ordinary users of the machine cannot read it; an administrator can. (On Linux and macOS, where the bridge library is also used, it is created `0600`.) Nothing leaves the machine; there is no telemetry.
 
 ## Layout
 
@@ -76,9 +76,10 @@ src/BECode.VisualStudio/     net472 — the package and the Visual Studio implem
 test/BECode.Bridge.Tests/    xunit
 build.ps1                    Windows: produces the .vsix
 WINDOWS-CHECKLIST.md         what to verify on a real install, and what to send back if a step fails
+THIRD-PARTY-NOTICES.md       the .NET libraries shipped inside the .vsix
 ```
 
-On Linux or macOS, `dotnet build` and `dotnet test` in this directory compile every project, the Visual Studio layer included, and run the tests. Only packaging needs Windows. The design is in `../docs/superpowers/specs/2026-09-20-visual-studio-extension-design.md` and `…-visual-studio-host-design.md`.
+On Linux or macOS, `dotnet build` and `dotnet test` in this directory compile every project, the Visual Studio layer included, and run the tests. Only packaging needs Windows. From the repository root that is `make -f build.mk visualstudio-test`. It is deliberately **not** part of `make verify` or `release`, which must work without the .NET SDK — so after changing a tool in the VS Code extension and regenerating `vscode/tools.manifest.json`, run it: the C# side's parity tests are what notice a tool this side has no handler for. The design is in `../docs/superpowers/specs/2026-09-20-visual-studio-extension-design.md` and `…-visual-studio-host-design.md`.
 
 `System.Text.Json` is held at 6.0.x in `BECode.Bridge` on purpose. Inside Visual Studio the library runs in `devenv.exe`, which loads its own copies of these assemblies under binding redirects an extension cannot change; a reference *newer* than the oldest supported Visual Studio carries fails the package load. Because 6.0.x is older than anything 17.6+ redirects to, the `.vsix` can safely ship its own copies too: where Visual Studio has one, Visual Studio's wins; where it has none, ours is found (`[ProvideBindingPath]`). Raising the version means raising the minimum Visual Studio with it.
 

@@ -20,7 +20,7 @@ that had been live since shared reviews shipped.
   proposed-write diff in Visual Studio's own difference viewer with Accept, Accept all and
   Reject in an information bar. **The Visual Studio layer compiles against the real SDK —
   on Linux, warnings as errors, SDK analyzers on — and has never been run.** The protocol,
-  the lock file and every tool underneath it are tested (271 tests), and
+  the lock file and every tool underneath it are tested (272 tests), and
   `internal/ide/contract_test.go` drives the real Go client against the real bridge, every
   tool, including a review cancelled mid-flight. `visualstudio/WINDOWS-CHECKLIST.md` is
   what proves the rest, and `visualstudio/README.md` lists what this version does not do:
@@ -32,7 +32,12 @@ that had been live since shared reviews shipped.
   attaches only inside VS Code's own terminal or with `--ide`, and a Visual Studio open on
   some other project is never picked up: the quiet path uses only locks that cover the
   directory (`ide.DiscoverCovering`), where `--ide` keeps its newest-lock fallback. Every
-  interactive launch now reads and prunes `~/.be-code/ide`.
+  interactive launch now reads and prunes `~/.be-code/ide`. On Windows that coverage
+  comparison now ignores case: Visual Studio, a PowerShell `cd` and VS Code each report the
+  same directory in a different case, which the newest-lock fallback had always hidden.
+- The attached editor is named for what it is (`Visual Studio connected: 16 tools`,
+  `answered in Visual Studio`), and with Visual Studio attached the system prompt points the
+  model at `ide_debug_configs` instead of the `program` form Visual Studio refuses.
 - `make -f build.mk visualstudio-test` compiles the Visual Studio projects and runs their
   tests where the .NET SDK is installed. `verify` does not need it: the contract test
   skips without `dotnet`, and under `-short`.

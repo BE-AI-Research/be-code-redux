@@ -159,6 +159,32 @@ namespace BECode.Bridge.Tests
             Assert.Null(next);
         }
 
+        // The wire contract lists ping among the methods answered inline, and
+        // the VS Code bridge answers it with an empty result. The harness never
+        // pings, so nothing depended on it — but a second client, or a person
+        // with netcat and the spec, would have been told "unknown method".
+        [Fact]
+        public async Task PingIsAnsweredWithAnEmptyResult()
+        {
+            var (server, port) = await StartServerAsync();
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}");
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(line);
+            var root = JsonDocument.Parse(line!).RootElement;
+
+            Assert.Equal(7, root.GetProperty("id").GetInt32());
+            Assert.False(root.TryGetProperty("error", out _));
+            Assert.Equal(JsonValueKind.Object, root.GetProperty("result").ValueKind);
+            Assert.Empty(root.GetProperty("result").EnumerateObject());
+        }
+
         [Fact]
         public async Task ToolsListBeforeInitializeGetsNotInitialized()
         {

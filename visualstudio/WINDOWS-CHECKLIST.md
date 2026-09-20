@@ -18,14 +18,15 @@ Do it once on Visual Studio 2022 (17.6 or later) and once on 2026. Tick as you g
   *If it says the extension-development workload is missing, install it from the Visual Studio Installer.*
 - [ ] **A2.** The `.vsix` installs into Visual Studio 2022. *(On an Arm64 machine this is also the test that the Arm64 install targets are right.)*
 - [ ] **A3.** The same `.vsix` installs into Visual Studio 2026.
-- [ ] **A4.** Start Visual Studio **with no solution**. Within a few seconds `%USERPROFILE%\.be-code\visualstudio.log` gains a line like `listening on port N, 0 workspace folders`, and `%USERPROFILE%\.be-code\ide\<pid>.json` exists with `"ideName":"visualstudio"` and `"workspaceFolders":[]`.
+- [ ] **A4.** Start Visual Studio **with no solution**. Within a few seconds `%USERPROFILE%\.be-code\visualstudio.log` gains the line `listening on port N, 0 workspace folder(s), VS <version>`, and `%USERPROFILE%\.be-code\ide\<pid>.json` exists with `"ideName":"visualstudio"` and `"workspaceFolders":[]`.
   *No log line and no lock file means the package loaded but could not resolve `BECode.Bridge.dll` or one of its dependencies inside `devenv.exe` — the single most likely failure. The Activity Log will name the assembly (`FileNotFoundException` / `FileLoadException`). Send it back.*
 - [ ] **A5.** Visual Studio starts no slower than before, and nothing is pinned to the top of its window.
 
 ## B. Attaching — the second likeliest
 
 - [ ] **B1.** With Visual Studio still open from A4, **open a solution**. Within a second or two the log gains a `republished lock` line and the lock file's `workspaceFolders` now lists the solution directory and each project's directory.
-- [ ] **B2.** Open a terminal **outside** Visual Studio (Windows Terminal), `cd` into the solution, run `be-code` — no flags. Its startup shows the editor attached; `/tools` lists sixteen `ide_*` tools (no `ide_review_diff`, no `ide_review_cancel`).
+- [ ] **B2.** Open a terminal **outside** Visual Studio (Windows Terminal), `cd` into the solution, run `be-code` — no flags. Its startup says `Visual Studio connected: 16 tools`; `/tools` lists sixteen `ide_*` tools (no `ide_review_diff`, no `ide_review_cancel`).
+  *If it does not attach, run `be-code --ide` once: if THAT attaches, the lock's folders do not cover your directory — send the lock file and the output of `cd` (PowerShell: `(Get-Location).Path`).*
 - [ ] **B3.** `cd` to a directory that is **not** under the solution and run `be-code`: it must **not** attach.
 - [ ] **B4.** Open a second Visual Studio on a different solution. Each `be-code`, started under its own solution, attaches to its own Visual Studio (ask it `what file am I looking at?` in each).
 - [ ] **B5.** **File › Open › Folder** on a plain folder, close Visual Studio, reopen it so the folder is restored at startup: the lock lists that folder, and `be-code` inside it attaches.

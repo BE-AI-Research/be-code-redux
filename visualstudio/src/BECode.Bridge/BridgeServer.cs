@@ -729,6 +729,10 @@ namespace BECode.Bridge
                             await HandleToolsListAsync(state, id).ConfigureAwait(false);
                             break;
 
+                        case "ping":
+                            await WriteResultAsync(state, id, new { }).ConfigureAwait(false);
+                            break;
+
                         case "tools/call":
                             // The ORDERED
                             // processor acquires a call slot before forking

@@ -808,12 +808,15 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.11.0 — context handling: a task record that survives compaction, native Ollama
-with a configurable window, and a model loader gated on consent (see the changelog).
+v0.12.0 — a Visual Studio 2022/2026 extension beside the VS Code one (compiled against the
+real SDK, not yet run: see `visualstudio/README.md`), and an editor review that can be
+withdrawn without wedging the bridge. v0.11.x — context handling: a task record that survives
+compaction, native Ollama with a configurable window, a model loader gated on consent, and a
+compaction target that can be reached (see the changelog).
 Earlier milestones, from v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
 think-filtering, model compaction, plan mode, git awareness + /commit + /init, custom
 commands + hooks, MCP client, reviewer routing, shell allow/deny + background processes,
 bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Earlier:
 v0.2.0 (dual UI, wizard, diff approvals, sessions), v0.1.0 (core loop + verification).
-4-platform builds; 15 tested packages plus scripted-model e2e (repair loop, MCP attach,
+4-platform builds; 21 tested Go packages, the two editor extensions' own suites, and scripted-model e2e (repair loop, MCP attach,
 undo, JSON mode, bench harness) driven through the real binary.

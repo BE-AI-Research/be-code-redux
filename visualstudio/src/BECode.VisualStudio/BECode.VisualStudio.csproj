@@ -97,6 +97,11 @@
     <!-- Update, not Include — the SDK's default glob
          already includes source.extension.vsixmanifest as a None item;
          Include would duplicate it (CS2002-equivalent MSBuild warning). -->
+    <!-- The MIT notice has to travel with the .NET assemblies the container
+         carries. -->
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md">
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
     <None Update="source.extension.vsixmanifest">
       <SubType>Designer</SubType>
     </None>
