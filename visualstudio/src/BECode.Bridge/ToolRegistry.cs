@@ -15,12 +15,10 @@ namespace BECode.Bridge
     /// handler, or a handler with no manifest entry, throws at construction —
     /// the two must never drift, in either direction.
     ///
-    /// Checkpoint 1: every handler is a placeholder ("not implemented"); the
-    /// eighteen names, their manifest binding and the unknown-tool contract
-    /// are what this checkpoint proves. Later checkpoints replace the
-    /// placeholders with the real tool families (<c>Tools/EditorTools.cs</c>,
-    /// <c>DiagnosticsTools.cs</c>, <c>ReviewTools.cs</c>, <c>DebugTools.cs</c>)
-    /// without touching this binding table's shape.
+    /// The eighteen names bind to the four tool families in
+    /// <c>Tools/</c> (<c>EditorTools</c>, <c>DiagnosticsTools</c>,
+    /// <c>ReviewTools</c>, <c>DebugTools</c>); the ten <c>debug_*</c> names
+    /// still resolve to a placeholder pending checkpoint 4.
     /// </summary>
     public sealed class ToolRegistry : IToolDispatcher
     {
@@ -28,12 +26,14 @@ namespace BECode.Bridge
 
         private readonly IReadOnlyList<ToolInfo> _list;
         private readonly IReadOnlyDictionary<string, ToolHandler> _handlers;
+        private readonly ReviewTools _reviewTools;
 
         public ToolRegistry(IEditorHost host)
         {
             var manifest = ToolManifest.Load();
 
-            var handlers = BuildHandlers(host);
+            _reviewTools = new ReviewTools(host);
+            var handlers = BuildHandlers(host, _reviewTools);
 
             var manifestNames = new HashSet<string>(manifest.Select(m => m.Name), StringComparer.Ordinal);
             var missing = manifestNames.Where(n => !handlers.ContainsKey(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
@@ -53,14 +53,14 @@ namespace BECode.Bridge
                 .ToList();
         }
 
-        private static Dictionary<string, ToolHandler> BuildHandlers(IEditorHost host)
+        private static Dictionary<string, ToolHandler> BuildHandlers(IEditorHost host, ReviewTools reviewTools)
         {
             var editorTools = new EditorTools(host);
             var diagnosticsTools = new DiagnosticsTools(host);
 
-            // Checkpoints 3/4 replace the remaining placeholders with
-            // ReviewTools/DebugTools; debug_* and review_* still resolve to
-            // "not implemented" until then.
+            // Checkpoint 4 replaces the remaining placeholders with
+            // DebugTools; debug_* still resolves to "not implemented" until
+            // then.
             ToolHandler notImplemented = (args, connection, ct) =>
                 Task.FromResult(new ToolResult("not implemented", true));
 
@@ -82,8 +82,8 @@ namespace BECode.Bridge
                 ["debug_evaluate"] = notImplemented,
                 ["debug_output"] = notImplemented,
                 ["debug_stop"] = notImplemented,
-                ["review_diff"] = notImplemented,
-                ["review_cancel"] = notImplemented,
+                ["review_diff"] = reviewTools.ReviewDiff,
+                ["review_cancel"] = reviewTools.ReviewCancel,
             };
         }
 
@@ -102,8 +102,7 @@ namespace BECode.Bridge
 
         public void ConnectionClosed(object connection)
         {
-            // Checkpoint 3 wires this to ReviewTools' accept-all/pending
-            // state; nothing at this checkpoint holds per-connection state.
+            _reviewTools.ConnectionClosed(connection);
         }
     }
 }

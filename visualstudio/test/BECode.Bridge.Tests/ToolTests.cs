@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -342,6 +343,207 @@ namespace BECode.Bridge.Tests
             Assert.Equal("2 errors, 1 warning in 2 files", firstLine);
             Assert.Contains("b.go:1:1 error go: missing import", result.Text, StringComparison.Ordinal);
             Assert.True(result.Text.IndexOf("a.py", StringComparison.Ordinal) < result.Text.IndexOf("b.go", StringComparison.Ordinal));
+        }
+
+        // ---- review_diff / review_cancel (vscode/src/tools/review.ts, vscode/test/review.test.ts) ----
+
+        private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (!condition())
+            {
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new TimeoutException($"condition not met within {timeout}");
+                }
+
+                await Task.Delay(10);
+            }
+        }
+
+        [Theory]
+        [InlineData("{\"proposed\":\"new\"}", "path")]
+        [InlineData("{\"path\":\"a.txt\"}", "proposed")]
+        public async Task ReviewDiffMissingRequiredArgumentIsErrorNamingIt(string argsJson, string missing)
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var result = await registry.CallAsync("review_diff", Args(argsJson), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains(missing, result.Text, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task ReviewCancelMissingPathIsErrorNamingIt()
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var result = await registry.CallAsync("review_cancel", Args("{}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("path", result.Text, StringComparison.Ordinal);
+        }
+
+        [Theory]
+        [InlineData(ReviewDecision.Accept, "{\"decision\":\"accept\"}")]
+        [InlineData(ReviewDecision.Reject, "{\"decision\":\"reject\"}")]
+        [InlineData(ReviewDecision.AcceptAll, "{\"decision\":\"accept_all\"}")]
+        [InlineData(ReviewDecision.Cancelled, "{\"decision\":\"cancelled\"}")]
+        public async Task ReviewDiffSerialisesEachDecisionExactly(ReviewDecision decision, string expected)
+        {
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => Task.FromResult(decision) };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Equal(expected, result.Text);
+        }
+
+        [Fact]
+        public async Task AcceptAllIsRememberedForTheConnectionAndSkipsAskingTheHostAgain()
+        {
+            var callCount = 0;
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => { callCount++; return Task.FromResult(ReviewDecision.AcceptAll); } };
+            var registry = new ToolRegistry(host);
+            var connA = new object();
+            var connB = new object();
+
+            var first = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), connA, CancellationToken.None);
+            Assert.Equal("{\"decision\":\"accept_all\"}", first.Text);
+            Assert.Equal(1, callCount);
+
+            // Same connection, a different path: accept-all is per connection, not per path.
+            var second = await registry.CallAsync("review_diff", Args("{\"path\":\"b.txt\",\"proposed\":\"new\"}"), connA, CancellationToken.None);
+            Assert.Equal("{\"decision\":\"accept\"}", second.Text);
+            Assert.Equal(1, callCount); // host not asked again
+
+            // A different connection still asks.
+            var third = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), connB, CancellationToken.None);
+            Assert.Equal("{\"decision\":\"accept_all\"}", third.Text);
+            Assert.Equal(2, callCount);
+        }
+
+        [Fact]
+        public async Task ConnectionClosedDropsAcceptAllState()
+        {
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => Task.FromResult(ReviewDecision.AcceptAll) };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            registry.ConnectionClosed(conn);
+
+            host.OnReviewDiff = (req, ct) => Task.FromResult(ReviewDecision.Reject);
+            var result = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+
+            Assert.Equal("{\"decision\":\"reject\"}", result.Text);
+        }
+
+        [Fact]
+        public async Task ReviewCancelForAnUnknownPathReturnsCancelledFalse()
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var result = await registry.CallAsync("review_cancel", Args("{\"path\":\"nope.txt\"}"), new object(), CancellationToken.None);
+
+            Assert.Equal("{\"cancelled\":false}", result.Text);
+        }
+
+        [Fact]
+        public async Task ReviewCancelResolvesAPendingReviewDiffAsCancelled()
+        {
+            var hostCalled = new TaskCompletionSource<bool>();
+            var host = new FakeEditorHost
+            {
+                OnReviewDiff = async (req, ct) =>
+                {
+                    var tcs = new TaskCompletionSource<bool>();
+                    using (ct.Register(() => tcs.TrySetResult(true)))
+                    {
+                        hostCalled.SetResult(true);
+                        await tcs.Task;
+                    }
+
+                    return ReviewDecision.Cancelled;
+                },
+            };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            var diffTask = registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            await hostCalled.Task;
+
+            var cancelResult = await registry.CallAsync("review_cancel", Args("{\"path\":\"a.txt\"}"), conn, CancellationToken.None);
+            Assert.Equal("{\"cancelled\":true}", cancelResult.Text);
+
+            var diffResult = await diffTask;
+            Assert.Equal("{\"decision\":\"cancelled\"}", diffResult.Text);
+        }
+
+        [Fact]
+        public async Task ReviewCancelAfterTheDecisionAlreadyResolvedReturnsCancelledFalse()
+        {
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => Task.FromResult(ReviewDecision.Accept) };
+            var registry = new ToolRegistry(host);
+            var conn = new object();
+
+            var diffResult = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), conn, CancellationToken.None);
+            Assert.Equal("{\"decision\":\"accept\"}", diffResult.Text);
+
+            var cancelResult = await registry.CallAsync("review_cancel", Args("{\"path\":\"a.txt\"}"), conn, CancellationToken.None);
+            Assert.Equal("{\"cancelled\":false}", cancelResult.Text);
+        }
+
+        [Fact]
+        public async Task TwoConnectionsReviewingTheSamePathAreIsolatedFromEachOthersCancel()
+        {
+            var resolvers = new List<TaskCompletionSource<ReviewDecision>>();
+            var host = new FakeEditorHost
+            {
+                OnReviewDiff = (req, ct) =>
+                {
+                    var tcs = new TaskCompletionSource<ReviewDecision>();
+                    lock (resolvers)
+                    {
+                        resolvers.Add(tcs);
+                    }
+
+                    ct.Register(() => tcs.TrySetResult(ReviewDecision.Cancelled));
+                    return tcs.Task;
+                },
+            };
+            var registry = new ToolRegistry(host);
+            var connA = new object();
+            var connB = new object();
+
+            var diffA = registry.CallAsync("review_diff", Args("{\"path\":\"shared.txt\",\"proposed\":\"new\"}"), connA, CancellationToken.None);
+            await WaitForAsync(() => resolvers.Count >= 1, TimeSpan.FromSeconds(5));
+            var diffB = registry.CallAsync("review_diff", Args("{\"path\":\"shared.txt\",\"proposed\":\"new\"}"), connB, CancellationToken.None);
+            await WaitForAsync(() => resolvers.Count >= 2, TimeSpan.FromSeconds(5));
+
+            var cancelA = await registry.CallAsync("review_cancel", Args("{\"path\":\"shared.txt\"}"), connA, CancellationToken.None);
+            Assert.Equal("{\"cancelled\":true}", cancelA.Text);
+            Assert.Equal("{\"decision\":\"cancelled\"}", (await diffA).Text);
+
+            var cancelAAgain = await registry.CallAsync("review_cancel", Args("{\"path\":\"shared.txt\"}"), connA, CancellationToken.None);
+            Assert.Equal("{\"cancelled\":false}", cancelAAgain.Text);
+
+            // B was never touched by any of the above.
+            resolvers[1].SetResult(ReviewDecision.Accept);
+            Assert.Equal("{\"decision\":\"accept\"}", (await diffB).Text);
+        }
+
+        [Fact]
+        public void BothReviewToolsAreOmittedFromList()
+        {
+            var registry = new ToolRegistry(NewHost());
+
+            var names = registry.List().Select(t => t.Name).ToList();
+
+            Assert.DoesNotContain("review_diff", names);
+            Assert.DoesNotContain("review_cancel", names);
         }
     }
 }
