@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace BECode.Bridge
 {
     /// <summary>
-    /// Fix round 1, F6 (Ruling R-9): the shared manifest's
+    /// The shared manifest's
     /// <c>debug_start</c>/<c>debug_configs</c> descriptions tell the model to
     /// use vscode's <c>program</c>+<c>type</c> launch shape, which this
     /// bridge refuses — Visual Studio debugs the startup project instead.
@@ -18,7 +18,7 @@ namespace BECode.Bridge
         public static readonly IReadOnlyDictionary<string, string> Descriptions = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["debug_configs"] = "List what Visual Studio can debug: the solution's startup projects and their launch profiles. Pass a name to debug_start as config.",
-            // Fix round 2, T2: the tool itself enforces a 60s wait
+            // The tool itself enforces a 60s wait
             // (DebugTools.Describe's Timeout case) — the description should
             // say so rather than leaving the model to guess how long
             // debug_start might block.

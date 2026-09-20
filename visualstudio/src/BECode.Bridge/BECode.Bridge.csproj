@@ -28,7 +28,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- vscode/tools.manifest.json (Task 1) is the single source of truth for
+    <!-- vscode/tools.manifest.json is the single source of truth for
          tool names, descriptions and schemas; ToolManifest.cs reads it back
          out of this assembly by LogicalName so the resource's identity does
          not depend on the relative path used here. -->

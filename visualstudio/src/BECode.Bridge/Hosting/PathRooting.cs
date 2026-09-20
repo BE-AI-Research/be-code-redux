@@ -5,7 +5,7 @@ using System.IO;
 namespace BECode.Bridge.Hosting
 {
     /// <summary>
-    /// Fix round 1, I-10: roots a bare or relative file name — an MSBuild
+    /// Roots a bare or relative file name — an MSBuild
     /// <c>ErrorItem.FileName</c> is often project-relative or bare, not
     /// absolute — against a list of candidate directories, tried in order,
     /// the first one where the combined path actually EXISTS wins. When

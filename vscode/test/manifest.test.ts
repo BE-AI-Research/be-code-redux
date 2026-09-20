@@ -27,8 +27,8 @@ function buildManifest() {
   registerDebugTools(reg, ctx);
   registerReviewTool(reg, ctx);
   // ToolDef.hidden is optional (only review.ts sets it, to true); the
-  // manifest carries it explicitly on every entry so consumers (Task 3's C#
-  // project, Task 4's Go contract test) never have to treat a missing key as
+  // manifest carries it explicitly on every entry so consumers (the C#
+  // project, the Go contract test) never have to treat a missing key as
   // "not hidden".
   return reg.all().map(({ name, description, inputSchema, hidden }) => ({
     name,

@@ -6,7 +6,7 @@
     <Description xml:space="preserve">Connects BE-Code (an offline-first agentic coding CLI for local LLMs) to Visual Studio: active file/selection, diagnostics, go-to-definition/references/hover, a diff review of every proposed write, and the debugger.</Description>
   </Metadata>
   <Installation>
-    <!-- Manifest floor 17.6 (Task 6 v2, owner-agreed): the first
+    <!-- Manifest floor 17.6: the first
          long-term-servicing 2022 release, and the first to carry a
          System.Text.Json new enough that the bridge's own dependency does
          not fail package load (host design §1.1). Ceiling 19.0 (exclusive)

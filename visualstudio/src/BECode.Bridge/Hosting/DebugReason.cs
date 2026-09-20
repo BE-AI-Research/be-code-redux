@@ -4,7 +4,7 @@ namespace BECode.Bridge.Hosting
     /// Host design §4, <c>DebugSession</c>'s <c>OnEnterBreakMode</c>/
     /// <c>OnEnterDesignMode</c> handlers: maps an <c>EnvDTE.dbgEventReason</c>
     /// value to the free-text reason word <c>IDebugHost.StartAsync</c>'s doc
-    /// comment (Ruling D2) asks for, and decides whether leaving run mode
+    /// comment asks for, and decides whether leaving run mode
     /// was a normal process exit. Takes the enum value's OWN
     /// <c>ToString()</c> name rather than the <c>dbgEventReason</c> type
     /// itself: <c>BECode.Bridge</c> must never reference a Visual Studio/

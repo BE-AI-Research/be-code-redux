@@ -2,8 +2,8 @@
 <#
 .SYNOPSIS
     Builds BECode.VisualStudio.csproj on Windows and prints the resulting
-    .vsix path. This script is Task 6's Windows half: everything up to
-    packaging is proven by `dotnet build` on Linux (see the repo's CI and
+    .vsix path. Everything up to packaging is proven by `dotnet build` on
+    Linux (see the repo's CI and
     docs/superpowers/specs/2026-09-20-visual-studio-host-design.md); this
     script exists because the VSIX container itself (Microsoft.VSSDK.BuildTools'
     MSBuild targets) can only be produced by MSBuild.exe on a machine with
@@ -22,8 +22,8 @@
        bin\<Configuration>\net472\, not bin\<Configuration>\ directly) and
        prints its path.
     5. Opens the .vsix as a zip and fails loudly if BECode.Bridge.dll is not
-       inside it (fix round 1, C-1) — the one thing this script exists to
-       catch before the owner finds out the hard way inside devenv.exe.
+       inside it — the one thing this script exists to catch before the
+       owner finds out the hard way inside devenv.exe.
 
     A missing vswhere, a missing MSBuild, or a build failure that looks
     like the VSSDK targets are absent all produce a readable, specific
@@ -34,7 +34,7 @@ param(
     [string]$Configuration = "Release"
 )
 
-# Fix round 1, M-8: with $ErrorActionPreference = "Stop", Write-Error is a
+# With $ErrorActionPreference = "Stop", Write-Error is a
 # TERMINATING error — it throws immediately, so any "exit $code" written
 # after it never runs and the script's real exit code is lost (PowerShell's
 # own default for an uncaught terminating error, not whatever the caller
@@ -49,7 +49,7 @@ function Write-ErrorBlock {
     [Console]::Error.WriteLine($Text)
 }
 
-# Fix round 1, M-8: $PSScriptRoot (this script's own directory), not
+# $PSScriptRoot (this script's own directory), not
 # Split-Path -Parent $MyInvocation.MyCommand.Path — the latter is empty when
 # this script is dot-sourced rather than invoked directly.
 $repoRoot = $PSScriptRoot
@@ -88,7 +88,7 @@ with that workload, then re-run this script.
         exit 1
     }
 
-    # Fix round 1, C-1: ask vswhere to FIND MSBuild.exe itself under the
+    # Ask vswhere to FIND MSBuild.exe itself under the
     # installation's own MSBuild tree, rather than hard-coding
     # "MSBuild\Current\Bin" — VS 2026's own layout there is unverified from
     # this Linux checkout, and -find is exactly what vswhere exists for.
@@ -144,7 +144,7 @@ actual compile error.
     exit $buildExitCode
 }
 
-# Fix round 1, C-1(b): an SDK-style project outputs to
+# An SDK-style project outputs to
 # bin\<Configuration>\net472\, not bin\<Configuration>\ directly — search
 # recursively and take the newest .vsix in case a stale one from an older
 # TargetFramework layout is still sitting there.
@@ -158,7 +158,7 @@ if (-not $vsix) {
     exit 1
 }
 
-# Fix round 1, C-1: the .vsix is a zip file. List its contents and fail
+# The .vsix is a zip file. List its contents and fail
 # loudly if BECode.Bridge.dll is not inside — a silent, empty-handed
 # "success" here is exactly the failure mode this script exists to catch
 # before the owner installs it into devenv.exe and finds out the hard way.

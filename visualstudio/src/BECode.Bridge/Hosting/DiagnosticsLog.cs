@@ -4,7 +4,7 @@ using System.IO;
 namespace BECode.Bridge.Hosting
 {
     /// <summary>
-    /// Fix round 1, I-9 (Ruling R-15): pure formatting/rotation logic for
+    /// Pure formatting/rotation logic for
     /// the plain-file mirror of every Activity Log entry BE-Code's Visual
     /// Studio host writes, <c>&lt;home&gt;\.be-code\visualstudio.log</c> —
     /// the owner's only diagnostic surface besides the Activity Log itself

@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace BECode.Bridge
 {
     /// <summary>
-    /// One entry from vscode/tools.manifest.json (Task 1): name, description
+    /// One entry from vscode/tools.manifest.json: name, description
     /// and input schema come from there verbatim, never retyped here.
     /// <see cref="Hidden"/> marks a tool callable through <c>tools/call</c>
     /// but omitted from <c>tools/list</c> (<c>review_diff</c>/<c>review_cancel</c>).
@@ -41,7 +41,7 @@ namespace BECode.Bridge
         public static IReadOnlyList<ManifestEntry> Load() => Load(typeof(ToolManifest).Assembly);
 
         /// <summary>
-        /// Fix round 1, F5: takes the assembly to read the resource from, so
+        /// Takes the assembly to read the resource from, so
         /// a test can prove the missing-resource guard actually throws by
         /// passing an assembly that does not embed it (e.g. the test
         /// assembly itself), rather than trusting that by accident.

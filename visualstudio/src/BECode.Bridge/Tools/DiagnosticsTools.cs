@@ -8,10 +8,9 @@ namespace BECode.Bridge.Tools
 {
     /// <summary>
     /// The <c>diagnostics</c> tool. Ports vscode/src/tools/diagnostics.ts.
-    /// Fix round 1, F3 (Ruling R-6): the default severity is errors and
-    /// warnings, matching vscode and the manifest's own description — the
-    /// original "defaults to all" was a mistake in the task brief, not a
-    /// deliberate Visual Studio difference.
+    /// The default severity is errors and
+    /// warnings, matching vscode and the manifest's own description; do not
+    /// change the default to "all".
     /// </summary>
     public sealed class DiagnosticsTools
     {
@@ -27,9 +26,9 @@ namespace BECode.Bridge.Tools
             var rawPath = ToolArgs.GetString(args, "path");
             var severityArg = ToolArgs.GetString(args, "severity");
 
-            // Ruling S3: IEditorHost.DiagnosticsAsync's path is absolute or
+            // IEditorHost.DiagnosticsAsync's path is absolute or
             // null, so an optional filter argument is resolved and confined
-            // (Ruling S9 applies uniformly) exactly like every other path
+            // exactly like every other path
             // argument, before it reaches the host.
             string? absPath = null;
             IReadOnlyList<string>? folders = null;

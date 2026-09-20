@@ -474,10 +474,9 @@ func TestChooseIDELockVSCodeTerminalUsesOrdinaryDiscover(t *testing.T) {
 	}
 }
 
-// Extra case beyond the brief: a newer vscode lock and an older
-// visualstudio lock both cover the workspace; on the quiet path the
-// visualstudio one wins, since a covering vscode lock never auto-attaches
-// without its own terminal or --ide.
+// A newer vscode lock and an older visualstudio lock both cover the
+// workspace; on the quiet path the visualstudio one wins, since a covering
+// vscode lock never auto-attaches without its own terminal or --ide.
 func TestChooseIDELockPrefersVisualStudioOverNewerCoveringVSCodeQuietly(t *testing.T) {
 	dir := t.TempDir()
 	me := os.Getpid()

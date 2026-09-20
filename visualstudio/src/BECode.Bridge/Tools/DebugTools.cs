@@ -19,8 +19,8 @@ namespace BECode.Bridge.Tools
     public sealed class DebugTools
     {
         // Text only: the 60s wait itself is IDebugHost's job (vscode's own
-        // WAIT_MS), not the tool's — see IDebugHost.StartAsync's doc comment
-        // (Ruling D2), which ContinueAsync and StepAsync's own doc comments
+        // WAIT_MS), not the tool's — see IDebugHost.StartAsync's doc comment,
+        // which ContinueAsync and StepAsync's own doc comments
         // point back to.
         private const int WaitSeconds = 60;
 
@@ -44,7 +44,7 @@ namespace BECode.Bridge.Tools
 
         public async Task<ToolResult> Start(JsonElement args, object connection, CancellationToken ct)
         {
-            // Ruling S8: args is refused too, alongside program/type —
+            // args is refused too, alongside program/type —
             // Visual Studio takes arguments from the startup project's own
             // launch profile, not from the caller.
             if (HasNonEmptyStringProperty(args, "program")
@@ -73,7 +73,7 @@ namespace BECode.Bridge.Tools
                 return errLine!;
             }
 
-            // D7: action becomes an enum at the seam; the tool parses and
+            // action becomes an enum at the seam; the tool parses and
             // refuses an unrecognised value itself, naming what's allowed.
             var actionArg = ToolArgs.GetString(args, "action");
             if (!TryParseBreakpointAction(actionArg, out var action))
@@ -89,7 +89,7 @@ namespace BECode.Bridge.Tools
                 return resolveErr;
             }
 
-            // D1: lines are 1-based across the seam; clamp before the host
+            // Lines are 1-based across the seam; clamp before the host
             // ever sees it.
             var breakpoints = await _host.Debug.SetBreakpointAsync(abs!, ToolArgs.ClampToMinimumOne(line), action, condition, ct).ConfigureAwait(false);
             if (breakpoints.Count == 0)
@@ -114,7 +114,7 @@ namespace BECode.Bridge.Tools
                 return err!;
             }
 
-            // D7: step becomes an enum at the seam; the tool parses and
+            // step becomes an enum at the seam; the tool parses and
             // refuses an unrecognised value itself, naming what's allowed.
             if (!TryParseStepKind(stepArg, out var step))
             {
@@ -137,7 +137,7 @@ namespace BECode.Bridge.Tools
         {
             var frame = ToolArgs.GetInt(args, "frame");
             var scope = ToolArgs.GetString(args, "scope") ?? "locals";
-            // D5: scope is no longer sent to the host — it returns every
+            // scope is not sent to the host — it returns every
             // scope it has, and the tool alone decides which to show.
             var scopes = await _host.Debug.VariablesAsync(frame, ct).ConfigureAwait(false);
             return new ToolResult(FormatVariables(scopes, scope), false);
@@ -186,7 +186,7 @@ namespace BECode.Bridge.Tools
                 && el.GetArrayLength() > 0;
         }
 
-        // D7: vscode/tools.manifest.json's debug_breakpoint.action enum is
+        // vscode/tools.manifest.json's debug_breakpoint.action enum is
         // exactly ["add", "remove"]; absent defaults to "add" (matching
         // vscode's own `a.action === "remove" ? remove : add`).
         private static bool TryParseBreakpointAction(string? raw, out BreakpointAction action)
@@ -206,7 +206,7 @@ namespace BECode.Bridge.Tools
             }
         }
 
-        // D7: vscode/tools.manifest.json's debug_step.step enum is exactly
+        // vscode/tools.manifest.json's debug_step.step enum is exactly
         // ["over", "into", "out"].
         private static bool TryParseStepKind(string raw, out DebugStepKind step)
         {
@@ -240,13 +240,13 @@ namespace BECode.Bridge.Tools
                         var folders = await _host.GetWorkspaceFoldersAsync(ct).ConfigureAwait(false);
                         return $"stopped ({r.Reason ?? "unknown"})\n{FormatStack(frames, folders)}";
                     }
-                    // Fix round 1, F8: a bare `catch` here swallowed
+                    // A bare `catch` here would swallow
                     // OperationCanceledException along with a genuinely dead
                     // session, turning a cancelled request (the connection
                     // going away while this read was in flight) into ordinary
                     // success text — BridgeServer's own "a cancelled in-
-                    // flight call gets no reply" handling never sees it,
-                    // because CallAsync returns normally instead of
+                    // flight call gets no reply" handling would never see it,
+                    // because CallAsync would return normally instead of
                     // propagating the cancellation. Let cancellation through.
                     catch (Exception ex) when (!(ex is OperationCanceledException))
                     {
@@ -264,7 +264,7 @@ namespace BECode.Bridge.Tools
             }
         }
 
-        // Ruling S3: StackFrameInfo.Path crosses the seam absolute;
+        // StackFrameInfo.Path crosses the seam absolute;
         // relativise here, exactly where vscode's own debug_stack handler
         // does.
         private static string FormatStack(IReadOnlyList<StackFrameInfo> frames, IReadOnlyList<string> folders)

@@ -35,7 +35,7 @@ namespace BECode.Bridge.Tools
 
         /// <summary>
         /// Like <see cref="TryRequireString"/>, but an empty string is a
-        /// legal value (fix round 1, F4: <c>review_diff</c>'s <c>proposed</c>
+        /// legal value (<c>review_diff</c>'s <c>proposed</c>
         /// argument — proposing an emptied file is legal, "the argument is
         /// missing" and "the argument is the empty string" are different
         /// facts). Only the argument's presence and type are required.
@@ -99,7 +99,7 @@ namespace BECode.Bridge.Tools
         }
 
         /// <summary>
-        /// Fix round 2, D1: lines and columns are 1-based everywhere across
+        /// Lines and columns are 1-based everywhere across
         /// the seam; the tools clamp an incoming value to a minimum of 1
         /// before it ever reaches the host (mirroring vscode's own
         /// <c>Math.max(0, line-1)</c> clamp, one layer up — vscode clamps

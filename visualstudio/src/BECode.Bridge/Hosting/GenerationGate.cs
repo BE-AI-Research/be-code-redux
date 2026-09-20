@@ -3,7 +3,7 @@ using System.Threading;
 namespace BECode.Bridge.Hosting
 {
     /// <summary>
-    /// Fix round 1, I-2: <c>WorkspaceFolders</c>' republish of the lock file
+    /// <c>WorkspaceFolders</c>' republish of the lock file
     /// is debounced and runs its own file I/O, so two recomputes that both
     /// pass the debounce (a rapid solution-then-project-load burst wider
     /// than the 250ms window, say) can have their WRITES complete out of

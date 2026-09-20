@@ -328,10 +328,9 @@ func TestVisualStudioBridgeSpeaksTheHarnesssProtocol(t *testing.T) {
 		}
 	}
 
-	// review_diff (the 18th tool, and Task 4's required proof that a
-	// decision it returns is one the harness's own ReviewDiff parser
-	// (Session.ReviewWrite) accepts): accept.txt is scripted to answer
-	// Accept immediately.
+	// review_diff (the 18th tool): a decision it returns must be one the
+	// harness's own ReviewDiff parser (Session.ReviewWrite) accepts;
+	// accept.txt is scripted to answer Accept immediately.
 	{
 		decision := sess.ReviewWrite(ctx, "accept.txt", "old\n", "new content\n", false)
 		if decision != tools.ReviewAccept {

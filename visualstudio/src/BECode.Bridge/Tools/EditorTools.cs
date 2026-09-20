@@ -15,7 +15,7 @@ namespace BECode.Bridge.Tools
     /// </summary>
     public sealed class EditorTools
     {
-        // Ruling S6: the 2048-character selection cut moves here from the
+        // The 2048-character selection cut happens here, not in the
         // host — the host returns the raw, untruncated selection.
         private const int SelectionCap = 2048;
 
@@ -31,7 +31,7 @@ namespace BECode.Bridge.Tools
             var context = await _host.GetContextAsync(ct).ConfigureAwait(false);
             var folders = await _host.GetWorkspaceFoldersAsync(ct).ConfigureAwait(false);
 
-            // Ruling S3: file/open cross the seam absolute; relativise here,
+            // file/open cross the seam absolute; relativise here,
             // exactly where vscode's own context handler does (against
             // folders()). An empty file (no active editor) stays empty —
             // there is nothing to relativise.
@@ -67,12 +67,12 @@ namespace BECode.Bridge.Tools
 
             var line = ToolArgs.GetInt(args, "line");
 
-            // D9: the host throws FileNotFoundException for a path that
+            // The host throws FileNotFoundException for a path that
             // does not exist; the tool answers isError:true naming the path
             // as given, rather than letting the exception escape.
             try
             {
-                // D1: lines are 1-based across the seam; clamp before the
+                // Lines are 1-based across the seam; clamp before the
                 // host ever sees it.
                 var hostLine = line.HasValue ? ToolArgs.ClampToMinimumOne(line.Value) : (int?)null;
                 await _host.OpenAsync(abs!, hostLine, ct).ConfigureAwait(false);
@@ -139,12 +139,13 @@ namespace BECode.Bridge.Tools
                 return errCol!;
             }
 
-            // Fix round 2, N1: a non-positive max used to still print the
-            // "N reference(s)" header with nothing listed. Clamp first, then
+            // Clamp max first, then
             // — like vscode's editor.ts:64 — decide "nothing to show" from
             // the length AFTER slicing, not the total before it: with
             // max=0 there may be 200 real references and the answer is
-            // still "no references found".
+            // still "no references found". Deciding from the pre-slice total
+            // instead would print the "N reference(s)" header with nothing
+            // actually listed.
             var max = System.Math.Max(0, ToolArgs.GetInt(args, "max") ?? 50);
 
             var (abs, folders, resolveErr) = await ToolPaths.ResolveAsync(_host, path, ct).ConfigureAwait(false);
@@ -153,7 +154,7 @@ namespace BECode.Bridge.Tools
                 return resolveErr;
             }
 
-            // Ruling S5: the host returns every reference; the TOTAL count
+            // The host returns every reference; the TOTAL count
             // (before slicing) goes in the header, and only the first `max`
             // are printed — matching vscode's own res.length-before-slice.
             var locations = await _host.ReferencesAsync(abs!, ToolArgs.ClampToMinimumOne(line), ToolArgs.ClampToMinimumOne(col), ct).ConfigureAwait(false);

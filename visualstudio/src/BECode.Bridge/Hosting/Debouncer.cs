@@ -10,8 +10,8 @@ namespace BECode.Bridge.Hosting
     /// arrived for <paramref name="delay"/> — the visual-studio-host-design's
     /// §2.2 republish debounce (250ms, for <c>WorkspaceFolders</c>'s
     /// <c>IVsSolutionEvents</c> sink), pulled out here because the
-    /// coalescing itself needs no Visual Studio type (Task 6 brief's Rules
-    /// section: "the debounce" is one of the named pure-logic candidates).
+    /// coalescing itself needs no Visual Studio type, so it can be unit-tested
+    /// on its own without a Visual Studio host.
     /// Takes a delay function instead of calling <see cref="Task.Delay(TimeSpan,
     /// CancellationToken)"/> directly so a test can substitute a
     /// deterministic one and assert the coalescing behaviour without

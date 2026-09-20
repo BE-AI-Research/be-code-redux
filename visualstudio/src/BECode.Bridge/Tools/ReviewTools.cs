@@ -11,8 +11,8 @@ namespace BECode.Bridge.Tools
     /// callable through <c>ToolRegistry.CallAsync</c> but never returned by
     /// <c>List()</c> — the harness drives these, never the model. Ports
     /// vscode/src/tools/review.ts and its accept-all/pending-cancel state,
-    /// keyed by connection identity per the task's carried obligation (drop
-    /// it in <see cref="ConnectionClosed"/>).
+    /// keyed by connection identity, dropped
+    /// in <see cref="ConnectionClosed"/> when the connection goes away.
     ///
     /// vscode implements the cancel race with a manual <c>Promise.race</c>
     /// because <c>showInformationMessage</c> has no built-in cancellation;
@@ -23,7 +23,7 @@ namespace BECode.Bridge.Tools
     /// token cancelled (matching the decision going out over the wire as an
     /// ordinary return value, not an exception), but a host that instead
     /// throws <see cref="OperationCanceledException"/> — for that token being
-    /// cancelled, or for any other reason (fix round 2, D4) — is treated the
+    /// cancelled, or for any other reason — is treated the
     /// same way, unconditionally: <c>ReviewDiff</c>'s catch is not gated on
     /// the token's own state.
     /// </summary>
@@ -95,14 +95,14 @@ namespace BECode.Bridge.Tools
                 {
                     decision = await _host.ReviewDiffAsync(request, cts.Token).ConfigureAwait(false);
                 }
-                // Fix round 2, D4: a host may throw OperationCanceledException
+                // A host may throw OperationCanceledException
                 // for a reason that has nothing to do with THIS token — Visual
                 // Studio shutting down, the document closed underneath it —
                 // and is not obliged to check `ct` before doing so. Gating this
-                // catch on `cts.IsCancellationRequested` (fix round 1's
-                // version) let such an OCE escape uncaught whenever the token
-                // itself was not the reason, which propagated out of
-                // ReviewDiff entirely: the Go side then waited out its own
+                // catch on `cts.IsCancellationRequested` would let such an OCE
+                // escape uncaught whenever the token
+                // itself was not the reason, which would propagate out of
+                // ReviewDiff entirely: the Go side would then wait out its own
                 // timeout instead of getting an ordinary "cancelled" reply.
                 // Any OCE from the host means "cancelled", unconditionally.
                 catch (OperationCanceledException)
@@ -110,22 +110,23 @@ namespace BECode.Bridge.Tools
                     decision = ReviewDecision.Cancelled;
                 }
 
-                // Fix round 2, F9: the entire decision — Resolved's read/write
-                // (fix round 1, F7) AND whether an AcceptAll answer is honoured
-                // — now happens in ONE lock acquisition, gated on this specific
-                // pending registration still being present in _pending. Round
-                // 1's version split this into two lock sections and checked
-                // `cts.IsCancellationRequested` in between them, UNLOCKED:
+                // The entire decision — Resolved's read/write
+                // AND whether an AcceptAll answer is honoured
+                // — happens in ONE lock acquisition, gated on this specific
+                // pending registration still being present in _pending.
+                // Splitting this into two lock sections and checking
+                // `cts.IsCancellationRequested` in between them, UNLOCKED, is
+                // unsafe:
                 // ConnectionClosed removes the map entry under _lock, then
                 // calls Cts.Cancel() OUTSIDE the lock (deliberately — see
                 // ConnectionClosed's own comment) — so there is a real window,
                 // under genuine thread concurrency, where the map entry is
                 // already gone but the token has not been marked cancelled
                 // yet. A review_diff whose host ignores cancellation and
-                // answers AcceptAll in exactly that window read
-                // `!cts.IsCancellationRequested` as still true and resurrected
+                // answers AcceptAll in exactly that window would read
+                // `!cts.IsCancellationRequested` as still true and resurrect
                 // accept-all for a connection ConnectionClosed had already
-                // torn down (reviewer's probe: 582/5000). Checking "is this
+                // torn down. Checking "is this
                 // pending object still the one registered under
                 // (connection, path)?" — under the SAME lock ConnectionClosed
                 // removes it under — is deterministic regardless of when
@@ -208,11 +209,11 @@ namespace BECode.Bridge.Tools
 
         public void ConnectionClosed(object connection)
         {
-            // Fix round 1, F1: this used to drop _pending[connection]
-            // without cancelling those CancellationTokenSources, so a still-
-            // running review_diff was never told the connection is gone —
-            // the host's difference viewer stayed open and the tool call
-            // hung until (if ever) the host's own logic gave up. Cancel every
+            // Dropping _pending[connection]
+            // without cancelling those CancellationTokenSources would leave a
+            // still-running review_diff never told the connection is gone —
+            // the host's difference viewer would stay open and the tool call
+            // would hang until (if ever) the host's own logic gave up. Cancel every
             // pending CTS for this connection first, then drop the map entry;
             // ReviewDiff's own `finally` still runs and finds nothing left to
             // remove, which is fine — this is the one place responsible for
@@ -259,7 +260,7 @@ namespace BECode.Bridge.Tools
         }
 
         /// <summary>
-        /// Fix round 2, F9: a test-only probe of whether <paramref name="connection"/>
+        /// A test-only probe of whether <paramref name="connection"/>
         /// currently has "accept all this session" recorded, so a regression
         /// test can assert the absence of state directly instead of inferring
         /// it indirectly through a second <c>review_diff</c> call.

@@ -84,23 +84,24 @@ namespace BECode.Bridge
             return RelativeIfInside(folder, abs) != null;
         }
 
-        // Fix round 1, S3: the original implementation round-tripped
+        // Avoid round-tripping
         // relative paths through System.Uri (MakeRelativeUri, then
         // Uri.UnescapeDataString(relUri.ToString())) to get forward
         // slashes without depending on Path.GetRelativePath (not part of
-        // the netstandard2.0 surface this project targets). Two latent
-        // Windows defects followed from that: (1) Uri.ToString() already
-        // unescapes "safe" characters, so unescaping it AGAIN corrupted any
+        // the netstandard2.0 surface this project targets): that route has
+        // two latent Windows defects. (1) Uri.ToString() already
+        // unescapes "safe" characters, so unescaping it AGAIN would corrupt any
         // file name containing a literal '%' sequence that happens to look
-        // like percent-encoding (e.g. "file%41.txt" came back "fileA.txt");
+        // like percent-encoding (e.g. "file%41.txt" would come back "fileA.txt").
         // (2) MakeRelativeUri across two different Windows drives produces
         // an absolute file:// URI, not a relative one, which the caller's
-        // ".." guard was supposed to reject via TS's `!isAbsolute(r)` but
-        // never actually ran against, since nothing checked for it here.
-        // Ported by hand instead: pure string/segment work, no escaping to
-        // get wrong, and an explicit root comparison that returns null (no
-        // relative path exists) across two different roots instead of ever
-        // producing an absolute path as a "relative" answer.
+        // ".." guard needs to reject via TS's `!isAbsolute(r)` but has
+        // nothing to check it against, since a Uri-based path never signals
+        // "no relative path exists" that way. Pure string/segment work
+        // instead: no escaping to get wrong, and an explicit root comparison
+        // that returns null (no relative path exists) across two different
+        // roots instead of ever producing an absolute path as a "relative"
+        // answer.
         private static string? RelativeIfInside(string folder, string abs)
         {
             var f = Path.GetFullPath(folder);
@@ -110,7 +111,7 @@ namespace BECode.Bridge
         private static string DefaultRootOf(string p) => Path.GetPathRoot(p) ?? "";
 
         /// <summary>
-        /// Fix round 2, T1: the pure, platform-independent core of the
+        /// The pure, platform-independent core of the
         /// "inside" check — <paramref name="folder"/> and
         /// <paramref name="abs"/> already absolute/normalised,
         /// <paramref name="separator"/>/<paramref name="comparison"/>/

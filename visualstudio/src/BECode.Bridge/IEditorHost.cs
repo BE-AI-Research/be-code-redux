@@ -8,21 +8,21 @@ namespace BECode.Bridge
     /// What the user is looking at: active file, cursor line, selection, open
     /// files. Field names mirror the JSON object vscode/src/tools/editor.ts's
     /// <c>context</c> handler returns (file, line, selStart, selEnd,
-    /// selection, open). <c>workspaceFolders</c> is NOT carried here (Ruling
-    /// S2): it is fetched separately, through
+    /// selection, open). <c>workspaceFolders</c> is NOT carried here:
+    /// it is fetched separately, through
     /// <see cref="IEditorHost.GetWorkspaceFoldersAsync"/>, so a tool that only
     /// needs to resolve a path does not also have to read the active editor's
     /// state.
     ///
     /// <see cref="File"/> and each entry of <see cref="Open"/> are ABSOLUTE
-    /// paths (Ruling S3): the host never relativises anything —
+    /// paths: the host never relativises anything —
     /// <c>EditorTools.Context</c> applies <see cref="Paths.RelPath"/> before
     /// the reply goes on the wire, exactly where vscode's own <c>context</c>
     /// handler does (against <c>folders()</c>). <see cref="Selection"/> is the
-    /// RAW, untruncated selection text (Ruling S6): the 2048-character cut
+    /// RAW, untruncated selection text: the 2048-character cut
     /// vscode applies is the tool's job now, not the host's.
     ///
-    /// Fix round 2, D8 — what each field is, matching vscode's own
+    /// What each field is, matching vscode's own
     /// <c>editor.ts</c> "context" handler field for field, so the Visual
     /// Studio host's behaviour is a straight port rather than a guess:
     /// <list type="bullet">
@@ -40,13 +40,12 @@ namespace BECode.Bridge
     /// <see cref="Line"/> repeated. When something is selected, both are
     /// 1-based line numbers (<see cref="SelStart"/> &lt;= <see cref="SelEnd"/>
     /// regardless of which direction the user dragged) and
-    /// <see cref="Selection"/> is the selected text, RAW/untruncated (Ruling
-    /// S6).</item>
+    /// <see cref="Selection"/> is the selected text, RAW/untruncated.</item>
     /// <item><see cref="Open"/> lists file-backed documents only — every
     /// document currently loaded in an editor buffer (not just the visible
     /// tabs) whose content is a real file on disk; skip diff views, output/
     /// tool windows, untitled buffers, and anything else with no path on
-    /// disk. Absolute paths (Ruling S3).</item>
+    /// disk. Absolute paths.</item>
     /// </list>
     /// </summary>
     public sealed record EditorContext(
@@ -58,16 +57,16 @@ namespace BECode.Bridge
         IReadOnlyList<string> Open);
 
     /// <summary>
-    /// A source location. <see cref="Path"/> is an ABSOLUTE path (Ruling S3);
+    /// A source location. <see cref="Path"/> is an ABSOLUTE path;
     /// the tool relativises it for output, exactly where vscode's own
     /// <c>definition</c>/<c>references</c> handlers do. <see cref="Line"/>/
-    /// <see cref="Col"/> are 1-based (Ruling D1). <see cref="Text"/> is
+    /// <see cref="Col"/> are 1-based. <see cref="Text"/> is
     /// only populated by <see cref="IEditorHost.ReferencesAsync"/> (the
     /// source line's raw text, matching vscode's <c>references</c>
     /// formatting of <c>path:line: text</c>); <see cref="IEditorHost.DefinitionAsync"/>
     /// leaves it null, since vscode's <c>definition</c> formats only
-    /// <c>path:line:col</c>. One record for both, as the brief's interface
-    /// signature calls for.
+    /// <c>path:line:col</c>. One record serves both, since they share the
+    /// same shape.
     /// </summary>
     public sealed record Location(string Path, int Line, int Col, string? Text = null);
 
@@ -75,16 +74,16 @@ namespace BECode.Bridge
     /// One error/warning/info/hint from the language service, in the shape
     /// vscode/src/lib/format.ts's <c>DiagItem</c> takes: <see cref="Severity"/>
     /// is one of "error", "warning", "info", "hint". <see cref="Path"/> is an
-    /// ABSOLUTE path (Ruling S3); <c>DiagnosticsTools</c> relativises it for
+    /// ABSOLUTE path; <c>DiagnosticsTools</c> relativises it for
     /// output, exactly where vscode's own <c>diagnostics</c> handler does.
-    /// <see cref="Line"/>/<see cref="Col"/> are 1-based (Ruling D1).
+    /// <see cref="Line"/>/<see cref="Col"/> are 1-based.
     /// </summary>
     public sealed record Diagnostic(string Path, int Line, int Col, string Severity, string Source, string Message);
 
     /// <summary>
     /// A proposed file change offered for review (vscode/src/tools/review.ts's
     /// <c>review_diff</c> arguments). <see cref="Proposed"/> may legally be an
-    /// empty string (an emptied file, fix round 1 F4); only
+    /// empty string (an emptied file); only
     /// <see cref="Path"/> is required to be non-empty.
     /// </summary>
     public sealed record ReviewRequest(string Path, string? Original, string Proposed, string? Summary, bool Shared);
@@ -100,17 +99,16 @@ namespace BECode.Bridge
     /// <summary>
     /// What the eighteen tools need from an editor. Implemented once here as
     /// the seam every tool is written against (<c>ToolRegistry</c>); the real
-    /// Visual Studio implementation (Task 6, over DTE / the text manager / the
+    /// Visual Studio implementation (over DTE / the text manager / the
     /// Error List / EnvDTE.Debugger / IVsDifferenceService) cannot be compiled
     /// on this machine, so nothing in this project may depend on anything
     /// beyond this interface, and nothing in this project has ever exercised
     /// a real implementation of it. Four conventions hold for EVERY member
-    /// below, stated once here rather than repeated verbatim on each one
-    /// (fix round 2, R-12):
+    /// below, stated once here rather than repeated verbatim on each one:
     ///
     /// <list type="number">
     /// <item><b>Everything decidable without Visual Studio lives in the
-    /// tools, not here (Ruling R-8, review round 1).</b> Every method
+    /// tools, not here.</b> Every method
     /// returns raw, absolute, unfiltered, untruncated data and does
     /// UI-thread work only; filtering, truncation, path relativisation and
     /// text formatting are the tools' job. A null return from
@@ -123,7 +121,7 @@ namespace BECode.Bridge
     /// found nothing, which is an empty list / empty string instead).</item>
     ///
     /// <item><b>Lines and columns are 1-BASED everywhere across the seam, in
-    /// BOTH directions (Ruling D1).</b> Every argument that names a line or
+    /// BOTH directions.</b> Every argument that names a line or
     /// column (<see cref="OpenAsync"/>, <see cref="DefinitionAsync"/>,
     /// <see cref="ReferencesAsync"/>, <see cref="HoverAsync"/>,
     /// <see cref="IDebugHost.SetBreakpointAsync"/>) and every result field
@@ -145,7 +143,7 @@ namespace BECode.Bridge
     /// converting an incoming 1-based argument IN before calling
     /// Roslyn/text-buffer APIs with it.</item>
     ///
-    /// <item><b>Threading (Ruling D3).</b> Every member may be called from a
+    /// <item><b>Threading.</b> Every member may be called from a
     /// thread-pool thread, and calls are CONCURRENT: <c>BridgeServer</c> runs
     /// <c>tools/call</c> concurrently per connection, and every connection to
     /// this bridge shares the ONE <see cref="IEditorHost"/> instance. The
@@ -158,7 +156,7 @@ namespace BECode.Bridge
     /// whatever internal locking its own state (e.g. <see cref="IDebugHost"/>'s
     /// single active session) needs.</item>
     ///
-    /// <item><b>Cancellation (Ruling D4).</b> Every member observes
+    /// <item><b>Cancellation.</b> Every member observes
     /// <paramref name="ct"/>-equivalent parameters and MAY throw
     /// <see cref="System.OperationCanceledException"/> — but only when its
     /// own <c>ct</c> is the reason. A review that must be abandoned for any
@@ -179,8 +177,8 @@ namespace BECode.Bridge
         Task<EditorContext> GetContextAsync(CancellationToken ct);
 
         /// <summary>
-        /// The solution/folder roots tools confine every path argument to
-        /// (Ruling S2), and that <c>context</c> reports as
+        /// The solution/folder roots tools confine every path argument to,
+        /// and that <c>context</c> reports as
         /// <c>workspaceFolders</c> (unmodified, absolute — <c>context</c> is
         /// the one place these are NOT relativised, since relativising a
         /// folder against itself is meaningless). Split out from
@@ -194,7 +192,7 @@ namespace BECode.Bridge
         /// <summary>
         /// Brings <paramref name="path"/> (absolute, already confined) to
         /// the front of the editor, scrolled to <paramref name="line"/>
-        /// (1-based, Ruling D1) when given. Ruling D9: do this without
+        /// (1-based) when given. Do this without
         /// taking keyboard focus away from wherever the user is currently
         /// typing, if Visual Studio allows it (vscode's own analogue is
         /// <c>{ preserveFocus: true }</c> on <c>showTextDocument</c>) — the
@@ -209,7 +207,7 @@ namespace BECode.Bridge
         Task<IReadOnlyList<Location>?> DefinitionAsync(string path, int line, int col, CancellationToken ct);
 
         /// <summary>
-        /// Every reference, unfiltered (Ruling S5) — no <c>max</c> parameter
+        /// Every reference, unfiltered — no <c>max</c> parameter
         /// here: the tool reports the TOTAL count and prints only the first
         /// <c>max</c> (default 50), exactly as vscode does
         /// (<c>res.length</c> read before <c>.slice()</c>).
@@ -218,7 +216,7 @@ namespace BECode.Bridge
 
         /// <summary>
         /// Type/signature information for the symbol at <paramref name="path"/>:<paramref name="line"/>:<paramref name="col"/>,
-        /// as PLAIN TEXT — no markup (no Markdown, no HTML). Ruling D10: when
+        /// as PLAIN TEXT — no markup (no Markdown, no HTML). When
         /// the language service offers more than one part (e.g. a type
         /// signature plus documentation), join them with a BLANK LINE
         /// between (<c>"\n\n"</c>), matching vscode's own
@@ -234,8 +232,8 @@ namespace BECode.Bridge
         /// <summary>
         /// Every diagnostic for <paramref name="path"/> (absolute), or for
         /// the whole solution when <paramref name="path"/> is null — no
-        /// severity filtering here (Ruling S4): <c>DiagnosticsTools</c>
-        /// filters with the ported <c>severitiesFor</c>. Ruling D11: a
+        /// severity filtering here: <c>DiagnosticsTools</c>
+        /// filters with the ported <c>severitiesFor</c>. A
         /// non-null <paramref name="path"/> is matched EXACTLY, as an
         /// absolute path (case-insensitively on Windows, matching
         /// <see cref="Paths"/>'s own comparison rule) — never a substring
@@ -254,11 +252,8 @@ namespace BECode.Bridge
         /// viewer and complete, either by returning
         /// <see cref="ReviewDecision.Cancelled"/> or by throwing
         /// <see cref="System.OperationCanceledException"/>; <c>ReviewTools</c>
-        /// treats both the same way, as "cancelled" (Ruling S1). There is
-        /// exactly one cancellation mechanism: this token. (An earlier draft
-        /// of this interface also had <c>ReviewCancelAsync(string path)</c>;
-        /// it was removed in fix round 1 — nothing ever called it.) Ruling
-        /// D4: a review abandoned for a reason that has NOTHING to do with
+        /// treats both the same way, as "cancelled". There is
+        /// exactly one cancellation mechanism: this token. A review abandoned for a reason that has NOTHING to do with
         /// this token (Visual Studio shutting down, the document closed
         /// underneath it) should still be reported as
         /// <see cref="ReviewDecision.Cancelled"/> — <c>ReviewTools</c> treats
@@ -279,7 +274,7 @@ namespace BECode.Bridge
     /// <see cref="IDebugHost.StackAsync"/> itself for a top-of-stack summary
     /// when <see cref="Kind"/> is <see cref="StopKind.Stopped"/> — the same
     /// two-step vscode's <c>DebugManager.describe()</c> takes. See
-    /// <see cref="IDebugHost.StartAsync"/>'s doc comment (Ruling D2) for
+    /// <see cref="IDebugHost.StartAsync"/>'s doc comment for
     /// exactly which real-world outcome maps to which <see cref="StopKind"/>.
     /// </summary>
     public sealed record StopResult(StopKind Kind, string? Reason = null, int? ExitCode = null);
@@ -289,9 +284,9 @@ namespace BECode.Bridge
     /// debug configurations — the design spec's stand-in for vscode's
     /// <c>launch.json</c> entries (<c>debug_configs</c> "lists the solution's
     /// startup projects and launch profiles rather than launch.json entries").
-    /// Ruling D6: <see cref="Kind"/> is free display text, printed VERBATIM
+    /// <see cref="Kind"/> is free display text, printed VERBATIM
     /// by <c>DebugTools.Configs</c> as <c>"{Name} ({Kind})"</c> — no parsing,
-    /// no validation. The two values Task 6 is expected to use are
+    /// no validation. The two values expected in practice are
     /// <c>"startup project"</c> (a project set as the solution's startup
     /// project, or one of several in a multi-project startup) and
     /// <c>"launch profile"</c> (an entry from that project's
@@ -301,11 +296,11 @@ namespace BECode.Bridge
     /// </summary>
     public sealed record DebugConfigInfo(string Name, string Kind);
 
-    /// <summary>A breakpoint in one file, as it stands after debug_breakpoint's add/remove. <see cref="Line"/> is 1-based (Ruling D1).</summary>
+    /// <summary>A breakpoint in one file, as it stands after debug_breakpoint's add/remove. <see cref="Line"/> is 1-based.</summary>
     public sealed record BreakpointInfo(int Line, string? Condition);
 
     /// <summary>
-    /// Fix round 2, D7: <c>debug_breakpoint</c>'s <c>action</c> argument
+    /// <c>debug_breakpoint</c>'s <c>action</c> argument
     /// becomes this enum at the seam — exactly the two values
     /// vscode/tools.manifest.json's <c>debug_breakpoint.action</c> schema
     /// enumerates. The tool parses the incoming string and refuses an
@@ -314,7 +309,7 @@ namespace BECode.Bridge
     public enum BreakpointAction { Add, Remove }
 
     /// <summary>
-    /// Fix round 2, D7: <c>debug_step</c>'s <c>step</c> argument becomes this
+    /// <c>debug_step</c>'s <c>step</c> argument becomes this
     /// enum at the seam — exactly the three values
     /// vscode/tools.manifest.json's <c>debug_step.step</c> schema
     /// enumerates. The tool parses the incoming string and refuses an
@@ -324,11 +319,10 @@ namespace BECode.Bridge
 
     /// <summary>
     /// One frame of a call stack. <see cref="Path"/> is an ABSOLUTE path
-    /// (Ruling S3; <c>DebugTools</c> relativises it for output, exactly
+    /// (<c>DebugTools</c> relativises it for output, exactly
     /// where vscode's own <c>debug_stack</c> handler does), or null when the
     /// frame has no source (matches vscode's <c>f.source?.path ? … : "?"</c>
-    /// fallback, rendered by the tool). <see cref="Line"/> is 1-based
-    /// (Ruling D1).
+    /// fallback, rendered by the tool). <see cref="Line"/> is 1-based.
     /// </summary>
     public sealed record StackFrameInfo(string Name, string? Path, int Line, int FrameId);
 
@@ -340,14 +334,14 @@ namespace BECode.Bridge
     /// *display* them (only when the parent scope has ten or fewer
     /// variables, capped at twenty children), exactly as
     /// vscode/src/tools/debug.ts's <c>variables()</c> does — see
-    /// <see cref="IDebugHost.VariablesAsync"/>'s doc comment (Ruling S7) for
+    /// <see cref="IDebugHost.VariablesAsync"/>'s doc comment for
     /// the bound on how deep the host itself may go resolving them.
     /// </summary>
     public sealed record VariableInfo(string Name, string Value, string? Type, IReadOnlyList<VariableInfo>? Children = null);
 
     /// <summary>
     /// One DAP-equivalent scope ("Locals", "Arguments", …) and its
-    /// variables. Ruling D5: <see cref="Name"/> is what
+    /// variables. <see cref="Name"/> is what
     /// <c>DebugTools.Variables</c> filters on — a name containing "local"
     /// (case-insensitively) is treated as the locals scope, one containing
     /// "arg" as the arguments scope; the host SHOULD name them "Locals" and
@@ -381,7 +375,7 @@ namespace BECode.Bridge
         /// Starts <paramref name="config"/> (a name <see cref="ConfigsAsync"/>
         /// listed — a startup project or launch profile) or, when null, the
         /// solution's current startup project as-is, replacing any prior
-        /// session. Ruling D2: this method — and <see cref="ContinueAsync"/>
+        /// session. This method — and <see cref="ContinueAsync"/>
         /// and <see cref="StepAsync"/>, which share this exact contract —
         /// starts or resumes execution and then WAITS for the next stop
         /// (breakpoint hit, step complete, an unhandled exception pausing
@@ -413,22 +407,22 @@ namespace BECode.Bridge
         Task<StopResult> StartAsync(string? config, CancellationToken ct);
         Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, BreakpointAction action, string? condition, CancellationToken ct);
 
-        /// <summary>Resumes and waits for the next stop — see <see cref="StartAsync"/>'s doc comment (Ruling D2) for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
+        /// <summary>Resumes and waits for the next stop — see <see cref="StartAsync"/>'s doc comment for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
         Task<StopResult> ContinueAsync(CancellationToken ct);
 
-        /// <summary>Steps (<paramref name="step"/>: over/into/out) and waits for the next stop — see <see cref="StartAsync"/>'s doc comment (Ruling D2) for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
+        /// <summary>Steps (<paramref name="step"/>: over/into/out) and waits for the next stop — see <see cref="StartAsync"/>'s doc comment for the full wait/timeout contract and the <see cref="StopKind"/> mapping, which applies here unchanged.</summary>
         Task<StopResult> StepAsync(DebugStepKind step, CancellationToken ct);
         Task<IReadOnlyList<StackFrameInfo>> StackAsync(int depth, CancellationToken ct);
 
         /// <summary>
         /// Every scope's every variable, for <paramref name="frame"/> (the
-        /// top frame when null) — <c>scope</c> is NOT a parameter here
-        /// (fix round 2, D5): the host returns everything it has, and
+        /// top frame when null) — <c>scope</c> is NOT a parameter here:
+        /// the host returns everything it has, and
         /// <c>DebugTools</c> filters to locals/args/all by scope name (see
         /// <see cref="VariableScope"/>'s doc comment for the exact naming
         /// rule). Children (<see cref="VariableInfo.Children"/>) are
         /// resolved by the host at most ONE level deep, and only for a
-        /// scope with ten or fewer variables in total (Ruling S7) — never
+        /// scope with ten or fewer variables in total — never
         /// walk the object graph beyond that. The tool then prints at most
         /// 60 variables per scope and 20 children per variable; it never
         /// asks for more than the host already resolved.

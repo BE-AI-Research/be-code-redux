@@ -47,7 +47,7 @@ namespace BECode.Bridge
 
         // Standard JSON-RPC 2.0 "internal error": used by BridgeServer's
         // per-line guard for any exception that escapes request dispatch
-        // (e.g. IToolDispatcher.List() throwing) — review round 1, C1.
+        // (e.g. IToolDispatcher.List() throwing).
         public const int InternalError = -32603;
     }
 
@@ -59,9 +59,9 @@ namespace BECode.Bridge
     /// </summary>
     internal static class JsonRpcWriter
     {
-        // Review round 1, M10: the default encoder escapes '<', '>', '&'
+        // The default encoder escapes '<', '>', '&'
         // and every non-ASCII character as \uXXXX. Diffs and source text
-        // go through this in later tasks, so use the relaxed encoder —
+        // go through this, so use the relaxed encoder —
         // still safe here, since this is a loopback JSON-RPC wire, not
         // HTML being embedded in a page.
         private static readonly JsonSerializerOptions Options = new JsonSerializerOptions

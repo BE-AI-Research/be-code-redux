@@ -45,22 +45,23 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Fix round 1, ruling R-13 — REVERSES the host design's §1.1 "do not
-         ship them": BECode.Bridge's own BCL package references (System.Text.Json
-         6.0.11 and friends) now SHIP inside the VSIX, because ExcludeAssets="runtime"
-         on this ProjectReference was withholding not just BECode.Bridge.dll's
-         transitively-flowed packages but leaving devenv.exe with nothing on
-         its probing path to resolve them from at all — UseCodebase (below)
-         registers a CodeBase for the package assembly ONLY, not its
-         dependencies. Why shipping 6.0.x is safe (findings, C-2): these are
-         OLDER than anything Visual Studio 17.6+ redirects to, so for every
-         assembly devenv's own config redirects, its newer copy still wins
-         and ours is ignored; for one it does not carry or redirect at all
-         (System.Threading.Channels is the doubtful one), ours is found on
-         the binding path ([ProvideBindingPath] below) instead of the load
-         failing. Roslyn and the Visual Studio SDK assemblies still stay OUT
-         — see the two PackageReferences above, both ExcludeAssets="runtime" —
-         that half of the original reasoning is unchanged. -->
+    <!-- BECode.Bridge's own BCL package references (System.Text.Json
+         6.0.11 and friends) SHIP inside the VSIX. This looks like it
+         contradicts host design §1.1's "do not ship them", but that
+         guidance is about the Visual Studio SDK/Roslyn assemblies below,
+         not these: ExcludeAssets="runtime" on this ProjectReference would
+         withhold not just BECode.Bridge.dll's transitively-flowed packages
+         but leave devenv.exe with nothing on its probing path to resolve
+         them from at all — UseCodebase (below) registers a CodeBase for
+         the package assembly ONLY, not its dependencies. Shipping 6.0.x is
+         safe: these are OLDER than anything Visual Studio 17.6+ redirects
+         to, so for every assembly devenv's own config redirects, its newer
+         copy still wins and ours is ignored; for one it does not carry or
+         redirect at all (System.Threading.Channels is the doubtful one),
+         ours is found on the binding path ([ProvideBindingPath] below)
+         instead of the load failing. Roslyn and the Visual Studio SDK
+         assemblies still stay OUT — see the two PackageReferences above,
+         both ExcludeAssets="runtime". -->
     <ProjectReference Include="..\BECode.Bridge\BECode.Bridge.csproj" />
   </ItemGroup>
 
@@ -68,8 +69,9 @@
        MSBuild targets that turn this class library into a .vsix (pkgdef
        generation, the VSIX container, the manifest, deployment) and are not
        resolvable/buildable on Linux (they shell out to VSIXInstaller.exe
-       etc.); gating the whole PackageReference keeps `dotnet build` on this
-       machine a plain class-library compile, exactly as the brief requires. -->
+       etc.); gating the whole PackageReference keeps `dotnet build` a
+       plain class-library compile on this machine, so CI and Linux
+       development never need the VSSDK tooling. -->
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
     <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.6.2164" PrivateAssets="all" />
   </ItemGroup>
@@ -87,12 +89,12 @@
     <!-- The Microsoft.VSSDK.BuildTools NuGet package auto-imports its own
          Microsoft.VsSDK.targets (an SDK-style project needs no explicit
          "$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" <Import> the way an
-         old-style VSIX .csproj did) — see the report's "Design corrections"
-         for why an explicit VSToolsPath import was dropped. -->
+         old-style VSIX .csproj did); adding one back would duplicate the
+         import and break the build. -->
   </PropertyGroup>
 
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
-    <!-- Fix round 1, M-1: Update, not Include — the SDK's default glob
+    <!-- Update, not Include — the SDK's default glob
          already includes source.extension.vsixmanifest as a None item;
          Include would duplicate it (CS2002-equivalent MSBuild warning). -->
     <None Update="source.extension.vsixmanifest">

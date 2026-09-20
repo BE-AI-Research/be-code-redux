@@ -8,12 +8,12 @@ namespace BECode.Bridge.Tools
     /// <summary>
     /// Resolves a tool's raw path argument to an absolute path confined to
     /// one of the host's workspace folders (<see cref="Paths.AbsPath"/>),
-    /// fetching those folders from <see cref="IEditorHost.GetWorkspaceFoldersAsync"/>
-    /// (Ruling S2). A path that escapes every folder never reaches the host:
+    /// fetching those folders from <see cref="IEditorHost.GetWorkspaceFoldersAsync"/>.
+    /// A path that escapes every folder never reaches the host:
     /// the caller gets <c>Error</c> back and must return it without calling
     /// anything else on the host. <see cref="Folders"/> is also handed back
     /// on success, so a caller that needs to relativise the host's response
-    /// (Ruling S3 — <c>definition</c>, <c>references</c>, <c>debug_stack</c>,
+    /// (<c>definition</c>, <c>references</c>, <c>debug_stack</c>,
     /// <c>diagnostics</c>) does not have to fetch the same list twice.
     /// </summary>
     internal static class ToolPaths
@@ -25,14 +25,14 @@ namespace BECode.Bridge.Tools
             {
                 folders = await host.GetWorkspaceFoldersAsync(ct).ConfigureAwait(false);
             }
-            // Fix round 1, F8: let cancellation propagate rather than
+            // Let cancellation propagate rather than
             // turning a connection going away into a synthesized tool error.
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
                 return (null, null, new ToolResult($"workspace folders: {ex.Message}", true));
             }
 
-            // Ruling S9: an empty workspace-folder list (no solution or
+            // An empty workspace-folder list (no solution or
             // folder open in Visual Studio) is refused here, before
             // Paths.AbsPath ever runs — AbsPath's own TS-parity fallback
             // (resolve against the process's current directory) would
@@ -52,12 +52,12 @@ namespace BECode.Bridge.Tools
             {
                 return (null, null, new ToolResult(ex.Message, true));
             }
-            // Fix round 2, N2: a malformed path argument (e.g. an embedded
+            // A malformed path argument (e.g. an embedded
             // NUL character) makes Path.GetFullPath/Path.Combine throw
-            // ArgumentException, which used to escape ToolRegistry.CallAsync
-            // entirely — an expected, caller-triggerable failure must come
-            // back as an ordinary isError:true result, not an unhandled
-            // exception. Cancellation still propagates (fix round 1, F8).
+            // ArgumentException; left uncaught, it would escape
+            // ToolRegistry.CallAsync entirely — an expected, caller-triggerable
+            // failure must come back as an ordinary isError:true result, not
+            // an unhandled exception. Cancellation still propagates.
             catch (Exception ex) when (!(ex is OperationCanceledException))
             {
                 return (null, null, new ToolResult($"invalid path: {ex.Message}", true));

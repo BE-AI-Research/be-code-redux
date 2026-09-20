@@ -32,7 +32,7 @@ namespace BECode.Bridge
         }
 
         /// <summary>
-        /// Fix round 1, F5: takes the manifest entries directly, so a test
+        /// Takes the manifest entries directly, so a test
         /// can inject a deliberately mismatched manifest and prove the
         /// parity guard actually throws — in both directions, naming the
         /// offender — rather than trusting that by never having deleted it.
@@ -41,7 +41,7 @@ namespace BECode.Bridge
         {
             var manifestNames = new HashSet<string>(manifest.Select(m => m.Name), StringComparer.Ordinal);
 
-            // Fix round 1, F6: validated before the handler-parity check
+            // Validated before the handler-parity check
             // below (which, given ToolOverrides only ever names real tools,
             // would also always catch the same missing entry) so a mismatch
             // here is reported as what it specifically is — the override

@@ -7,12 +7,11 @@ namespace BECode.Bridge.Tools
     internal static class Format
     {
         /// <summary>
-        /// Fix round 1, F3 (Ruling R-6): the default (null or unrecognised)
+        /// The default (null or unrecognised)
         /// is errors and warnings — the manifest's own description says so
         /// ("severity: error, warning or all (default: errors and
         /// warnings)"), and this is vscode/src/lib/format.ts's
-        /// <c>severitiesFor</c> verbatim. The task brief's "defaults to all"
-        /// was wrong.
+        /// <c>severitiesFor</c> verbatim; do not change the default to "all".
         /// </summary>
         public static IReadOnlyList<string> SeveritiesFor(string? severity)
         {
