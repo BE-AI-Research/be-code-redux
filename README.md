@@ -805,6 +805,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   Working memory tells the model to finish it, split it or note why (negative turns it off);
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
+- `prompt_prefill` (true) — after anything that empties the server's prompt cache (a model load or reload, a resume, `/compact`), the prompt the next turn will send is sent ahead with generation off, in the background, and cancelled the moment you press Enter. Native Ollama only. `/stats` shows what the server spent reading prompts and how often its cache missed.
 - `time_awareness` (true) — gives the model a clock: every tool result ends with `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each of your messages with when it was sent. Appended text only, never the system prompt, so the server's prompt cache is untouched; about fifteen tokens a tool call.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
   "Working memory"

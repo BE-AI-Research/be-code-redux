@@ -229,7 +229,12 @@ type Config struct {
 	// TimeAwareness gives the model a clock: a footer on every tool result
 	// (time, what the call took, how long the current step has been open,
 	// context used) and an arrival time on each user message.
-	TimeAwareness     bool `json:"time_awareness"`
+	TimeAwareness bool `json:"time_awareness"`
+	// PromptPrefill sends the next turn's prompt to the server ahead of
+	// time, with generation off, after anything that emptied its prompt
+	// cache (a model load or reload, a resume), so the real request pays
+	// only for what is new. Native Ollama only.
+	PromptPrefill     bool `json:"prompt_prefill"`
 	ResumeReplayTurns int  `json:"resume_replay_turns"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
@@ -342,6 +347,7 @@ func Default() *Config {
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
 		TimeAwareness:    true,
+		PromptPrefill:    true,
 		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, ItemCap: 4096, NodeCap: 32768, Tools: "full"},
 	}
 }

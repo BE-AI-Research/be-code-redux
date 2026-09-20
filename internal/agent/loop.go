@@ -216,7 +216,9 @@ type Agent struct {
 	toolFailStreak toolFailStreak
 	// repeats notices the same call returning the same result again and
 	// again (repeat.go). Agent goroutine only, like toolFailStreak.
-	repeats       repeatTracker
+	repeats repeatTracker
+	// prefill is the one background prompt-cache warm-up (prefill.go).
+	prefill       prefillState
 	pendingAdvice string
 
 	// Model parameters (see the ModelLoader block below). modelMu guards
@@ -557,13 +559,23 @@ func (a *Agent) tidyBeforeColdRead() {
 		// first request, and the live registry depends on that.
 		a.autosave(a.lastUserInput)
 	}
-	if h == nil || h.Tokens() <= h.Target() {
+	if h == nil {
 		return
 	}
-	before := h.Tokens()
+	// Measured under modelMu as well: the system prompt is part of the
+	// count, and a switch landing behind this one rewrites it.
+	a.modelMu.Lock()
+	before, target := h.Tokens(), h.Target()
+	a.modelMu.Unlock()
+	if before <= target {
+		return
+	}
 	if n := h.CollapseToolResults(coldKeepResults); n > 0 {
+		a.modelMu.Lock()
+		after := h.Tokens()
+		a.modelMu.Unlock()
 		a.notice("collapsed %d old tool results before the model loads (%d → %d tokens); the newest %d and the current step's record are untouched",
-			n, before, h.Tokens(), coldKeepResults)
+			n, before, after, coldKeepResults)
 	}
 }
 
@@ -716,6 +728,10 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		// explained in its own words; repeating it here would say it twice.
 		return
 	}
+	// Registered before the turn lock's own deferred release below, so it
+	// runs after it: the prefill snapshots the prompt under that lock, once
+	// the tidy-up and any compaction here have finished with it.
+	defer a.StartPrefill()
 	prev := a.Window()
 	// Said whenever the window moved, not only when it shrank the budget: a
 	// reload the user has just approved is exactly the change they are
@@ -780,6 +796,11 @@ func (a *Agent) ClearHistory() {
 // CompactNow is Compact under the turn lock, for a UI asking for it
 // directly. The tool loop's own compaction is already inside run().
 func (a *Agent) CompactNow(ctx context.Context) error {
+	a.stopPrefill()
+	// A compaction rewrites the conversation, so the server's cache of it is
+	// gone; the user asked for this one by hand and is idle afterwards.
+	// Deferred first so it runs after the turn lock is released.
+	defer a.StartPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	return a.Compact(ctx)
@@ -995,6 +1016,8 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	// Held for the whole request: the only other writer of the transcript
 	// is resolveModel's post-switch compaction, which runs on a goroutine
 	// of its own and steps aside rather than interleave with this.
+	// A speculative prefill never shares the server with a real request.
+	a.stopPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	start := time.Now()
@@ -1030,18 +1053,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		})
 		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
 	}
-	if a.repoDirty {
-		a.repoDirty = false
-		a.RefreshRepoMap()
-		a.History.System.Content = a.composeSystem("")
-	}
-	// The window may have been resolved, or changed, since the map was built.
-	a.fitRepoMap()
-	a.warnHeavyPrompt()
-	if gi := gitctx.Summary(ctx, a.Tools.Root); gi != "" {
-		a.lastGitInfo = gi
-		a.History.System.Content = a.composeSystem(gi)
-	}
+	a.refreshSystemForRequest(ctx)
 	expanded := ExpandMentions(a.Tools.Root, userInput)
 	if newTurn && a.ContextProvider != nil {
 		if note := a.ContextProvider(ctx); note != "" {
@@ -1082,18 +1094,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
-		req := provider.ChatRequest{
-			Model:           a.Model,
-			Messages:        a.History.Prompt(),
-			Temperature:     a.temperature(),
-			MaxTokens:       a.Cfg.MaxTokens,
-			ReasoningEffort: a.effortFor(effort),
-		}
-		a.History.Extra = 0
-		if !a.compat {
-			req.Tools = a.Tools.Specs()
-			a.History.Extra = a.specsTokens()
-		}
+		req := a.requestFor(effort)
 
 		resp, err := a.chatWithRetry(ctx, req)
 		if err != nil {
