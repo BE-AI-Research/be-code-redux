@@ -11,7 +11,7 @@ namespace BECode.Bridge.FakeHost
     /// console app: every member answers a fixed, canned value (never a
     /// delegate a caller reconfigures — that shape is
     /// <c>BECode.Bridge.Tests.FakeEditorHost</c>, used by the C# unit
-    /// tests). This is the thing Task 4's Go contract test drives the real
+    /// tests). This is the thing the Go contract test drives the real
     /// <c>internal/ide</c> client against, so its answers exist to prove the
     /// wire agrees end to end, not to model a real Visual Studio session.
     ///
@@ -57,7 +57,7 @@ namespace BECode.Bridge.FakeHost
 
         public Task OpenAsync(string path, int? line, CancellationToken ct)
         {
-            // Ruling from IEditorHost.OpenAsync's own doc comment: a path
+            // Per IEditorHost.OpenAsync's own doc comment: a path
             // that does not exist throws FileNotFoundException, which
             // EditorTools.Open turns into an ordinary isError result.
             if (!File.Exists(path))
@@ -117,7 +117,7 @@ namespace BECode.Bridge.FakeHost
                 // Blocks until review_cancel (or the connection going away)
                 // cancels ct — the fixture the contract test's concurrency
                 // regression case exercises. IEditorHost.ReviewDiffAsync's
-                // own doc comment (Ruling S1/D4) allows either answering
+                // own doc comment allows either answering
                 // Cancelled or throwing OperationCanceledException; this
                 // host does the former, explicitly.
                 var tcs = new TaskCompletionSource<bool>();

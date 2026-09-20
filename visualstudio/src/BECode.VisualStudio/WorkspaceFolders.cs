@@ -27,7 +27,7 @@ namespace BECode.VisualStudio
     {
         private static readonly TimeSpan DebounceDelay = TimeSpan.FromMilliseconds(250);
 
-        /// <summary>The solution-folder project type GUID (I-4/I-10): skipped everywhere loaded projects are enumerated.</summary>
+        /// <summary>The solution-folder project type GUID: skipped everywhere loaded projects are enumerated.</summary>
         private static readonly Guid SolutionFolderTypeGuid = new Guid("{2150E333-8FDC-42A3-9474-1A3956D46DE8}");
 
         private readonly AsyncPackage _package;
@@ -55,7 +55,7 @@ namespace BECode.VisualStudio
         public IReadOnlyList<string> Current => _current;
 
         /// <summary>
-        /// Fix round 1, I-4/I-10: every loaded project (solution folders
+        /// Every loaded project (solution folders
         /// already excluded), as of the same recompute that produced
         /// <see cref="Current"/> — shared by <c>VisualStudioDebugHost.ConfigsAsync</c>
         /// (listing startable projects) and <c>ErrorListReader</c> (rooting
@@ -66,7 +66,7 @@ namespace BECode.VisualStudio
         public IReadOnlyList<ProjectEntry> CurrentProjects => _currentProjects;
 
         /// <summary>
-        /// Fix round 1, I-2: fires after every recompute — including the
+        /// Fires after every recompute — including the
         /// initial one — with the generation that recompute claimed (via
         /// <see cref="GenerationGate.Next"/>, in RECOMPUTE-START order) and
         /// the folder list it produced. <c>BECodePackage</c> uses this to
@@ -89,7 +89,7 @@ namespace BECode.VisualStudio
             {
                 _solution.AdviseSolutionEvents(this, out _solutionEventsCookie);
 
-                // Fix round 1, I-12: Open Folder mode is otherwise detected
+                // Open Folder mode is otherwise detected
                 // only by OnAfterOpenFolder, which never fires for a folder
                 // that was ALREADY open when the package itself finishes
                 // loading (the package can auto-load after Open Folder has
@@ -121,7 +121,7 @@ namespace BECode.VisualStudio
 
         private async Task RecomputeAsync()
         {
-            // Fix round 1, I-2: claimed in RECOMPUTE-START order, before any
+            // Claimed in RECOMPUTE-START order, before any
             // await — this is what lets BECodePackage's GenerationGate
             // reject a late-finishing write for a recompute that a
             // LATER-started one has already superseded, however the two
@@ -144,7 +144,7 @@ namespace BECode.VisualStudio
                 nextProjects = Array.Empty<ProjectEntry>();
             }
 
-            // Fix round 1, M-7: assign the volatile fields BEFORE hopping
+            // Assign the volatile fields BEFORE hopping
             // off the UI thread — Current/CurrentProjects must reflect this
             // recompute's result as soon as it is known, not only once this
             // method has also finished hopping to the thread pool.
@@ -167,7 +167,7 @@ namespace BECode.VisualStudio
         // method's own body to prove thread affinity; routing it through
         // Threading.SwitchToMainThreadAsync (a wrapper) or asserting with
         // ThreadHelper.ThrowIfNotOnUIThread() here instead both left this
-        // flagged (design correction — see the report).
+        // flagged by the analyzer.
         private IReadOnlyList<string> ComputeOnMainThread(IReadOnlyList<ProjectEntry> projects)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
@@ -205,7 +205,7 @@ namespace BECode.VisualStudio
         }
 
         /// <summary>
-        /// Fix round 1, I-4/I-10: every loaded, non-solution-folder project,
+        /// Every loaded, non-solution-folder project,
         /// via <see cref="IVsSolution.GetProjectEnum"/> (never
         /// <c>DTE.Solution.Projects</c> — the enumeration the whole class's
         /// own doc comment already rules out) — shared by whichever caller
@@ -292,7 +292,7 @@ namespace BECode.VisualStudio
 
         // IVsSolutionEvents — every mutation republishes (debounced); every
         // "query" callback is a plain S_OK/no-op, this sink never vetoes
-        // anything. Fix round 1, I-8: every method's body is fenced —
+        // anything. Every method's body is fenced —
         // Visual Studio invokes these directly as part of its own solution
         // load/unload dispatch, and an unhandled exception there is exactly
         // the "fail package load" outcome host design §1.3 rules out.
@@ -383,7 +383,7 @@ namespace BECode.VisualStudio
         }
 
         /// <summary>
-        /// Fix round 1, I-8: <see cref="Republish"/> itself only ever calls
+        /// <see cref="Republish"/> itself only ever calls
         /// <see cref="Debouncer.Trigger"/>, which does not throw under
         /// ordinary use — this fences the call anyway so every one of the
         /// callbacks above stays true to "the whole body is fenced" even as
@@ -412,7 +412,7 @@ namespace BECode.VisualStudio
         /// </summary>
         public void Dispose()
         {
-            // Fix round 1, I-2: stops Changed from firing for a recompute
+            // Stops Changed from firing for a recompute
             // that was already past the debounce and mid-flight when
             // Dispose was called — _debouncer.Dispose() only cancels a
             // still-PENDING (debounced) trigger, not one whose RecomputeAsync
@@ -444,7 +444,7 @@ namespace BECode.VisualStudio
     }
 
     /// <summary>
-    /// Fix round 1, I-4/I-10: one loaded, non-solution-folder project, as
+    /// One loaded, non-solution-folder project, as
     /// <see cref="WorkspaceFolders.EnumerateLoadedProjects"/> produces it.
     /// <see cref="UniqueName"/> falls back to <see cref="Name"/> when
     /// <c>EnvDTE.Project.UniqueName</c> itself throws (some project systems

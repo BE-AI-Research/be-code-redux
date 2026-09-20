@@ -32,7 +32,7 @@ namespace BECode.VisualStudio
         /// transitive dependency of <c>Microsoft.VisualStudio.SDK</c>, so no
         /// extra reference was needed.
         ///
-        /// Design correction (see the report): there is deliberately NO
+        /// There is deliberately NO
         /// <c>Threading.SwitchToMainThreadAsync</c> counterpart to this
         /// method any more. The VSTHRD010/VSTHRD108 analyzers only accept a
         /// LITERAL <c>await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct)</c>
@@ -57,8 +57,8 @@ namespace BECode.VisualStudio
     /// <see cref="Threading.SwitchToBackgroundAsync"/>'s doc comment for why
     /// it no longer also performs the main-thread switch): an
     /// <see cref="OperationCanceledException"/> caused by THIS call's own
-    /// <paramref name="ct"/> passes through unchanged (<c>IEditorHost</c>'s
-    /// Ruling D4); anything else — including an
+    /// <paramref name="ct"/> passes through unchanged (see <c>IEditorHost</c>'s
+    /// cancellation contract); anything else — including an
     /// <see cref="OperationCanceledException"/> from some other cause — is
     /// logged to the Activity Log and rethrown as
     /// <see cref="InvalidOperationException"/>("&lt;name&gt;: &lt;message&gt;"),
@@ -75,7 +75,7 @@ namespace BECode.VisualStudio
             {
                 var result = await body().ConfigureAwait(true);
 
-                // Fix round 1, I-1: every host member's body runs to
+                // Every host member's body runs to
                 // completion on whatever thread it left off on — usually
                 // the UI thread, since the last thing most bodies do is a
                 // literal SwitchToMainThreadAsync before touching a COM

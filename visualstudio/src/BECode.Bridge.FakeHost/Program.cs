@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 namespace BECode.Bridge.FakeHost
 {
     /// <summary>
-    /// Task 4's fake Visual Studio host: a console app that runs the real
+    /// A fake Visual Studio host: a console app that runs the real
     /// <see cref="BridgeServer"/>/<see cref="ToolRegistry"/> over a
     /// <see cref="ScriptedEditorHost"/> instead of Visual Studio, so
     /// <c>internal/ide</c>'s real Go client can be driven against the real

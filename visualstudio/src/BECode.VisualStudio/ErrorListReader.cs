@@ -19,20 +19,20 @@ namespace BECode.VisualStudio
     /// collection unchanged since Visual Studio 2005, chosen over the newer
     /// IErrorList/table API because it is five properties on a stable
     /// interface rather than something much easier to get wrong unrun.
-    /// <c>Ruling D11</c> (<see cref="IEditorHost.DiagnosticsAsync"/>'s own
-    /// doc comment) says a non-null path is matched EXACTLY here, not left
+    /// Per <see cref="IEditorHost.DiagnosticsAsync"/>'s own
+    /// doc comment, a non-null path is matched EXACTLY here, not left
     /// to the tool: <see cref="DiagnosticsAsync"/> does that filtering
-    /// itself — fix round 1, I-10, AFTER rooting a non-absolute
+    /// itself, AFTER rooting a non-absolute
     /// <c>ErrorItem.FileName</c> (build errors from MSBuild often carry a
-    /// project-relative or bare name), since the exact-absolute-path match
-    /// was silently dropping every one of those. Severity filtering is
-    /// explicitly NOT this host's job (Ruling S4) — every diagnostic is
+    /// project-relative or bare name) — matching the exact absolute path
+    /// before rooting would silently drop every one of those. Severity
+    /// filtering is explicitly NOT this host's job — every diagnostic is
     /// returned regardless of path filtering's outcome, and
     /// <c>DiagnosticsTools</c> filters by severity.
     /// </summary>
     internal sealed class ErrorListReader
     {
-        /// <summary>Fix round 1, I-11: the Error List is capped here so an enormous solution cannot make one call read tens of thousands of COM items.</summary>
+        /// <summary>The Error List is capped here so an enormous solution cannot make one call read tens of thousands of COM items.</summary>
         private const int MaxItems = 5000;
 
         private readonly AsyncPackage _package;
@@ -59,7 +59,7 @@ namespace BECode.VisualStudio
                     return (IReadOnlyList<Diagnostic>)Array.Empty<Diagnostic>();
                 }
 
-                // Fix round 1, I-10: candidate directories to root a
+                // Candidate directories to root a
                 // non-absolute FileName against — the owning project's
                 // directory first, then the solution directory — via the
                 // SAME enumeration WorkspaceFolders uses, so no separate
@@ -151,7 +151,7 @@ namespace BECode.VisualStudio
 
                 if (truncated)
                 {
-                    // Fix round 1, I-11: a synthetic diagnostic so the model
+                    // A synthetic diagnostic so the model
                     // sees the truncation rather than silently getting a
                     // partial answer — Source "be-code" distinguishes it
                     // from anything the Error List itself produced.

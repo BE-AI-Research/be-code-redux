@@ -83,7 +83,7 @@ namespace BECode.VisualStudio
                     return (IReadOnlyList<BridgeLocation>?)Array.Empty<BridgeLocation>();
                 }
 
-                // Unbounded by design (Ruling S5): every reference, the tool
+                // Unbounded by design: every reference, the tool
                 // counts and truncates.
                 var referencedSymbols = await SymbolFinder.FindReferencesAsync(lookup.Symbol, lookup.Solution, ct).ConfigureAwait(false);
 
@@ -138,7 +138,7 @@ namespace BECode.VisualStudio
                 var display = lookup.Symbol.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
                 var summary = DocCommentSummary.Extract(lookup.Symbol.GetDocumentationCommentXml());
 
-                // Ruling D10: join with a BLANK line when there is more
+                // Join with a BLANK line when there is more
                 // than one part.
                 return string.IsNullOrEmpty(summary) ? display : display + "\n\n" + summary;
             });
@@ -187,7 +187,7 @@ namespace BECode.VisualStudio
             }
 
             // Position clamped to the line's length (host design §3.3);
-            // incoming line/col are already 1-based per Ruling D1, and the
+            // incoming line/col are already 1-based, and the
             // interface's own contract (IEditorHost's class doc comment)
             // says the TOOLS have already clamped them to a minimum of 1.
             var textLine = text.Lines[lineIndex];

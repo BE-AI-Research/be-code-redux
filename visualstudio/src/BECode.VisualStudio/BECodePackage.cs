@@ -22,7 +22,7 @@ namespace BECode.VisualStudio
     [Guid(PackageGuidString)]
     [ProvideAutoLoad(UIContextGuids80.NoSolution, PackageAutoLoadFlags.BackgroundLoad)]
     [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
-    // Fix round 1, C-2: joins this package's own folder onto devenv's
+    // Joins this package's own folder onto devenv's
     // assembly probing path, so BECode.Bridge.dll and the BCL assemblies
     // shipped alongside it (System.Text.Json and friends — see the csproj's
     // ProjectReference comment) are resolvable at load time. UseCodebase
@@ -47,7 +47,7 @@ namespace BECode.VisualStudio
         private int _port;
         private string? _token;
 
-        // Fix round 1, I-2: republishing the lock file when
+        // Republishing the lock file when
         // WorkspaceFolders.Changed fires. One lock (_lockWriteGate) guards
         // both the "is this the newest generation queued" decision and the
         // pending-folders slot together, so the two can never be updated
@@ -77,7 +77,7 @@ namespace BECode.VisualStudio
 
         private async Task InitializeCoreAsync(CancellationToken ct)
         {
-            // Fix round 1, I-9: resolved and the file mirror initialised as
+            // Resolved and the file mirror initialised as
             // early as possible, before anything else in this method can
             // log — neither call needs the UI thread.
             _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -114,7 +114,7 @@ namespace BECode.VisualStudio
                 vsVersion = "unknown";
             }
 
-            // Fix round 1, I-11 (M-9): BridgeServer.StartAsync (opens a TCP
+            // BridgeServer.StartAsync (opens a TCP
             // listener) and LockFile.WriteAsync (file I/O) need nothing from
             // the UI thread — hop to the pool before either.
             await TaskScheduler.Default;
@@ -134,7 +134,7 @@ namespace BECode.VisualStudio
                 "visualstudio",
                 Version)).ConfigureAwait(false);
 
-            // Fix round 1, I-2: from here on, a folder-list change
+            // From here on, a folder-list change
             // republishes the lock (off the UI thread, serialised,
             // superseded generations dropped — see OnFoldersChanged).
             // Subscribed AFTER the initial write above so the recompute
@@ -146,7 +146,7 @@ namespace BECode.VisualStudio
         }
 
         /// <summary>
-        /// Fix round 1, I-2: <see cref="WorkspaceFolders.Changed"/>'s
+        /// <see cref="WorkspaceFolders.Changed"/>'s
         /// handler. Runs off the UI thread already (the event is raised
         /// there). The single <see cref="_lockWriteGate"/> lock makes the
         /// "is this generation newer than everything already queued"
@@ -239,7 +239,7 @@ namespace BECode.VisualStudio
         {
             if (disposing)
             {
-                // Fix round 1, I-2: stop republishing BEFORE the lock is
+                // Stop republishing BEFORE the lock is
                 // removed — set under the same lock OnFoldersChanged and
                 // DrainLockWritesAsync check, so a write already queued or
                 // in flight cannot land AFTER LockFile.Remove below.

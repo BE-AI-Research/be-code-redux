@@ -38,8 +38,8 @@ namespace BECode.VisualStudio
         private readonly object _gate = new object();
         private TaskCompletionSource<StopResult>? _pendingStop;
 
-        // Fix round 1, I-6: held across Start/Continue/Step/Stop — the seam's
-        // own doc comment (IDebugHost.StartAsync's Ruling D2 paragraph)
+        // Held across Start/Continue/Step/Stop — the seam's
+        // own doc comment (IDebugHost.StartAsync's wait/timeout contract)
         // requires debug-session mutation to be serialised, and StartAsync's
         // "already debugging" branch awaits up to 10s, during which a second
         // concurrent StartAsync could otherwise arm ITS OWN waiter over the
@@ -80,7 +80,7 @@ namespace BECode.VisualStudio
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            // Fix round 1, I-8: Visual Studio invokes DebuggerEvents
+            // Visual Studio invokes DebuggerEvents
             // handlers directly as part of its own debugger dispatch while
             // entering break mode — an unhandled exception here is not just
             // a lost stop result, it runs inside that dispatch.
@@ -122,7 +122,7 @@ namespace BECode.VisualStudio
         }
 
         /// <summary>
-        /// Fix round 1, I-5: resolves <paramref name="expected"/> only if it
+        /// Resolves <paramref name="expected"/> only if it
         /// is STILL the currently-armed waiter — used by
         /// <see cref="CheckBuildFailureAsync"/>, whose 5s-delayed check can
         /// otherwise fire after a NEWER call (e.g. a second StartAsync that
@@ -148,7 +148,7 @@ namespace BECode.VisualStudio
 
         private TaskCompletionSource<StopResult> Arm()
         {
-            // Fix round 1, C-3: same reasoning as DiffReview's tcs — resolved
+            // Same reasoning as DiffReview's tcs — resolved
             // by OnEnterBreakMode/OnEnterDesignMode on the UI thread inside
             // Visual Studio's own debugger-event dispatch; without
             // RunContinuationsAsynchronously, every awaiter of this Task
@@ -170,12 +170,12 @@ namespace BECode.VisualStudio
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-                // Fix round 1, I-4 (Ruling R-14): list EVERY loaded project
+                // List EVERY loaded project
                 // that is not a solution folder, via the SAME enumeration
                 // WorkspaceFolders already uses (IVsSolution.GetProjectEnum),
                 // not solution.Projects — which the design forbids AND
-                // cannot see projects inside solution folders. I-3: the old
-                // OutputType/"IsStartable" heuristic is deleted; over-listing
+                // cannot see projects inside solution folders. Do not filter
+                // by OutputType/"IsStartable"; over-listing
                 // is harmless (debug_start on a class library fails with
                 // Visual Studio's own clear message), under-listing hides a
                 // project the model then never tries.
@@ -201,7 +201,7 @@ namespace BECode.VisualStudio
                     ActivityLog.LogWarning(nameof(ConfigsAsync), ex.ToString());
                 }
 
-                // Fix round 1, I-11: project names/dirs are already collected
+                // Project names/dirs are already collected
                 // (on the UI thread, above); hop off before reading each
                 // project's launchSettings.json — ordinary file I/O that
                 // does not need the UI thread.
@@ -239,7 +239,7 @@ namespace BECode.VisualStudio
         {
             return Guard.RunAsync(nameof(StartAsync), ct, async () =>
             {
-                // Fix round 1, I-6: held for the whole method — the
+                // Held for the whole method — the
                 // "already debugging" branch below awaits up to 10s, during
                 // which a second concurrent StartAsync must not be able to
                 // arm its own waiter over this one's.
@@ -265,9 +265,9 @@ namespace BECode.VisualStudio
                                 "\"" + config + "\" is a launch profile; select it in Visual Studio's own toolbar first — switching it programmatically is not supported (host design §4)");
                         }
 
-                        // Fix round 1, I-4: resolved through the shared
-                        // enumeration, no longer filtered by the deleted
-                        // IsStartable heuristic (I-3) — a name ConfigsAsync
+                        // Resolved through the shared
+                        // enumeration, not filtered by any OutputType-based
+                        // heuristic — a name ConfigsAsync
                         // just listed is always resolvable here.
                         var solutionService = await _package.GetServiceAsync(typeof(SVsSolution)).ConfigureAwait(true) as IVsSolution;
                         var projects = WorkspaceFolders.EnumerateLoadedProjects(solutionService);
@@ -322,12 +322,13 @@ namespace BECode.VisualStudio
         }
 
         /// <summary>
-        /// Fix round 1, I-5: previously fired ONCE at a fixed 5s and read
-        /// <c>LastBuildInfo</c>, which is the PREVIOUS build's failure count
-        /// — the normal state of an agent fixing compile errors, so this
-        /// could report "build failed" for a build that was in fact still
-        /// running, then (via the old unconditional <c>Resolve</c>) clear
-        /// the pending stop and lose the breakpoint hit that followed. Now
+        /// A single fixed-5s read of
+        /// <c>LastBuildInfo</c> is not safe: it is the PREVIOUS build's
+        /// failure count — the normal state of an agent fixing compile
+        /// errors — so a fixed-delay read can report "build failed" for a
+        /// build that is in fact still running, and resolving the pending
+        /// stop unconditionally on that would clear it and lose the
+        /// breakpoint hit that followed. Instead this
         /// polls <c>SolutionBuild.BuildState</c> until it leaves
         /// <c>vsBuildStateInProgress</c> (bounded by the caller's own 60s
         /// wait/<paramref name="ct"/>, off the UI thread between polls),
@@ -475,8 +476,9 @@ namespace BECode.VisualStudio
 
                 if (action == BreakpointAction.Add)
                 {
-                    // Fix round 1, M-3: both ternary arms were the same
-                    // value — dropped.
+                    // ConditionType is always dbgBreakpointConditionTypeWhenTrue:
+                    // there is no other condition type this bridge needs to
+                    // distinguish, whether or not a condition is set.
                     _debugger.Breakpoints.Add(
                         File: path,
                         Line: line,
@@ -501,7 +503,7 @@ namespace BECode.VisualStudio
                     }
                 }
 
-                // Fix round 1, M-5: a bound breakpoint can appear more than
+                // A bound breakpoint can appear more than
                 // once in _debugger.Breakpoints for the same file/line
                 // (Visual Studio's own binding mechanics) — dedupe by line
                 // so the reported list matches what the user would see.
@@ -536,7 +538,7 @@ namespace BECode.VisualStudio
                 var count = Math.Min(depth, frames.Count);
                 for (var i = 1; i <= count; i++)
                 {
-                    // Fix round 1, M-4: fenced PER FRAME — one bad frame
+                    // Fenced PER FRAME — one bad frame
                     // (a COM call that throws for it specifically, e.g. a
                     // frame with no symbols) degrades to Path=null, Line=0
                     // rather than losing every frame after it.
@@ -678,7 +680,7 @@ namespace BECode.VisualStudio
         /// <summary>
         /// Children (<see cref="VariableInfo.Children"/>) resolved at most
         /// ONE level deep, and only for a scope with ten or fewer variables
-        /// in total (Ruling S7) — reading <c>DataMembers</c> evaluates
+        /// in total — reading <c>DataMembers</c> evaluates
         /// properties in the debuggee, which can be slow or have side
         /// effects.
         /// </summary>
@@ -692,7 +694,7 @@ namespace BECode.VisualStudio
 
             foreach (Expression expr in expressions)
             {
-                // Fix round 1, M-4: fenced PER VARIABLE — one bad variable
+                // Fenced PER VARIABLE — one bad variable
                 // (evaluating it, or a child's DataMembers, throws) degrades
                 // to Value="<unavailable>" rather than losing every
                 // variable after it in the scope.
@@ -811,18 +813,16 @@ namespace BECode.VisualStudio
             return null;
         }
 
-        // Fix round 1, I-3: the OutputType-based IsStartable heuristic (and
-        // FindStartableProjectByName, which filtered through it) are
-        // deleted — superseded by I-4's rule (ConfigsAsync/StartAsync now
-        // list/resolve EVERY loaded project via WorkspaceFolders.EnumerateLoadedProjects).
-        // The heuristic also read the numeric OutputType backwards
-        // (VSLangProj.prjOutputType has WinExe=0, Exe=1, Library=2 — the old
-        // code accepted "0" and "2", so it listed class libraries and hid
-        // console apps).
+        // Do not filter startup projects by an OutputType-based "IsStartable"
+        // heuristic: ConfigsAsync/StartAsync
+        // list/resolve EVERY loaded project via WorkspaceFolders.EnumerateLoadedProjects
+        // instead. A numeric-OutputType heuristic is also easy to get
+        // backwards (VSLangProj.prjOutputType has WinExe=0, Exe=1, Library=2)
+        // and end up listing class libraries while hiding console apps.
 
         /// <summary>
-        /// Fix round 1, I-11: no longer asserts the UI thread — the caller
-        /// (<see cref="ConfigsAsync"/>) now hops OFF it (<c>await
+        /// Does not assert the UI thread — the caller
+        /// (<see cref="ConfigsAsync"/>) hops OFF it (<c>await
         /// TaskScheduler.Default</c>) before calling this for each project,
         /// since launchSettings.json is ordinary file I/O that does not
         /// need it. <paramref name="project"/>'s <see cref="ProjectEntry.Dir"/>

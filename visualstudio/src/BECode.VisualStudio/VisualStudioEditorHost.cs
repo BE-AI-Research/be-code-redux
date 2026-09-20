@@ -62,7 +62,7 @@ namespace BECode.VisualStudio
                     return new EditorContext(string.Empty, 0, 0, 0, string.Empty, Array.Empty<string>());
                 }
 
-                // Fix round 1, I-11: collect the open documents' names on
+                // Collect the open documents' names on
                 // the UI thread — Path.IsPathRooted is pure string logic —
                 // and defer File.Exists (synchronous disk I/O) until after
                 // hopping off it below, instead of doing it once per open
@@ -200,7 +200,7 @@ namespace BECode.VisualStudio
                     view.CenterLines(zeroBased, 1);
                 }
 
-                // Ruling D9: do not take keyboard focus away from wherever
+                // Do not take keyboard focus away from wherever
                 // the user is currently typing — ShowNoActivate rather than
                 // Show().
                 frame?.ShowNoActivate();

@@ -20,7 +20,7 @@ namespace BECode.VisualStudio
     /// reason something else in this layer throws (host design §1.3, "no
     /// failure in this layer may take down Visual Studio").
     ///
-    /// Fix round 1, I-9 (Ruling R-15): the Activity Log may need the UI
+    /// The Activity Log may need the UI
     /// thread, and it is easy to miss entirely if the owner never opens it —
     /// every entry is now ALSO mirrored to a plain file,
     /// <c>&lt;home&gt;\.be-code\visualstudio.log</c>, appended from a
@@ -93,7 +93,7 @@ namespace BECode.VisualStudio
         {
             try
             {
-                // Fix round 1, I-9 (Ruling R-15): the TryLog* overloads —
+                // The TryLog* overloads —
                 // they report failure via their bool return rather than
                 // throwing, so a missing/not-yet-ready Activity Log service
                 // cannot itself become an unhandled exception here.
@@ -117,7 +117,7 @@ namespace BECode.VisualStudio
                 return;
             }
 
-            // Fix round 1, I-9: appended from a background thread ONLY,
+            // Appended from a background thread ONLY,
             // never on the UI thread. This is deliberately fire-and-forget
             // (nothing ever awaits the returned Task, and nothing may —
             // Write/LogError/.. are synchronous, called from anywhere,

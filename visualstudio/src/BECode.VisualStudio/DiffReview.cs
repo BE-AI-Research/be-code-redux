@@ -43,14 +43,14 @@ namespace BECode.VisualStudio
 
         private async Task<ReviewDecision> ReviewOnMainThreadAsync(ReviewRequest request, CancellationToken ct)
         {
-            // Redundant with the caller's own switch, but literal here too
-            // (design correction — see the report): VSTHRD109 flags a
+            // Redundant with the caller's own switch, but literal here too:
+            // VSTHRD109 flags a
             // ThreadHelper.ThrowIfNotOnUIThread() assertion inside an async
             // method and wants an actual switch instead, even one that is a
             // main-thread no-op because the caller already switched.
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
-            // Fix round 1, M-2: the path is computed here, but the directory
+            // The path is computed here, but the directory
             // itself is created INSIDE the try below — TryDeleteDirectory in
             // the finally is a no-op (via its own catch-all) against a path
             // that was never created, so this is still safe to reference
@@ -61,7 +61,7 @@ namespace BECode.VisualStudio
             IVsInfoBarUIElement? infoBarElement = null;
             uint infoBarCookie = 0;
             uint frameNotifyCookie = 0;
-            // Fix round 1, C-3: without RunContinuationsAsynchronously, a
+            // Without RunContinuationsAsynchronously, a
             // TrySetResult from an info-bar click handler (itself running on
             // the UI thread — host design §2.3) runs every continuation of
             // tcs.Task INLINE on that same call stack: the unadvises, a
@@ -75,7 +75,7 @@ namespace BECode.VisualStudio
 
             try
             {
-                // Fix round 1, M-2: the directory and both temp files are
+                // The directory and both temp files are
                 // created HERE, inside the try, so a failed write (or the
                 // CreateDirectory call itself) cannot leak a directory the
                 // finally never learns to clean up.
@@ -143,7 +143,7 @@ namespace BECode.VisualStudio
                 // always be able to close it.
                 frame.Show();
 
-                // Fix round 1, I-7: the relative path is now UNCONDITIONALLY
+                // The relative path is UNCONDITIONALLY
                 // part of the bar's text — several concurrent reviews (one
                 // per file) are otherwise indistinguishable, since the
                 // summary alone ("Apply this change?") looks identical on
@@ -236,12 +236,13 @@ namespace BECode.VisualStudio
 
                 if (infoBarElement != null)
                 {
-                    // Fix round 1, I-7: the finally previously unadvised but
-                    // never closed the bar. On the main-window fallback host
+                    // The finally must unadvise AND close the bar. On the
+                    // main-window fallback host
                     // (used when the comparison frame itself has no info bar
-                    // host) every cancelled review left a dead "Apply this
-                    // change?" bar pinned to the top of Visual Studio, and
-                    // they accumulated across reviews. Close() after the bar
+                    // host), unadvising without closing leaves a dead "Apply
+                    // this change?" bar pinned to the top of Visual Studio for
+                    // every cancelled review, accumulating across reviews.
+                    // Close() after the bar
                     // already closed itself (the ordinary Accept/Reject path,
                     // which calls Close() in OnActionItemClicked) is expected
                     // to be a harmless no-op — same defensive shape as
@@ -363,28 +364,28 @@ namespace BECode.VisualStudio
             public void OnActionItemClicked(IVsInfoBarUIElement infoBarUIElement, IVsInfoBarActionItem actionItem)
             {
                 // Visual Studio always raises info bar UI events on the main
-                // thread; this assertion documents that (host design §2.3 /
-                // the brief's own rule: assert rather than switch in a
+                // thread; this assertion documents that (host design §2.3:
+                // assert rather than switch in a
                 // synchronous callback Visual Studio itself invokes).
                 ThreadHelper.ThrowIfNotOnUIThread();
 
-                // Fix round 1, I-8: the whole body is fenced — a callback
+                // The whole body is fenced — a callback
                 // Visual Studio itself invokes must never let an exception
                 // escape back into its own dispatch.
                 try
                 {
-                    // Fix round 1, M-11: ActionContext may marshal across
+                    // ActionContext may marshal across
                     // this COM boundary as the raw underlying int rather
                     // than the ReviewDecision enum value; fall back to the
                     // int, then to the button's own Text — a click must
                     // never do nothing.
                     var decision = ResolveDecision(actionItem);
 
-                    // Fix round 1, I-8: decide -> Close() the bar -> TrySetResult,
-                    // in that order (previously TrySetResult ran BEFORE
-                    // Close(), so tcs.Task's continuations — everything the
-                    // caller does after its own await — could run while the
-                    // bar was still showing).
+                    // Decide -> Close() the bar -> TrySetResult,
+                    // in that order: TrySetResult running BEFORE
+                    // Close() would let tcs.Task's continuations — everything
+                    // the caller does after its own await — run while the
+                    // bar was still showing.
                     infoBarUIElement.Close();
 
                     if (decision.HasValue)
@@ -419,7 +420,7 @@ namespace BECode.VisualStudio
             }
 
             /// <summary>
-            /// Fix round 1, M-11: <see cref="IVsInfoBarActionItem.ActionContext"/>
+            /// <see cref="IVsInfoBarActionItem.ActionContext"/>
             /// is typed <c>object</c> and may marshal as the ReviewDecision
             /// enum value itself, as the plain <c>int</c> underneath it, or —
             /// if neither survives the COM round trip — not at all; the
@@ -429,7 +430,7 @@ namespace BECode.VisualStudio
             /// </summary>
             private static ReviewDecision? ResolveDecision(IVsInfoBarActionItem actionItem)
             {
-                // Design correction (report, item 2): a synchronous private
+                // A synchronous private
                 // method needs its OWN assertion — the analyzer does not
                 // reason across the call from OnActionItemClicked, which is
                 // itself only known to be on the main thread because Visual
@@ -472,7 +473,7 @@ namespace BECode.VisualStudio
 
             public int OnShow(int fShow)
             {
-                // Fix round 1, I-8: Visual Studio invokes this synchronously
+                // Visual Studio invokes this synchronously
                 // on the main thread as part of the frame's own
                 // notification dispatch — fence the body so an exception
                 // here (e.g. TrySetResult never throws, but a future change
@@ -497,7 +498,7 @@ namespace BECode.VisualStudio
 
             public int OnMove()
             {
-                // Fix round 1, I-8: fenced like OnShow's siblings, even
+                // Fenced like OnShow's siblings, even
                 // though nothing in the body itself can throw today — a
                 // future change here must not have to remember to add this.
                 ThreadHelper.ThrowIfNotOnUIThread();
