@@ -653,6 +653,131 @@ namespace BECode.Bridge.Tests
             Assert.Same(callReturned.Task, completedCall);
         }
 
+        // Replies after close: once teardown has fully finished (the client
+        // observed ConnectionClosed and ConnectionCount 0), a call that only
+        // then completes must not throw out of its task and must not be
+        // reported through OnError with a write context — "a client that
+        // went away is ordinary". Uses the dispatcher's own completion
+        // signal (callCompleted) rather than an unreliable subscription to
+        // TaskScheduler.UnobservedTaskException.
+        [Fact]
+        public async Task ALateReplyAfterTheConnectionIsGoneIsDroppedQuietly()
+        {
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var callCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    await gate.Task; // deliberately ignores ct, like the straggler above
+                    var result = new ToolResult("too-late", false);
+                    callCompleted.TrySetResult(true);
+                    return result;
+                },
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.InFlightDrainTimeout = TimeSpan.FromMilliseconds(200);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            var client = await ConnectAsync(port);
+            var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            // Force-open the gate in `finally`: on a RED run against today's
+            // sequential code the earlier WaitForAsync calls below never
+            // resolve (ConnectionClosed never fires while the stubborn call
+            // is stuck on the gate), so nothing else would ever open it —
+            // without this, DisposeAsync (the `await using` above) would
+            // hang the test process during cleanup instead of the RED
+            // failure being a bounded timeout.
+            try
+            {
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
+                await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+                client.Close();
+
+                await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+                await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+                // Let the abandonment bound elapse (reported through
+                // OnError) so the connection is fully torn down — state
+                // disposed — before the dispatcher's own gate is opened.
+                await WaitForAsync(
+                    () => errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0),
+                    TimeSpan.FromSeconds(5));
+
+                lock (errors)
+                {
+                    errors.Clear();
+                }
+
+                gate.TrySetResult(true);
+                var completedInTime = await Task.WhenAny(callCompleted.Task, Task.Delay(TimeSpan.FromSeconds(5))) == callCompleted.Task;
+                Assert.True(completedInTime, "the abandoned call never completed via the dispatcher's own signal");
+
+                // Bounded grace period for the now-completed call's reply
+                // attempt to reach BridgeServer's write path and be dropped.
+                await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+                Assert.DoesNotContain(errors, e => e.Context.IndexOf("write", StringComparison.OrdinalIgnoreCase) >= 0);
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+            }
+        }
+
+        // Frames never interleave: 20 concurrent tools/call replies, each a
+        // large (64 KiB) text payload, must each still land as exactly one
+        // parseable JSON line — proving the per-connection write lock still
+        // serialises writes under genuine concurrency.
+        [Fact]
+        public async Task TwentyConcurrentCallsNeverInterleaveFramesAndEachIdArrivesExactlyOnce()
+        {
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    await Task.Yield();
+                    return new ToolResult(new string('x', 64 * 1024), false);
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            for (var i = 1; i <= 20; i++)
+            {
+                await SendLineAsync(stream, $"{{\"jsonrpc\":\"2.0\",\"id\":{i},\"method\":\"tools/call\",\"params\":{{\"name\":\"big\",\"arguments\":{{}}}}}}");
+            }
+
+            var seenIds = new HashSet<int>();
+            for (var i = 0; i < 20; i++)
+            {
+                var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(line);
+                var root = JsonDocument.Parse(line!).RootElement; // throws if frames interleaved into invalid JSON
+                var id = root.GetProperty("id").GetInt32();
+                Assert.True(seenIds.Add(id), $"id {id} seen more than once");
+                Assert.Equal(64 * 1024, root.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!.Length);
+            }
+
+            Assert.Equal(new HashSet<int>(Enumerable.Range(1, 20)), seenIds);
+        }
+
         [Fact]
         public async Task ThrownExceptionInAToolIsErrorNotAJsonRpcError()
         {

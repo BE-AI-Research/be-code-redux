@@ -153,10 +153,18 @@ namespace BECode.Bridge
         /// Per-<c>tools/call</c> marker, created before the call's task
         /// starts and handed into it. Set by <see cref="DrainInFlightAsync"/>
         /// only for a task it gave up waiting on at connection teardown — a
-        /// straggler that ignored its cancellation token. Not yet consulted
-        /// anywhere (that lands with the late-reply-quietness checkpoint);
-        /// for now it just lets DrainInFlightAsync tell which of the
-        /// stragglers it reported are still actually running.
+        /// straggler that ignored its cancellation token. A call's own reply
+        /// write checks this immediately before writing: once true, a write
+        /// failure is the ordinary "client went away" case (requirement 4),
+        /// not a reportable one. This is deliberately per-call rather than a
+        /// single connection-wide flag: connection teardown (cancel token,
+        /// <c>ConnectionClosed</c>, remove from <c>_clients</c>) can genuinely
+        /// race, on a different thread, against an ordinary in-flight call
+        /// that is about to fail its own write for an unrelated reason (e.g.
+        /// <see cref="AWriteFailureIsReportedThroughOnError"/>-shaped tests,
+        /// where the dispatcher itself closes the socket) — that failure must
+        /// still be reported. Only a call actually abandoned past
+        /// <see cref="InFlightDrainTimeout"/> is quiet.
         /// </summary>
         private sealed class InFlightCall
         {
@@ -284,10 +292,16 @@ namespace BECode.Bridge
                 var framer = new LineFramer(_maxLineBytes);
 
                 // Requests are READ and DISPATCHED in order: the read loop
-                // only frames lines and enqueues them, a single consumer task
-                // processes them one at a time, in order. tools/call is the
+                // only frames lines and enqueues them, and a single consumer
+                // task (ProcessQueueAsync) works through them one at a time
+                // in order. initialize/tools/list/errors are handled inline
+                // there and so still reply in order too. tools/call is the
                 // one exception (R-7): it is dispatched in order but RUNS on
-                // its own task, so its reply may arrive out of order.
+                // its own task, so its reply is written whenever that task
+                // completes — a slow tools/call no longer delays a later
+                // request's reply on the same connection. Writes stay
+                // serialised by the per-connection write lock, so frames
+                // never interleave regardless.
                 channel = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
                 {
                     SingleReader = true,
@@ -450,7 +464,9 @@ namespace BECode.Bridge
             {
                 // Mark only the ones still actually running: a call that
                 // ignored its token and is still going when the bound
-                // elapses.
+                // elapses. Its own eventual write (if any) checks this marker
+                // and drops itself quietly instead of reporting through
+                // OnError — "a client that went away is ordinary".
                 foreach (var straggler in stragglers)
                 {
                     if (!straggler.Task.IsCompleted)
@@ -568,15 +584,17 @@ namespace BECode.Bridge
                             break;
 
                         case "tools/call":
-                            // R-7: dispatched in order — we reach this line
-                            // in strict per-connection order, same as every
-                            // other case — but NOT awaited here. It runs on
+                            // R-7: dispatched in order (we reach this line in
+                            // strict per-connection order, same as every
+                            // other case), but NOT awaited here — it runs on
                             // its own task and replies whenever that task
-                            // completes. The connection's own token (not the
-                            // server's) is what IToolDispatcher.CallAsync
-                            // receives, and the task is tracked (with its own
-                            // InFlightCall marker) so teardown can await it
-                            // bounded instead of forever.
+                            // completes, so a slow call never delays a later
+                            // request's reply on this connection. The
+                            // connection's own token (not the server's) is
+                            // what IToolDispatcher.CallAsync receives, and
+                            // the task is tracked (with its own InFlightCall
+                            // marker) so teardown can await it bounded
+                            // instead of forever.
                             var callHandle = new InFlightCall();
                             var callTask = HandleToolsCallAsync(state, id, paramsElement, state.Cts.Token, callHandle);
                             state.TrackInFlight(callTask, callHandle);
@@ -683,13 +701,20 @@ namespace BECode.Bridge
                 content = new[] { new { type = "text", text = result.Text } },
                 isError = result.IsError,
             };
-            await WriteResultAsync(state, id, payload).ConfigureAwait(false);
+
+            // Task 3a, requirement 4: checked right before writing, not at
+            // dispatch time — a call only ever becomes Abandoned once
+            // DrainInFlightAsync gives up on it at connection teardown, long
+            // after any ordinary (non-straggler) call would already have
+            // written its reply. See InFlightCall's own comment for why this
+            // is per-call rather than a single connection-wide flag.
+            await WriteResultAsync(state, id, payload, quiet: handle.Abandoned).ConfigureAwait(false);
         }
 
-        private Task WriteResultAsync(ConnectionState state, JsonElement id, object? result)
+        private Task WriteResultAsync(ConnectionState state, JsonElement id, object? result, bool quiet = false)
         {
             var bytes = JsonRpcWriter.EncodeResult(id, result);
-            return WriteBytesAsync(state, bytes);
+            return WriteBytesAsync(state, bytes, quiet);
         }
 
         private Task WriteErrorAsync(ConnectionState state, JsonElement id, int code, string message)
@@ -698,15 +723,38 @@ namespace BECode.Bridge
             return WriteBytesAsync(state, bytes);
         }
 
-        private async Task WriteBytesAsync(ConnectionState state, byte[] bytes)
+        private async Task WriteBytesAsync(ConnectionState state, byte[] bytes, bool quiet = false)
         {
-            await state.WriteLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await state.WriteLock.WaitAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // Task 3a, requirement 4: teardown already disposed the
+                // write lock. Structurally this can only happen to a call
+                // DrainInFlightAsync already gave up on (the lock is only
+                // disposed, in ConnectionState.Dispose, after that drain
+                // completes or times out) — drop it quietly, no OnError. "A
+                // client that went away is ordinary."
+                return;
+            }
+
             try
             {
                 await state.Stream.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
+                if (quiet)
+                {
+                    // Task 3a, requirement 4: this reply belongs to a call
+                    // DrainInFlightAsync already abandoned at connection
+                    // teardown — a late write losing the race against a
+                    // closed/disposed stream is ordinary, not reportable.
+                    return;
+                }
+
                 // Review round 1: a failed write used to be swallowed
                 // silently, leaving ShouldClose unset — later replies on
                 // this connection would just keep failing into a dead
@@ -718,7 +766,15 @@ namespace BECode.Bridge
             }
             finally
             {
-                state.WriteLock.Release();
+                try
+                {
+                    state.WriteLock.Release();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Teardown disposed the lock while this write was in
+                    // flight (a straggler); nothing left to release.
+                }
             }
         }
 
