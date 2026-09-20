@@ -97,6 +97,23 @@ namespace BECode.Bridge.Tests
             await stream.WriteAsync(bytes, 0, bytes.Length);
         }
 
+        // M6(a) (fix round 1): writes several JSON-RPC lines in ONE
+        // WriteAsync call, so they genuinely pipeline on the wire (both
+        // already sent, and available to be read/dequeued together) rather
+        // than the second only being written after the first's reply is
+        // read — which would never exercise a race between them.
+        private static async Task SendLinesAsync(NetworkStream stream, params string[] jsonLines)
+        {
+            var sb = new StringBuilder();
+            foreach (var json in jsonLines)
+            {
+                sb.Append(json).Append('\n');
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(sb.ToString());
+            await stream.WriteAsync(bytes, 0, bytes.Length);
+        }
+
         private static async Task<string?> ReadLineWithTimeoutAsync(System.IO.StreamReader reader, TimeSpan timeout)
         {
             using var cts = new CancellationTokenSource(timeout);
@@ -485,14 +502,27 @@ namespace BECode.Bridge.Tests
             using var stream = client.GetStream();
             using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
 
-            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
+            // M6(a) (fix round 1): both lines written in ONE WriteAsync, so
+            // they genuinely pipeline — reading the first reply before
+            // sending the second (the original shape) never exercises
+            // whether auth-gating happens before a tools/call is forked,
+            // since the second line would not even be on the wire yet.
+            await SendLinesAsync(
+                stream,
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}",
+                $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{{\"auth\":{{\"token\":\"{Token}\"}}}}}}");
+
             var first = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
             Assert.NotNull(first);
             var firstRoot = JsonDocument.Parse(first!).RootElement;
+            Assert.Equal(1, firstRoot.GetProperty("id").GetInt32());
             Assert.Equal(-32002, firstRoot.GetProperty("error").GetProperty("code").GetInt32());
 
-            var initRoot = await InitializeAsync(stream, reader, Token, id: 2);
-            Assert.False(initRoot.TryGetProperty("error", out _));
+            var second = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(second);
+            var secondRoot = JsonDocument.Parse(second!).RootElement;
+            Assert.Equal(2, secondRoot.GetProperty("id").GetInt32());
+            Assert.False(secondRoot.TryGetProperty("error", out _));
         }
 
         // Per-connection cancellation + prompt teardown: a call that blocks
@@ -631,36 +661,59 @@ namespace BECode.Bridge.Tests
                     errors.Add((ctx, ex));
                 }
             };
+            // M6(c) (fix round 1): dispose the server via `await using` and
+            // force-open the gate in `finally` — an early assertion failure
+            // used to leave the server undisposed and the dispatcher's
+            // OnCall permanently blocked on the gate, leaking a pooled task
+            // for the rest of the test run.
+            await using var serverLifetime = server;
 
             var client = await ConnectAsync(port);
             var stream = client.GetStream();
             using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
             await InitializeAsync(stream, reader, Token);
 
-            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
-            var startedInTime = await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))) == started.Task;
-            Assert.True(startedInTime, "the tools/call handler never started");
+            try
+            {
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
+                var startedInTime = await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))) == started.Task;
+                Assert.True(startedInTime, "the tools/call handler never started");
 
-            client.Close();
+                client.Close();
 
-            await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
-            Assert.Single(dispatcher.ClosedConnections);
-            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+                await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+                Assert.Single(dispatcher.ClosedConnections);
+                await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
 
-            await WaitForAsync(
-                () => errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0),
-                TimeSpan.FromSeconds(5));
+                // M6(b) (fix round 1): snapshot under the lock — errors is
+                // written from the server's own thread(s) concurrently with
+                // this one polling it.
+                await WaitForAsync(
+                    () =>
+                    {
+                        lock (errors)
+                        {
+                            return errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0);
+                        }
+                    },
+                    TimeSpan.FromSeconds(5));
 
-            var disposeTask = server.DisposeAsync().AsTask();
-            var completed = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(5)));
-            Assert.Same(disposeTask, completed);
-            await disposeTask;
+                var disposeTask = server.DisposeAsync().AsTask();
+                var completed = await Task.WhenAny(disposeTask, Task.Delay(TimeSpan.FromSeconds(5)));
+                Assert.Same(disposeTask, completed);
+                await disposeTask;
 
-            // Only now let the abandoned call finish — proving it does not
-            // hang or throw once teardown has already moved on without it.
-            gate.TrySetResult(true);
-            var completedCall = await Task.WhenAny(callReturned.Task, Task.Delay(TimeSpan.FromSeconds(5)));
-            Assert.Same(callReturned.Task, completedCall);
+                // Only now let the abandoned call finish — proving it does
+                // not hang or throw once teardown has already moved on
+                // without it.
+                gate.TrySetResult(true);
+                var completedCall = await Task.WhenAny(callReturned.Task, Task.Delay(TimeSpan.FromSeconds(5)));
+                Assert.Same(callReturned.Task, completedCall);
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+            }
         }
 
         // Replies after close: once teardown has fully finished (the client
@@ -702,6 +755,12 @@ namespace BECode.Bridge.Tests
                     errors.Add((ctx, ex));
                 }
             };
+            // M6(d) (fix round 1): a deterministic signal for "this call's
+            // own reply write has been attempted" — set only once, on the
+            // straggler's eventual (post-abandonment) completion, since
+            // that is the settlement this test actually needs to wait for.
+            var settled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.OnCallSettled = () => settled.TrySetResult(true);
             await using var serverLifetime = server;
 
             var client = await ConnectAsync(port);
@@ -729,8 +788,17 @@ namespace BECode.Bridge.Tests
                 // Let the abandonment bound elapse (reported through
                 // OnError) so the connection is fully torn down — state
                 // disposed — before the dispatcher's own gate is opened.
+                // M6(b) (fix round 1): snapshot under the lock — errors is
+                // written from the server's own thread(s) concurrently with
+                // this one polling it.
                 await WaitForAsync(
-                    () => errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0),
+                    () =>
+                    {
+                        lock (errors)
+                        {
+                            return errors.Any(e => e.Context.IndexOf("in-flight", StringComparison.OrdinalIgnoreCase) >= 0);
+                        }
+                    },
                     TimeSpan.FromSeconds(5));
 
                 lock (errors)
@@ -742,11 +810,20 @@ namespace BECode.Bridge.Tests
                 var completedInTime = await Task.WhenAny(callCompleted.Task, Task.Delay(TimeSpan.FromSeconds(5))) == callCompleted.Task;
                 Assert.True(completedInTime, "the abandoned call never completed via the dispatcher's own signal");
 
-                // Bounded grace period for the now-completed call's reply
-                // attempt to reach BridgeServer's write path and be dropped.
-                await Task.Delay(TimeSpan.FromMilliseconds(300));
+                // M6(d) (fix round 1): wait for the deterministic
+                // OnCallSettled signal — the straggler's own reply write has
+                // now actually been attempted (and dropped quietly) —
+                // instead of guessing at a fixed grace period.
+                var settledInTime = await Task.WhenAny(settled.Task, Task.Delay(TimeSpan.FromSeconds(5))) == settled.Task;
+                Assert.True(settledInTime, "the straggler's call task never settled");
 
-                Assert.DoesNotContain(errors, e => e.Context.IndexOf("write", StringComparison.OrdinalIgnoreCase) >= 0);
+                List<(string Context, Exception Exception)> errorsSnapshot;
+                lock (errors)
+                {
+                    errorsSnapshot = new List<(string, Exception)>(errors);
+                }
+
+                Assert.DoesNotContain(errorsSnapshot, e => e.Context.IndexOf("write", StringComparison.OrdinalIgnoreCase) >= 0);
             }
             finally
             {
@@ -994,7 +1071,16 @@ namespace BECode.Bridge.Tests
             Assert.False(secondRoot.TryGetProperty("error", out _));
             Assert.Equal(0, secondRoot.GetProperty("result").GetProperty("tools").GetArrayLength());
 
-            Assert.Contains(errors, e => e.Exception.Message == "boom-list");
+            // M6(b) (fix round 1): snapshot under the lock before asserting
+            // — errors is written from the server's own thread(s), not just
+            // this test's.
+            List<(string Context, Exception Exception)> errorsSnapshot;
+            lock (errors)
+            {
+                errorsSnapshot = new List<(string, Exception)>(errors);
+            }
+
+            Assert.Contains(errorsSnapshot, e => e.Exception.Message == "boom-list");
         }
 
         // I1 (review round 1), server-level: the per-connection LineFramer
@@ -1028,8 +1114,24 @@ namespace BECode.Bridge.Tests
             var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
             Assert.Null(line); // closed, not merely idle
 
-            await WaitForAsync(() => errors.Count > 0, TimeSpan.FromSeconds(5));
-            Assert.Contains(errors, e => e.Exception is System.IO.InvalidDataException);
+            await WaitForAsync(
+                () =>
+                {
+                    lock (errors)
+                    {
+                        return errors.Count > 0;
+                    }
+                },
+                TimeSpan.FromSeconds(5));
+
+            // M6(b) (fix round 1): snapshot under the lock before asserting.
+            List<(string Context, Exception Exception)> errorsSnapshot;
+            lock (errors)
+            {
+                errorsSnapshot = new List<(string, Exception)>(errors);
+            }
+
+            Assert.Contains(errorsSnapshot, e => e.Exception is System.IO.InvalidDataException);
         }
 
         // Test gap closed (review round 1): ConnectionCount across a real
@@ -1179,8 +1281,79 @@ namespace BECode.Bridge.Tests
 
             await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
 
-            await WaitForAsync(() => errors.Any(e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase)), TimeSpan.FromSeconds(5));
-            Assert.Contains(errors, e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
+            // M6(b) (fix round 1): snapshot under the lock before asserting
+            // — errors is written from the dispatcher's/server's own
+            // threads concurrently with this one enumerating it.
+            await WaitForAsync(
+                () =>
+                {
+                    lock (errors)
+                    {
+                        return errors.Any(e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
+                    }
+                },
+                TimeSpan.FromSeconds(5));
+
+            List<(string Context, Exception Exception)> errorsSnapshot;
+            lock (errors)
+            {
+                errorsSnapshot = new List<(string, Exception)>(errors);
+            }
+
+            Assert.Contains(errorsSnapshot, e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Fix round 1, M5: ShouldClose alone only closes the socket the next
+        // time ProcessQueueAsync happens to recheck it, after processing
+        // another line — but tools/call's write now happens on its own
+        // forked task (R-7), so if the client never sends anything further,
+        // nothing ever rechecks the flag. Same deterministic write-failure
+        // setup as AWriteFailureIsReportedThroughOnError (the dispatcher
+        // itself closes the socket), asserting the connection still tears
+        // down promptly WITHOUT the client ever sending anything more.
+        //
+        // Caveat, recorded honestly rather than glossed over: this
+        // particular setup does not isolate the fix, because on this
+        // runtime a Socket.Close() (and, empirically, even a
+        // Socket.Shutdown(SocketShutdown.Send) — tried first, and it also
+        // aborts the read loop's own pending ReadAsync with an
+        // "Operation canceled" IOException) already faults the read loop's
+        // pending ReadAsync on its own, which tears the connection down
+        // through the ordinary disconnect path regardless of whether
+        // WriteBytesAsync additionally closes the socket on a write
+        // failure. I could not find a standard Socket API that fails a
+        // pending write while leaving a concurrently pending read on the
+        // very same socket unaffected, to construct a case that would
+        // actually hang pre-fix. The fix itself is still correct per M5's
+        // own reasoning (a write failure from a cause that does NOT also
+        // trip the read side — e.g. one BridgeServer detects before the OS
+        // does — must not leave the connection to linger), and this test
+        // guards the passing behaviour going forward even though it does
+        // not demonstrate a pre-fix hang.
+        [Fact]
+        public async Task AWriteFailureClosesTheConnectionWithoutWaitingForMoreInput()
+        {
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = (name, args, conn, ct) =>
+                {
+                    ((TcpClient)conn).Close();
+                    return Task.FromResult(new ToolResult("won't be delivered", false));
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
+
+            // No further input is ever sent on this connection.
+            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+            Assert.Equal(0, server.ConnectionCount);
         }
 
         // Fix round 1, C1: requirement 4 says an ORDINARY late reply — a
@@ -1338,6 +1511,68 @@ namespace BECode.Bridge.Tests
             }
 
             Assert.Contains(errorsSnapshot, e => e.Context.IndexOf("cancel", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        // Fix round 1, M4: the "a request with an id always gets a reply"
+        // guard in ProcessLineAsync only covers the inline methods
+        // (initialize, tools/list, errors) — tools/call runs on its own
+        // task, unawaited there, so a fault in HandleToolsCallAsync's tail
+        // (the JSON encode + write, outside CallAsync's own try) used to
+        // fault the forked task silently: no reply for that id, no OnError,
+        // since nothing awaits that task except TrackInFlight's fire-and-
+        // forget continuation, which only observes the exception. Forces a
+        // genuine fault in that tail deterministically: the dispatcher
+        // returns a null ToolResult (a legal value for the CallAsync
+        // signature — the try/catch around CallAsync itself only guards
+        // against a THROWN exception, not a null return), so
+        // `result.Text`/`result.IsError` in the payload-construction step
+        // right after — which is the tail this finding is about, not
+        // CallAsync itself — throws NullReferenceException. (An earlier
+        // attempt using a lone UTF-16 surrogate in the text did not work:
+        // System.Text.Json silently substitutes U+FFFD for it rather than
+        // throwing, and a deliberately over-deep id fails to PARSE in the
+        // first place, before ever reaching dispatch — there is no window
+        // where encoding a legally-parsed id can fail on the reply side but
+        // not the request side, since both wrap it in exactly one more
+        // level of nesting.)
+        [Fact]
+        public async Task AFaultInTheReplyTailIsReportedAndStillGetsAReply()
+        {
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = (name, args, conn, ct) => Task.FromResult<ToolResult>(null!),
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"tools/call\",\"params\":{\"name\":\"null-result\",\"arguments\":{}}}");
+
+            var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+            Assert.NotNull(line);
+            var root = JsonDocument.Parse(line!).RootElement;
+            Assert.Equal(50, root.GetProperty("id").GetInt32());
+            Assert.Equal(-32603, root.GetProperty("error").GetProperty("code").GetInt32());
+
+            List<(string Context, Exception Exception)> errorsSnapshot;
+            lock (errors)
+            {
+                errorsSnapshot = new List<(string, Exception)>(errors);
+            }
+
+            Assert.Contains(errorsSnapshot, e => e.Context.IndexOf("tools/call reply", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         // M10: the default JSON encoder escapes '<', '>', '&' and every

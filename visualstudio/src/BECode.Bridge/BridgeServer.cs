@@ -69,10 +69,13 @@ namespace BECode.Bridge
         /// <c>tools/call</c> tasks to finish, once the connection's token has
         /// already been cancelled, before abandoning them and reporting a
         /// straggler through <see cref="OnError"/> instead of blocking on it.
-        /// Default 5 s per the wire contract; additive public member, tests
-        /// may shorten it. None of the pinned signatures change.
+        /// Default 5 s per the wire contract. Fix round 1, M3: internal, not
+        /// public — a caller has no business tuning this outside a test —
+        /// visible to BECode.Bridge.Tests via the assembly's
+        /// InternalsVisibleTo (AssemblyInfo.cs). None of the pinned
+        /// signatures change.
         /// </summary>
-        public TimeSpan InFlightDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        internal TimeSpan InFlightDrainTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
         /// <summary>
         /// Fix round 1, C1: how long connection teardown will wait to
@@ -100,6 +103,16 @@ namespace BECode.Bridge
         /// 64.
         /// </summary>
         internal int MaxConcurrentCallsPerConnection { get; set; } = 64;
+
+        /// <summary>
+        /// Fix round 1, M6(d): test-only hook invoked once every forked
+        /// <c>tools/call</c> task — including its own reply write attempt,
+        /// quiet or not — has fully settled. Lets a test replace a fixed
+        /// delay ("give the write path a moment to run") with a genuine
+        /// deterministic signal instead of guessing how long is enough.
+        /// Fenced like OnError: a throwing hook cannot break the server.
+        /// </summary>
+        internal Action? OnCallSettled { get; set; }
 
         public int ConnectionCount
         {
@@ -742,6 +755,20 @@ namespace BECode.Bridge
                             // bounded instead of forever.
                             var callTask = HandleToolsCallAsync(state, id, paramsElement, state.Cts.Token);
                             state.TrackInFlight(callTask);
+
+                            // M6(d): fires after the call's own reply write
+                            // (quiet or not) has been attempted, not just
+                            // after CallAsync itself returns — see
+                            // OnCallSettled's own comment.
+                            if (OnCallSettled != null)
+                            {
+                                _ = callTask.ContinueWith(
+                                    _ => ReportCallSettled(),
+                                    CancellationToken.None,
+                                    TaskContinuationOptions.ExecuteSynchronously,
+                                    TaskScheduler.Default);
+                            }
+
                             break;
 
                         default:
@@ -840,13 +867,39 @@ namespace BECode.Bridge
                 result = new ToolResult($"{name}: {ex.Message}", true);
             }
 
-            var payload = new
+            // Fix round 1, M4: the "a request with an id always gets a
+            // reply" guard in ProcessLineAsync only covers the inline
+            // methods (initialize, tools/list, errors) — tools/call runs on
+            // its own task, never awaited there, so a fault in this tail
+            // (the encode + write, outside CallAsync's own try above) used
+            // to fault the forked task silently: no reply for this id, and
+            // no OnError, since nothing awaits this task except
+            // TrackInFlight's fire-and-forget continuation, which only
+            // observes the exception. Wrapped the same way ProcessLineAsync
+            // wraps its own inline methods.
+            try
             {
-                content = new[] { new { type = "text", text = result.Text } },
-                isError = result.IsError,
-            };
+                var payload = new
+                {
+                    content = new[] { new { type = "text", text = result.Text } },
+                    isError = result.IsError,
+                };
 
-            await WriteResultAsync(state, id, payload).ConfigureAwait(false);
+                await WriteResultAsync(state, id, payload).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                ReportError("unhandled exception writing tools/call reply", ex);
+                try
+                {
+                    await WriteErrorAsync(state, id, JsonRpcCodes.InternalError, ex.Message).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // WriteErrorAsync already reports its own write
+                    // failures via WriteBytesAsync; nothing more to add.
+                }
+            }
         }
 
         private Task WriteResultAsync(ConnectionState state, JsonElement id, object? result)
@@ -903,10 +956,28 @@ namespace BECode.Bridge
                 // silently, leaving ShouldClose unset — later replies on
                 // this connection would just keep failing into a dead
                 // socket. Now: report it and stop processing further
-                // requests on this connection (the ShouldClose check in
-                // ProcessQueueAsync closes the socket right after).
+                // requests on this connection.
+                //
+                // Fix round 1, M5: ShouldClose alone only closes the socket
+                // the next time ProcessQueueAsync happens to check it, after
+                // processing another line — but tools/call's write now
+                // happens on its own forked task (R-7), so if the client
+                // never sends anything else, nothing ever rechecks the flag
+                // and the connection lingers with a dead write forever.
+                // Close the socket directly instead: this faults the read
+                // loop's pending ReadAsync and runs the ordinary teardown
+                // (ConnectionClosed exactly once, same as any other
+                // disconnect), promptly, without waiting for more input.
                 state.ShouldClose = true;
                 ReportError("write failed", ex);
+                try
+                {
+                    state.Client.Close();
+                }
+                catch
+                {
+                    // already closed
+                }
             }
             finally
             {
@@ -931,6 +1002,18 @@ namespace BECode.Bridge
             catch
             {
                 // a throwing error callback must not break the server
+            }
+        }
+
+        private void ReportCallSettled()
+        {
+            try
+            {
+                OnCallSettled?.Invoke();
+            }
+            catch
+            {
+                // a throwing test hook must not break the server
             }
         }
 
