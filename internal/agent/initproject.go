@@ -177,6 +177,7 @@ func (a *Agent) InitProject(ctx context.Context, facts discover.Facts) (string, 
 				provider.Message{Role: provider.RoleAssistant, Content: lastDoc},
 				provider.Message{Role: provider.RoleUser, Content: "The previous attempt was rejected because: " + strings.Join(last, "; ") + ". Write BECODE.md again, correcting these."})
 		}
+		a.awaitWindow(ctx) // never send with no window on the wire
 		resp, err := a.Provider.Chat(ctx, provider.ChatRequest{Model: a.Model, Messages: msgs, Temperature: 0.2, NoThink: true}, nil)
 		if err != nil {
 			return "", false, err

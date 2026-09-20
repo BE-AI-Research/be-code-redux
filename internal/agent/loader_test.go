@@ -1026,3 +1026,42 @@ func TestAConsentedReloadIsNotUndoneBeforeItReachesTheServer(t *testing.T) {
 		t.Fatalf("did not adapt to another client's reload: window %d", ag.Window())
 	}
 }
+
+// TestARequestInTheSwitchGapWaitsForTheWindow: /model takes the previous
+// model's num_ctx off the wire at once and resolves the new one behind it. A
+// request sent in between carried no num_ctx at all, and on a real Ollama that
+// is not "leave the model alone": it loads — or reloads — the model at the
+// server's default window (8192 on the owner's box), which is how a session
+// configured for 32768 came to be resident at 8192. The request waits for the
+// resolution instead; it is bounded by ModelResolveTimeout and by ctx.
+func TestARequestInTheSwitchGapWaitsForTheWindow(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	ag.SetLoader(&fakeLoader{window: 32768, delay: 150 * time.Millisecond})
+	var atRequest atomic.Int64
+	ag.Provider = &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		atRequest.Store(int64(ag.Window()))
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+
+	ag.SetModel("other-model")
+	if _, err := ag.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if got := atRequest.Load(); got != 32768 {
+		t.Fatalf("the request went out before the new model's window was resolved (window %d at send time)", got)
+	}
+}
+
+// ...and a caller that gives up is not held: the wait ends with its context.
+func TestTheWindowWaitEndsWithTheCallersContext(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	ag.SetLoader(&fakeLoader{window: 32768, delay: 5 * time.Second})
+	ag.SetModel("other-model")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	ag.awaitWindow(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("awaitWindow outlived its context by %s", d)
+	}
+}

@@ -119,6 +119,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 		tr = "[earlier transcript omitted]\n" + cut
 	}
 	b.WriteString(tr)
+	a.awaitWindow(ctx) // never send with no window on the wire
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
 		Model: a.Model,
 		Messages: []provider.Message{

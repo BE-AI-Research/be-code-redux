@@ -120,8 +120,10 @@ type KeepAliver interface {
 
 // WindowClearer is implemented by providers that carry a context window on
 // the wire (Ollama's num_ctx). Clearing it means "send no window", which is
-// not the same as sending zero: the server keeps whatever the model is
-// already loaded with, and nothing reloads.
+// not the same as sending zero — and not safe either: a real Ollama runs a
+// request that names no window at its own default, reloading a model held at
+// another size. So a cleared wire is a state to wait out, never to send in
+// (Agent.awaitWindow).
 //
 // The agent uses it for the gap between a model switch and the loader's
 // answer for the new model. Options belong to the endpoint, so in that gap

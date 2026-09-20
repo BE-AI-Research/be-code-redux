@@ -128,10 +128,16 @@ type Agent struct {
 	// reporting another window is not news: the model is reloaded by the
 	// request that carries ours, not by deciding to (see checkBackend).
 	windowUnconfirmed atomic.Bool
-	systemOverride    string // plan mode: replaces the base coding prompt
-	reqTouched        bool   // a tool that can change files ran during this request
-	repoDirty         bool   // files were written; rebuild the repo map before the next request
-	lastGitInfo       string // this request's git summary, for the per-turn prompt recompose
+	// resolving is open while the current model's parameters are being
+	// resolved and closed when that resolution ends, however it ends. Guarded
+	// by modelMu. Requests wait on it (awaitWindow) rather than go out with
+	// no window on the wire.
+	resolving      chan struct{}
+	resolvingGen   int
+	systemOverride string // plan mode: replaces the base coding prompt
+	reqTouched     bool   // a tool that can change files ran during this request
+	repoDirty      bool   // files were written; rebuild the repo map before the next request
+	lastGitInfo    string // this request's git summary, for the per-turn prompt recompose
 
 	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
 	// cowork.go): the current request and the newest failing tool result,
@@ -365,6 +371,9 @@ func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 	}
 	a.modelGen++
 	gen, l := a.modelGen, a.loader
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if a.History != nil {
 		// A thinking model needs a different reserve than a plain one.
@@ -386,9 +395,10 @@ func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 	// would still be carrying the *previous* model's num_ctx — and a
 	// request sent in that gap reloads the new model at a window nobody
 	// consented to, which is precisely what the gate exists to prevent.
-	// Sending none at all leaves the server's own choice alone. Only when
-	// there is a loader to put one back: without one, nothing would ever
-	// restore it.
+	// Sending none at all is no better on a real Ollama (the server default
+	// applies, which is itself a reload), so requests wait out the gap:
+	// see awaitWindow. Only when there is a loader to put one back: without
+	// one, nothing would ever restore it.
 	a.clearWireWindow()
 	return l, gen
 }
@@ -450,6 +460,61 @@ func (a *Agent) reapplyCurrent(ctx context.Context) {
 		a.clearWireWindow()
 	}
 	a.clearWireWindow()
+}
+
+// beginResolveLocked opens the wait for generation gen. A resolution it
+// supersedes will never close its own channel (endResolve checks the
+// generation), so that one is closed here; its waiters wake, find this one
+// and wait again. Caller holds modelMu.
+func (a *Agent) beginResolveLocked(gen int) {
+	if a.resolving != nil {
+		close(a.resolving)
+	}
+	a.resolving, a.resolvingGen = make(chan struct{}), gen
+}
+
+// endResolve closes the wait for gen if it is still the current one. It runs
+// last in resolveModel, after the window has landed on the wire and in the
+// budget, and on every way out of it — a declined consent, an unreachable
+// backend, a panic — because a request must never wait on a resolution that
+// is no longer running.
+func (a *Agent) endResolve(gen int) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	if a.resolving != nil && a.resolvingGen == gen {
+		close(a.resolving)
+		a.resolving = nil
+	}
+}
+
+// awaitWindow holds a request until the current model's parameters are
+// resolved. applySwitch takes the previous model's num_ctx off the wire at
+// once, and the comment there used to say a request in that gap "leaves the
+// server's own choice alone". On a real Ollama it does not: a request with no
+// num_ctx runs at the server's default window, loading the new model there or
+// reloading a resident one down to it, with nobody asked. So the request
+// waits. The wait is the resolution's own — bounded by ModelResolveTimeout,
+// consent prompt included, which the user can see and answer while this
+// waits — and it ends with the caller's context.
+func (a *Agent) awaitWindow(ctx context.Context) {
+	said := false
+	for {
+		a.modelMu.Lock()
+		ch, model := a.resolving, a.Model
+		a.modelMu.Unlock()
+		if ch == nil {
+			return
+		}
+		if !said {
+			said = true
+			a.transient("waiting for %s's context window before sending", model)
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // goResolve starts one resolution on its own goroutine, under
@@ -521,6 +586,9 @@ func (a *Agent) ResolveModel() {
 	l, model := a.loader, a.Model
 	a.modelGen++
 	gen := a.modelGen
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if l == nil {
 		return
@@ -545,6 +613,9 @@ func (a *Agent) ResolveModelNow(ctx context.Context) {
 	l, model := a.loader, a.Model
 	a.modelGen++
 	gen := a.modelGen
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if l == nil {
 		return
@@ -556,6 +627,7 @@ func (a *Agent) ResolveModelNow(ctx context.Context) {
 // model parameters are advisory, and a session that cannot learn its window
 // still runs — at the budget it already had.
 func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, gen int) {
+	defer a.endResolve(gen)
 	defer func() {
 		if r := recover(); r != nil {
 			a.notice("model parameters for %s could not be resolved: %v", model, r)
@@ -942,6 +1014,8 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			a.History.Add(provider.Message{Role: provider.RoleUser, Content: a.pendingAdvice})
 			a.pendingAdvice = ""
 		}
+		// A model switch still being resolved has no window on the wire.
+		a.awaitWindow(ctx)
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
