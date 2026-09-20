@@ -757,6 +757,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   `compact`/`full` force it on or off
 - `shell_allow` / `shell_deny` — command glob lists; `hooks` — post_write / pre_shell
 - `repo_map` (true) + `repo_map_budget`; `compact_with_model` (true)
+  Since 0.11.1 this is a ceiling: the map is built to at most a fifth of the usable
+  context and rebuilt when the window changes, with a notice when the budget was cut.
 - `mcp_servers` — stdio MCP tool servers; `reviewer` + `review_on_done` — second-model review
 - `ide.enabled` (true), `ide.auto_context` (true), `ide.review` (`auto`) — the VS Code
   editor bridge; see "VS Code"

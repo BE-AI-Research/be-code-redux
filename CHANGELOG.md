@@ -1,5 +1,29 @@
 # BE-Code Changelog
 
+## v0.11.1 — a compaction target that can be reached
+
+Compaction can only shrink the conversation; the system prompt and the tools schema go
+out whole with every request. The target was half the usable context regardless, so a
+large fixed prompt made it unreachable: a 32 KB `repo_map_budget` at a 32k window put the
+fixed floor at about 16,700 tokens against a target of 10,900, every compaction reported
+something like "compacted to 18569 tokens (target 10982)", and it fired again a few turns
+later.
+
+- **The target is measured over what can shrink.** It is now the fixed floor plus half
+  the room above it (`History.Floor`, `History.Target`), so it is always reachable and
+  always leaves real runway. Collapsing old tool output reaches it more often, so fewer
+  compactions need the model at all.
+- **The repo map follows the window.** `repo_map_budget` is a ceiling: the map is built
+  to at most a fifth of the usable context (floor 2 KB), rebuilt when the window is
+  resolved or changes, with one notice when the configured budget was cut. The same
+  settings now give a 9.6 KB map and a 6,400-token floor instead of 32 KB and 16,700.
+- **A heavy fixed prompt is reported once.** When the fixed prompt alone takes more than
+  half the usable context, a notice says so and names the knobs that help.
+
+Known cost, unchanged by this release and pinned by a test: at an 8k window, under a
+probe of sixteen 6 KB reads, the working-memory block leaves so little room that each
+compaction still needs the model (five summaries where an engine-off run now needs none).
+
 ## v0.11.0 — context handling
 
 Two failures with one cause — the model losing its grip on a long task — fixed
