@@ -36,7 +36,7 @@ Where Visual Studio differs, the tool keeps its name and shape and adapts its me
 - **`debug_configs`** lists the solution's startup projects and launch profiles rather than `launch.json` entries.
 - **`debug_start`** starts a listed configuration; the VS Code extension's ad-hoc Go and Python launch shapes are answered with a clear `isError` saying Visual Studio debugs the startup project.
 - **`definition` / `references` / `hover`** go through the language service where Roslyn provides one (C#, VB), and return a clear "not available for this file type" otherwise, never an empty success.
-- **`review_diff`** opens Visual Studio's own difference viewer between the file on disk and the proposed content, with accept and reject in an info bar, and resolves `accepted`, `rejected` or `cancelled`. `review_cancel` closes it. Accept-all for the connection is dropped when the connection closes, as in VS Code.
+- **`review_diff`** opens Visual Studio's own difference viewer between the file on disk and the proposed content, with accept, accept-all and reject in an info bar, and replies with the same JSON the VS Code extension does: `{"decision":"accept"|"reject"|"accept_all"|"cancelled"}`. `review_cancel` closes it and replies `{"cancelled":true|false}`. Both are **hidden** tools: callable, never advertised by `tools/list`, because the harness drives them and the model must not. Accept-all for the connection is dropped when the connection closes, as in VS Code.
 
 ## 5. Structure
 
