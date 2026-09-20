@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -138,7 +139,14 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 			return askAnswer{}
 		}
 	case <-ctx.Done():
-		s.CancelAsk(a.Gen, "")
+		// A deadline means nobody answered, and the people looking at the
+		// modal deserve to know why it closed. A cancellation is the user's
+		// own Esc and needs no explaining.
+		note := ""
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			note = noAnswerNote
+		}
+		s.CancelAsk(a.Gen, note)
 		// An answer given at the very instant the context ended is already
 		// in the (buffered) channel and is the real verdict: a terminal
 		// approved this write, so reporting a denial would be a lie. If
@@ -284,3 +292,7 @@ func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string
 	}
 	return s.Ask(ctx, &ask{Kind: askApproval, Action: action, Detail: detail}).OK
 }
+
+// noAnswerNote is what every terminal is shown when a question is withdrawn
+// because its deadline passed with nobody answering.
+const noAnswerNote = "no answer; question withdrawn"

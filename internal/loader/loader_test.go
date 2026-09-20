@@ -830,3 +830,36 @@ func TestAGenuineRefusalStillLatchesUnderADeadline(t *testing.T) {
 		t.Fatalf("the refusal did not explain itself once: %v", notes)
 	}
 }
+
+// A configured num_ctx (or any other runner-level key) in the options
+// passthrough is merged onto the wire last, so it would walk past the consent
+// gate. It is dropped with one notice unless reloads were already agreed to.
+func TestRunnerOptionsCannotBypassConsent(t *testing.T) {
+	srv, _ := stub(t, psEmpty, `{}`)
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {
+		ContextWindow: 8192,
+		Options:       map[string]any{"num_ctx": 65536, "num_gpu": 99, "top_k": 40},
+	}}
+	var notices []string
+	l := New(provider.NewOllama("t", srv.URL, ""), cfg, refuse(t), func(m string) { notices = append(notices, m) })
+	p := l.Params("m")
+	if _, ok := p.Options["num_ctx"]; ok {
+		t.Fatal("num_ctx survived in the passthrough and would override the loader")
+	}
+	if _, ok := p.Options["num_gpu"]; ok {
+		t.Fatal("num_gpu survived in the passthrough")
+	}
+	if p.Options["top_k"] != 40 {
+		t.Fatalf("a sampling option was dropped too: %v", p.Options)
+	}
+	l.Params("m")
+	if len(notices) != 1 || !strings.Contains(notices[0], "num_ctx") {
+		t.Fatalf("want exactly one notice naming the dropped keys, got %v", notices)
+	}
+
+	cfg.ReloadOnMismatch = "always"
+	if _, ok := New(provider.NewOllama("t", srv.URL, ""), cfg, refuse(t), func(string) {}).Params("m").Options["num_ctx"]; !ok {
+		t.Fatal("with reload_on_mismatch always the user has agreed to reloads; the key must pass")
+	}
+}

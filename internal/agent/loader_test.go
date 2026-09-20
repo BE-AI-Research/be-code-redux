@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -906,5 +907,62 @@ func TestHandoffIsSafeToReadWhileAResumeWritesIt(t *testing.T) {
 	wg.Wait()
 	if ag.Handoff() == "" {
 		t.Fatal("the handoff was lost")
+	}
+}
+
+// ctxLoader records whether the context it was handed was still alive.
+type ctxLoader struct {
+	fakeLoader
+	dead atomic.Int32
+}
+
+func (c *ctxLoader) Apply(ctx context.Context, model string) (int, error) {
+	if ctx.Err() != nil {
+		c.dead.Add(1)
+		return 0, ctx.Err()
+	}
+	return c.fakeLoader.Apply(ctx, model)
+}
+
+// Being superseded and late means arriving with a dead context. Handing the
+// wire back on that context would fail the residency read and blank the
+// current model's window behind an untrue notice, so the hand-back gets a
+// short context of its own.
+func TestTheHandBackDoesNotRunOnADeadContext(t *testing.T) {
+	ag, _ := newTestAgent(t, nil, nil)
+	l := &ctxLoader{fakeLoader: fakeLoader{window: 8192}}
+	ag.SetLoader(l)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ag.reapplyCurrent(ctx)
+	if l.dead.Load() != 0 {
+		t.Fatal("the current model was re-applied on a context that was already dead")
+	}
+	l.mu.Lock()
+	n := len(l.applied)
+	l.mu.Unlock()
+	if n == 0 {
+		t.Fatal("the current model was never re-applied")
+	}
+}
+
+// A warning raised while the session is still being wired has no UI to land
+// in. It is held, and shown in order once a UI exists — the context_tokens
+// cap line was going to a hosted session's log file, where nobody reads it.
+func TestStartupWarningsReachTheTranscriptOnceAUIExists(t *testing.T) {
+	ag, _ := newTestAgent(t, nil, nil)
+	ag.Events.OnNotice = nil
+	ag.QueueNotice("first")
+	ag.QueueNotice("second")
+	ag.FlushQueuedNotices() // no UI yet: nothing may be lost
+	var got []string
+	ag.Events.OnNotice = func(m string) { got = append(got, m) }
+	ag.ResolveModel()
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Fatalf("queued warnings were not delivered in order: %v", got)
+	}
+	ag.ResolveModel()
+	if len(got) != 2 {
+		t.Fatalf("warnings were delivered twice: %v", got)
 	}
 }

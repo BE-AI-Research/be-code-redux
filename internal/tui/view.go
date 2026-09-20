@@ -591,7 +591,7 @@ func answeredNote(by string) string {
 	if by == "" {
 		return ""
 	}
-	if strings.HasPrefix(by, "answered") {
+	if strings.HasPrefix(by, "answered") || strings.HasPrefix(by, "no answer") {
 		return by
 	}
 	return "answered by " + by

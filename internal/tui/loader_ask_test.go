@@ -251,3 +251,33 @@ func TestAResolutionsDeadlineWithdrawsTheSharedModal(t *testing.T) {
 	}
 	waitFor(t, func() bool { flush(a, b); return a.mode != modeAsk && b.mode != modeAsk })
 }
+
+// A question withdrawn because its deadline passed tells every terminal that
+// nobody answered; a plain cancellation (the user's own Esc) stays silent.
+func TestADeadlineWithdrawalSaysNobodyAnswered(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	v := s.NewView(0, "local")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	flush(v)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	done := make(chan askAnswer, 1)
+	go func() { done <- s.Ask(ctx, &ask{Kind: askApproval, Action: "model_reload", Detail: "reload?"}) }()
+	select {
+	case ans := <-done:
+		if ans.OK {
+			t.Fatal("an unanswered question came back approved")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the deadline did not withdraw the question")
+	}
+	flush(v)
+	if got := v.rendered.String(); !strings.Contains(got, noAnswerNote) {
+		t.Fatalf("the terminal was not told why the modal closed:\n%s", got)
+	}
+	if answeredNote("") != "" || answeredNote(noAnswerNote) != noAnswerNote {
+		t.Fatal("answeredNote must pass the withdrawal note through and stay silent for a cancellation")
+	}
+}

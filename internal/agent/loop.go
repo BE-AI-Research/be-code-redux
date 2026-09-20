@@ -150,8 +150,11 @@ type Agent struct {
 	saveDisabled bool
 	saveOwner    int
 	saveWarned   bool
-	knownTools   map[string]bool
-	compat       bool // current session uses embedded tool calls
+	// queuedNotices are warnings raised during wiring, before a UI existed.
+	queuedNotices []string
+	queuedMu      sync.Mutex
+	knownTools    map[string]bool
+	compat        bool // current session uses embedded tool calls
 
 	// Co-working state (see cowork.go). coworkers is the usable co-worker
 	// list, resolved once at New and read-only thereafter; consults is the
@@ -401,6 +404,16 @@ const maxResolveRetries = 8
 // either the current model's window there or none at all, never a window
 // belonging to a model the session is not running.
 func (a *Agent) reapplyCurrent(ctx context.Context) {
+	// Being superseded and late is the normal way to arrive here with a dead
+	// context: a consent question sat unanswered until the resolve deadline.
+	// Re-applying on that context would fail the residency read and blank the
+	// current model's already-resolved window behind an untrue "could not
+	// read the backend" notice, so the hand-back gets a short one of its own.
+	if ctx.Err() != nil {
+		fresh, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		ctx = fresh
+	}
 	for i := 0; i < maxResolveRetries; i++ {
 		a.modelMu.Lock()
 		l, model, gen := a.loader, a.Model, a.modelGen
@@ -487,6 +500,7 @@ func (a *Agent) SetLoader(l ModelLoader) {
 // refused — correctly, but silently. Re-running it from runInteractive and
 // runSessionHost is what turns that refusal back into a question.
 func (a *Agent) ResolveModel() {
+	a.FlushQueuedNotices()
 	a.modelMu.Lock()
 	l, model := a.loader, a.Model
 	a.modelGen++
@@ -510,6 +524,7 @@ func (a *Agent) ResolveModel() {
 // withdraw the question it is timing is a lie. The caller bounds this with
 // ModelResolveTimeout on a context its own prompt also waits on.
 func (a *Agent) ResolveModelNow(ctx context.Context) {
+	a.FlushQueuedNotices()
 	a.modelMu.Lock()
 	l, model := a.loader, a.Model
 	a.modelGen++
@@ -773,6 +788,34 @@ func (a *Agent) notice(format string, args ...any) {
 // stderr — but the same notice raised later belongs in the transcript,
 // which under a TUI is the only place it can be read at all (stderr is
 // wiped by the alt screen, or is a host log file).
+// QueueNotice holds a notice raised while the session was still being wired,
+// before any UI existed to show it. buildAgent runs ahead of every UI, so a
+// warning printed there reaches stderr only — which under a TUI is wiped by
+// the alt screen and in a hosted session is a log file nobody opens. Queued
+// notices are delivered by FlushQueuedNotices once a UI has wired Events.
+func (a *Agent) QueueNotice(msg string) {
+	a.queuedMu.Lock()
+	if len(a.queuedNotices) < 32 {
+		a.queuedNotices = append(a.queuedNotices, msg)
+	}
+	a.queuedMu.Unlock()
+}
+
+// FlushQueuedNotices delivers what QueueNotice held, in order, once. It is a
+// no-op until a UI has wired OnNotice, so nothing is lost by calling it early.
+func (a *Agent) FlushQueuedNotices() {
+	if a.Events.OnNotice == nil {
+		return
+	}
+	a.queuedMu.Lock()
+	pending := a.queuedNotices
+	a.queuedNotices = nil
+	a.queuedMu.Unlock()
+	for _, m := range pending {
+		a.Events.OnNotice(m)
+	}
+}
+
 func (a *Agent) Notice(msg string) bool {
 	if a.Events.OnNotice == nil {
 		return false

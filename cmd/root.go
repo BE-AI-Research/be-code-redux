@@ -397,8 +397,8 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 			if budget <= 0 {
 				budget, _, _ = ag.History.Scalars()
 			}
-			fmt.Fprintf(os.Stderr, "warn: could not determine the backend context window; using a budget of %d tokens.\n"+
-				"      Set \"context_window\" for this model in config to say what it really is.\n", budget)
+			startupWarn(ag, fmt.Sprintf("could not determine the backend context window; using a budget of %d tokens. "+
+				"Set \"context_window\" for this model in config to say what it really is.", budget))
 		}
 		return
 	}
@@ -413,9 +413,9 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// OLLAMA_CONTEXT_LENGTH=4096".
 	wanted, _, _ := ag.History.Scalars()
 	if ag.ApplyWindow(n) && !configured {
-		fmt.Fprintf(os.Stderr, "warn: model %s runs with a %d-token window; budget clamped to %d.\n"+
-			"      Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.\n",
-			model, n, n, wanted)
+		startupWarn(ag, fmt.Sprintf("model %s runs with a %d-token window; budget clamped to %d. "+
+			"Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.",
+			model, n, n, wanted))
 	}
 	// The other direction, and the one that used to say nothing at all:
 	// context_tokens is below the window, so most of a window the user went
@@ -424,9 +424,9 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// this line the loss is invisible, which is the complaint that started
 	// this work.
 	if cfg.ContextTokens > 0 && n > cfg.ContextTokens {
-		fmt.Fprintf(os.Stderr, "warn: model %s has a %d-token window but context_tokens=%d caps the budget; %d tokens go unused.\n"+
-			"      Remove \"context_tokens\" from config to use the whole window, or raise it.\n",
-			model, n, cfg.ContextTokens, n-cfg.ContextTokens)
+		startupWarn(ag, fmt.Sprintf("model %s has a %d-token window but context_tokens=%d caps the budget; %d tokens go unused. "+
+			"Remove \"context_tokens\" from config to use the whole window, or raise it.",
+			model, n, cfg.ContextTokens, n-cfg.ContextTokens))
 	}
 }
 
@@ -632,4 +632,15 @@ func runInteractive(cmd *cobra.Command) error {
 	// (Session.NewView), so this is safe to run before the program starts.
 	ag.ResolveModel()
 	return s.RunLocal(ctx)
+}
+
+// startupWarn reports a warning raised while the session is still being built.
+// It goes to stderr, which is all a headless or plain run has, and is queued
+// on the agent so a TUI or hosted session — where stderr is wiped or is a log
+// file — shows it in the transcript once a UI exists.
+func startupWarn(ag *agent.Agent, msg string) {
+	fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
+	if ag != nil {
+		ag.QueueNotice(msg)
+	}
 }

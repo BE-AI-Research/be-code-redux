@@ -145,7 +145,41 @@ func (l *Loader) Params(model string) Params {
 	if p.KeepAlive == 0 {
 		p.KeepAlive = parseDuration(l.cfg.KeepAlive)
 	}
+	l.stripRunnerOptions(model, &p)
 	return p
+}
+
+// runnerOptions are the Ollama options that belong to the loaded runner, not
+// to one request: sending any of them with a value that differs from how the
+// model is loaded makes the server reload it, evicting whoever else was using
+// it. The passthrough map is merged onto the wire last, so left alone it would
+// carry a configured num_ctx straight past the consent gate.
+var runnerOptions = []string{
+	"num_ctx", "num_batch", "num_gpu", "main_gpu", "low_vram", "f16_kv",
+	"logits_all", "vocab_only", "use_mmap", "use_mlock", "num_thread", "numa",
+}
+
+// stripRunnerOptions removes them from the passthrough unless the user has
+// already said reloads are fine (reload_on_mismatch: always), and says once
+// which keys it dropped and what to use instead.
+func (l *Loader) stripRunnerOptions(model string, p *Params) {
+	if len(p.Options) == 0 || strings.EqualFold(strings.TrimSpace(l.cfg.ReloadOnMismatch), "always") {
+		return
+	}
+	var dropped []string
+	for _, k := range runnerOptions {
+		if _, ok := p.Options[k]; ok {
+			delete(p.Options, k)
+			dropped = append(dropped, k)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	l.noticeOnce(model+"\x00runner-options", fmt.Sprintf(
+		"ignoring options %s for %s: they belong to the loaded model and would reload it on a shared server; "+
+			"use context_window for the window, or set reload_on_mismatch to \"always\" to send them",
+		strings.Join(dropped, ", "), model))
 }
 
 // KeepAlive is this model's resolved residency, for the caller that
