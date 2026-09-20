@@ -52,6 +52,16 @@ namespace BECode.Bridge.Tools
             {
                 return (null, null, new ToolResult(ex.Message, true));
             }
+            // Fix round 2, N2: a malformed path argument (e.g. an embedded
+            // NUL character) makes Path.GetFullPath/Path.Combine throw
+            // ArgumentException, which used to escape ToolRegistry.CallAsync
+            // entirely — an expected, caller-triggerable failure must come
+            // back as an ordinary isError:true result, not an unhandled
+            // exception. Cancellation still propagates (fix round 1, F8).
+            catch (Exception ex) when (!(ex is OperationCanceledException))
+            {
+                return (null, null, new ToolResult($"invalid path: {ex.Message}", true));
+            }
         }
     }
 }

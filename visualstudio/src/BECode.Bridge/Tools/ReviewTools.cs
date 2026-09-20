@@ -22,9 +22,10 @@ namespace BECode.Bridge.Tools
     /// answer <see cref="ReviewDecision.Cancelled"/> itself when it sees that
     /// token cancelled (matching the decision going out over the wire as an
     /// ordinary return value, not an exception), but a host that instead
-    /// follows the standard .NET convention and throws
-    /// <see cref="OperationCanceledException"/> is treated the same way, as a
-    /// defensive fallback.
+    /// throws <see cref="OperationCanceledException"/> — for that token being
+    /// cancelled, or for any other reason (fix round 2, D4) — is treated the
+    /// same way, unconditionally: <c>ReviewDiff</c>'s catch is not gated on
+    /// the token's own state.
     /// </summary>
     public sealed class ReviewTools
     {
@@ -94,48 +95,61 @@ namespace BECode.Bridge.Tools
                 {
                     decision = await _host.ReviewDiffAsync(request, cts.Token).ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (cts.IsCancellationRequested)
+                // Fix round 2, D4: a host may throw OperationCanceledException
+                // for a reason that has nothing to do with THIS token — Visual
+                // Studio shutting down, the document closed underneath it —
+                // and is not obliged to check `ct` before doing so. Gating this
+                // catch on `cts.IsCancellationRequested` (fix round 1's
+                // version) let such an OCE escape uncaught whenever the token
+                // itself was not the reason, which propagated out of
+                // ReviewDiff entirely: the Go side then waited out its own
+                // timeout instead of getting an ordinary "cancelled" reply.
+                // Any OCE from the host means "cancelled", unconditionally.
+                catch (OperationCanceledException)
                 {
                     decision = ReviewDecision.Cancelled;
                 }
 
-                // Fix round 1, F7: Resolved must be read AND set atomically
-                // with ReviewCancel's own read-and-claim — the same lock.
-                // Setting it unlocked (the original code) let a
-                // review_cancel racing a fast answer see Resolved still
-                // false, claim the pending review as its own (reporting
-                // {"cancelled":true} to ITS caller), while this call went on
-                // to return the host's actual decision (e.g. "accept") to
-                // ITS OWN caller — two callers asking about the exact same
-                // review getting contradictory answers. Reading the OLD
-                // value here (before overwriting it true) is what tells this
-                // call whether review_cancel got there first: if so, it must
-                // agree and answer "cancelled" too, regardless of what the
-                // host actually decided.
-                bool claimedByCancel;
+                // Fix round 2, F9: the entire decision — Resolved's read/write
+                // (fix round 1, F7) AND whether an AcceptAll answer is honoured
+                // — now happens in ONE lock acquisition, gated on this specific
+                // pending registration still being present in _pending. Round
+                // 1's version split this into two lock sections and checked
+                // `cts.IsCancellationRequested` in between them, UNLOCKED:
+                // ConnectionClosed removes the map entry under _lock, then
+                // calls Cts.Cancel() OUTSIDE the lock (deliberately — see
+                // ConnectionClosed's own comment) — so there is a real window,
+                // under genuine thread concurrency, where the map entry is
+                // already gone but the token has not been marked cancelled
+                // yet. A review_diff whose host ignores cancellation and
+                // answers AcceptAll in exactly that window read
+                // `!cts.IsCancellationRequested` as still true and resurrected
+                // accept-all for a connection ConnectionClosed had already
+                // torn down (reviewer's probe: 582/5000). Checking "is this
+                // pending object still the one registered under
+                // (connection, path)?" — under the SAME lock ConnectionClosed
+                // removes it under — is deterministic regardless of when
+                // Cancel() itself runs, because map membership (not the
+                // token) is what ConnectionClosed and this check now
+                // synchronise on.
                 lock (_lock)
                 {
-                    claimedByCancel = pending.Resolved;
+                    var claimedByCancel = pending.Resolved;
                     pending.Resolved = true;
-                }
 
-                if (claimedByCancel)
-                {
-                    decision = ReviewDecision.Cancelled;
-                }
-                else if (decision == ReviewDecision.AcceptAll && !cts.IsCancellationRequested)
-                {
-                    // Fix round 1, per the coordinator's note on the
-                    // BridgeServer rework: ConnectionClosed may have
-                    // cancelled this review's token directly (not via
-                    // review_cancel — e.g. the socket simply closed) while a
-                    // misbehaving host still answers AcceptAll despite that.
-                    // A still-running review_diff must not re-create
-                    // per-connection state for a connection already known
-                    // gone.
-                    lock (_lock)
+                    if (claimedByCancel)
                     {
-                        _acceptAll.Add(connection);
+                        decision = ReviewDecision.Cancelled;
+                    }
+                    else if (decision == ReviewDecision.AcceptAll)
+                    {
+                        var stillRegistered = _pending.TryGetValue(connection, out var byConn)
+                            && byConn.TryGetValue(path, out var existing)
+                            && ReferenceEquals(existing, pending);
+                        if (stillRegistered)
+                        {
+                            _acceptAll.Add(connection);
+                        }
                     }
                 }
 
@@ -241,6 +255,20 @@ namespace BECode.Bridge.Tools
                         // there is nothing left to cancel.
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Fix round 2, F9: a test-only probe of whether <paramref name="connection"/>
+        /// currently has "accept all this session" recorded, so a regression
+        /// test can assert the absence of state directly instead of inferring
+        /// it indirectly through a second <c>review_diff</c> call.
+        /// </summary>
+        internal bool HasAcceptAll(object connection)
+        {
+            lock (_lock)
+            {
+                return _acceptAll.Contains(connection);
             }
         }
 

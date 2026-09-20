@@ -123,7 +123,13 @@ namespace BECode.Bridge.Tools
                 return errCol!;
             }
 
-            var max = ToolArgs.GetInt(args, "max") ?? 50;
+            // Fix round 2, N1: a non-positive max used to still print the
+            // "N reference(s)" header with nothing listed. Clamp first, then
+            // — like vscode's editor.ts:64 — decide "nothing to show" from
+            // the length AFTER slicing, not the total before it: with
+            // max=0 there may be 200 real references and the answer is
+            // still "no references found".
+            var max = System.Math.Max(0, ToolArgs.GetInt(args, "max") ?? 50);
 
             var (abs, folders, resolveErr) = await ToolPaths.ResolveAsync(_host, path, ct).ConfigureAwait(false);
             if (resolveErr != null)
@@ -140,12 +146,12 @@ namespace BECode.Bridge.Tools
                 return new ToolResult("not available for this file type", true);
             }
 
-            if (locations.Count == 0)
+            var shown = locations.Take(max).Select(l => $"{Paths.RelPath(folders!, l.Path)}:{l.Line}: {(l.Text ?? "").Trim()}").ToList();
+            if (shown.Count == 0)
             {
                 return new ToolResult("no references found", false);
             }
 
-            var shown = locations.Take(max).Select(l => $"{Paths.RelPath(folders!, l.Path)}:{l.Line}: {(l.Text ?? "").Trim()}");
             return new ToolResult($"{locations.Count} reference(s)\n" + string.Join("\n", shown), false);
         }
 

@@ -181,6 +181,23 @@ namespace BECode.Bridge.Tests
             Assert.Empty(host.OpenCalls);
         }
 
+        [Fact]
+        public async Task OpenReportsAMalformedPathAsAnOrdinaryToolErrorRatherThanThrowing()
+        {
+            // N2 (pre-existing, out of scope in round 1, fixed now): a NUL
+            // character in the path argument makes Path.GetFullPath throw
+            // ArgumentException, which used to escape ToolRegistry.CallAsync
+            // entirely instead of coming back as an ordinary isError result.
+            var host = NewHost();
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("open", Args("{\"path\":\"bad\\u0000name.txt\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.StartsWith("invalid path: ", result.Text, StringComparison.Ordinal);
+            Assert.Empty(host.OpenCalls);
+        }
+
         // ---- definition ----
 
         [Fact]
@@ -319,6 +336,38 @@ namespace BECode.Bridge.Tests
 
             Assert.True(result.IsError);
             Assert.Equal("not available for this file type", result.Text);
+        }
+
+        [Fact]
+        public async Task ReferencesWithMaxZeroSaysNoReferencesFoundEvenWhenTheHostHasResults()
+        {
+            // N1: emitted "N reference(s)\n" with nothing listed; VS Code
+            // decides "nothing to show" from the length AFTER slicing
+            // (editor.ts:64), not the total before it.
+            var host = NewHost();
+            var all = Enumerable.Range(0, 5)
+                .Select(i => new Location(Path.Combine(_workspace, "a.go"), i + 1, 1, $"line{i}"))
+                .ToArray();
+            host.OnReferences = (path, line, col, ct) => Task.FromResult<IReadOnlyList<Location>?>(all);
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1,\"max\":0}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Equal("no references found", result.Text);
+        }
+
+        [Fact]
+        public async Task ReferencesWithANegativeMaxIsClampedToZero()
+        {
+            var host = NewHost();
+            host.OnReferences = (path, line, col, ct) => Task.FromResult<IReadOnlyList<Location>?>(new[] { new Location(Path.Combine(_workspace, "a.go"), 1, 1, "x") });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1,\"max\":-5}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Equal("no references found", result.Text);
         }
 
         // ---- hover ----
@@ -863,6 +912,25 @@ namespace BECode.Bridge.Tests
 
             var diffResult = await diffTask;
             Assert.Equal("{\"decision\":\"cancelled\"}", diffResult.Text);
+        }
+
+        [Fact]
+        public async Task ReviewDiffTreatsAnyOperationCanceledExceptionFromTheHostAsCancelled()
+        {
+            // D4: a host may throw OperationCanceledException for a reason
+            // that has nothing to do with THIS review's own token (Visual
+            // Studio shutting down, the document closed underneath it) and
+            // is not obliged to check `ct` first. Gating the catch on
+            // cts.IsCancellationRequested (fix round 1) let such an OCE
+            // escape uncaught — the Go side would then wait out its own
+            // timeout instead of getting an ordinary "cancelled" reply.
+            var host = new FakeEditorHost { OnReviewDiff = (req, ct) => throw new OperationCanceledException("unrelated to ct") };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("review_diff", Args("{\"path\":\"a.txt\",\"proposed\":\"new\"}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Equal("{\"decision\":\"cancelled\"}", result.Text);
         }
 
         [Fact]
