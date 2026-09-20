@@ -966,3 +966,63 @@ func TestStartupWarningsReachTheTranscriptOnceAUIExists(t *testing.T) {
 		t.Fatalf("warnings were delivered twice: %v", got)
 	}
 }
+
+// TestAConsentedReloadIsNotUndoneBeforeItReachesTheServer: the VM failure of
+// 2026-09-20. The model sat resident at 8192, the user approved the reload to
+// 32768, and that only put 32768 on the wire — the model stays at 8192 until a
+// request carries it. checkBackend runs before that request, saw 8192 against
+// our 32768, read it as "another client changed the window" and adapted down,
+// so the approved reload never reached the server and an 11k-token prompt was
+// sent into 8192 for ever after. A window we have resolved but not yet sent a
+// request at is ours, not another client's.
+func TestAConsentedReloadIsNotUndoneBeforeItReachesTheServer(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	l := &fakeLoader{window: 32768}
+	ag.SetLoader(l)
+	sp := &statusProvider{funcProvider: &funcProvider{}, window: 8192, loaded: true}
+	sp.fn = func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		// The request that carries our window is what reloads the model.
+		sp.mu.Lock()
+		sp.window = 32768
+		sp.mu.Unlock()
+		return &provider.ChatResponse{Content: "done"}, nil
+	}
+	ag.Provider = sp
+	notices := collectNotices(ag)
+	ag.ApplyWindow(8192) // startup, before any UI: nobody to ask, so the server's window
+
+	ag.ResolveModelNow(context.Background()) // the consented answer: 32768
+
+	ag.checkBackend(context.Background())
+	if ag.Window() != 32768 {
+		t.Fatalf("the consented window was undone before any request carried it: window %d", ag.Window())
+	}
+	if got := l.changedWindows(); len(got) != 0 {
+		t.Fatalf("the loader was told another client changed the window: %v", got)
+	}
+	found := false
+	for _, n := range *notices {
+		if strings.Contains(n, "32768-token window") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a window that grew was never announced: %q", *notices)
+	}
+
+	// One request at our window confirms it. After that a differing server
+	// window really is somebody else's doing, and we still never fight it.
+	if _, err := ag.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if ag.Window() != 32768 {
+		t.Fatalf("window after our own request: %d", ag.Window())
+	}
+	sp.mu.Lock()
+	sp.window = 4096
+	sp.mu.Unlock()
+	ag.checkBackend(context.Background())
+	if ag.Window() != 4096 {
+		t.Fatalf("did not adapt to another client's reload: window %d", ag.Window())
+	}
+}

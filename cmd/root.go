@@ -468,7 +468,7 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 	// "budget clamped to 4096 ... start the server with
 	// OLLAMA_CONTEXT_LENGTH=4096".
 	wanted, _, _ := ag.History.Scalars()
-	if ag.ApplyWindow(n) && !configured {
+	if ag.ApplyResolvedWindow(n) && !configured {
 		startupWarn(ag, fmt.Sprintf("model %s runs with a %d-token window; budget clamped to %d. "+
 			"Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.",
 			model, n, n, wanted))

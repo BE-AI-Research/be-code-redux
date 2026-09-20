@@ -122,11 +122,16 @@ type Agent struct {
 	// agent goroutine — resolveModel lands a model switch's window from a
 	// goroutine of its own — while a UI reads it to draw the context
 	// wheel.
-	window         atomic.Int64
-	systemOverride string // plan mode: replaces the base coding prompt
-	reqTouched     bool   // a tool that can change files ran during this request
-	repoDirty      bool   // files were written; rebuild the repo map before the next request
-	lastGitInfo    string // this request's git summary, for the per-turn prompt recompose
+	window atomic.Int64
+	// windowUnconfirmed is set when a resolution lands a window and cleared
+	// by the first request that succeeds with it. While it is set, a server
+	// reporting another window is not news: the model is reloaded by the
+	// request that carries ours, not by deciding to (see checkBackend).
+	windowUnconfirmed atomic.Bool
+	systemOverride    string // plan mode: replaces the base coding prompt
+	reqTouched        bool   // a tool that can change files ran during this request
+	repoDirty         bool   // files were written; rebuild the repo map before the next request
+	lastGitInfo       string // this request's git summary, for the per-turn prompt recompose
 
 	// lastUserInput and lastFailingTool feed Agent.RecentContext (see
 	// cowork.go): the current request and the newest failing tool result,
@@ -590,7 +595,10 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		return
 	}
 	prev := a.Window()
-	if a.ApplyWindow(w) {
+	// Said whenever the window moved, not only when it shrank the budget: a
+	// reload the user has just approved is exactly the change they are
+	// waiting to see confirmed.
+	if clamped := a.ApplyResolvedWindow(w); clamped || (prev > 0 && prev != w) {
 		budget, _, _ := a.History.Scalars()
 		a.notice("%s runs with a %d-token window; budget now %d tokens", model, w, budget)
 	}
@@ -1343,6 +1351,9 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if err != nil {
 		return nil, err
 	}
+	// A request that succeeded carried our window, so the server now holds
+	// it: from here on a differing window is somebody else's doing.
+	a.windowUnconfirmed.Store(false)
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}

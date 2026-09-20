@@ -255,6 +255,18 @@ func (a *Agent) ApplyWindow(window int) bool {
 	return clamped
 }
 
+// ApplyResolvedWindow is ApplyWindow for a window the loader has just
+// resolved — at startup, after a model switch, after a consent answer. The
+// server does not hold it yet: a model is reloaded by the first request that
+// carries the new num_ctx, so until one succeeds checkBackend must not read
+// the old window as another client's change and adapt back down to it.
+func (a *Agent) ApplyResolvedWindow(window int) bool {
+	if window > 0 {
+		a.windowUnconfirmed.Store(true)
+	}
+	return a.ApplyWindow(window)
+}
+
 // reserveFor is the generation headroom kept free below the window.
 // Reasoning models spend a large, unpredictable share of the window
 // thinking before the first answer token, so they get a third of it;

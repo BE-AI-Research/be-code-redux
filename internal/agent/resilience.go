@@ -149,6 +149,19 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	// what OnEvicted arranged two lines above: a configured 32768 becomes
 	// the Modelfile's 4096 on the next chat request and on the keep-alive
 	// touch, with no consent asked for either.
+	//
+	// And only once a request of ours has confirmed the window we hold. A
+	// window the loader has just resolved — above all one the user has just
+	// consented to — is on the wire but not on the server: the model reloads
+	// when a request carries it. Reading the old window as "another client
+	// changed it" adapted back down and handed the old number to the loader,
+	// so the approved reload never happened and the session ran, and failed,
+	// inside the window it had asked to leave. A backend that has fallen back
+	// to the OpenAI path cannot carry a window at all, so there the server's
+	// number is simply the truth.
+	if a.windowUnconfirmed.Load() && !a.nativeFellBack() {
+		return
+	}
 	if loaded && window > 0 && window != a.Window() {
 		old := a.Window()
 		a.ApplyWindow(window)
@@ -158,6 +171,11 @@ func (a *Agent) checkBackend(ctx context.Context) {
 			l.OnWindowChanged(a.Model, window)
 		}
 	}
+}
+
+func (a *Agent) nativeFellBack() bool {
+	nf, ok := a.Provider.(provider.NativeFallbacker)
+	return ok && nf.NativeFallback()
 }
 
 // refreshKeepAlive extends the model's residency after a request (async;
