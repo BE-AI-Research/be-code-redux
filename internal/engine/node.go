@@ -36,6 +36,9 @@ type Node struct {
 
 type Tree struct {
 	Roots []*Node `json:"roots"`
+	// nudge is Limits.StepNudge, carried on the copy Render makes so the
+	// renderer stays a function of the tree it is given. Never persisted.
+	nudge int
 }
 
 // Add appends a child under parent ("" for a new root) and returns it. Ids

@@ -66,7 +66,7 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 		budget = DefaultBudget
 	}
 	s.mu.Lock()
-	t := Tree{Roots: copyNodes(s.tree.Roots)}
+	t := Tree{Roots: copyNodes(s.tree.Roots), nudge: s.lim.StepNudge}
 	notes := strings.TrimRight(s.notes, "\n")
 	root := s.root
 	s.mu.Unlock()
@@ -301,6 +301,11 @@ func newActiveParts(t *Tree, inMap func(string) bool, changed func(FileRef) bool
 		}
 	}
 	doing := path[len(path)-1]
+	// Part of the header, so it is never a rung of the budget ladder: the
+	// step it is about is the one thing the block always keeps.
+	if calls := len(doing.Evidence.Raw) + doing.Evidence.Dropped; t.nudge > 0 && calls > t.nudge {
+		fmt.Fprintf(&b, "! step %s has been open for %d tool calls: finish it, split it into smaller steps, or note why it is taking this long\n", doing.ID, calls)
+	}
 	p := &activeParts{
 		id:      doing.ID,
 		header:  strings.TrimRight(b.String(), "\n"),

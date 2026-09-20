@@ -801,6 +801,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   `engine.item_cap` (4096) — byte cap on one recorded tool result;
   `engine.node_cap` (32768) — byte cap on one task node's verbatim buffer, oldest
   results dropped (and counted) past it;
+  `engine.step_nudge` (20) — once the current step has taken more tool calls than this,
+  Working memory tells the model to finish it, split it or note why (negative turns it off);
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.

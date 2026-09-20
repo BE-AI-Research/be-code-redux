@@ -49,7 +49,7 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 		return
 	}
 	st, err := engine.Open(reg.Root, ag.Session.ID, resumed,
-		engine.Limits{NotesCap: cfg.Engine.NotesCap, ItemCap: cfg.Engine.ItemCap, NodeCap: cfg.Engine.NodeCap})
+		engine.Limits{NotesCap: cfg.Engine.NotesCap, ItemCap: cfg.Engine.ItemCap, NodeCap: cfg.Engine.NodeCap, StepNudge: cfg.Engine.StepNudge})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warn: engine: %v; continuing without working memory\n", err)
 		// The store is what remembers; the tools are what the model can

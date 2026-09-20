@@ -34,6 +34,9 @@ const (
 	defaultNotesCap = 4096
 	defaultItemCap  = 4 * 1024
 	defaultNodeCap  = 32 * 1024
+	// defaultStepNudge matches the prompt's "about ten tool calls" a step
+	// with room to spare: twice that is a step that was not small.
+	defaultStepNudge = 20
 	// maxFileMemos caps the per-file hashes and outlines state.json keeps.
 	maxFileMemos = 200
 
@@ -230,6 +233,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.NodeCap <= 0 {
 		l.NodeCap = defaultNodeCap
+	}
+	if l.StepNudge == 0 {
+		l.StepNudge = defaultStepNudge
 	}
 	return l
 }

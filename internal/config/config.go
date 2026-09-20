@@ -57,6 +57,10 @@ type EngineConfig struct {
 	// Tools is "full" (task, lookup, history, show, changes) or "minimal"
 	// (task and lookup only) for tight compat-mode prompts.
 	Tools string `json:"tools"`
+	// StepNudge is how many tool calls the current step may take before
+	// Working memory tells the model it has been open too long. 0 means
+	// the default (20); negative turns the line off.
+	StepNudge int `json:"step_nudge,omitempty"`
 }
 
 // ProviderConfig describes one inference endpoint.

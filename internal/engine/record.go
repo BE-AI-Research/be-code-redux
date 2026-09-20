@@ -30,7 +30,13 @@ var hitLine = regexp.MustCompile(`^([^\s:][^:]*):(\d+):(.*)$`)
 
 // Limits bounds the recorder's raw buffer: ItemCap per tool result, NodeCap
 // per node in total, NotesCap the durable notes. All in bytes.
-type Limits struct{ NotesCap, ItemCap, NodeCap int }
+type Limits struct {
+	NotesCap, ItemCap, NodeCap int
+	// StepNudge is how many tool calls the doing step may take before the
+	// Working memory block says it has been open too long. 0 means the
+	// default; negative turns the line off.
+	StepNudge int
+}
 
 // recorder is the continuous half of a node's evidence: it keeps every tool
 // result verbatim (capped) while a node is doing, refreshes the durable
