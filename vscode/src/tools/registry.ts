@@ -32,6 +32,13 @@ export class ToolRegistry {
     return [...this.tools.values()].filter((t) => !t.hidden).map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
   }
 
+  // all returns every registered tool, including hidden ones and their
+  // handler stripped, in registration order — the shape the tool manifest
+  // (vscode/tools.manifest.json) is generated from and checked against.
+  all(): Omit<ToolDef, "handler">[] {
+    return [...this.tools.values()].map(({ handler, ...rest }) => rest);
+  }
+
   async call(name: string, args: any, conn?: object): Promise<{ text: string; isError: boolean }> {
     const t = this.tools.get(name);
     if (!t) return { text: `unknown tool ${name}`, isError: true };
