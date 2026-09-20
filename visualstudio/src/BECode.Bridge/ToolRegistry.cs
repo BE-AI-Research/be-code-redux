@@ -17,8 +17,7 @@ namespace BECode.Bridge
     ///
     /// The eighteen names bind to the four tool families in
     /// <c>Tools/</c> (<c>EditorTools</c>, <c>DiagnosticsTools</c>,
-    /// <c>ReviewTools</c>, <c>DebugTools</c>); the ten <c>debug_*</c> names
-    /// still resolve to a placeholder pending checkpoint 4.
+    /// <c>ReviewTools</c>, <c>DebugTools</c>).
     /// </summary>
     public sealed class ToolRegistry : IToolDispatcher
     {
@@ -57,12 +56,7 @@ namespace BECode.Bridge
         {
             var editorTools = new EditorTools(host);
             var diagnosticsTools = new DiagnosticsTools(host);
-
-            // Checkpoint 4 replaces the remaining placeholders with
-            // DebugTools; debug_* still resolves to "not implemented" until
-            // then.
-            ToolHandler notImplemented = (args, connection, ct) =>
-                Task.FromResult(new ToolResult("not implemented", true));
+            var debugTools = new DebugTools(host);
 
             return new Dictionary<string, ToolHandler>(StringComparer.Ordinal)
             {
@@ -72,16 +66,16 @@ namespace BECode.Bridge
                 ["references"] = editorTools.References,
                 ["hover"] = editorTools.Hover,
                 ["diagnostics"] = diagnosticsTools.Diagnostics,
-                ["debug_configs"] = notImplemented,
-                ["debug_start"] = notImplemented,
-                ["debug_breakpoint"] = notImplemented,
-                ["debug_continue"] = notImplemented,
-                ["debug_step"] = notImplemented,
-                ["debug_stack"] = notImplemented,
-                ["debug_variables"] = notImplemented,
-                ["debug_evaluate"] = notImplemented,
-                ["debug_output"] = notImplemented,
-                ["debug_stop"] = notImplemented,
+                ["debug_configs"] = debugTools.Configs,
+                ["debug_start"] = debugTools.Start,
+                ["debug_breakpoint"] = debugTools.Breakpoint,
+                ["debug_continue"] = debugTools.Continue,
+                ["debug_step"] = debugTools.Step,
+                ["debug_stack"] = debugTools.Stack,
+                ["debug_variables"] = debugTools.Variables,
+                ["debug_evaluate"] = debugTools.Evaluate,
+                ["debug_output"] = debugTools.Output,
+                ["debug_stop"] = debugTools.Stop,
                 ["review_diff"] = reviewTools.ReviewDiff,
                 ["review_cancel"] = reviewTools.ReviewCancel,
             };
