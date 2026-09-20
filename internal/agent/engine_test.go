@@ -488,7 +488,7 @@ func (s stubTool) Run(context.Context, map[string]any) tools.Result {
 
 func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
-	if strings.Contains(ag.History.System.Content, "record a plan with the task tool") {
+	if strings.Contains(ag.History.System.Content, "record a plan with the task tool") || strings.Contains(ag.History.System.Content, "Work in small steps") {
 		t.Fatal("guidance without the tool")
 	}
 	st := withEngine(t, ag)
@@ -496,6 +496,17 @@ func TestPromptCarriesTaskGuidanceWhenTheToolExists(t *testing.T) {
 	ag.RefreshSystem()
 	if !strings.Contains(ag.History.System.Content, "record a plan with the task tool") || !strings.Contains(ag.History.System.Content, "Context is limited and does not survive compaction") {
 		t.Fatal("guidance missing")
+	}
+	// The pacing paragraph rides with the task tool — without the tool there
+	// is nothing to plan small steps in — and leaves the measured paragraph
+	// before it verbatim.
+	if !strings.Contains(ag.History.System.Content, taskGuidance+" "+pacingGuidance) {
+		t.Fatal("pacing guidance missing, or the task paragraph was reworded")
+	}
+	for _, want := range []string{"Work in small steps", "about ten tool calls", "narrowest check", "failed twice"} {
+		if !strings.Contains(pacingGuidance, want) {
+			t.Fatalf("pacing guidance lost %q", want)
+		}
 	}
 	if strings.Contains(ag.History.System.Content, "call lookup") {
 		t.Fatal("git guidance without the git tools")
