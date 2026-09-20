@@ -54,6 +54,7 @@ func (t *taskTool) Schema() json.RawMessage {
 		"status":{"type":"string","enum":["doing","done","blocked","dropped"],"description":"status: the new status"},
 		"reason":{"type":"string","description":"status: why, for blocked and dropped"},
 		"file":{"type":"string","description":"note: the file this note is about"},
+		"decision":{"type":"boolean","description":"note: this is a decision, not just a fact"},
 		"keep":{"type":"boolean","description":"note: also remember this across sessions"}},
 		"required":["action"]}`)
 }
