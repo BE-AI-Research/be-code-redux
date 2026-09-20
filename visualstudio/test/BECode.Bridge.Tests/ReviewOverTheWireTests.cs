@@ -11,9 +11,9 @@ using Xunit;
 namespace BECode.Bridge.Tests
 {
     /// <summary>
-    /// F2: an end-to-end regression test through the real <see cref="BridgeServer"/>
+    /// An end-to-end regression test through the real <see cref="BridgeServer"/>
     /// (not just <see cref="ToolRegistry"/>/<see cref="FakeEditorHost"/> called
-    /// in-process), since the server-level deadlock the round-1 review found
+    /// in-process), since a server-level deadlock
     /// (review_cancel queued behind review_diff on the same connection) could
     /// only be seen with a real socket and the server's actual per-connection
     /// dispatch — an in-process call to <c>ToolRegistry.CallAsync</c> can

@@ -9,10 +9,10 @@ using Xunit;
 namespace BECode.Bridge.Tests
 {
     /// <summary>
-    /// Fix round 2, F9: <see cref="ReviewTools"/> instantiated directly
+    /// <see cref="ReviewTools"/> instantiated directly
     /// (its constructor is public) rather than through <see cref="ToolRegistry"/>,
     /// so these tests can reach the internal <c>HasAcceptAll</c> probe and
-    /// force the exact interleaving the finding describes — a still-running
+    /// force a specific interleaving — a still-running
     /// <c>review_diff</c> racing <c>ConnectionClosed</c> for the SAME
     /// connection, with a host that never looks at its token.
     /// </summary>
@@ -29,10 +29,10 @@ namespace BECode.Bridge.Tests
         {
             // Genuine thread-pool concurrency (Task.Run for both sides, a
             // real await Task.Yield() inside the host) is what actually
-            // exercises the race — the round-1 test that only ever waits on
+            // exercises the race — a test that only ever waits on
             // ct.Register cannot, by construction, ever see the token
-            // un-cancelled at check time (see the finding). 200 iterations:
-            // the reviewer measured roughly 12% of iterations hitting the
+            // un-cancelled at check time. 200 iterations:
+            // roughly 12% of iterations hit the
             // bad interleaving against the un-fixed code, so a 200-iteration
             // run fails essentially every time without the fix and never
             // with it.

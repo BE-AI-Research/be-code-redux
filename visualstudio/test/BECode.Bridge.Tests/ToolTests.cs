@@ -50,8 +50,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ContextSerialisesTheHostsContextInTheVsCodeShape()
         {
-            // Ruling S3: file/open cross the seam absolute; the tool
-            // relativises them against workspaceFolders (Ruling S2, fetched
+            // file/open cross the seam absolute; the tool
+            // relativises them against workspaceFolders (fetched
             // separately from GetContextAsync) before they go on the wire.
             var aGo = Path.Combine(_workspace, "a.go");
             var bGo = Path.Combine(_workspace, "b.go");
@@ -95,8 +95,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ContextTruncatesTheSelectionTo2048Characters()
         {
-            // Ruling S6: the host returns the raw, untruncated selection;
-            // the 2048-character cut is the tool's job now.
+            // The host returns the raw, untruncated selection;
+            // the 2048-character cut is the tool's job.
             var raw = new string('x', 3000);
             var host = new FakeEditorHost
             {
@@ -168,7 +168,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task OpenRefusesWhenNoWorkspaceFolderIsOpen()
         {
-            // Ruling S9: an empty workspace-folder list (devenv.exe with no
+            // An empty workspace-folder list (devenv.exe with no
             // solution/folder open) is refused with a clear message, rather
             // than confining to the process's arbitrary current directory.
             var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()) };
@@ -184,9 +184,9 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task OpenReportsAMalformedPathAsAnOrdinaryToolErrorRatherThanThrowing()
         {
-            // N2 (pre-existing, out of scope in round 1, fixed now): a NUL
+            // A NUL
             // character in the path argument makes Path.GetFullPath throw
-            // ArgumentException, which used to escape ToolRegistry.CallAsync
+            // ArgumentException; left uncaught, this would escape ToolRegistry.CallAsync
             // entirely instead of coming back as an ordinary isError result.
             var host = NewHost();
             var registry = new ToolRegistry(host);
@@ -203,7 +203,7 @@ namespace BECode.Bridge.Tests
         [InlineData(-5)]
         public async Task OpenClampsANonPositiveLineToOneBeforeCallingTheHost(int rawLine)
         {
-            // D1: lines are 1-based everywhere across the seam; the tool
+            // Lines are 1-based everywhere across the seam; the tool
             // clamps to a minimum of 1 before the host ever sees it.
             var host = NewHost();
             var registry = new ToolRegistry(host);
@@ -218,7 +218,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task OpenAnswersFileNotFoundWhenTheHostThrows()
         {
-            // D9: the host throws FileNotFoundException for a path that does
+            // The host throws FileNotFoundException for a path that does
             // not exist; the tool turns that into an ordinary isError result
             // naming the path as given.
             var host = NewHost();
@@ -236,7 +236,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DefinitionFormatsPathLineColPerLocationRelativisingTheAbsolutePathTheHostReturns()
         {
-            // Ruling S3: Location.Path crosses the seam absolute; the tool
+            // Location.Path crosses the seam absolute; the tool
             // relativises it for output, exactly where vscode's own
             // definition handler does.
             var host = NewHost();
@@ -339,7 +339,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReferencesReportsTheTotalCountAndPrintsOnlyTheFirstMax()
         {
-            // Ruling S5: the host is no longer given a `max` — it returns
+            // The host is not given a `max` — it returns
             // every reference; the tool reports the TOTAL count and prints
             // only the first `max` (default 50), matching vscode's own
             // res.length read before slicing.
@@ -389,7 +389,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReferencesWithMaxZeroSaysNoReferencesFoundEvenWhenTheHostHasResults()
         {
-            // N1: emitted "N reference(s)\n" with nothing listed; VS Code
+            // Deciding "nothing to show" from the total before slicing would
+            // emit "N reference(s)\n" with nothing listed; VS Code
             // decides "nothing to show" from the length AFTER slicing
             // (editor.ts:64), not the total before it.
             var host = NewHost();
@@ -494,12 +495,11 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DiagnosticsDefaultsSeverityToErrorsAndWarnings()
         {
-            // F3 (Ruling R-6 — the task brief's "defaults to all" was wrong):
-            // the default is errors and warnings, as the manifest's own
+            // The default is errors and warnings, as the manifest's own
             // description says ("severity: error, warning or all (default:
             // errors and warnings)") and vscode/src/lib/format.ts's
-            // severitiesFor implements. The host no longer takes a severity
-            // parameter at all (Ruling S4): it returns everything, and the
+            // severitiesFor implements. The host does not take a severity
+            // parameter at all: it returns everything, and the
             // tool filters.
             var host = NewHost();
             host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
@@ -568,7 +568,7 @@ namespace BECode.Bridge.Tests
         public async Task DiagnosticsGroupsByFileWithACountSummaryFirst()
         {
             // Ported from vscode/test/format.test.ts's "groups by file with a
-            // count summary first". Diagnostic.Path is absolute (Ruling S3);
+            // count summary first". Diagnostic.Path is absolute;
             // relativised names still sort/group the same way.
             var host = NewHost();
             host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
@@ -605,7 +605,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DiagnosticsResolvesThePathFilterArgumentToAnAbsolutePathBeforeCallingTheHost()
         {
-            // Ruling S3/S4: IEditorHost.DiagnosticsAsync's path is
+            // IEditorHost.DiagnosticsAsync's path is
             // "absolute or null" — an incoming relative filter argument must
             // be resolved and confined like every other path argument.
             var host = NewHost();
@@ -838,8 +838,9 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ConnectionClosedCancelsAPendingReviewDiffsToken()
         {
-            // F1: ConnectionClosed used to drop _pending[connection] without
-            // cancelling those CancellationTokenSources — the host was never
+            // ConnectionClosed must cancel every pending CancellationTokenSource
+            // for the connection, not just drop _pending[connection] — left
+            // uncancelled, the host is never
             // told, and the pending review_diff call could hang forever.
             var hostCalled = new TaskCompletionSource<bool>();
             var hostObservedCancellation = new TaskCompletionSource<bool>();
@@ -876,7 +877,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ConnectionClosedDoesNotLetAStillRunningReviewDiffResurrectAcceptAllForTheDroppedConnection()
         {
-            // F1 (coordinator's note): a still-running review_diff for a
+            // A still-running review_diff for a
             // connection ConnectionClosed already tore down must not
             // re-create per-connection state — here, a misbehaving host that
             // ignores cancellation and answers AcceptAll anyway must not get
@@ -934,10 +935,10 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReviewDiffAcceptsAnEmptyProposedString()
         {
-            // F4: TryRequireString treated "" as absent. An emptied file is a
+            // TryRequireString must not treat "" as absent. An emptied file is a
             // legal proposal (VS Code accepts it: typeof "" === "string"),
             // and the Go side maps isError to "review unavailable", silently
-            // skipping the editor diff — so rejecting "" here silently broke
+            // skipping the editor diff — so rejecting "" here would silently break
             // reviewing a file being emptied.
             ReviewRequest? captured = null;
             var host = new FakeEditorHost { OnReviewDiff = (req, ct) => { captured = req; return Task.FromResult(ReviewDecision.Accept); } };
@@ -965,7 +966,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReviewCancelResolvesAPendingReviewDiffAsCancelledWhenTheHostThrowsOperationCanceledException()
         {
-            // S1: the host may answer a cancelled review either by returning
+            // The host may answer a cancelled review either by returning
             // ReviewDecision.Cancelled or by throwing
             // OperationCanceledException; ReviewTools must treat both the
             // same way.
@@ -995,11 +996,11 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReviewDiffTreatsAnyOperationCanceledExceptionFromTheHostAsCancelled()
         {
-            // D4: a host may throw OperationCanceledException for a reason
+            // A host may throw OperationCanceledException for a reason
             // that has nothing to do with THIS review's own token (Visual
             // Studio shutting down, the document closed underneath it) and
             // is not obliged to check `ct` first. Gating the catch on
-            // cts.IsCancellationRequested (fix round 1) let such an OCE
+            // cts.IsCancellationRequested would let such an OCE
             // escape uncaught — the Go side would then wait out its own
             // timeout instead of getting an ordinary "cancelled" reply.
             var host = new FakeEditorHost { OnReviewDiff = (req, ct) => throw new OperationCanceledException("unrelated to ct") };
@@ -1014,8 +1015,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ReviewCancelAndAFastAcceptingHostNeverDisagreeOnTheOutcome()
         {
-            // F7 regression: pending.Resolved was set outside the lock that
-            // ReviewCancel reads-and-claims it under, so a cancel racing a
+            // pending.Resolved must be read and claimed under the same lock
+            // ReviewCancel uses, not set outside it — otherwise a cancel racing a
             // fast "accept" answer could report {"cancelled":true} for a
             // review that had actually resolved "accept". Run many
             // genuinely-concurrent iterations (Task.Run onto the thread pool,
@@ -1055,7 +1056,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugStartPropagatesCancellationFromTheStackReadInsteadOfSwallowingIt()
         {
-            // F8: Describe's bare `catch` turned a cancelled connection into
+            // A bare `catch` in Describe would turn a cancelled connection into
             // ordinary "session ended before the stack could be read" success
             // text instead of letting the cancellation propagate.
             var host = NewHost();
@@ -1070,7 +1071,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task OpenPropagatesCancellationFromPathResolutionInsteadOfReportingAnError()
         {
-            // F8: ToolPaths.ResolveAsync's blanket catch turned a cancelled
+            // A blanket catch in ToolPaths.ResolveAsync would turn a cancelled
             // connection into isError:true "workspace folders: ..." instead
             // of letting the cancellation propagate so BridgeServer's own
             // cancelled-call handling (no reply at all) applies.
@@ -1129,7 +1130,7 @@ namespace BECode.Bridge.Tests
         [InlineData("{\"config\":\"WebApp\",\"args\":[\"x\"]}")]
         public async Task DebugStartWithTheVsCodeOnlyProgramTypeArgsShapeIsRefused(string argsJson)
         {
-            // Ruling S8: args is refused too, alongside program/type.
+            // args is refused too, alongside program/type.
             var host = NewHost();
             var registry = new ToolRegistry(host);
 
@@ -1156,7 +1157,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugStartWithConfigCallsHostAndDescribesAStop()
         {
-            // Ruling S3: StackFrameInfo.Path crosses the seam absolute; the
+            // StackFrameInfo.Path crosses the seam absolute; the
             // tool relativises it for output, exactly where vscode's own
             // debug_stack handler does.
             var host = NewHost();
@@ -1282,7 +1283,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugBreakpointRefusesWhenNoWorkspaceFolderIsOpen()
         {
-            // Ruling S9, applied to every path-taking tool, not just open.
+            // An empty workspace-folder list is refused for every
+            // path-taking tool, not just open.
             var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()) };
             var called = false;
             host.DebugHost.OnSetBreakpoint = (path, line, action, condition, ct) => { called = true; return Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>()); };
@@ -1366,7 +1368,7 @@ namespace BECode.Bridge.Tests
         [InlineData("out", DebugStepKind.Out)]
         public async Task DebugStepParsesTheStepValueIntoTheEnumForTheHost(string step, DebugStepKind expected)
         {
-            // D7: step becomes an enum at the seam; the tool parses the
+            // step becomes an enum at the seam; the tool parses the
             // manifest's three string values into it.
             var host = NewHost();
             DebugStepKind? seen = null;
@@ -1445,7 +1447,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugVariablesDefaultsScopeToLocalsAndFiltersByName()
         {
-            // D5: scope is no longer sent to the host at all — it returns
+            // scope is not sent to the host at all — it returns
             // every scope it has, and the tool alone filters.
             var host = NewHost();
             var hostCalled = false;
@@ -1514,7 +1516,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugVariablesCapsAt60PerScope()
         {
-            // Ruling S7: the tool prints at most 60 variables per scope,
+            // The tool prints at most 60 variables per scope,
             // regardless of how many the host resolved.
             var many = Enumerable.Range(0, 70).Select(i => new VariableInfo($"v{i}", i.ToString(), "int")).ToList();
             var host = NewHost();
@@ -1534,7 +1536,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugVariablesCapsChildrenAt20()
         {
-            // Ruling S7: at most 20 children per variable, even when the
+            // At most 20 children per variable, even when the
             // host resolved more (a scope with a single variable easily
             // qualifies for the <=10-variables expansion rule).
             var manyChildren = Enumerable.Range(0, 25).Select(i => new VariableInfo($"f{i}", i.ToString(), null)).ToList();

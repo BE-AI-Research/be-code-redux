@@ -7,11 +7,11 @@ using Xunit;
 
 namespace BECode.Bridge.Tests
 {
-    // Task 6: the pure-logic helpers extracted from the Visual Studio host
-    // design because they need no Visual Studio type (the brief's Rules
-    // section names each one). net472 xunit tests cannot run on this Linux
-    // checkout (no Mono, no .NET Framework runtime installed) so, per the
-    // brief's own decision rule, these live in BECode.Bridge/Hosting and are
+    // The pure-logic helpers extracted from the Visual Studio host
+    // design because they need no Visual Studio type. net472 xunit tests
+    // cannot run on this Linux
+    // checkout (no Mono, no .NET Framework runtime installed) so
+    // these live in BECode.Bridge/Hosting and are
     // tested here instead, against the existing net8.0 test project.
     public class ErrorSourceTests
     {
@@ -262,7 +262,7 @@ namespace BECode.Bridge.Tests
         }
     }
 
-    // Task 6, fix round 1, I-2: the lock-republish ordering guard.
+    // The lock-republish ordering guard.
     public class GenerationGateTests
     {
         [Fact]
@@ -328,7 +328,7 @@ namespace BECode.Bridge.Tests
         }
     }
 
-    // Task 6, fix round 1, I-9: the plain-file Activity Log mirror.
+    // The plain-file Activity Log mirror.
     public class DiagnosticsLogTests
     {
         [Fact]
@@ -378,7 +378,7 @@ namespace BECode.Bridge.Tests
         }
     }
 
-    // Task 6, fix round 1, I-10: rooting a diagnostic's project-relative FileName.
+    // Rooting a diagnostic's project-relative FileName.
     public class PathRootingTests
     {
         [Fact]

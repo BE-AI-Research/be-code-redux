@@ -101,7 +101,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(new[] { "{\"a\":1}" }, lines);
         }
 
-        // I1 (review round 1): a non-empty remainder must carry over
+        // A non-empty remainder must carry over
         // correctly into the next Push, not just the "everything up to the
         // last newline" case the other tests exercise.
         [Fact]
@@ -116,7 +116,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(new[] { "bc" }, lines2);
         }
 
-        // I1: a line whose unterminated byte count exceeds the cap must
+        // A line whose unterminated byte count exceeds the cap must
         // throw eagerly, from Push itself (Push is not an iterator, so
         // there is nothing to defer to).
         [Fact]
@@ -129,7 +129,7 @@ namespace BECode.Bridge.Tests
             Assert.Contains("16", ex.Message);
         }
 
-        // I1: the cap must be enforced cumulatively across pushes too, not
+        // The cap must be enforced cumulatively across pushes too, not
         // just within a single chunk.
         [Fact]
         public void PendingBytesAccumulatedAcrossPushesBeyondTheCapThrow()
@@ -140,8 +140,8 @@ namespace BECode.Bridge.Tests
             Assert.Throws<InvalidDataException>(() => framer.Push(Encoding.UTF8.GetBytes(new string('y', 10))).ToList());
         }
 
-        // I1 perf guard: the original implementation reallocated and copied
-        // the *entire* pending buffer on every Push, which is quadratic in
+        // Perf guard: an implementation that reallocates and copies
+        // the *entire* pending buffer on every Push is quadratic in
         // the number of chunks for one long unterminated line. The size is
         // what gives the guard teeth: at 4 MiB the quadratic code took about
         // 2.2 s in a Debug build but only 0.9 s in Release, so a 2 s bound

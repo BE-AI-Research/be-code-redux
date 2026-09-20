@@ -4,7 +4,7 @@ using Xunit;
 namespace BECode.Bridge.Tests
 {
     // Ports vscode/test/format.test.ts's severitiesFor cases directly against
-    // BECode.Bridge.Tools.Format.SeveritiesFor (F3).
+    // BECode.Bridge.Tools.Format.SeveritiesFor.
     public class FormatTests
     {
         [Fact]
@@ -34,7 +34,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void SeveritiesForFallsBackToErrorsAndWarningsForAnUnrecognisedValue()
         {
-            // Ruling R-6: the manifest's own description ("severity: error,
+            // The manifest's own description ("severity: error,
             // warning or all (default: errors and warnings)") and vscode's
             // severitiesFor both treat anything else as the default.
             Assert.Equal(new[] { "error", "warning" }, Format.SeveritiesFor("bogus"));

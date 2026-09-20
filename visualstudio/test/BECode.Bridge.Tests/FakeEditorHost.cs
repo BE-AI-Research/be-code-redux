@@ -17,7 +17,7 @@ namespace BECode.Bridge.Tests
         public Func<CancellationToken, Task<EditorContext>> OnGetContext { get; set; } =
             ct => Task.FromResult(new EditorContext("", 0, 0, 0, "", Array.Empty<string>()));
 
-        // Ruling S2: workspace folders are fetched separately from context.
+        // Workspace folders are fetched separately from context.
         // Default: empty (no solution/folder open) — tests that need a real
         // workspace set this explicitly (see ToolTests.NewHost()).
         public Func<CancellationToken, Task<IReadOnlyList<string>>> OnGetWorkspaceFolders { get; set; } =

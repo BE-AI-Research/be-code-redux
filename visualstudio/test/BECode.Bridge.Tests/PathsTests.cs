@@ -102,12 +102,12 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void RelPathDoesNotDecodeAPercentEncodedLookingLiteralFileName()
         {
-            // S3: the original implementation round-tripped through
+            // Do not implement this by round-tripping through
             // System.Uri (folderUri.MakeRelativeUri(fileUri) then
-            // Uri.UnescapeDataString(relUri.ToString())) — but Uri.ToString()
+            // Uri.UnescapeDataString(relUri.ToString())): Uri.ToString()
             // already unescapes "safe" characters, so unescaping it again
-            // corrupted any file name that happens to contain a literal '%'
-            // sequence that looks like percent-encoding, decoding
+            // would corrupt any file name that happens to contain a literal
+            // '%' sequence that looks like percent-encoding, decoding
             // "file%41.txt" to "fileA.txt". A real file's name is just
             // bytes; it must round-trip unchanged.
             var literalName = "file%41.txt";
@@ -120,13 +120,13 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void RelPathPrefersTheFirstFolderThatContainsThePathAmongNestedRoots()
         {
-            // T1: folders are tried in order; "/ws" contains "/ws/sub/a.go"
+            // Folders are tried in order; "/ws" contains "/ws/sub/a.go"
             // and comes first, so the answer is relative to "/ws" ("sub/a.go"),
             // not to the more specific "/ws/sub" ("a.go").
             Assert.Equal("sub/a.go", Paths.RelPath(new[] { "/ws", "/ws/sub" }, "/ws/sub/a.go"));
         }
 
-        // ---- T1: Paths.RelativeIfInsideCore is the pure, injectable core of
+        // ---- Paths.RelativeIfInsideCore is the pure, injectable core of
         // RelPath's "inside" check (separator, comparison and root-extraction
         // all passed in) — this is what makes the port's Windows-specific
         // behaviour (drive letters, case-insensitivity, backslash separators)

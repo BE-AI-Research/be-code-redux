@@ -66,7 +66,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(info.WorkspaceFolders, folders);
         }
 
-        // M7 (review round 1): this assertion is synchronous; there was no
+        // This assertion is synchronous; there is no
         // reason for the test method itself to be async.
         [Fact]
         public void PathForMatchesGoSideLayout()
@@ -155,7 +155,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
         }
 
-        // I2 (review round 1): the final file after an atomic replace (not
+        // The final file after an atomic replace (not
         // just a first-ever write) must still be 0600 — a regression guard
         // on the create-empty / chmod / write / rename ordering surviving a
         // second write to the same pid.
@@ -176,7 +176,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
         }
 
-        // I2: the ide directory this call creates must be 0700 on Unix,
+        // The ide directory this call creates must be 0700 on Unix,
         // matching the Go side's os.MkdirAll(d, 0o700).
         [Fact]
         public async Task FreshlyCreatedIdeDirectoryIsOwnerOnly()
@@ -196,7 +196,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, mode);
         }
 
-        // I2: a pre-existing ide directory's mode is the user's own choice
+        // A pre-existing ide directory's mode is the user's own choice
         // and must not be touched by WriteAsync.
         [Fact]
         public async Task PreexistingIdeDirectoryModeIsNotChanged()

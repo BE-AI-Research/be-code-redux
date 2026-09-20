@@ -30,7 +30,7 @@ namespace BECode.Bridge.Tests
 
             public Func<string, JsonElement, object, CancellationToken, Task<ToolResult>>? OnCall { get; set; }
 
-            // C1 (review round 1): lets a test make List() throw, to prove
+            // Lets a test make List() throw, to prove
             // the server survives it instead of zombifying the connection.
             public Func<IReadOnlyList<ToolInfo>>? OnList { get; set; }
 
@@ -97,7 +97,7 @@ namespace BECode.Bridge.Tests
             await stream.WriteAsync(bytes, 0, bytes.Length);
         }
 
-        // M6(a) (fix round 1): writes several JSON-RPC lines in ONE
+        // Writes several JSON-RPC lines in ONE
         // WriteAsync call, so they genuinely pipeline on the wire (both
         // already sent, and available to be read/dequeued together) rather
         // than the second only being written after the first's reply is
@@ -261,22 +261,22 @@ namespace BECode.Bridge.Tests
             Assert.Equal("hello from ping", first.GetProperty("text").GetString());
         }
 
-        // I3 (review round 1): this does NOT prove the server recognises
+        // This does NOT prove the server recognises
         // "unknown tool nope" — there is no registry in this project at
-        // all, that is Task 3's obligation (ToolRegistry, built against
-        // IToolDispatcher). What it actually proves is narrower and still
+        // all; recognising tool names is ToolRegistry's job (built against
+        // IToolDispatcher, tested separately). What it actually proves is narrower and still
         // load-bearing: BridgeServer passes a dispatcher's ToolResult
         // through to the wire unchanged (isError and text both), whatever
         // that result says. FakeToolDispatcher's default behaviour —
         // returning isError:true "unknown tool <name>" for anything with no
-        // OnCall configured — merely mimics the shape Task 3's real
+        // OnCall configured — merely mimics the shape the real
         // ToolRegistry is expected to produce for an unrecognised name, so
         // this test doubles as a fixture for that shape without asserting
         // the server itself implements it.
         [Fact]
         public async Task ToolsCallPassesADispatchersIsErrorResultThroughUnchanged()
         {
-            var (server, port) = await StartServerAsync(); // default dispatcher stands in for Task 3's ToolRegistry answering "no such tool"
+            var (server, port) = await StartServerAsync(); // default dispatcher stands in for ToolRegistry answering "no such tool"
             await using var serverLifetime = server;
 
             using var client = await ConnectAsync(port);
@@ -293,13 +293,13 @@ namespace BECode.Bridge.Tests
             Assert.Equal("unknown tool nope", result.GetProperty("content")[0].GetProperty("text").GetString());
         }
 
-        // Task 3a / R-7: the wire contract changed. "Requests on one
-        // connection are handled in order" (the premise this test used to
-        // assert for tools/call replies) is no longer true — tools/call now
+        // "Requests on one
+        // connection are handled in order" does NOT hold for tools/call
+        // replies — tools/call
         // runs on its own task and its reply may arrive out of request
-        // order. REPLACES PipelinedCallsReplyInRequestOrderDespiteADelayedFirstCall;
-        // see ASlowToolsCallDoesNotDelayALaterCallsReplyOnTheSameConnection
-        // below, which asserts the opposite of what this test used to: the
+        // order; see
+        // ASlowToolsCallDoesNotDelayALaterCallsReplyOnTheSameConnection
+        // below, which asserts exactly that: the
         // later, faster call's reply arrives WHILE the slow one is still
         // pending.
         [Fact]
@@ -359,7 +359,7 @@ namespace BECode.Bridge.Tests
             }
         }
 
-        // R-7: review_diff/review_cancel in miniature — call A blocks until
+        // review_diff/review_cancel in miniature — call A blocks until
         // call B's own handler unblocks it, both dispatched on ONE
         // connection before either reply is read. RED today: sequential
         // processing means B never even gets dispatched (it queues behind
@@ -502,9 +502,9 @@ namespace BECode.Bridge.Tests
             using var stream = client.GetStream();
             using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
 
-            // M6(a) (fix round 1): both lines written in ONE WriteAsync, so
+            // Both lines written in ONE WriteAsync, so
             // they genuinely pipeline — reading the first reply before
-            // sending the second (the original shape) never exercises
+            // sending the second would never exercise
             // whether auth-gating happens before a tools/call is forked,
             // since the second line would not even be on the wire yet.
             await SendLinesAsync(
@@ -633,9 +633,9 @@ namespace BECode.Bridge.Tests
         {
             // ConnectionCount == 1 is true from the moment the TCP connect
             // is accepted, well before this connection's tools/call handler
-            // has necessarily started running — fix round 1, M1 added an
-            // extra await (CallSlots.WaitAsync) before a call is even
-            // forked, so relying on ConnectionCount alone now genuinely
+            // has necessarily started running — an
+            // extra await (CallSlots.WaitAsync) happens before a call is even
+            // forked, so relying on ConnectionCount alone genuinely
             // races client.Close() against the dispatcher ever being
             // invoked at all. started is the real synchronisation point.
             var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -661,9 +661,9 @@ namespace BECode.Bridge.Tests
                     errors.Add((ctx, ex));
                 }
             };
-            // M6(c) (fix round 1): dispose the server via `await using` and
+            // Dispose the server via `await using` and
             // force-open the gate in `finally` — an early assertion failure
-            // used to leave the server undisposed and the dispatcher's
+            // without this would leave the server undisposed and the dispatcher's
             // OnCall permanently blocked on the gate, leaking a pooled task
             // for the rest of the test run.
             await using var serverLifetime = server;
@@ -685,7 +685,7 @@ namespace BECode.Bridge.Tests
                 Assert.Single(dispatcher.ClosedConnections);
                 await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
 
-                // M6(b) (fix round 1): snapshot under the lock — errors is
+                // Snapshot under the lock — errors is
                 // written from the server's own thread(s) concurrently with
                 // this one polling it.
                 await WaitForAsync(
@@ -799,8 +799,8 @@ namespace BECode.Bridge.Tests
         {
             // See AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError's
             // comment on started: ConnectionCount alone is not a safe proxy
-            // for "the tools/call handler has started", now that fix round
-            // 1, M1 puts an extra await (CallSlots.WaitAsync) between a line
+            // for "the tools/call handler has started" — an
+            // extra await (CallSlots.WaitAsync) happens between a line
             // being dequeued and its call being forked.
             var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -826,7 +826,7 @@ namespace BECode.Bridge.Tests
                     errors.Add((ctx, ex));
                 }
             };
-            // M6(d) (fix round 1): a deterministic signal for "this call's
+            // A deterministic signal for "this call's
             // own reply write has been attempted" — set only once, on the
             // straggler's eventual (post-abandonment) completion, since
             // that is the settlement this test actually needs to wait for.
@@ -859,7 +859,7 @@ namespace BECode.Bridge.Tests
                 // Let the abandonment bound elapse (reported through
                 // OnError) so the connection is fully torn down — state
                 // disposed — before the dispatcher's own gate is opened.
-                // M6(b) (fix round 1): snapshot under the lock — errors is
+                // Snapshot under the lock — errors is
                 // written from the server's own thread(s) concurrently with
                 // this one polling it.
                 await WaitForAsync(
@@ -881,7 +881,7 @@ namespace BECode.Bridge.Tests
                 var completedInTime = await Task.WhenAny(callCompleted.Task, Task.Delay(TimeSpan.FromSeconds(5))) == callCompleted.Task;
                 Assert.True(completedInTime, "the abandoned call never completed via the dispatcher's own signal");
 
-                // M6(d) (fix round 1): wait for the deterministic
+                // Wait for the deterministic
                 // OnCallSettled signal — the straggler's own reply write has
                 // now actually been attempted (and dropped quietly) —
                 // instead of guessing at a fixed grace period.
@@ -944,9 +944,9 @@ namespace BECode.Bridge.Tests
             Assert.Equal(new HashSet<int>(Enumerable.Range(1, 20)), seenIds);
         }
 
-        // Fix round 1, M1 (Ruling R-10): before this task's concurrency
-        // rework, one connection could hold at most one in-flight call; the
-        // cap restores an equivalent bound instead of letting a client that
+        // Without a cap, one connection could hold as many in-flight calls as
+        // a client pipelines; the
+        // cap restores a bound instead of letting a client that
         // pipelines many thousands of tools/call lines get that many live
         // dispatcher calls at once. With the cap shrunk to 2, three gated
         // calls dispatched back to back must leave the third's handler
@@ -1096,7 +1096,7 @@ namespace BECode.Bridge.Tests
             Assert.All(matches, ep => Assert.Equal(IPAddress.Loopback, ep.Address));
         }
 
-        // C1 (review round 1): a dispatcher whose List() throws must not
+        // A dispatcher whose List() throws must not
         // zombify the connection — the request that hit it gets an internal
         // error, and a later request on the same connection is still
         // answered normally.
@@ -1142,7 +1142,7 @@ namespace BECode.Bridge.Tests
             Assert.False(secondRoot.TryGetProperty("error", out _));
             Assert.Equal(0, secondRoot.GetProperty("result").GetProperty("tools").GetArrayLength());
 
-            // M6(b) (fix round 1): snapshot under the lock before asserting
+            // Snapshot under the lock before asserting
             // — errors is written from the server's own thread(s), not just
             // this test's.
             List<(string Context, Exception Exception)> errorsSnapshot;
@@ -1154,7 +1154,7 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errorsSnapshot, e => e.Exception.Message == "boom-list");
         }
 
-        // I1 (review round 1), server-level: the per-connection LineFramer
+        // Server-level: the per-connection LineFramer
         // cap is wired through the optional trailing BridgeServer
         // constructor parameter, and exceeding it closes the connection
         // rather than growing the buffer forever.
@@ -1195,7 +1195,7 @@ namespace BECode.Bridge.Tests
                 },
                 TimeSpan.FromSeconds(5));
 
-            // M6(b) (fix round 1): snapshot under the lock before asserting.
+            // Snapshot under the lock before asserting.
             List<(string Context, Exception Exception)> errorsSnapshot;
             lock (errors)
             {
@@ -1205,7 +1205,7 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errorsSnapshot, e => e.Exception is System.IO.InvalidDataException);
         }
 
-        // Test gap closed (review round 1): ConnectionCount across a real
+        // ConnectionCount across a real
         // connect/disconnect, polled with a deadline rather than a sleep.
         [Fact]
         public async Task ConnectionCountTracksConnectAndDisconnect()
@@ -1291,7 +1291,7 @@ namespace BECode.Bridge.Tests
             Assert.Equal("abc-123", root.GetProperty("id").GetString());
         }
 
-        // M4: DisposeAsync must not throw when called more than once, or
+        // DisposeAsync must not throw when called more than once, or
         // when two calls race concurrently.
         [Fact]
         public async Task DisposeAsyncIsIdempotent()
@@ -1316,7 +1316,7 @@ namespace BECode.Bridge.Tests
             Assert.Null(ex);
         }
 
-        // "Also fix" (review round 1): a failed write must be reported
+        // A failed write must be reported
         // through OnError and stop the connection, not silently keep trying
         // to write into a dead socket. Forcing a real write failure
         // deterministically: the dispatcher itself closes the connection's
@@ -1352,7 +1352,7 @@ namespace BECode.Bridge.Tests
 
             await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"arguments\":{}}}");
 
-            // M6(b) (fix round 1): snapshot under the lock before asserting
+            // Snapshot under the lock before asserting
             // — errors is written from the dispatcher's/server's own
             // threads concurrently with this one enumerating it.
             await WaitForAsync(
@@ -1374,17 +1374,19 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errorsSnapshot, e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
         }
 
-        // Fix round 1, M5: ShouldClose alone only closes the socket the next
+        // ShouldClose alone only closes the socket the next
         // time ProcessQueueAsync happens to recheck it, after processing
-        // another line — but tools/call's write now happens on its own
-        // forked task (R-7), so if the client never sends anything further,
-        // nothing ever rechecks the flag. Same deterministic write-failure
+        // another line — but tools/call's write happens on its own
+        // forked task, so if the client never sends anything further,
+        // nothing ever rechecks the flag; WriteBytesAsync must close the
+        // socket itself on a write failure instead. Same deterministic
+        // write-failure
         // setup as AWriteFailureIsReportedThroughOnError (the dispatcher
         // itself closes the socket), asserting the connection still tears
         // down promptly WITHOUT the client ever sending anything more.
         //
         // Caveat, recorded honestly rather than glossed over: this
-        // particular setup does not isolate the fix, because on this
+        // particular setup does not isolate that behaviour, because on this
         // runtime a Socket.Close() (and, empirically, even a
         // Socket.Shutdown(SocketShutdown.Send) — tried first, and it also
         // aborts the read loop's own pending ReadAsync with an
@@ -1392,15 +1394,16 @@ namespace BECode.Bridge.Tests
         // pending ReadAsync on its own, which tears the connection down
         // through the ordinary disconnect path regardless of whether
         // WriteBytesAsync additionally closes the socket on a write
-        // failure. I could not find a standard Socket API that fails a
+        // failure. There is no standard Socket API found that fails a
         // pending write while leaving a concurrently pending read on the
         // very same socket unaffected, to construct a case that would
-        // actually hang pre-fix. The fix itself is still correct per M5's
-        // own reasoning (a write failure from a cause that does NOT also
+        // actually hang without WriteBytesAsync closing the socket itself.
+        // The behaviour is still correct on its own reasoning (a write
+        // failure from a cause that does NOT also
         // trip the read side — e.g. one BridgeServer detects before the OS
         // does — must not leave the connection to linger), and this test
         // guards the passing behaviour going forward even though it does
-        // not demonstrate a pre-fix hang.
+        // not demonstrate a hang without it.
         [Fact]
         public async Task AWriteFailureClosesTheConnectionWithoutWaitingForMoreInput()
         {
@@ -1427,17 +1430,19 @@ namespace BECode.Bridge.Tests
             Assert.Equal(0, server.ConnectionCount);
         }
 
-        // Fix round 1, C1: requirement 4 says an ORDINARY late reply — a
+        // An ORDINARY late reply — a
         // call that honours its token, takes a little real unwind time, then
         // returns a normal result (exactly what ReviewTools.ReviewDiff does:
         // it returns Cancelled as an ordinary result, never a thrown
-        // exception) — must be quiet, not reported through OnError. The
-        // reviewer's probe found the original per-call Abandoned marker
-        // regressed this: 100/100 for any unwind >= 1ms, 0/250 on the
-        // pre-task-3a baseline. ct.IsCancellationRequested at write time is
+        // exception) — must be quiet, not reported through OnError. A
+        // per-call boolean "abandoned" marker with no synchronisation
+        // regresses this: it fails 100/100 trials for any unwind >= 1ms, but
+        // only 0/250 under purely sequential (non-concurrent) processing,
+        // since the race needs concurrent dispatch to trigger at all.
+        // ct.IsCancellationRequested at write time is
         // NOT a safe discriminator (that race is exactly what broke
         // AWriteFailureIsReportedThroughOnError the first time); this test
-        // is looped 50 times because the fix depends on a lock-based
+        // is looped 50 times because the correct behaviour depends on a lock-based
         // happens-before edge, not a fixed delay, and a flaky ordering bug
         // would not necessarily show up on the first iteration.
         [Fact]
@@ -1448,8 +1453,8 @@ namespace BECode.Bridge.Tests
                 // ConnectionCount alone is not a safe proxy for "the
                 // tools/call handler has started" — see
                 // AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError's
-                // comment on the same pattern (fix round 1, M1 added an
-                // extra await, CallSlots.WaitAsync, before a call is forked).
+                // comment on the same pattern (an
+                // extra await, CallSlots.WaitAsync, happens before a call is forked).
                 var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var callCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var dispatcher = new FakeToolDispatcher
@@ -1514,12 +1519,12 @@ namespace BECode.Bridge.Tests
             }
         }
 
-        // Fix round 1, I1: CancellationTokenSource.Cancel() rethrows
+        // CancellationTokenSource.Cancel() rethrows
         // (aggregated) any exception a registered callback throws — a
         // callback registered by dispatcher/tool code, not by BridgeServer.
-        // Unfenced, the reviewer's probe found this skipped the entire rest
+        // Left unfenced, this would skip the entire rest
         // of teardown: ConnectionClosed zero times, ConnectionCount stuck at
-        // 1 forever, client.Close() and state.Dispose() never ran, nothing
+        // 1 forever, client.Close() and state.Dispose() never run, nothing
         // reported.
         [Fact]
         public async Task AThrowingCancellationCallbackDoesNotSkipTeardown()
@@ -1584,11 +1589,12 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errorsSnapshot, e => e.Context.IndexOf("cancel", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
-        // Fix round 1, M4: the "a request with an id always gets a reply"
+        // The "a request with an id always gets a reply"
         // guard in ProcessLineAsync only covers the inline methods
         // (initialize, tools/list, errors) — tools/call runs on its own
         // task, unawaited there, so a fault in HandleToolsCallAsync's tail
-        // (the JSON encode + write, outside CallAsync's own try) used to
+        // (the JSON encode + write, outside CallAsync's own try), left
+        // unguarded, would
         // fault the forked task silently: no reply for that id, no OnError,
         // since nothing awaits that task except TrackInFlight's fire-and-
         // forget continuation, which only observes the exception. Forces a
@@ -1597,7 +1603,7 @@ namespace BECode.Bridge.Tests
         // signature — the try/catch around CallAsync itself only guards
         // against a THROWN exception, not a null return), so
         // `result.Text`/`result.IsError` in the payload-construction step
-        // right after — which is the tail this finding is about, not
+        // right after — which is the tail this test targets, not
         // CallAsync itself — throws NullReferenceException. (An earlier
         // attempt using a lone UTF-16 surrogate in the text did not work:
         // System.Text.Json silently substitutes U+FFFD for it rather than
@@ -1646,7 +1652,7 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errorsSnapshot, e => e.Context.IndexOf("tools/call reply", StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
-        // M10: the default JSON encoder escapes '<', '>', '&' and every
+        // The default JSON encoder escapes '<', '>', '&' and every
         // non-ASCII character as \uXXXX. Confirms the relaxed encoder is in
         // effect (content is readable on the wire, not just round-trippable
         // — \uXXXX also round-trips, so that alone would not catch a

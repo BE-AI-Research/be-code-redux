@@ -13,7 +13,7 @@ namespace BECode.Bridge.Tests
     /// A host that throws if any of its members are actually invoked. Used
     /// only to construct a <see cref="ToolRegistry"/> for tests that check
     /// its manifest binding and never dispatch a call through a handler that
-    /// would touch the host (checkpoint 1: every handler is a placeholder
+    /// would touch the host (every handler is a placeholder
     /// that ignores its host anyway). Behavioural tests over a real,
     /// configurable host live in <c>FakeEditorHost.cs</c> / <c>ToolTests.cs</c>.
     /// </summary>
@@ -127,7 +127,7 @@ namespace BECode.Bridge.Tests
 
                 Assert.True(byName.TryGetValue(entry.Name, out var tool), $"'{entry.Name}' missing from List()");
 
-                // Schemas are NEVER overridden (F6): always byte-equal to the
+                // Schemas are NEVER overridden: always byte-equal to the
                 // manifest's. Descriptions are, for exactly the two tools
                 // ToolOverrides names — see
                 // ListDescriptionsMatchTheManifestExceptTheTwoOverriddenDebugTools.
@@ -145,7 +145,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void ListDescriptionsMatchTheManifestExceptTheTwoOverriddenDebugTools()
         {
-            // F6 (Ruling R-9): debug_configs/debug_start's descriptions are
+            // debug_configs/debug_start's descriptions are
             // overridden because the manifest's own text tells the model to
             // use vscode's program+type launch shape, which this bridge
             // refuses. Every other tool's description is the manifest's own.
@@ -181,7 +181,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void ToolOverridesTextIsPinnedLiterally()
         {
-            // T2: a typo here previously failed no test — the override
+            // A typo here would otherwise fail no test — the override
             // table's own JSON-schema-adjacent nature (it's read as plain
             // text by the model) means the exact wording matters and
             // deserves the same literal-string protection a manifest entry
@@ -215,7 +215,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void ConstructorThrowsNamingAManifestEntryWithNoHandler()
         {
-            // F5: proves the parity guard actually throws for a manifest
+            // Proves the parity guard actually throws for a manifest
             // entry with no handler, naming the offender — rather than only
             // ever being exercised by construction succeeding.
             var manifest = new List<ManifestEntry>(ToolManifest.Load())
@@ -231,7 +231,7 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void ConstructorThrowsNamingAHandlerWithNoManifestEntry()
         {
-            // F5, the other direction: a manifest missing an entry for a
+            // The other direction: a manifest missing an entry for a
             // name ToolRegistry always has a handler for (any of the
             // fourteen non-override names avoids also tripping the
             // override-mismatch guard above).
@@ -245,8 +245,8 @@ namespace BECode.Bridge.Tests
         [Fact]
         public void ToolManifestLoadThrowsNamingTheResourceWhenItIsMissingFromTheGivenAssembly()
         {
-            // F5: "same for a missing embedded resource, if it can be
-            // injected cheaply" — it can, via the internal Load(Assembly)
+            // The same guard applies to a missing embedded resource; it can
+            // be exercised cheaply via the internal Load(Assembly)
             // overload: the test assembly itself does not embed the
             // manifest resource.
             var ex = Assert.Throws<InvalidOperationException>(() => ToolManifest.Load(typeof(ManifestParityTests).Assembly));
