@@ -716,6 +716,77 @@ namespace BECode.Bridge.Tests
             }
         }
 
+        // An abandoned call that finishes after teardown gives its call slot
+        // back to a semaphore teardown has already disposed. That must not
+        // throw out of the continuation: nothing awaits it, so the fault
+        // would surface only as an unobserved task exception on the
+        // finalizer thread, which is why this test has to go looking there.
+        [Fact]
+        public async Task AnAbandonedCallFinishingAfterTeardownLeavesNoUnobservedException()
+        {
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var settled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    started.TrySetResult(true);
+                    await gate.Task; // deliberately ignores ct
+                    return new ToolResult("late", false);
+                },
+            };
+            var unobserved = new List<Exception>();
+            EventHandler<UnobservedTaskExceptionEventArgs> handler = (sender, e) =>
+            {
+                lock (unobserved)
+                {
+                    unobserved.AddRange(e.Exception.InnerExceptions);
+                }
+            };
+            TaskScheduler.UnobservedTaskException += handler;
+            try
+            {
+                var (server, port) = await StartServerAsync(dispatcher);
+                server.InFlightDrainTimeout = TimeSpan.FromMilliseconds(100);
+                server.OnCallSettled = () => settled.TrySetResult(true);
+                await using var serverLifetime = server;
+
+                var client = await ConnectAsync(port);
+                var stream = client.GetStream();
+                using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+                await InitializeAsync(stream, reader, Token);
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
+                Assert.Same(started.Task, await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+
+                client.Close();
+                await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+                // Teardown is only over, and the slot semaphore only disposed,
+                // once the drain has given up on the straggler.
+                await server.DisposeAsync();
+
+                gate.TrySetResult(true);
+                Assert.Same(settled.Task, await Task.WhenAny(settled.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+
+                for (var i = 0; i < 5; i++)
+                {
+                    await Task.Yield();
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+
+                lock (unobserved)
+                {
+                    Assert.DoesNotContain(unobserved, e => e is ObjectDisposedException);
+                }
+            }
+            finally
+            {
+                gate.TrySetResult(true);
+                TaskScheduler.UnobservedTaskException -= handler;
+            }
+        }
+
         // Replies after close: once teardown has fully finished (the client
         // observed ConnectionClosed and ConnectionCount 0), a call that only
         // then completes must not throw out of its task and must not be

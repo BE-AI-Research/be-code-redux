@@ -296,7 +296,18 @@ namespace BECode.Bridge
                             _ = t.Exception;
                         }
 
-                        CallSlots.Release();
+                        try
+                        {
+                            CallSlots.Release();
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // An abandoned straggler finishing after
+                            // teardown disposed the semaphore: there is no
+                            // slot left to give back. Nothing awaits this
+                            // continuation, so letting it throw would only
+                            // surface on the finalizer thread.
+                        }
                     },
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
@@ -930,6 +941,7 @@ namespace BECode.Bridge
                 return;
             }
 
+            Exception? writeFailure = null;
             try
             {
                 // Fix round 1, C1: checked immediately after acquiring the
@@ -969,15 +981,7 @@ namespace BECode.Bridge
                 // (ConnectionClosed exactly once, same as any other
                 // disconnect), promptly, without waiting for more input.
                 state.ShouldClose = true;
-                ReportError("write failed", ex);
-                try
-                {
-                    state.Client.Close();
-                }
-                catch
-                {
-                    // already closed
-                }
+                writeFailure = ex;
             }
             finally
             {
@@ -989,6 +993,22 @@ namespace BECode.Bridge
                 {
                     // Teardown disposed the lock while this write was in
                     // flight (a straggler); nothing left to release.
+                }
+            }
+
+            if (writeFailure != null)
+            {
+                // Reported and closed only once the write lock is released:
+                // OnError is somebody else's code, and the close starts a
+                // teardown whose first step is to take that same lock.
+                ReportError("write failed", writeFailure);
+                try
+                {
+                    state.Client.Close();
+                }
+                catch
+                {
+                    // already closed
                 }
             }
         }
