@@ -70,7 +70,7 @@ namespace BECode.Bridge.Tools
             var action = ToolArgs.GetString(args, "action") ?? "add";
             var condition = ToolArgs.GetString(args, "condition");
 
-            var (abs, resolveErr) = await ToolPaths.ResolveAsync(_host, path, ct).ConfigureAwait(false);
+            var (abs, _, resolveErr) = await ToolPaths.ResolveAsync(_host, path, ct).ConfigureAwait(false);
             if (resolveErr != null)
             {
                 return resolveErr;
@@ -107,7 +107,8 @@ namespace BECode.Bridge.Tools
         {
             var depth = ToolArgs.GetInt(args, "depth") ?? 10;
             var frames = await _host.Debug.StackAsync(depth, ct).ConfigureAwait(false);
-            return new ToolResult(FormatStack(frames), false);
+            var folders = await _host.GetWorkspaceFoldersAsync(ct).ConfigureAwait(false);
+            return new ToolResult(FormatStack(frames, folders), false);
         }
 
         public async Task<ToolResult> Variables(JsonElement args, object connection, CancellationToken ct)
@@ -163,7 +164,8 @@ namespace BECode.Bridge.Tools
                     try
                     {
                         var frames = await _host.Debug.StackAsync(3, ct).ConfigureAwait(false);
-                        return $"stopped ({r.Reason ?? "unknown"})\n{FormatStack(frames)}";
+                        var folders = await _host.GetWorkspaceFoldersAsync(ct).ConfigureAwait(false);
+                        return $"stopped ({r.Reason ?? "unknown"})\n{FormatStack(frames, folders)}";
                     }
                     // Fix round 1, F8: a bare `catch` here swallowed
                     // OperationCanceledException along with a genuinely dead
@@ -189,7 +191,10 @@ namespace BECode.Bridge.Tools
             }
         }
 
-        private static string FormatStack(IReadOnlyList<StackFrameInfo> frames)
+        // Ruling S3: StackFrameInfo.Path crosses the seam absolute;
+        // relativise here, exactly where vscode's own debug_stack handler
+        // does.
+        private static string FormatStack(IReadOnlyList<StackFrameInfo> frames, IReadOnlyList<string> folders)
         {
             if (frames.Count == 0)
             {
@@ -200,7 +205,8 @@ namespace BECode.Bridge.Tools
             for (var i = 0; i < frames.Count; i++)
             {
                 var f = frames[i];
-                lines.Add($"#{i} {f.Name} {f.Path ?? "?"}:{f.Line}  [frame {f.FrameId}]");
+                var path = f.Path != null ? Paths.RelPath(folders, f.Path) : "?";
+                lines.Add($"#{i} {f.Name} {path}:{f.Line}  [frame {f.FrameId}]");
             }
 
             return string.Join("\n", lines);

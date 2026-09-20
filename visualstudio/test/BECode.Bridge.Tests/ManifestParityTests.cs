@@ -22,14 +22,14 @@ namespace BECode.Bridge.Tests
             => new InvalidOperationException($"ThrowingEditorHost.{member} should not be called by this test");
 
         public Task<EditorContext> GetContextAsync(CancellationToken ct) => throw NotExpected();
+        public Task<IReadOnlyList<string>> GetWorkspaceFoldersAsync(CancellationToken ct) => throw NotExpected();
         public Task OpenAsync(string path, int? line, CancellationToken ct) => throw NotExpected();
         public Task<IReadOnlyList<Location>?> DefinitionAsync(string path, int line, int col, CancellationToken ct) => throw NotExpected();
-        public Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, int max, CancellationToken ct) => throw NotExpected();
+        public Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, CancellationToken ct) => throw NotExpected();
         public Task<string?> HoverAsync(string path, int line, int col, CancellationToken ct) => throw NotExpected();
         public Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, CancellationToken ct) => throw NotExpected();
         public IDebugHost Debug => throw NotExpected();
         public Task<ReviewDecision> ReviewDiffAsync(ReviewRequest request, CancellationToken ct) => throw NotExpected();
-        public Task<bool> ReviewCancelAsync(string path) => throw NotExpected();
     }
 
     public class ManifestParityTests

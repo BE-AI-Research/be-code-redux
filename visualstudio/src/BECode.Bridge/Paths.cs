@@ -81,43 +81,67 @@ namespace BECode.Bridge
         // "/ws-evil/x" must not count as inside "/ws".
         private static bool Inside(string folder, string abs)
         {
+            return RelativeIfInside(folder, abs) != null;
+        }
+
+        // Fix round 1, S3: the original implementation round-tripped
+        // relative paths through System.Uri (MakeRelativeUri, then
+        // Uri.UnescapeDataString(relUri.ToString())) to get forward
+        // slashes without depending on Path.GetRelativePath (not part of
+        // the netstandard2.0 surface this project targets). Two latent
+        // Windows defects followed from that: (1) Uri.ToString() already
+        // unescapes "safe" characters, so unescaping it AGAIN corrupted any
+        // file name containing a literal '%' sequence that happens to look
+        // like percent-encoding (e.g. "file%41.txt" came back "fileA.txt");
+        // (2) MakeRelativeUri across two different Windows drives produces
+        // an absolute file:// URI, not a relative one, which the caller's
+        // ".." guard was supposed to reject via TS's `!isAbsolute(r)` but
+        // never actually ran against, since nothing checked for it here.
+        // Ported by hand instead: pure string/segment work on
+        // Path.GetFullPath output, no escaping to get wrong, and an
+        // explicit root comparison that returns null (no relative path
+        // exists) across two different roots instead of ever producing an
+        // absolute path as a "relative" answer.
+        private static string? RelativeIfInside(string folder, string abs)
+        {
             var f = Path.GetFullPath(folder);
+
+            if (!string.Equals(Path.GetPathRoot(f), Path.GetPathRoot(abs), PathComparison))
+            {
+                // Different roots (e.g. different drives on Windows): there
+                // is no relative path between them.
+                return null;
+            }
+
             if (string.Equals(abs, f, PathComparison))
             {
-                return true;
+                return string.Empty;
             }
 
             var withSep = f.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
                 ? f
                 : f + Path.DirectorySeparatorChar;
-            return abs.StartsWith(withSep, PathComparison);
+            if (!abs.StartsWith(withSep, PathComparison))
+            {
+                return null;
+            }
+
+            return abs.Substring(withSep.Length).Replace('\\', '/');
         }
 
-        // Uri.MakeRelativeUri gives a forward-slash-separated relative path
-        // without depending on Path.GetRelativePath, which is not part of
-        // the netstandard2.0 surface this project targets.
         private static string? TryRelative(string folder, string fsPath)
         {
+            string abs;
             try
             {
-                var folderFull = Path.GetFullPath(folder);
-                var withSep = folderFull.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                    ? folderFull
-                    : folderFull + Path.DirectorySeparatorChar;
-                var folderUri = new Uri(withSep);
-                var fileUri = new Uri(Path.GetFullPath(fsPath));
-                if (folderUri.Scheme != fileUri.Scheme)
-                {
-                    return null;
-                }
-
-                var relUri = folderUri.MakeRelativeUri(fileUri);
-                return Uri.UnescapeDataString(relUri.ToString());
+                abs = Path.GetFullPath(fsPath);
             }
             catch
             {
                 return null;
             }
+
+            return RelativeIfInside(folder, abs);
         }
     }
 }

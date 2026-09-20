@@ -98,5 +98,23 @@ namespace BECode.Bridge.Tests
         {
             Assert.Equal("/elsewhere/y.go", Paths.RelPath(new[] { "/w/proj" }, "/elsewhere/y.go"));
         }
+
+        [Fact]
+        public void RelPathDoesNotDecodeAPercentEncodedLookingLiteralFileName()
+        {
+            // S3: the original implementation round-tripped through
+            // System.Uri (folderUri.MakeRelativeUri(fileUri) then
+            // Uri.UnescapeDataString(relUri.ToString())) — but Uri.ToString()
+            // already unescapes "safe" characters, so unescaping it again
+            // corrupted any file name that happens to contain a literal '%'
+            // sequence that looks like percent-encoding, decoding
+            // "file%41.txt" to "fileA.txt". A real file's name is just
+            // bytes; it must round-trip unchanged.
+            var literalName = "file%41.txt";
+            var path = Path.Combine(_rootA, literalName);
+            File.WriteAllText(path, "x");
+
+            Assert.Equal(literalName, Paths.RelPath(_folders, path));
+        }
     }
 }

@@ -15,13 +15,19 @@ namespace BECode.Bridge.Tests
     internal sealed class FakeEditorHost : IEditorHost
     {
         public Func<CancellationToken, Task<EditorContext>> OnGetContext { get; set; } =
-            ct => Task.FromResult(new EditorContext("", 0, 0, 0, "", Array.Empty<string>(), Array.Empty<string>()));
+            ct => Task.FromResult(new EditorContext("", 0, 0, 0, "", Array.Empty<string>()));
+
+        // Ruling S2: workspace folders are fetched separately from context.
+        // Default: empty (no solution/folder open) — tests that need a real
+        // workspace set this explicitly (see ToolTests.NewHost()).
+        public Func<CancellationToken, Task<IReadOnlyList<string>>> OnGetWorkspaceFolders { get; set; } =
+            ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 
         public List<(string Path, int? Line)> OpenCalls { get; } = new List<(string, int?)>();
         public Func<string, int?, CancellationToken, Task>? OnOpen { get; set; }
 
         public Func<string, int, int, CancellationToken, Task<IReadOnlyList<Location>?>>? OnDefinition { get; set; }
-        public Func<string, int, int, int, CancellationToken, Task<IReadOnlyList<Location>?>>? OnReferences { get; set; }
+        public Func<string, int, int, CancellationToken, Task<IReadOnlyList<Location>?>>? OnReferences { get; set; }
         public Func<string, int, int, CancellationToken, Task<string?>>? OnHover { get; set; }
 
         public Func<string?, CancellationToken, Task<IReadOnlyList<Diagnostic>>> OnDiagnostics { get; set; } =
@@ -30,9 +36,10 @@ namespace BECode.Bridge.Tests
         public FakeDebugHost DebugHost { get; } = new FakeDebugHost();
 
         public Func<ReviewRequest, CancellationToken, Task<ReviewDecision>>? OnReviewDiff { get; set; }
-        public Func<string, Task<bool>>? OnReviewCancel { get; set; }
 
         public Task<EditorContext> GetContextAsync(CancellationToken ct) => OnGetContext(ct);
+
+        public Task<IReadOnlyList<string>> GetWorkspaceFoldersAsync(CancellationToken ct) => OnGetWorkspaceFolders(ct);
 
         public async Task OpenAsync(string path, int? line, CancellationToken ct)
         {
@@ -48,9 +55,9 @@ namespace BECode.Bridge.Tests
                 ? OnDefinition(path, line, col, ct)
                 : Task.FromResult<IReadOnlyList<Location>?>(Array.Empty<Location>());
 
-        public Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, int max, CancellationToken ct) =>
+        public Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, CancellationToken ct) =>
             OnReferences != null
-                ? OnReferences(path, line, col, max, ct)
+                ? OnReferences(path, line, col, ct)
                 : Task.FromResult<IReadOnlyList<Location>?>(Array.Empty<Location>());
 
         public Task<string?> HoverAsync(string path, int line, int col, CancellationToken ct) =>
@@ -63,9 +70,6 @@ namespace BECode.Bridge.Tests
 
         public Task<ReviewDecision> ReviewDiffAsync(ReviewRequest request, CancellationToken ct) =>
             OnReviewDiff != null ? OnReviewDiff(request, ct) : Task.FromResult(ReviewDecision.Reject);
-
-        public Task<bool> ReviewCancelAsync(string path) =>
-            OnReviewCancel != null ? OnReviewCancel(path) : Task.FromResult(false);
     }
 
     /// <summary>Configurable <see cref="IDebugHost"/> double, mirrored one delegate per debug_* tool.</summary>

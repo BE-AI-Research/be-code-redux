@@ -37,19 +37,28 @@ namespace BECode.Bridge.Tests
             return doc.RootElement.Clone();
         }
 
-        private EditorContext DefaultContext() => new EditorContext("", 0, 0, 0, "", Array.Empty<string>(), _folders);
+        private EditorContext DefaultContext() => new EditorContext("", 0, 0, 0, "", Array.Empty<string>());
 
-        private FakeEditorHost NewHost() => new FakeEditorHost { OnGetContext = ct => Task.FromResult(DefaultContext()) };
+        private FakeEditorHost NewHost() => new FakeEditorHost
+        {
+            OnGetContext = ct => Task.FromResult(DefaultContext()),
+            OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(_folders),
+        };
 
         // ---- context (vscode/src/tools/editor.ts's "context" handler) ----
 
         [Fact]
         public async Task ContextSerialisesTheHostsContextInTheVsCodeShape()
         {
+            // Ruling S3: file/open cross the seam absolute; the tool
+            // relativises them against workspaceFolders (Ruling S2, fetched
+            // separately from GetContextAsync) before they go on the wire.
+            var aGo = Path.Combine(_workspace, "a.go");
+            var bGo = Path.Combine(_workspace, "b.go");
             var host = new FakeEditorHost
             {
-                OnGetContext = ct => Task.FromResult(new EditorContext(
-                    "a.go", 5, 2, 4, "hello", new[] { "a.go", "b.go" }, new[] { "/ws" })),
+                OnGetContext = ct => Task.FromResult(new EditorContext(aGo, 5, 2, 4, "hello", new[] { aGo, bGo })),
+                OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(_folders),
             };
             var registry = new ToolRegistry(host);
 
@@ -64,7 +73,44 @@ namespace BECode.Bridge.Tests
             Assert.Equal(4, root.GetProperty("selEnd").GetInt32());
             Assert.Equal("hello", root.GetProperty("selection").GetString());
             Assert.Equal(new[] { "a.go", "b.go" }, root.GetProperty("open").EnumerateArray().Select(e => e.GetString()));
-            Assert.Equal(new[] { "/ws" }, root.GetProperty("workspaceFolders").EnumerateArray().Select(e => e.GetString()));
+            Assert.Equal(new[] { _workspace }, root.GetProperty("workspaceFolders").EnumerateArray().Select(e => e.GetString()));
+        }
+
+        [Fact]
+        public async Task ContextLeavesAnEmptyFileEmptyRatherThanTryingToRelativiseIt()
+        {
+            var host = new FakeEditorHost
+            {
+                OnGetContext = ct => Task.FromResult(new EditorContext("", 0, 0, 0, "", Array.Empty<string>())),
+                OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(_folders),
+            };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("context", Args("{}"), new object(), CancellationToken.None);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            Assert.Equal("", doc.RootElement.GetProperty("file").GetString());
+        }
+
+        [Fact]
+        public async Task ContextTruncatesTheSelectionTo2048Characters()
+        {
+            // Ruling S6: the host returns the raw, untruncated selection;
+            // the 2048-character cut is the tool's job now.
+            var raw = new string('x', 3000);
+            var host = new FakeEditorHost
+            {
+                OnGetContext = ct => Task.FromResult(new EditorContext("", 1, 0, 0, raw, Array.Empty<string>())),
+                OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(_folders),
+            };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("context", Args("{}"), new object(), CancellationToken.None);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            var selection = doc.RootElement.GetProperty("selection").GetString();
+            Assert.Equal(2048, selection!.Length);
+            Assert.Equal(raw.Substring(0, 2048), selection);
         }
 
         // ---- open ----
@@ -119,14 +165,33 @@ namespace BECode.Bridge.Tests
             Assert.Empty(host.OpenCalls);
         }
 
+        [Fact]
+        public async Task OpenRefusesWhenNoWorkspaceFolderIsOpen()
+        {
+            // Ruling S9: an empty workspace-folder list (devenv.exe with no
+            // solution/folder open) is refused with a clear message, rather
+            // than confining to the process's arbitrary current directory.
+            var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()) };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("open", Args("{\"path\":\"sample.go\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Equal("no solution or folder is open", result.Text);
+            Assert.Empty(host.OpenCalls);
+        }
+
         // ---- definition ----
 
         [Fact]
-        public async Task DefinitionFormatsPathLineColPerLocation()
+        public async Task DefinitionFormatsPathLineColPerLocationRelativisingTheAbsolutePathTheHostReturns()
         {
+            // Ruling S3: Location.Path crosses the seam absolute; the tool
+            // relativises it for output, exactly where vscode's own
+            // definition handler does.
             var host = NewHost();
             host.OnDefinition = (path, line, col, ct) =>
-                Task.FromResult<System.Collections.Generic.IReadOnlyList<Location>?>(new[] { new Location("a.go", 10, 2) });
+                Task.FromResult<IReadOnlyList<Location>?>(new[] { new Location(Path.Combine(_workspace, "a.go"), 10, 2) });
             var registry = new ToolRegistry(host);
 
             var result = await registry.CallAsync("definition", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
@@ -193,11 +258,11 @@ namespace BECode.Bridge.Tests
         // ---- references ----
 
         [Fact]
-        public async Task ReferencesFormatsCountAndPathLineText()
+        public async Task ReferencesFormatsCountAndPathLineTextRelativisingTheAbsolutePathTheHostReturns()
         {
             var host = NewHost();
-            host.OnReferences = (path, line, col, max, ct) =>
-                Task.FromResult<System.Collections.Generic.IReadOnlyList<Location>?>(new[] { new Location("a.go", 3, 1, "  x := 1  ") });
+            host.OnReferences = (path, line, col, ct) =>
+                Task.FromResult<IReadOnlyList<Location>?>(new[] { new Location(Path.Combine(_workspace, "a.go"), 3, 1, "  x := 1  ") });
             var registry = new ToolRegistry(host);
 
             var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
@@ -207,23 +272,34 @@ namespace BECode.Bridge.Tests
         }
 
         [Fact]
-        public async Task ReferencesDefaultsMaxTo50()
+        public async Task ReferencesReportsTheTotalCountAndPrintsOnlyTheFirstMax()
         {
+            // Ruling S5: the host is no longer given a `max` — it returns
+            // every reference; the tool reports the TOTAL count and prints
+            // only the first `max` (default 50), matching vscode's own
+            // res.length read before slicing.
             var host = NewHost();
-            int? seenMax = null;
-            host.OnReferences = (path, line, col, max, ct) => { seenMax = max; return Task.FromResult<System.Collections.Generic.IReadOnlyList<Location>?>(Array.Empty<Location>()); };
+            var all = Enumerable.Range(0, 200)
+                .Select(i => new Location(Path.Combine(_workspace, "a.go"), i + 1, 1, $"line{i}"))
+                .ToArray();
+            host.OnReferences = (path, line, col, ct) => Task.FromResult<IReadOnlyList<Location>?>(all);
             var registry = new ToolRegistry(host);
 
-            await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
+            var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
 
-            Assert.Equal(50, seenMax);
+            Assert.False(result.IsError);
+            Assert.StartsWith("200 reference(s)", result.Text);
+            var lines = result.Text.Split('\n');
+            Assert.Equal(51, lines.Length); // header + 50 shown
+            Assert.Contains("line0", lines[1]);
+            Assert.Contains("line49", lines[50]);
         }
 
         [Fact]
         public async Task ReferencesWithNoResultsSaysSoWithoutError()
         {
             var host = NewHost();
-            host.OnReferences = (path, line, col, max, ct) => Task.FromResult<System.Collections.Generic.IReadOnlyList<Location>?>(Array.Empty<Location>());
+            host.OnReferences = (path, line, col, ct) => Task.FromResult<IReadOnlyList<Location>?>(Array.Empty<Location>());
             var registry = new ToolRegistry(host);
 
             var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
@@ -236,7 +312,7 @@ namespace BECode.Bridge.Tests
         public async Task ReferencesOnAHostThatReturnsNullAnswersNotAvailableForThisFileType()
         {
             var host = NewHost();
-            host.OnReferences = (path, line, col, max, ct) => Task.FromResult<System.Collections.Generic.IReadOnlyList<Location>?>(null);
+            host.OnReferences = (path, line, col, ct) => Task.FromResult<IReadOnlyList<Location>?>(null);
             var registry = new ToolRegistry(host);
 
             var result = await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":1,\"col\":1}"), new object(), CancellationToken.None);
@@ -364,13 +440,15 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DiagnosticsGroupsByFileWithACountSummaryFirst()
         {
-            // Ported from vscode/test/format.test.ts's "groups by file with a count summary first".
+            // Ported from vscode/test/format.test.ts's "groups by file with a
+            // count summary first". Diagnostic.Path is absolute (Ruling S3);
+            // relativised names still sort/group the same way.
             var host = NewHost();
             host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
             {
-                new Diagnostic("b.go", 3, 1, "error", "go", "undefined: x"),
-                new Diagnostic("a.py", 10, 5, "warning", "Pylance", "unused"),
-                new Diagnostic("b.go", 1, 1, "error", "go", "missing import"),
+                new Diagnostic(Path.Combine(_workspace, "b.go"), 3, 1, "error", "go", "undefined: x"),
+                new Diagnostic(Path.Combine(_workspace, "a.py"), 10, 5, "warning", "Pylance", "unused"),
+                new Diagnostic(Path.Combine(_workspace, "b.go"), 1, 1, "error", "go", "missing import"),
             });
             var registry = new ToolRegistry(host);
 
@@ -380,6 +458,64 @@ namespace BECode.Bridge.Tests
             Assert.Equal("2 errors, 1 warning in 2 files", firstLine);
             Assert.Contains("b.go:1:1 error go: missing import", result.Text, StringComparison.Ordinal);
             Assert.True(result.Text.IndexOf("a.py", StringComparison.Ordinal) < result.Text.IndexOf("b.go", StringComparison.Ordinal));
+        }
+
+        [Fact]
+        public async Task DiagnosticsRelativisesAPathInASubdirectoryForDisplay()
+        {
+            var host = NewHost();
+            host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
+            {
+                new Diagnostic(Path.Combine(_workspace, "internal", "pkg", "a.go"), 1, 1, "error", "go", "e1"),
+            });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("diagnostics", Args("{}"), new object(), CancellationToken.None);
+
+            Assert.Contains("internal/pkg/a.go:1:1 error go: e1", result.Text, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task DiagnosticsResolvesThePathFilterArgumentToAnAbsolutePathBeforeCallingTheHost()
+        {
+            // Ruling S3/S4: IEditorHost.DiagnosticsAsync's path is
+            // "absolute or null" — an incoming relative filter argument must
+            // be resolved and confined like every other path argument.
+            var host = NewHost();
+            string? seenPath = "not set";
+            host.OnDiagnostics = (path, ct) => { seenPath = path; return Task.FromResult<IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>()); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("diagnostics", Args("{\"path\":\"sample.go\"}"), new object(), CancellationToken.None);
+
+            Assert.Equal(Path.Combine(_workspace, "sample.go"), seenPath);
+        }
+
+        [Fact]
+        public async Task DiagnosticsRejectsAPathFilterOutsideTheWorkspaceWithoutCallingTheHost()
+        {
+            var host = NewHost();
+            var called = false;
+            host.OnDiagnostics = (path, ct) => { called = true; return Task.FromResult<IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>()); };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("diagnostics", Args("{\"path\":\"../outside.txt\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("outside the workspace", result.Text, StringComparison.Ordinal);
+            Assert.False(called);
+        }
+
+        [Fact]
+        public async Task DiagnosticsRefusesAPathFilterWhenNoWorkspaceFolderIsOpen()
+        {
+            var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()) };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("diagnostics", Args("{\"path\":\"sample.go\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Equal("no solution or folder is open", result.Text);
         }
 
         // ---- review_diff / review_cancel (vscode/src/tools/review.ts, vscode/test/review.test.ts) ----
@@ -789,10 +925,10 @@ namespace BECode.Bridge.Tests
         public async Task OpenPropagatesCancellationFromPathResolutionInsteadOfReportingAnError()
         {
             // F8: ToolPaths.ResolveAsync's blanket catch turned a cancelled
-            // connection into isError:true "context: ..." instead of letting
-            // the cancellation propagate so BridgeServer's own cancelled-call
-            // handling (no reply at all) applies.
-            var host = new FakeEditorHost { OnGetContext = ct => throw new OperationCanceledException() };
+            // connection into isError:true "workspace folders: ..." instead
+            // of letting the cancellation propagate so BridgeServer's own
+            // cancelled-call handling (no reply at all) applies.
+            var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => throw new OperationCanceledException() };
             var registry = new ToolRegistry(host);
 
             await Assert.ThrowsAsync<OperationCanceledException>(
@@ -858,11 +994,14 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugStartWithConfigCallsHostAndDescribesAStop()
         {
+            // Ruling S3: StackFrameInfo.Path crosses the seam absolute; the
+            // tool relativises it for output, exactly where vscode's own
+            // debug_stack handler does.
             var host = NewHost();
             host.DebugHost.OnStart = (config, ct) => Task.FromResult(new StopResult(StopKind.Stopped, "breakpoint"));
             host.DebugHost.OnStack = (depth, ct) => Task.FromResult<IReadOnlyList<StackFrameInfo>>(new[]
             {
-                new StackFrameInfo("main.main", "main.go", 12, 1),
+                new StackFrameInfo("main.main", Path.Combine(_workspace, "main.go"), 12, 1),
             });
             var registry = new ToolRegistry(host);
 
@@ -979,6 +1118,22 @@ namespace BECode.Bridge.Tests
         }
 
         [Fact]
+        public async Task DebugBreakpointRefusesWhenNoWorkspaceFolderIsOpen()
+        {
+            // Ruling S9, applied to every path-taking tool, not just open.
+            var host = new FakeEditorHost { OnGetWorkspaceFolders = ct => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()) };
+            var called = false;
+            host.DebugHost.OnSetBreakpoint = (path, line, action, condition, ct) => { called = true; return Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>()); };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_breakpoint", Args("{\"path\":\"sample.go\",\"line\":1}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Equal("no solution or folder is open", result.Text);
+            Assert.False(called);
+        }
+
+        [Fact]
         public async Task DebugContinueDescribesTheNextStop()
         {
             var host = NewHost();
@@ -1024,7 +1179,7 @@ namespace BECode.Bridge.Tests
             int? seenDepth = null;
             host.DebugHost.OnStack = (depth, ct) => { seenDepth = depth; return Task.FromResult<IReadOnlyList<StackFrameInfo>>(new[]
             {
-                new StackFrameInfo("main.main", "main.go", 12, 1),
+                new StackFrameInfo("main.main", Path.Combine(_workspace, "main.go"), 12, 1),
                 new StackFrameInfo("main.helper", null, 4, 2),
             }); };
             var registry = new ToolRegistry(host);
@@ -1033,6 +1188,25 @@ namespace BECode.Bridge.Tests
 
             Assert.Equal(10, seenDepth);
             Assert.Equal("#0 main.main main.go:12  [frame 1]\n#1 main.helper ?:4  [frame 2]", result.Text);
+        }
+
+        [Fact]
+        public async Task DebugStackRelativisesAPathInASubdirectory()
+        {
+            // A path directly under the workspace root relativises to a
+            // string identical to its own file name — the case above can't
+            // by itself distinguish "the tool relativised this" from "the
+            // tool passed it through unchanged". A subdirectory can.
+            var host = NewHost();
+            host.DebugHost.OnStack = (depth, ct) => Task.FromResult<IReadOnlyList<StackFrameInfo>>(new[]
+            {
+                new StackFrameInfo("pkg.Helper", Path.Combine(_workspace, "internal", "pkg", "helper.go"), 7, 1),
+            });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_stack", Args("{}"), new object(), CancellationToken.None);
+
+            Assert.Equal("#0 pkg.Helper internal/pkg/helper.go:7  [frame 1]", result.Text);
         }
 
         [Fact]
