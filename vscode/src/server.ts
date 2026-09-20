@@ -52,8 +52,11 @@ export class BridgeServer {
     let req: any;
     try { req = JSON.parse(line); } catch { return; }
     if (req.id === undefined) return; // notification
-    const reply = (result: unknown) => sock.write(encode({ jsonrpc: "2.0", id: req.id, result }));
-    const fail = (code: number, message: string) => sock.write(encode({ jsonrpc: "2.0", id: req.id, error: { code, message } }));
+    // A tool call can outlive its connection, so a reply may find the socket
+    // gone. A client that went away is ordinary: say nothing.
+    const send = (msg: object) => { if (!sock.destroyed && sock.writable) sock.write(encode(msg)); };
+    const reply = (result: unknown) => send({ jsonrpc: "2.0", id: req.id, result });
+    const fail = (code: number, message: string) => send({ jsonrpc: "2.0", id: req.id, error: { code, message } });
     switch (req.method) {
       case "initialize":
         if (req.params?.auth?.token !== this.token) { fail(-32001, "bad token"); sock.end(); return; }
@@ -66,8 +69,16 @@ export class BridgeServer {
         break;
       case "tools/call": {
         if (!state.authed) { fail(-32001, "not authenticated"); break; }
-        const { text, isError } = await this.tools.call(req.params?.name, req.params?.arguments, sock);
-        reply({ content: [{ type: "text", text }], isError });
+        // Dispatched in order, but not awaited: the call runs on its own and
+        // answers by id when it finishes. The harness multiplexes calls on one
+        // connection and sends review_cancel on the same connection as the
+        // review_diff it withdraws; awaiting here queued the cancel behind the
+        // very call it was meant to cancel, and every later tool call behind
+        // an open diff. ToolRegistry.call never rejects (a throwing handler is
+        // an isError result), so the catch is only a last line of defence.
+        void this.tools.call(req.params?.name, req.params?.arguments, sock)
+          .then(({ text, isError }) => reply({ content: [{ type: "text", text }], isError }))
+          .catch((e: any) => fail(-32603, e?.message ?? String(e)));
         break;
       }
       case "ping":
