@@ -33,6 +33,14 @@ The same deadlock was live in the shipped VS Code extension (1.1.0) and is fixed
 | R-14 | `debug_configs` lists every loaded project that is not a solution folder; the startability heuristic is gone. | The heuristic read `OutputType` backwards and could not see projects in solution folders. Over-listing is harmless; under-listing hides a project. | `debug_start` on a class library fails with Visual Studio's own message. |
 | R-15 | Every Activity Log entry is mirrored to `~/.be-code/visualstudio.log`. | The Activity Log may not be writable from a background thread, and it is the owner's only diagnostic surface. | One more file in the dotdir. |
 
+| R-16 | `Lock.Covers` folds case on Windows. | Found by the whole-branch review: Visual Studio, a PowerShell `cd` and VS Code each report the same directory in a different case. The byte-exact comparison had always been there, hidden by `Discover`'s newest-lock fallback; attaching without `--ide` has no fallback and is silent when it misses. | None on Linux or macOS; on Windows two directories differing only in case are one directory anyway. |
+
+## The whole-branch review
+
+One review at the end, scoped to what a task review cannot see. It found the Windows case mismatch above (the likeliest cause of the checklist's attach step failing, and invisible from Linux); that an attached Visual Studio was announced as "VS Code connected" and a review it answered as "answered in VS Code"; that the system prompt still recommended the debugger's `program` form, which Visual Studio refuses and its own tool description warns against; that the C# server did not answer `ping` though the contract says it does; a manifest regeneration switch that any exported value could trip; stale status and version-floor text; and no notice for the MIT-licensed .NET assemblies the `.vsix` now ships. All fixed. It confirmed an ordinary session end writes nothing alarming to `visualstudio.log`, that a user who installs neither extension sees no change beyond `~/.be-code/ide` being created, and that `make release` needs no .NET SDK.
+
+For the owner to decide, not changed here: the repository has **no LICENSE file**, though `vscode/package.json` declares MIT; and the Visual Studio extension's own version is `0.1.0` (it is what the lock file and `serverInfo` report) while the release is 0.12.0.
+
 Accepted limits of 0.12.0 (owner agreed): definition, references and hover for C# and VB only; launch profiles listed but not selectable; diagnostics are what the Error List currently shows.
 
 ## Open — not blocking
