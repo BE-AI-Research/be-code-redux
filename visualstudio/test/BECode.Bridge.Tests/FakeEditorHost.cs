@@ -24,8 +24,8 @@ namespace BECode.Bridge.Tests
         public Func<string, int, int, int, CancellationToken, Task<IReadOnlyList<Location>?>>? OnReferences { get; set; }
         public Func<string, int, int, CancellationToken, Task<string?>>? OnHover { get; set; }
 
-        public Func<string?, string, CancellationToken, Task<IReadOnlyList<Diagnostic>>> OnDiagnostics { get; set; } =
-            (path, severity, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>());
+        public Func<string?, CancellationToken, Task<IReadOnlyList<Diagnostic>>> OnDiagnostics { get; set; } =
+            (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>());
 
         public FakeDebugHost DebugHost { get; } = new FakeDebugHost();
 
@@ -56,8 +56,8 @@ namespace BECode.Bridge.Tests
         public Task<string?> HoverAsync(string path, int line, int col, CancellationToken ct) =>
             OnHover != null ? OnHover(path, line, col, ct) : Task.FromResult<string?>("");
 
-        public Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, string severity, CancellationToken ct) =>
-            OnDiagnostics(path, severity, ct);
+        public Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, CancellationToken ct) =>
+            OnDiagnostics(path, ct);
 
         public IDebugHost Debug => DebugHost;
 

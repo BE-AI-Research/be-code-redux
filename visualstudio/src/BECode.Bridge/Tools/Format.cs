@@ -3,9 +3,37 @@ using System.Linq;
 
 namespace BECode.Bridge.Tools
 {
-    /// <summary>Ports vscode/src/lib/format.ts's <c>formatDiagnostics</c> (used by <c>diagnostics</c>) and <c>severitiesFor</c>'s counting rule (errors/warnings only in the summary line).</summary>
+    /// <summary>Ports vscode/src/lib/format.ts's <c>formatDiagnostics</c> and <c>severitiesFor</c> (used by <c>diagnostics</c>).</summary>
     internal static class Format
     {
+        /// <summary>
+        /// Fix round 1, F3 (Ruling R-6): the default (null or unrecognised)
+        /// is errors and warnings — the manifest's own description says so
+        /// ("severity: error, warning or all (default: errors and
+        /// warnings)"), and this is vscode/src/lib/format.ts's
+        /// <c>severitiesFor</c> verbatim. The task brief's "defaults to all"
+        /// was wrong.
+        /// </summary>
+        public static IReadOnlyList<string> SeveritiesFor(string? severity)
+        {
+            if (severity == "all")
+            {
+                return new[] { "error", "warning", "info", "hint" };
+            }
+
+            if (severity == "error")
+            {
+                return new[] { "error" };
+            }
+
+            if (severity == "warning")
+            {
+                return new[] { "warning" };
+            }
+
+            return new[] { "error", "warning" };
+        }
+
         public static string Diagnostics(IReadOnlyList<Diagnostic> items)
         {
             if (items.Count == 0)

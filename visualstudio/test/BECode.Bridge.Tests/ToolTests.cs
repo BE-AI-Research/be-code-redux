@@ -289,29 +289,66 @@ namespace BECode.Bridge.Tests
         // ---- diagnostics (vscode/src/lib/format.ts's formatDiagnostics/severitiesFor) ----
 
         [Fact]
-        public async Task DiagnosticsDefaultsSeverityToAll()
+        public async Task DiagnosticsDefaultsSeverityToErrorsAndWarnings()
         {
+            // F3 (Ruling R-6 — the task brief's "defaults to all" was wrong):
+            // the default is errors and warnings, as the manifest's own
+            // description says ("severity: error, warning or all (default:
+            // errors and warnings)") and vscode/src/lib/format.ts's
+            // severitiesFor implements. The host no longer takes a severity
+            // parameter at all (Ruling S4): it returns everything, and the
+            // tool filters.
             var host = NewHost();
-            string? seenSeverity = "not set";
-            host.OnDiagnostics = (path, severity, ct) => { seenSeverity = severity; return Task.FromResult<System.Collections.Generic.IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>()); };
+            host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
+            {
+                new Diagnostic("a.go", 1, 1, "error", "go", "e1"),
+                new Diagnostic("a.go", 2, 1, "warning", "go", "w1"),
+                new Diagnostic("a.go", 3, 1, "info", "go", "i1"),
+                new Diagnostic("a.go", 4, 1, "hint", "go", "h1"),
+            });
             var registry = new ToolRegistry(host);
 
-            await registry.CallAsync("diagnostics", Args("{}"), new object(), CancellationToken.None);
+            var result = await registry.CallAsync("diagnostics", Args("{}"), new object(), CancellationToken.None);
 
-            Assert.Equal("all", seenSeverity);
+            Assert.Contains("e1", result.Text);
+            Assert.Contains("w1", result.Text);
+            Assert.DoesNotContain("i1", result.Text);
+            Assert.DoesNotContain("h1", result.Text);
+            Assert.StartsWith("1 error, 1 warning in 1 file", result.Text);
         }
 
         [Fact]
-        public async Task DiagnosticsPassesAnExplicitSeverityThrough()
+        public async Task DiagnosticsWithSeverityErrorFiltersOutEverythingElse()
         {
             var host = NewHost();
-            string? seenSeverity = null;
-            host.OnDiagnostics = (path, severity, ct) => { seenSeverity = severity; return Task.FromResult<System.Collections.Generic.IReadOnlyList<Diagnostic>>(Array.Empty<Diagnostic>()); };
+            host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
+            {
+                new Diagnostic("a.go", 1, 1, "error", "go", "e1"),
+                new Diagnostic("a.go", 2, 1, "warning", "go", "w1"),
+            });
             var registry = new ToolRegistry(host);
 
-            await registry.CallAsync("diagnostics", Args("{\"severity\":\"error\"}"), new object(), CancellationToken.None);
+            var result = await registry.CallAsync("diagnostics", Args("{\"severity\":\"error\"}"), new object(), CancellationToken.None);
 
-            Assert.Equal("error", seenSeverity);
+            Assert.Contains("e1", result.Text);
+            Assert.DoesNotContain("w1", result.Text);
+        }
+
+        [Fact]
+        public async Task DiagnosticsWithSeverityAllIncludesInfoAndHint()
+        {
+            var host = NewHost();
+            host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
+            {
+                new Diagnostic("a.go", 3, 1, "info", "go", "i1"),
+                new Diagnostic("a.go", 4, 1, "hint", "go", "h1"),
+            });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("diagnostics", Args("{\"severity\":\"all\"}"), new object(), CancellationToken.None);
+
+            Assert.Contains("i1", result.Text);
+            Assert.Contains("h1", result.Text);
         }
 
         [Fact]
@@ -329,7 +366,7 @@ namespace BECode.Bridge.Tests
         {
             // Ported from vscode/test/format.test.ts's "groups by file with a count summary first".
             var host = NewHost();
-            host.OnDiagnostics = (path, severity, ct) => Task.FromResult<System.Collections.Generic.IReadOnlyList<Diagnostic>>(new[]
+            host.OnDiagnostics = (path, ct) => Task.FromResult<IReadOnlyList<Diagnostic>>(new[]
             {
                 new Diagnostic("b.go", 3, 1, "error", "go", "undefined: x"),
                 new Diagnostic("a.py", 10, 5, "warning", "Pylance", "unused"),

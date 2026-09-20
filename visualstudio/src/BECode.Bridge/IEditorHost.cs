@@ -74,7 +74,14 @@ namespace BECode.Bridge
         Task<IReadOnlyList<Location>?> DefinitionAsync(string path, int line, int col, CancellationToken ct);
         Task<IReadOnlyList<Location>?> ReferencesAsync(string path, int line, int col, int max, CancellationToken ct);
         Task<string?> HoverAsync(string path, int line, int col, CancellationToken ct);
-        Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, string severity, CancellationToken ct);
+
+        /// <summary>
+        /// Every diagnostic for <paramref name="path"/>, or for the whole
+        /// solution when <paramref name="path"/> is null — no severity
+        /// filtering here (Ruling S4): <c>DiagnosticsTools</c> filters with
+        /// the ported <c>severitiesFor</c>.
+        /// </summary>
+        Task<IReadOnlyList<Diagnostic>> DiagnosticsAsync(string? path, CancellationToken ct);
         IDebugHost Debug { get; }
         Task<ReviewDecision> ReviewDiffAsync(ReviewRequest request, CancellationToken ct);
         Task<bool> ReviewCancelAsync(string path);
