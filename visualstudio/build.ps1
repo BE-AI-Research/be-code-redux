@@ -180,6 +180,18 @@ if (-not $bridgeEntry) {
     exit 1
 }
 
+# Both BE-Code extensions package to a ".vsix", so the file is named for its
+# editor and put beside the VS Code one in the repository's dist\ folder. The
+# name is set here from the manifest's own version rather than trusted from
+# the build, so it is right even if the project's container name is not.
+[xml]$manifest = Get-Content (Join-Path (Split-Path -Parent $vsixProject) "source.extension.vsixmanifest")
+$extensionVersion = $manifest.PackageManifest.Metadata.Identity.Version
+$distDir = Join-Path (Split-Path -Parent $repoRoot) "dist"
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+$named = Join-Path $distDir "be-code-visualstudio-$extensionVersion.vsix"
+Copy-Item -Path $vsix.FullName -Destination $named -Force
+
 Write-Host ""
-Write-Host "build.ps1: built $($vsix.FullName)"
-Write-Output $vsix.FullName
+Write-Host "build.ps1: built $named"
+Write-Host "           (BE-Code for Visual Studio $extensionVersion - the VS Code extension is be-code-vscode-<version>.vsix)"
+Write-Output $named

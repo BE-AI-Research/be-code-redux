@@ -20,7 +20,7 @@ that had been live since shared reviews shipped.
   proposed-write diff in Visual Studio's own difference viewer with Accept, Accept all and
   Reject in an information bar. **The Visual Studio layer compiles against the real SDK —
   on Linux, warnings as errors, SDK analyzers on — and has never been run.** The protocol,
-  the lock file and every tool underneath it are tested (272 tests), and
+  the lock file and every tool underneath it are tested (275 tests), and
   `internal/ide/contract_test.go` drives the real Go client against the real bridge, every
   tool, including a review cancelled mid-flight. `visualstudio/WINDOWS-CHECKLIST.md` is
   what proves the rest, and `visualstudio/README.md` lists what this version does not do:
@@ -38,6 +38,11 @@ that had been live since shared reviews shipped.
 - The attached editor is named for what it is (`Visual Studio connected: 16 tools`,
   `answered in Visual Studio`), and with Visual Studio attached the system prompt points the
   model at `ide_debug_configs` instead of the `program` form Visual Studio refuses.
+- **Two extensions, two names.** Both package to a `.vsix`, and each keeps its own version,
+  so the files and the names shown in each editor now say which is which:
+  `be-code-vscode-<version>.vsix` is **BE-Code for VS Code** (1.1.1; it was
+  `be-code-<version>.vsix`, and its extension id is unchanged, so it upgrades in place), and
+  `be-code-visualstudio-<version>.vsix` is **BE-Code for Visual Studio** (0.1.0).
 - `make -f build.mk visualstudio-test` compiles the Visual Studio projects and runs their
   tests where the .NET SDK is installed. `verify` does not need it: the contract test
   skips without `dotnet`, and under `-short`.

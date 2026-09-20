@@ -1,6 +1,6 @@
 # VS Code editor bridge — live checklist
 
-1. make -f build.mk release; install dist/be-code-<version>.vsix (Extensions → ... → Install from VSIX); reload window.
+1. make -f build.mk release; install dist/be-code-vscode-<version>.vsix (Extensions → ... → Install from VSIX); reload window.
 2. Status bar shows "BE-Code: listening". Run "BE-Code: Open terminal". Expect "VS Code connected: 16 tools" and the ⌘ ide marker.
 3. Go project: introduce a compile error; ask "what errors are there?" → expect ide_diagnostics with the error line.
 4. Ask "where is X defined and who calls it?" → expect ide_definition / ide_references.

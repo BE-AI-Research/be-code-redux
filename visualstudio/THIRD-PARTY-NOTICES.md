@@ -1,6 +1,6 @@
 # Third-party notices
 
-The BE-Code Visual Studio extension (`BECode.VisualStudio.vsix`) redistributes the following .NET libraries, unmodified, as published by Microsoft on NuGet. They are carried so that the bridge can load inside `devenv.exe` on a Visual Studio that does not itself provide one of them; where Visual Studio provides its own copy, Visual Studio's is the one that loads.
+The BE-Code Visual Studio extension (`be-code-visualstudio-<version>.vsix`) redistributes the following .NET libraries, unmodified, as published by Microsoft on NuGet. They are carried so that the bridge can load inside `devenv.exe` on a Visual Studio that does not itself provide one of them; where Visual Studio provides its own copy, Visual Studio's is the one that loads.
 
 | Assembly | NuGet package |
 |---|---|

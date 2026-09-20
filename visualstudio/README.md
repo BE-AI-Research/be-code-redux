@@ -10,7 +10,7 @@ It has no window of its own. Install it, open a solution or a folder, and run `b
 
 | Part | State |
 |---|---|
-| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 272 tests |
+| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 275 tests |
 | The real BE-Code client against the real bridge, every tool (`internal/ide/contract_test.go`) | Tested on Linux through a scripted host |
 | The Visual Studio host (`src/BECode.VisualStudio`) | **Compiles; never run** |
 | Packaging the `.vsix` (`build.ps1`) | **Never executed** |
@@ -28,10 +28,10 @@ cd visualstudio
 .\build.ps1
 ```
 
-It finds MSBuild with `vswhere`, restores, builds Release and prints the path of `BECode.VisualStudio.vsix`. Double-click the file, or for a particular instance:
+It finds MSBuild with `vswhere`, restores, builds Release, and puts `be-code-visualstudio-<version>.vsix` in the repository's `dist\` folder, beside the VS Code extension's `be-code-vscode-<version>.vsix`. Both are `.vsix` files; the name is how to tell them apart, and each keeps its own version number — this extension's is independent of BE-Code's and of the VS Code extension's. Double-click the file, or for a particular instance:
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VSIXInstaller.exe" path\to\BECode.VisualStudio.vsix
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VSIXInstaller.exe" ..\dist\be-code-visualstudio-0.1.0.vsix
 ```
 
 One `.vsix` serves both 2022 and 2026; install it into each. Restart Visual Studio afterwards.
