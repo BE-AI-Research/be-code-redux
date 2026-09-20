@@ -9,6 +9,11 @@
     <OutputType>Library</OutputType>
     <RootNamespace>BECode.VisualStudio</RootNamespace>
     <AssemblyName>BECode.VisualStudio</AssemblyName>
+    <!-- This extension's own version, separate from BE-Code's and from the
+         VS Code extension's. It is also written in source.extension.vsixmanifest
+         (what the installer shows) and BECodePackage.Version (what the lock
+         file reports); ExtensionIdentityTests fails if the three disagree. -->
+    <BECodeExtensionVersion>0.1.0</BECodeExtensionVersion>
     <IsPackable>false</IsPackable>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <!-- This project is compiled here (Linux) but never RUN here: only
@@ -83,6 +88,9 @@
     <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
     <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
     <CreateVsixContainer>true</CreateVsixContainer>
+    <!-- Both BE-Code extensions package to a ".vsix"; the file name is what
+         tells a person which editor this one is for. -->
+    <TargetVsixContainerName>be-code-visualstudio-$(BECodeExtensionVersion).vsix</TargetVsixContainerName>
     <DeployExtension>false</DeployExtension>
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
     <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>

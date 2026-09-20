@@ -14,9 +14,9 @@ Do it once on Visual Studio 2022 (17.6 or later) and once on 2026. Tick as you g
 
 ## A. Build, install, load — the likeliest first failure
 
-- [ ] **A1.** `cd visualstudio; .\build.ps1` finishes and prints the path of a `.vsix`. It also lists what is inside: `BECode.VisualStudio.dll`, `BECode.Bridge.dll`, `System.Text.Json.dll`, `System.Threading.Channels.dll` and the rest of the small BCL set must be there; no `Microsoft.CodeAnalysis*`, no `Microsoft.VisualStudio*`.
+- [ ] **A1.** `cd visualstudio; .\build.ps1` finishes and prints the path of `dist\be-code-visualstudio-0.1.0.vsix`. *(Not `be-code-vscode-…vsix` — that one is the VS Code extension, and Visual Studio will refuse it.)* It also lists what is inside: `BECode.VisualStudio.dll`, `BECode.Bridge.dll`, `System.Text.Json.dll`, `System.Threading.Channels.dll` and the rest of the small BCL set must be there; no `Microsoft.CodeAnalysis*`, no `Microsoft.VisualStudio*`.
   *If it says the extension-development workload is missing, install it from the Visual Studio Installer.*
-- [ ] **A2.** The `.vsix` installs into Visual Studio 2022. *(On an Arm64 machine this is also the test that the Arm64 install targets are right.)*
+- [ ] **A2.** The `.vsix` installs into Visual Studio 2022, and **Extensions › Manage Extensions › Installed** lists it as **BE-Code for Visual Studio**, version 0.1.0. *(On an Arm64 machine this is also the test that the Arm64 install targets are right.)*
 - [ ] **A3.** The same `.vsix` installs into Visual Studio 2026.
 - [ ] **A4.** Start Visual Studio **with no solution**. Within a few seconds `%USERPROFILE%\.be-code\visualstudio.log` gains the line `listening on port N, 0 workspace folder(s), VS <version>`, and `%USERPROFILE%\.be-code\ide\<pid>.json` exists with `"ideName":"visualstudio"` and `"workspaceFolders":[]`.
   *No log line and no lock file means the package loaded but could not resolve `BECode.Bridge.dll` or one of its dependencies inside `devenv.exe` — the single most likely failure. The Activity Log will name the assembly (`FileNotFoundException` / `FileLoadException`). Send it back.*

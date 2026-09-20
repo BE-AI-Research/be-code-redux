@@ -2,7 +2,7 @@
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="BECode.VisualStudio.4f0c8f6a-3b2f-4c2b-9e6a-8a2c1c7a9d5e" Version="0.1.0" Language="en-US" Publisher="BE-Code" />
-    <DisplayName>BE-Code</DisplayName>
+    <DisplayName>BE-Code for Visual Studio</DisplayName>
     <Description xml:space="preserve">Connects BE-Code (an offline-first agentic coding CLI for local LLMs) to Visual Studio: active file/selection, diagnostics, go-to-definition/references/hover, a diff review of every proposed write, and the debugger.</Description>
   </Metadata>
   <Installation>

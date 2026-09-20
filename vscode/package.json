@@ -1,6 +1,6 @@
 {
   "name": "be-code",
-  "displayName": "BE-Code",
+  "displayName": "BE-Code for VS Code",
   "description": "Editor bridge for BE-Code: diagnostics, symbols, debugger and diff review for the local coding agent.",
   "version": "1.1.1",
   "publisher": "be-ai-research",
@@ -50,7 +50,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "test": "npm run typecheck && vitest run",
-    "package": "npm run build && vsce package --no-dependencies -o ../dist/be-code-$npm_package_version.vsix",
+    "package": "npm run build && vsce package --no-dependencies -o ../dist/be-code-vscode-$npm_package_version.vsix",
     "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {
