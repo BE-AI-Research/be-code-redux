@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -16,14 +17,28 @@ import (
 // funcProvider answers each request through a function, so tests can react
 // to what the agent actually sent (compaction prompts, message counts).
 type funcProvider struct {
-	fn   func(req provider.ChatRequest) (*provider.ChatResponse, error)
+	fn func(req provider.ChatRequest) (*provider.ChatResponse, error)
+	// reqs is behind a mutex: a compaction fired by a model switch runs on
+	// a goroutine of its own, so a test watching what has been sent is not
+	// the goroutine that sent it.
+	mu   sync.Mutex
 	reqs []provider.ChatRequest
 }
 
 func (f *funcProvider) Name() string { return "func" }
 func (f *funcProvider) Chat(_ context.Context, req provider.ChatRequest, _ provider.StreamFunc) (*provider.ChatResponse, error) {
+	f.mu.Lock()
 	f.reqs = append(f.reqs, req)
-	return f.fn(req)
+	fn := f.fn
+	f.mu.Unlock()
+	return fn(req)
+}
+
+// requests is a copy of what has been sent so far.
+func (f *funcProvider) requests() []provider.ChatRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]provider.ChatRequest(nil), f.reqs...)
 }
 func (f *funcProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (f *funcProvider) Ping(context.Context) (string, error)                     { return "ok", nil }

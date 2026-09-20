@@ -31,8 +31,9 @@ func (a *Agent) planAgent() *Agent {
 	scratch := &Agent{
 		Cfg: a.Cfg, Provider: a.Provider, Model: a.Model, Tools: readOnly,
 		Profile: a.Profile, compat: a.compat, projectNotes: a.projectNotes,
-		repoMap: a.repoMap, Events: a.Events, Window: a.Window,
+		repoMap: a.repoMap, Events: a.Events,
 	}
+	scratch.window.Store(int64(a.Window()))
 	scratch.knownTools = map[string]bool{}
 	for _, n := range readOnly.Names() {
 		scratch.knownTools[n] = true
@@ -62,9 +63,7 @@ func (a *Agent) planAgent() *Agent {
 
 // ExecutePlan runs the approved plan through the normal loop.
 func (a *Agent) ExecutePlan(ctx context.Context, request, plan string) (string, *ReviewedReport, error) {
-	if a.Engine != nil {
-		a.Engine.SetPlan(request, engine.ParsePlanSteps(plan))
-	}
+	a.engineDo("plan", func(st *engine.Store) { st.Plan(request, engine.ParsePlanSteps(plan)) })
 	return a.RunFull(ctx, fmt.Sprintf(planExecutePrefix, request, plan))
 }
 

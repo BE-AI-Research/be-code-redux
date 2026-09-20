@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -95,20 +96,31 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 	if old := s.ask; old != nil {
 		if old.Kind == askPicker && a.Kind != askPicker {
 			s.ask = nil
+			s.releaseAskLocked()
 			select {
 			case old.reply <- askAnswer{}:
 			default:
 			}
 			s.broadcast(askResolvedMsg{gen: old.Gen, by: "withdrawn", from: noClient})
-		} else {
-			if a.Kind != askPicker {
-				// An approval or a plan: its caller reads the refusal as a
-				// denial, so the transcript has to carry what happened.
-				s.appendEntryLocked(entry{Kind: entryWarn,
-					Text: "another prompt is already open; this request was not shown and counts as denied"})
-			}
+		} else if a.Kind == askPicker {
+			// A list nobody is waiting on gives way to the open question.
 			s.mu.Unlock()
 			return askAnswer{Refused: true}
+		} else {
+			// Two real questions: the newcomer waits its turn. Refusing it
+			// used to read as a denial — a consent modal raised by /model
+			// made the agent's next file write "denied" with nobody having
+			// been asked, and the reverse recorded a refused reload. It
+			// queues behind the open question instead, and its own context
+			// still bounds the wait.
+			free := s.askFree
+			s.mu.Unlock()
+			select {
+			case <-free:
+				return s.Ask(ctx, a)
+			case <-ctx.Done():
+				return askAnswer{Refused: true}
+			}
 		}
 	}
 	s.askGen++
@@ -117,6 +129,7 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 		a.raised(a.Gen)
 	}
 	s.ask = a
+	s.askFree = make(chan struct{})
 	if s.quitCh == nil {
 		s.quitCh = make(chan struct{})
 	}
@@ -138,7 +151,14 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 			return askAnswer{}
 		}
 	case <-ctx.Done():
-		s.CancelAsk(a.Gen, "")
+		// A deadline means nobody answered, and the people looking at the
+		// modal deserve to know why it closed. A cancellation is the user's
+		// own Esc and needs no explaining.
+		note := ""
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			note = noAnswerNote
+		}
+		s.CancelAsk(a.Gen, note)
 		// An answer given at the very instant the context ended is already
 		// in the (buffered) channel and is the real verdict: a terminal
 		// approved this write, so reporting a denial would be a lie. If
@@ -199,6 +219,7 @@ func (s *Session) Answer(gen int, ans askAnswer, from int, v *View) (tea.Cmd, bo
 	}
 	a.reply <- ans
 	s.ask = nil
+	s.releaseAskLocked()
 	s.broadcast(askResolvedMsg{gen: gen, by: s.clientLabel(from), from: from})
 	return cmd, true
 }
@@ -214,6 +235,7 @@ func (s *Session) CancelAsk(gen int, by string) {
 		return
 	}
 	s.ask = nil
+	s.releaseAskLocked()
 	select {
 	case a.reply <- askAnswer{}:
 	default:
@@ -257,16 +279,43 @@ func (t *reviewTerminal) Withdraw(note string) { t.s.CancelAsk(int(t.gen.Load())
 
 // approveFromAgent bridges the agent goroutine into the shared ask: the
 // approval modal every attached terminal sees, and any of them may answer.
+// It waits on the session's own lifetime, which is right for a tool call:
+// the thing that raised it lives as long as the session does.
 func (s *Session) approveFromAgent(action, detail string) bool {
+	ctx := s.rootCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.approveFromAgentCtx(ctx, action, detail)
+}
+
+// approveFromAgentCtx is the same modal for an asker that can give up on
+// its own question — a model-parameter resolution under a deadline. Ask
+// already withdraws on ctx (CancelAsk, broadcast to every view), so the
+// prompt closes everywhere rather than outliving the goroutine waiting for
+// it. See tools.ApproveCtxFunc.
+func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string) bool {
 	if action == "shell" && s.cfg.AutoApproveShell {
 		return true
 	}
 	if action == "file_write" && !s.cfg.ApproveFileWrites {
 		return true
 	}
-	ctx := s.rootCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return s.Ask(ctx, &ask{Kind: askApproval, Action: action, Detail: detail}).OK
+}
+
+// noAnswerNote is what every terminal is shown when a question is withdrawn
+// because its deadline passed with nobody answering.
+const noAnswerNote = "no answer; question withdrawn"
+
+// releaseAskLocked wakes whatever is queued behind the question that just
+// resolved. Callers hold s.mu.
+func (s *Session) releaseAskLocked() {
+	if s.askFree != nil {
+		close(s.askFree)
+		s.askFree = nil
+	}
 }

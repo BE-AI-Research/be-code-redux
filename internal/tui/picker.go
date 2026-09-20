@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
@@ -94,17 +95,15 @@ func (m *View) askModelPicker() tea.Cmd {
 	// loading goroutine: /provider can replace it while this list loads.
 	prov, ctx := m.prov, m.rootCtx
 	return m.askList("Select model", func() ([]pickItem, error) {
-		models, err := prov.ListModels(ctx)
+		// Details, not ListModels: the window a model is loaded with and
+		// whether it is resident at all are what the list is being asked.
+		models, err := provider.ModelDetails(ctx, prov)
 		if err != nil {
 			return nil, err
 		}
 		items := make([]pickItem, 0, len(models))
 		for _, mo := range models {
-			desc := ""
-			if mo.SizeBytes > 0 {
-				desc = fmt.Sprintf("%.1fGB %s %s", float64(mo.SizeBytes)/1e9, mo.Family, mo.Quantization)
-			}
-			items = append(items, pickItem{id: mo.ID, label: mo.ID, desc: desc})
+			items = append(items, pickItem{id: mo.ID, label: mo.ID, desc: mo.Describe()})
 		}
 		return items, nil
 	}, func(v *View, id string, _ int) tea.Cmd {

@@ -120,8 +120,11 @@ type Session struct {
 	// — a tool approval, a plan, a shared picker — and askGen numbers the
 	// asks so an answer or a withdrawal can be matched to the one it means
 	// (see ask.go). Both are guarded by mu like everything else here.
-	ask    *ask
-	askGen int
+	ask *ask
+	// askFree is closed when the open question resolves; a second question
+	// queues on it rather than being refused as a denial.
+	askFree chan struct{}
+	askGen  int
 
 	viewsMu sync.Mutex
 	views   map[int]*View // each View carries its mailbox (v.mb)
@@ -202,6 +205,7 @@ func (s *Session) seedResumeLocked(sess *store.Session) {
 func wireEvents(s *Session) {
 	ag := s.ag
 	ag.Tools.Approve = s.approveFromAgent
+	ag.Tools.ApproveCtx = s.approveFromAgentCtx
 	ag.Events = agent.Events{
 		OnDelta:     s.onDelta,
 		OnToolStart: s.onToolStart,

@@ -447,7 +447,8 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 	scratch := &Agent{
 		Cfg: &cfg, Provider: cp, Model: cw.Model, Tools: readOnly,
 		Profile: prof, compat: compat, projectNotes: a.projectNotes,
-		Window: 0,
+		// window stays 0: the co-worker's own backend decides its budget,
+		// and the primary's window says nothing about it.
 		// The same retry backoff and stall threshold the primary runs on:
 		// a struct literal starts them at zero, which would retry a failing
 		// co-worker with no delay at all and never say a word about a

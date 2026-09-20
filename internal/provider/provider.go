@@ -103,11 +103,42 @@ type BackendStatus interface {
 	Status(ctx context.Context, model string) (window int, loaded bool, err error)
 }
 
+// NativeFallbacker is implemented by providers that prefer a native
+// endpoint but can fall back to the OpenAI-compatible one against a server
+// that does not serve it (Ollama). The agent reports the downgrade once,
+// because the fallback silently loses what the native path was for.
+type NativeFallbacker interface {
+	NativeFallback() bool
+}
+
 // KeepAliver is implemented by providers that can extend a model's
 // residency (Ollama keep_alive), so idle expiry between prompts does not
 // evict it and force a slow reload plus prompt re-processing.
 type KeepAliver interface {
 	KeepAlive(ctx context.Context, model string, d time.Duration) error
+}
+
+// WindowClearer is implemented by providers that carry a context window on
+// the wire (Ollama's num_ctx). Clearing it means "send no window", which is
+// not the same as sending zero: the server keeps whatever the model is
+// already loaded with, and nothing reloads.
+//
+// The agent uses it for the gap between a model switch and the loader's
+// answer for the new model. Options belong to the endpoint, so in that gap
+// the provider is still carrying the previous model's window, and putting
+// that on the wire would reload the new model without anybody being asked.
+type WindowClearer interface {
+	ClearWindow()
+}
+
+// ModelDetailer is implemented by providers that can say more about their
+// models than a name and a size: the window each one is currently loaded
+// with, and whether it is resident at all. That is what a model picker is
+// really being asked — "what am I choosing between" — and it is the one
+// place a user can see, before switching, that a model is already held by
+// somebody else at a window our own config disagrees with.
+type ModelDetailer interface {
+	Details(ctx context.Context) ([]ModelDetail, error)
 }
 
 // ModelInfo describes an available model.

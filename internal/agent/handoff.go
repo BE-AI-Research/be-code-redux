@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
@@ -44,11 +45,13 @@ func (a *Agent) WriteHandoff(ctx context.Context, withModel bool) (string, error
 		}
 		h = a.heuristicHandoff()
 	}
-	if a.Engine != nil {
+	if a.engine() != nil {
 		// Drop the previous exit's line first: a resumed briefing carries
 		// one, and appending would stack a copy per exit.
 		h = stripStoppedAt(h)
-		if at := a.Engine.StoppedAt(); at != "" {
+		at := ""
+		a.engineDo("stopped at", func(st *engine.Store) { at = st.StoppedAt() })
+		if at != "" {
 			h += "\n\nStopped at: " + at
 		}
 	}
@@ -92,7 +95,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	defer cancel()
 	const capBytes = 16 * 1024
 	var b strings.Builder
-	if prior := priorBriefing(a.handoff); prior != "" {
+	if prior := priorBriefing(a.Handoff()); prior != "" {
 		fmt.Fprintf(&b, "Briefing from the session before this one:\n%s\n\n", prior)
 	}
 	b.WriteString("Transcript (most recent last):\n")
@@ -138,7 +141,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 // heuristicHandoff is the no-model fallback: task, files touched, last reply.
 func (a *Agent) heuristicHandoff() string {
 	var b strings.Builder
-	if prior := priorBriefing(a.handoff); prior != "" {
+	if prior := priorBriefing(a.Handoff()); prior != "" {
 		fmt.Fprintf(&b, "Previous briefing:\n%s\n\n", prior)
 	}
 	task, last := "", ""
@@ -182,15 +185,43 @@ func (a *Agent) heuristicHandoff() string {
 
 // Resume loads a saved conversation into this agent's history, carrying the
 // previous session's handoff into the system prompt.
+//
+// It takes the turn lock, and it must: replacing the transcript is the
+// largest rewrite there is, and it is no longer the only one that can be in
+// flight. A post-switch compaction parked in its model call is holding the
+// old conversation's messages; without this lock it would finish *after*
+// the resume and write that conversation's summary over the transcript the
+// user just loaded — which the next autosave would then commit to the
+// resumed session's own file. Cross-session corruption, from two commands
+// that look unrelated.
+//
+// Like ClearHistory and CompactNow it must therefore never be called from
+// inside a Bubble Tea Update; see the note on those.
 func (a *Agent) Resume(s *store.Session) {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	a.sessionMu.Lock()
 	a.handoff = s.Handoff
+	a.sessionMu.Unlock()
+	// modelMu for the system prompt, in the order everything else takes
+	// them: turn lock first, then this one.
+	a.modelMu.Lock()
 	a.History.System.Content = a.composeSystem("")
+	a.modelMu.Unlock()
 }
 
 // Handoff returns the briefing carried over from the resumed session.
-func (a *Agent) Handoff() string { return a.handoff }
+//
+// Under sessionMu, with every other read of the field: /handoff is
+// busy-safe, so a UI asks for it whenever it likes, while /resume writes it
+// from a goroutine of its own.
+func (a *Agent) Handoff() string {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.handoff
+}
 
 // ApplyWindow clamps the history budget to the backend's real context
 // window and reserves generation headroom. Returns true when the configured
@@ -199,7 +230,7 @@ func (a *Agent) ApplyWindow(window int) bool {
 	if window <= 0 {
 		return false
 	}
-	a.Window = window
+	a.window.Store(int64(window))
 	// The budget follows the window both ways, never above the configured
 	// context_tokens: a shrunken window clamps it, a restored one gives it
 	// back.
@@ -207,13 +238,20 @@ func (a *Agent) ApplyWindow(window int) bool {
 	if a.Cfg.ContextTokens > 0 && target > a.Cfg.ContextTokens {
 		target = a.Cfg.ContextTokens
 	}
-	// Under the history's lock: a consultation started from a UI goroutine
-	// reads these through History.Scalars while this runs.
+	// Both scalars in one critical section, and the reserve computed before
+	// it (reserveFor takes modelMu, and the order is always modelMu then
+	// this one). Two separate sections would leave a window in which the
+	// new budget stands beside the old reserve — or, going the other way, a
+	// reserve larger than the budget, which Limit would report as its 512
+	// floor to whatever UI or notice happened to read it just then.
+	reserve := a.reserveFor(window)
 	a.History.mu.Lock()
 	clamped := a.History.Budget > window
 	a.History.Budget = target
+	a.History.Reserve = reserve
+	limit := a.History.Budget - a.History.Reserve
 	a.History.mu.Unlock()
-	a.applyReserve(window)
+	a.capToolOutput(limit)
 	return clamped
 }
 
@@ -221,11 +259,18 @@ func (a *Agent) ApplyWindow(window int) bool {
 // Reasoning models spend a large, unpredictable share of the window
 // thinking before the first answer token, so they get a third of it;
 // plain models a quarter. An explicit max_tokens wins.
+//
+// It takes modelMu because the profile it reads is what a model switch
+// rewrites, and the window it is sizing for may be arriving on
+// resolveModel's goroutine while the switch itself ran on a UI's.
 func (a *Agent) reserveFor(window int) int {
 	if a.Cfg.MaxTokens > 0 {
 		return a.Cfg.MaxTokens
 	}
-	if a.Profile.StripThink {
+	a.modelMu.Lock()
+	thinking := a.Profile.StripThink
+	a.modelMu.Unlock()
+	if thinking {
 		r := window / 3
 		if r < 4096 {
 			r = 4096
@@ -253,15 +298,28 @@ func (a *Agent) applyReserve(window int) {
 	reserve := a.reserveFor(window)
 	a.History.mu.Lock()
 	a.History.Reserve = reserve
+	limit := a.History.Budget - reserve
 	a.History.mu.Unlock()
-	if a.Tools != nil {
-		capBytes := a.History.Limit() * 3 / 4
-		if capBytes > 24*1024 {
-			capBytes = 24 * 1024
-		}
-		if capBytes < 4*1024 {
-			capBytes = 4 * 1024
-		}
-		a.Tools.MaxOutput = capBytes
+	a.capToolOutput(limit)
+}
+
+// capToolOutput scales the per-call tool-output cap to the usable limit. It
+// takes the limit as a number rather than calling History.Limit, so its
+// caller can read it in the same critical section that wrote the scalars it
+// is derived from.
+func (a *Agent) capToolOutput(limit int) {
+	if limit < 512 {
+		limit = 512 // History.Limit's floor: never trim into nothing
 	}
+	if a.Tools == nil {
+		return
+	}
+	capBytes := limit * 3 / 4
+	if capBytes > 24*1024 {
+		capBytes = 24 * 1024
+	}
+	if capBytes < 4*1024 {
+		capBytes = 4 * 1024
+	}
+	a.Tools.SetMaxOutput(capBytes)
 }

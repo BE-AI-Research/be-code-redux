@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -64,9 +67,12 @@ func TestSessionPickerMarksLiveRowsAndSwitches(t *testing.T) {
 	if len(switched) != 0 {
 		t.Fatalf("switch on a cold session: %v", switched)
 	}
-	if m.ag.Session == nil || m.ag.Session.ID != "2" {
-		t.Fatalf("cold session was not resumed: %+v", m.ag.Session)
-	}
+	// Resume runs on a goroutine of its own now: it waits for the turn
+	// lock, which Update must never do.
+	waitFor(t, func() bool {
+		sess := m.ag.CurrentSession()
+		return sess != nil && sess.ID == "2"
+	})
 }
 
 // An in-process TUI (--no-host) has no host to switch through, so it says
@@ -234,5 +240,53 @@ func TestResumeOfAnUnsavedLiveCodeSwitchesWithoutLoading(t *testing.T) {
 	}
 	if strings.Contains(m.rendered.String(), "no session") {
 		t.Fatalf("store error surfaced for a live code:\n%s", m.rendered.String())
+	}
+}
+
+// detailerProvider is a backend that can say what is loaded and at what
+// window, as Ollama's /api/ps does.
+type detailerProvider struct {
+	nullProvider
+	rows []provider.ModelDetail
+}
+
+func (d detailerProvider) Details(context.Context) ([]provider.ModelDetail, error) {
+	return d.rows, nil
+}
+
+// A model list that names only sizes cannot answer the question a person is
+// actually asking it — which of these is already loaded, and at what window
+// — which is the same question the consent prompt is about. The rows carry
+// both, and both UIs render them from one formatter so they cannot drift.
+func TestModelPickerRowsShowTheWindowAndResidency(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	m := s.NewView(0, "local")
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.prov = detailerProvider{rows: []provider.ModelDetail{
+		{ID: "big", SizeBytes: 17_000_000_000, Family: "qwen3", Quantization: "Q4_K_XL", Window: 32768, Resident: true},
+		{ID: "small", SizeBytes: 4_000_000_000, Family: "llama", Quantization: "Q4_0"},
+	}}
+	cmd := m.askModelPicker()
+	go cmd()
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.current() != nil
+	})
+	s.mu.Lock()
+	items := s.current().Items
+	s.mu.Unlock()
+	if len(items) != 2 {
+		t.Fatalf("rows: %+v", items)
+	}
+	if !strings.Contains(items[0].desc, "32k ctx") || !strings.Contains(items[0].desc, "loaded") {
+		t.Fatalf("a resident model must say so, and at what window: %q", items[0].desc)
+	}
+	if !strings.Contains(items[1].desc, "ctx unknown") || strings.Contains(items[1].desc, "loaded") {
+		t.Fatalf("a model nobody has loaded has no window to report: %q", items[1].desc)
+	}
+	if !strings.Contains(items[0].desc, "17.0GB") || !strings.Contains(items[0].desc, "Q4_K_XL") {
+		t.Fatalf("the row lost what it already showed: %q", items[0].desc)
 	}
 }

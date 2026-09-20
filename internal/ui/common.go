@@ -81,7 +81,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/coworkers", "list co-working models and how often each was consulted", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
-	{"/task", "show the task ledger, or /task clear to reset this session's working memory", true},
+	{"/task", "task record: /task [show <id>|open|clear]", true},
 	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},

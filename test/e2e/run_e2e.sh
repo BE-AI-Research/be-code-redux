@@ -60,4 +60,57 @@ grep -q "WM:yes FOOTER:yes" "$OUT3"
 grep -q "TRIM:yes" "$OUT3"
 echo "[PASS] engine"
 
+# Fourth scenario: a compaction whose summary comes back empty — the failure
+# reported from the validation VM — and the task record carrying the work
+# across it. The sentinel lives in one workspace file and reaches the model
+# only as the output of a shell command, so it can enter a later system
+# prompt by exactly one route: the engine's verbatim block for the node that
+# was doing when the command ran. TREE:yes is read off the system prompt
+# alone (the kept tail still holds the shell result, so the transcript would
+# be no proof at all), and COMPACT:yes confirms the empty-summary branch was
+# the one taken.
+#
+# The proof that none of this passes vacuously is one command:
+#
+#   E2E_TASK_ENGINE=false sh test/e2e/run_e2e.sh
+#
+# which runs the identical script with the engine off and stops here with
+# TREE:no, since with no task record there is nothing but a trimmed
+# transcript on the far side of the compaction.
+TASKWS="$DIR/taskws"; mkdir -p "$TASKWS"
+printf 'PARSER-SENTINEL-4F2A\n' > "$TASKWS/parser-check.txt"
+task_config() { # $1: the engine.enabled value
+	cat > "$HOME/.be-code/config.json" <<CFG
+{"default_provider":"mock","model":"task-model",
+ "providers":{"mock":{"type":"openai","base_url":"http://127.0.0.1:18111/v1"}},
+ "max_turns":10,"max_repairs":0,"compat_tool_calls":"auto","verify_on_done":false,
+ "context_tokens":1200,"engine":{"enabled":$1},"compact_with_model":true}
+CFG
+}
+task_config "${E2E_TASK_ENGINE:-true}"
+OUT4="$DIR/task.out"
+"$(dirname "$0")/../../be-code" run -y -C "$TASKWS" "task scenario: check the parser" > "$OUT4"
+cat "$OUT4"
+grep -q "TREE:yes COMPACT:yes" "$OUT4"
+echo "[PASS] task"
+
+# Fifth scenario: the native Ollama path. The provider is type ollama, the
+# model has a configured context_window, and the fake /api/ps reports it as
+# not resident — so the loader picks that window without needing consent,
+# which a scripted run could never give. The fake /api/chat answers with the
+# options.num_ctx it actually received, so the assertion is on the wire and
+# not on anything the harness says about itself.
+cat > "$HOME/.be-code/config.json" <<CFG
+{"default_provider":"fake-ollama","model":"native-model",
+ "providers":{"fake-ollama":{"type":"ollama","base_url":"http://127.0.0.1:18111",
+   "context_window":32768}},
+ "max_turns":4,"max_repairs":0,"compat_tool_calls":"never","verify_on_done":false,
+ "engine":{"enabled":false},"keep_alive":"0"}
+CFG
+OUT5="$DIR/native.out"
+"$(dirname "$0")/../../be-code" run -y -C "$WS" "native scenario: report the window" > "$OUT5"
+cat "$OUT5"
+grep -q "NUMCTX:32768" "$OUT5"
+echo "[PASS] native"
+
 echo "E2E PASS"

@@ -19,6 +19,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/loader"
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
@@ -236,12 +237,18 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		if err != nil {
 			return nil, "", err
 		}
+		secondaryLoad(c, rp, c.Reviewer.Model, ag)
 		return rp, c.Reviewer.Model, nil
 	}
 
 	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
 	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return provider.FromConfig(c, cw.Provider)
+		cp, err := provider.FromConfig(c, cw.Provider)
+		if err != nil {
+			return nil, err
+		}
+		secondaryLoad(c, cp, cw.Model, ag)
+		return cp, nil
 	}
 
 	if flagResume != "" {
@@ -259,7 +266,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
-	applyBackendWindow(cfg, p, ag, model)
+	applyModelParams(cfg, p, reg, ag, model)
 	return p, ag, nil
 }
 
@@ -337,42 +344,95 @@ func usePlainUI(cfg *config.Config) bool {
 	return flagPlain || strings.EqualFold(cfg.UI, "plain") || !stdoutIsTTY() || !stdinIsTTY()
 }
 
-// applyBackendWindow asks an Ollama backend what context window it will
-// really use for the model and clamps the history budget to it. Ollama's
-// OpenAI endpoint cannot set num_ctx per request and silently truncates
-// oversized prompts, so a budget larger than the window means the model
-// quietly loses its instructions and history.
-func applyBackendWindow(cfg *config.Config, p provider.Provider, ag *agent.Agent, model string) {
-	o, ok := p.(*provider.Ollama)
-	if !ok {
+// applyModelParams resolves the model's parameters through the loader and
+// budgets the session against the window it actually gets.
+//
+// This replaces the startup probe that used to live here, which asked an
+// Ollama backend what window it would use and, when nothing could answer,
+// *loaded the model* to find out — a multi-minute stall before the first
+// prompt, under a four-minute deadline. A configured context_window now
+// means no probe at all; an unconfigured one costs two cheap reads.
+//
+// Consent is read through the registry at the moment it is needed, not
+// captured now. Nothing has wired an approver during buildAgent, which is
+// deliberate: reloading a model on a shared server evicts whatever else is
+// using it, and a session must not be able to do that before anyone is
+// watching. Startup therefore keeps whatever window the server already has.
+func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Registry, ag *agent.Agent, model string) {
+	// One way to build a loader, used both now and again if /provider
+	// moves this session to another backend — a loader speaks for exactly
+	// one server, and its consent record is about that server's users.
+	//
+	// Notices go to the transcript when there is one, and to stderr only
+	// while there is not. Under a TUI stderr is wiped by the alt screen,
+	// and in a hosted session it is a log file nobody opens — which is
+	// where every explanation of a refused reload used to end up.
+	newLoader := func(c *config.Config, prov provider.Provider) *loader.Loader {
+		l := loader.New(prov, c, nil, func(s string) {
+			if !ag.Notice(s) {
+				fmt.Fprintf(os.Stderr, "warn: %s\n", s)
+			}
+		})
+		l.SetApprover(func() tools.ApproveFunc { return reg.Approve })
+		// Preferred when the UI offers it: it lets a resolution's deadline
+		// close the question it raised, on every attached terminal.
+		l.SetApproverCtx(func() tools.ApproveCtxFunc { return reg.ApproveCtx })
+		return l
+	}
+	agent.LoaderFactory = func(c *config.Config, prov provider.Provider) agent.ModelLoader {
+		return newLoader(c, prov)
+	}
+	// Spec §10.1: the loader is the only path to a model's parameters, so
+	// the agent holds it for every later request — a /model switch, a pick
+	// from /models, a recovery after the backend-status check trips. It is
+	// reached through Agent.Loader, not a package var: /provider replaces it
+	// from a UI goroutine.
+	ld := newLoader(cfg, p)
+	ag.SetLoader(ld)
+
+	n, err := ld.Apply(context.Background(), model)
+	if _, isOllama := p.(*provider.Ollama); !isOllama {
+		return // nothing to set and nothing to read: no window to report
+	}
+	configured := ld.Params(model).Window > 0
+	if err != nil || n == 0 {
+		// Only news when nothing was configured; with a window in config the
+		// loader has already said why it could not be used.
+		if !configured {
+			budget := cfg.ContextTokens
+			if budget <= 0 {
+				budget, _, _ = ag.History.Scalars()
+			}
+			startupWarn(ag, fmt.Sprintf("could not determine the backend context window; using a budget of %d tokens. "+
+				"Set \"context_window\" for this model in config to say what it really is.", budget))
+		}
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-	n, err := o.ContextLength(ctx, model)
-	if err != nil {
-		return // unreachable backend: the first request will report it
+	// The clamp warning is only news when the server won. A window the user
+	// configured is the answer they chose, and the loader has already said
+	// so if the server refused to give it up.
+	//
+	// The budget is read *before* ApplyWindow because ApplyWindow overwrites
+	// it: the number worth naming in the advice is the one the session was
+	// going to use, not the one it has been cut down to, or the line reads
+	// "budget clamped to 4096 ... start the server with
+	// OLLAMA_CONTEXT_LENGTH=4096".
+	wanted, _, _ := ag.History.Scalars()
+	if ag.ApplyWindow(n) && !configured {
+		startupWarn(ag, fmt.Sprintf("model %s runs with a %d-token window; budget clamped to %d. "+
+			"Set \"context_window\" for this model in config, or start the server with OLLAMA_CONTEXT_LENGTH=%d.",
+			model, n, n, wanted))
 	}
-	if n == 0 {
-		// Not loaded and no Modelfile num_ctx: load it now (the first
-		// request would anyway) so /api/ps can report the live window.
-		fmt.Fprintf(os.Stderr, "loading %s to read its context window...\n", model)
-		keep := 30 * time.Minute
-		if d, err := time.ParseDuration(cfg.KeepAlive); err == nil && d > 0 {
-			keep = d
-		}
-		if werr := o.Warm(ctx, model, keep); werr == nil {
-			n, _ = o.ContextLength(ctx, model)
-		}
-	}
-	if n == 0 {
-		fmt.Fprintf(os.Stderr, "warn: could not determine the backend context window; using context_tokens=%d\n", cfg.ContextTokens)
-		return
-	}
-	if ag.ApplyWindow(n) {
-		fmt.Fprintf(os.Stderr, "warn: backend context window is %d tokens, below context_tokens=%d; budget clamped to %d.\n"+
-			"      Raise the window on the server (OLLAMA_CONTEXT_LENGTH=%d, or a Modelfile with PARAMETER num_ctx %d).\n",
-			n, cfg.ContextTokens, n, cfg.ContextTokens, cfg.ContextTokens)
+	// The other direction, and the one that used to say nothing at all:
+	// context_tokens is below the window, so most of a window the user went
+	// to the trouble of configuring simply goes unused. ApplyWindow reports
+	// no clamp here — the budget was already under the window — so without
+	// this line the loss is invisible, which is the complaint that started
+	// this work.
+	if cfg.ContextTokens > 0 && n > cfg.ContextTokens {
+		startupWarn(ag, fmt.Sprintf("model %s has a %d-token window but context_tokens=%d caps the budget; %d tokens go unused. "+
+			"Remove \"context_tokens\" from config to use the whole window, or raise it.",
+			model, n, cfg.ContextTokens, n-cfg.ContextTokens))
 	}
 }
 
@@ -557,6 +617,13 @@ func runInteractive(cmd *cobra.Command) error {
 		// really reach the editor: mode "tui" (or no editor at all) resolves
 		// in the terminal instead.
 		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+		// Plain mode answers on the one input stream its own loop reads,
+		// so its half of the deferred consent runs inline, on the REPL
+		// goroutine, after the reader is up and before the first line is
+		// taken. The REPL owns the bounding and the prompt context (see
+		// underPrompt), because a switch typed later needs exactly the
+		// same treatment.
+		repl.OnStart = func() { repl.ResolveModelParams(ctx) }
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)
@@ -564,5 +631,45 @@ func runInteractive(cmd *cobra.Command) error {
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+	// Now that NewSession has wired Registry.Approve, the question startup
+	// could not put to anybody can be asked: it goes through the shared
+	// approval modal, which is the only place under a TUI a person can see
+	// it. A terminal that attaches after it is raised is shown it too
+	// (Session.NewView), so this is safe to run before the program starts.
+	ag.ResolveModel()
 	return s.RunLocal(ctx)
+}
+
+// startupWarn reports a warning raised while the session is still being built.
+// It goes to stderr, which is all a headless or plain run has, and is queued
+// on the agent so a TUI or hosted session — where stderr is wiped or is a log
+// file — shows it in the transcript once a UI exists.
+func startupWarn(ag *agent.Agent, msg string) {
+	fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
+	if ag != nil {
+		ag.QueueNotice(msg)
+	}
+}
+
+// secondaryLoad puts a reviewer's or co-worker's provider through a loader of
+// its own before it is used. These providers are built fresh by the factories
+// above and used to skip the loader entirely, so their requests carried no
+// num_ctx at all — and on Ollama an absent num_ctx means the server default,
+// not "whatever is loaded": a review of the primary's own model would reload
+// it at 8192 and back again, evicting whoever else shares the server, with
+// nobody asked. The loader has no approver here, which it reads as a refusal:
+// a secondary model is never worth reloading someone else's. It keeps the
+// window the server already holds and puts that on the wire.
+func secondaryLoad(c *config.Config, prov provider.Provider, model string, ag *agent.Agent) {
+	if _, ok := prov.(*provider.Ollama); !ok || model == "" {
+		return
+	}
+	l := loader.New(prov, c, nil, func(msg string) {
+		if ag == nil || !ag.Notice(msg) {
+			fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = l.Apply(ctx, model)
 }

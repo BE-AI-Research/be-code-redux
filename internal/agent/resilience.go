@@ -30,6 +30,7 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 	var lastErr error
 	for attempt := 0; attempt <= maxBackendRetries; attempt++ {
 		resp, err := a.chatFiltered(ctx, req)
+		a.noteNativeFallback()
 		if err == nil {
 			return resp, nil
 		}
@@ -88,6 +89,19 @@ func compactErr(err error) string {
 	return s
 }
 
+// noteNativeFallback tells the user, once, when a backend has given up its
+// native endpoint for an OpenAI-compatible one. It is a quieter session,
+// not a broken one — but it is also a session that can no longer set the
+// model's context window, so it must not look identical to a healthy one.
+func (a *Agent) noteNativeFallback() {
+	nf, ok := a.Provider.(provider.NativeFallbacker)
+	if !ok || a.nativeFallbackNotified || !nf.NativeFallback() {
+		return
+	}
+	a.nativeFallbackNotified = true
+	a.notice("backend does not serve its native chat endpoint; using the OpenAI-compatible path for this session (the context window cannot be set from here)")
+}
+
 // checkBackend asks a status-capable provider whether the model is still
 // resident and with which window, then adapts the budget and tells the
 // user what happened.
@@ -102,18 +116,47 @@ func (a *Agent) checkBackend(ctx context.Context) {
 	if err != nil {
 		return // unreachable backend: the chat call will report it
 	}
+	// Both arms below hand the trip to the loader, because the loader is
+	// the only place a model's parameters are decided (spec §10.1). What
+	// it does with each is different, and the difference is who else is
+	// affected:
+	//
+	//   evicted — nothing is holding the model, so the next request
+	//   reloads it whatever we do. The reload may as well carry our
+	//   num_ctx, and nobody has to be asked for it.
+	//
+	//   window changed — another client reloaded the model at their size.
+	//   We adapt. Reloading it back would be a reload war on a shared
+	//   server, which is the worst outcome available, so the loader
+	//   insists only where standing consent already exists.
+	l := a.modelLoader()
 	if !loaded {
 		if !a.unloadedNotified {
 			a.unloadedNotified = true
 			a.transient("model %s is not loaded on the backend (evicted by another model or idle expiry); the next reply includes reload and prompt re-processing time", a.Model)
 		}
+		if l != nil {
+			l.OnEvicted(ctx, a.Model)
+		}
 	} else {
 		a.unloadedNotified = false
 	}
-	if window > 0 && window != a.Window {
-		old := a.Window
+	// Only while it is loaded. Status reports the *Modelfile's* num_ctx for
+	// a model that is not resident, and a Modelfile describes the load that
+	// would happen by default, not one any client chose — so treating it as
+	// "another client changed the window" adapts to a number nobody set and
+	// hands it to OnWindowChanged, which puts it on the wire. That undoes
+	// what OnEvicted arranged two lines above: a configured 32768 becomes
+	// the Modelfile's 4096 on the next chat request and on the keep-alive
+	// touch, with no consent asked for either.
+	if loaded && window > 0 && window != a.Window() {
+		old := a.Window()
 		a.ApplyWindow(window)
-		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, a.History.Budget, a.History.Limit())
+		budget, _, _ := a.History.Scalars()
+		a.transient("backend context window changed %d → %d; budget now %d tokens (limit %d)", old, window, budget, a.History.Limit())
+		if l != nil {
+			l.OnWindowChanged(a.Model, window)
+		}
 	}
 }
 
@@ -124,13 +167,25 @@ func (a *Agent) refreshKeepAlive() {
 	if !ok {
 		return
 	}
-	d, err := time.ParseDuration(strings.TrimSpace(a.Cfg.KeepAlive))
-	if a.Cfg.KeepAlive == "" {
-		d = 30 * time.Minute
-	} else if err != nil || d <= 0 {
-		return
-	}
 	model := a.Model
+	// The loader resolves keep_alive per model (models entry, then the
+	// provider block, then the top-level setting), and it is the same
+	// number the requests themselves carry. Reading cfg.KeepAlive here
+	// instead would refresh residency on a schedule a per-model setting had
+	// already overridden.
+	var d time.Duration
+	if l := a.modelLoader(); l != nil {
+		d = l.KeepAlive(model)
+	}
+	if d <= 0 {
+		var err error
+		d, err = time.ParseDuration(strings.TrimSpace(a.Cfg.KeepAlive))
+		if a.Cfg.KeepAlive == "" {
+			d = 30 * time.Minute
+		} else if err != nil || d <= 0 {
+			return // "0" means do not keep it resident; nothing to refresh
+		}
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

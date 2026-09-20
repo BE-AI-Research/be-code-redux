@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chzyer/readline"
+
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
@@ -37,6 +39,19 @@ func newTestREPL(t *testing.T) *REPL {
 		t.Fatal(err)
 	}
 	return &REPL{Cfg: cfg, Agent: agent.New(cfg, nullProvider{}, "m", reg, ""), Provider: nullProvider{}}
+}
+
+// testStoreFor opens a working-memory store rooted at the REPL's own
+// workspace (never the real ~/.be-code) and wires it onto the agent, the
+// way attachEngine does for a real run.
+func testStoreFor(t *testing.T, r *REPL) *engine.Store {
+	t.Helper()
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, engine.Limits{NotesCap: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Agent.SetEngine(st)
+	return st
 }
 
 // capture runs fn with os.Stdout redirected and returns what it printed.
@@ -375,15 +390,15 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	if !strings.Contains(out, "working memory is off") {
 		t.Fatalf("no engine:\n%s", out)
 	}
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), r.Agent.Tools.Root, "s", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Agent.SetEngine(st)
-	st.SetPlan("add flag", []string{"parse", "wire"})
-	st.SetStep(1, "doing")
+	id := st.Plan("add flag", []string{"parse", "wire"})
+	st.SetStatusText(id+".1", "doing", "")
 	out = capture(t, func() { r.command(context.Background(), "/task") })
-	if !strings.Contains(out, "task: add flag") || !strings.Contains(out, "[>] 1. parse") {
+	if !strings.Contains(out, "1. add flag") || !strings.Contains(out, "[>] 1.1. parse") {
 		t.Fatalf("/task:\n%s", out)
 	}
 	capture(t, func() { r.command(context.Background(), "/notes add tests need go") })
@@ -396,8 +411,10 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 		t.Fatalf("after drop:\n%s", out)
 	}
 	capture(t, func() { r.command(context.Background(), "/task clear") })
-	if st.Ledger().Task != "" {
-		t.Fatal("/task clear did not clear")
+	// Ruling T3-a: clear closes the open work, it does not erase it — the
+	// task and its steps still read back, now dropped with reason "cleared".
+	if !strings.Contains(st.TreeText(), "add flag") || !strings.Contains(st.TreeText(), "dropped: cleared") {
+		t.Fatalf("/task clear did not close the open work:\n%s", st.TreeText())
 	}
 	// Whatever spacing was typed, the note is the text after the add token.
 	capture(t, func() { r.command(context.Background(), "/notes  add  spaced text") })
@@ -406,6 +423,56 @@ func TestPlainTaskAndNotesCommands(t *testing.T) {
 	}
 	if out = capture(t, func() { r.command(context.Background(), "/notes drop") }); !strings.Contains(out, "usage: /notes drop N") {
 		t.Fatalf("bare drop:\n%s", out)
+	}
+}
+
+// TestPlainTaskCommands covers the tree-shaped /task surface Task 6 adds:
+// the whole tree, one branch, and the path to the document a human would
+// open by hand.
+func TestPlainTaskCommands(t *testing.T) {
+	r := newTestREPL(t)
+	// No engine: the off message, and nothing that looks like a crash.
+	out := capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "working memory is off (engine.enabled)") {
+		t.Fatalf("off message: %q", out)
+	}
+	st := testStoreFor(t, r) // helper: opens a store on the REPL's root
+	id := st.Plan("fix the parser", []string{"find the bug"})
+	st.SetStatusText(id+".1", "doing", "")
+
+	out = capture(t, func() { r.command(context.Background(), "/task") })
+	if !strings.Contains(out, "fix the parser") || !strings.Contains(out, "find the bug") {
+		t.Fatalf("tree listing: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task show "+id) })
+	if !strings.Contains(out, "fix the parser") {
+		t.Fatalf("show: %q", out)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task open") })
+	if !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open should print the document path: %q", out)
+	}
+}
+
+// TestPlainTaskOpenIsTruthfulBeforeAnythingIsWritten (fix round 1): before
+// any document has reached disk, "/task open" must not just print a
+// directory that does not exist yet as if it were an answer.
+func TestPlainTaskOpenIsTruthfulBeforeAnythingIsWritten(t *testing.T) {
+	r := newTestREPL(t)
+	st := testStoreFor(t, r)
+
+	out := capture(t, func() { r.command(context.Background(), "/task open") })
+	if !strings.Contains(out, "no task documents yet") || !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open before any document exists: %q", out)
+	}
+
+	st.Plan("fix the parser", []string{"find the bug"})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	out = capture(t, func() { r.command(context.Background(), "/task open") })
+	if strings.Contains(out, "no task documents yet") || !strings.Contains(out, filepath.Join(".be-code", "tasks")) {
+		t.Fatalf("open once a document exists: %q", out)
 	}
 }
 
@@ -432,3 +499,175 @@ func TestPlainResumeReplaysTheTranscript(t *testing.T) {
 		t.Fatalf("resume_replay off:\n%s", out)
 	}
 }
+
+// Ctrl-D at the startup consent prompt ends the session. The readline
+// goroutine exits on EOF, so the main loop's receive would otherwise wait
+// on a channel nobody will ever write to again — a hang with no prompt on
+// screen, which is worse than any answer the question could have had.
+func TestEOFAtAOneOffPromptEndsTheSession(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{err: io.EOF} // the reader's last word, taken by the prompt
+
+	if got := r.prompt("approve? "); got != "" {
+		t.Fatalf("EOF answered %q", got)
+	}
+	if !r.inputDone() {
+		t.Fatal("the prompt swallowed EOF without recording it")
+	}
+	done := make(chan bool, 1)
+	go func() { _, ok := r.nextLine(); done <- ok }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("the loop went on reading after input ended")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the main loop is waiting on a reader that has already exited")
+	}
+}
+
+// ^C is not the end of input: the reader goroutine survives it, so the loop
+// must too.
+func TestInterruptAtAOneOffPromptDoesNotEndTheSession(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{err: readline.ErrInterrupt}
+	if got := r.prompt("approve? "); got != "" {
+		t.Fatalf("^C answered %q", got)
+	}
+	if r.inputDone() {
+		t.Fatal("^C was mistaken for the end of input")
+	}
+}
+
+// A one-off prompt waits on the asker's context as well as on the user, so
+// a question whose asker has given up — the model resolution's
+// ModelResolveTimeout — leaves the screen instead of holding the session
+// open forever. Before this it waited on context.Background().
+func TestPromptContextWithdrawsAOneOffQuestion(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent) // nothing will ever arrive
+	ctx, cancel := context.WithCancel(context.Background())
+	r.SetPromptContext(ctx)
+	defer r.SetPromptContext(nil)
+
+	done := make(chan string, 1)
+	go func() { done <- r.prompt("approve? ") }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Fatalf("a withdrawn question answered %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the question outlived the asker that raised it")
+	}
+}
+
+// The startup consent prompt is the caller this exists for: with the
+// approver wired, a resolution whose context ends takes its question with
+// it rather than blocking the REPL's first prompt.
+func TestLoaderConsentPromptIsWithdrawnWithItsContext(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent)
+	r.Agent.Tools.Approve = r.approve
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	r.SetPromptContext(ctx)
+	defer r.SetPromptContext(nil)
+
+	done := make(chan bool, 1)
+	go func() { done <- r.Agent.Tools.Approve("model_reload", "model m is loaded with 8192") }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("a question nobody answered must not count as consent")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consent prompt could not be withdrawn")
+	}
+}
+
+// R2. /model raised its consent question from the resolution's goroutine
+// while the main loop was already reading r.lines, so the two split the
+// user's keystrokes: in the probe the "y" arrived at the loop as a fresh
+// request to the model, and the prompt then swallowed a later line. A
+// consent failure and a wrong action on the user's behalf at once.
+//
+// The switch therefore resolves inline, on this goroutine, which is where
+// the reader already is. The test's signal is exactly that: /model must not
+// return while its consent is still pending.
+func TestModelSwitchAsksOnTheREPLGoroutine(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 4)
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	answered := make(chan bool, 1)
+	r.Agent.SetLoader(&replConsentLoader{
+		started: started, release: release, answered: answered, reg: r.Agent.Tools,
+	})
+
+	returned := make(chan struct{})
+	go func() {
+		out := capture(t, func() { r.command(context.Background(), "/model other") })
+		_ = out
+		close(returned)
+	}()
+
+	<-started
+	select {
+	case <-returned:
+		t.Fatal("/model returned while its consent was still pending; the prompt is left racing the main loop for the user's keystroke")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+
+	// The user types y. It must reach the prompt, not the agent.
+	r.lines <- lineEvent{line: "y"}
+	select {
+	case ok := <-answered:
+		if !ok {
+			t.Fatal("y did not reach the consent prompt")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the consent prompt was never answered")
+	}
+	select {
+	case <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatal("/model never finished")
+	}
+	if n := len(r.lines); n != 0 {
+		t.Fatalf("%d typed line(s) left unread; the answer went somewhere other than the prompt", n)
+	}
+	if r.Agent.Model != "other" {
+		t.Fatalf("model %q", r.Agent.Model)
+	}
+}
+
+// replConsentLoader asks through the registry, as the real loader does.
+type replConsentLoader struct {
+	started  chan struct{}
+	release  chan struct{}
+	answered chan bool
+	reg      *tools.Registry
+}
+
+func (l *replConsentLoader) Apply(ctx context.Context, _ string) (int, error) {
+	close(l.started)
+	<-l.release
+	ok := l.reg.ApproveCtx(ctx, "model_reload", "model other is loaded with an 8192-token window")
+	l.answered <- ok
+	if !ok {
+		return 0, nil
+	}
+	return 32768, nil
+}
+func (*replConsentLoader) OnEvicted(context.Context, string) {}
+func (*replConsentLoader) OnWindowChanged(string, int)       {}
+func (*replConsentLoader) KeepAlive(string) time.Duration    { return 0 }

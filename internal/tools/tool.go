@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/mcp"
@@ -35,6 +36,14 @@ type Tool interface {
 // ApproveFunc asks the user to approve a dangerous action; returns false to deny.
 type ApproveFunc func(action, detail string) bool
 
+// ApproveCtxFunc is ApproveFunc for an asker that can give up on its own
+// question — a model-parameter resolution under a deadline. A UI that
+// implements it withdraws the prompt when ctx ends, through whatever
+// withdrawal path it already has, so a question nobody answered does not
+// sit on every attached terminal after the goroutine behind it has gone.
+// Returning false on a withdrawal is right: nobody consented.
+type ApproveCtxFunc func(ctx context.Context, action, detail string) bool
+
 // ReviewDecision is the outcome of an editor-side review of a file change.
 type ReviewDecision int
 
@@ -51,11 +60,18 @@ const (
 // Registry holds the active tool set, rooted at a workspace directory.
 type Registry struct {
 	Root string // absolute workspace root; all paths confined here
-	// MaxOutput bounds the bytes any single tool result returns to the
-	// model. Scaled to the backend window by agent.ApplyWindow.
-	MaxOutput  int
+	// maxOutput bounds the bytes any single tool result returns to the
+	// model. Scaled to the backend window by agent.ApplyWindow, which
+	// since model switching went through the loader can run on a goroutine
+	// of its own while tools are reading this — hence the atomic and the
+	// accessors rather than a plain field.
+	maxOutput  atomic.Int64
 	mcpClients []*mcp.Client
 	Approve    ApproveFunc
+	// ApproveCtx, when set, is preferred by callers that have a context to
+	// give — today the model loader. Tools use Approve: a tool call's
+	// cancellation already reaches them another way.
+	ApproveCtx ApproveCtxFunc
 	// ApproveWrites gates write_file/edit_file behind a review of the
 	// change before it lands. It is the single switch for BOTH review
 	// paths: when set, the editor is asked first if ReviewWrite is wired
@@ -103,7 +119,8 @@ func NewRegistry(dir string, approve ApproveFunc) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &Registry{MaxOutput: defaultMaxOutput, Root: abs, Approve: approve, byName: map[string]Tool{}, procs: NewProcessManager()}
+	r := &Registry{Root: abs, Approve: approve, byName: map[string]Tool{}, procs: NewProcessManager()}
+	r.SetMaxOutput(defaultMaxOutput)
 	r.add(
 		&readFileTool{r},
 		&writeFileTool{r},
@@ -145,6 +162,13 @@ func (r *Registry) AddTool(t Tool) {
 // registryAware tools get a pointer to their registry on AddTool (for
 // MaxOutput and confinement settings).
 type registryAware interface{ attach(r *Registry) }
+
+// MaxOutput is the per-call cap on bytes returned to the model.
+func (r *Registry) MaxOutput() int { return int(r.maxOutput.Load()) }
+
+// SetMaxOutput rescales that cap. Called from agent.applyReserve whenever
+// the window changes, including from a model switch's own goroutine.
+func (r *Registry) SetMaxOutput(n int) { r.maxOutput.Store(int64(n)) }
 
 // Close shuts down background resources (running processes).
 // Close stops background processes and shuts down attached MCP servers.

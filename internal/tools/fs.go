@@ -116,7 +116,7 @@ func (t *readFileTool) Run(_ context.Context, args map[string]any) Result {
 	if end < len(lines) {
 		fmt.Fprintf(&b, "... (%d more lines; call read_file again with offset=%d)\n", len(lines)-end, end+1)
 	}
-	return Result{Content: truncate(b.String(), t.r.MaxOutput)}
+	return Result{Content: truncate(b.String(), t.r.MaxOutput())}
 }
 
 // ---- write_file ------------------------------------------------------------
@@ -289,5 +289,5 @@ func (t *listDirTool) Run(_ context.Context, args map[string]any) Result {
 	if len(out) == 0 {
 		return Result{Content: "(empty directory)"}
 	}
-	return Result{Content: truncate(strings.Join(out, "\n"), t.r.MaxOutput)}
+	return Result{Content: truncate(strings.Join(out, "\n"), t.r.MaxOutput())}
 }

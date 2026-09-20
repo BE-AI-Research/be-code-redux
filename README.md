@@ -343,18 +343,30 @@ A symbol-level repository outline (`/map` to view) is injected into the system p
 small models spend turns editing, not exploring. `@path/to/file` in any message pins that
 file's content into context (Tab completes @paths in the TUI). When the conversation
 exceeds its budget, BE-Code has the model summarize older turns (`/compact` to force it)
-instead of dropping them; plain trimming remains the fallback.
+instead of dropping them. If that summary call fails or comes back empty, the session
+continues from the task record under `Working memory:` — which the harness wrote as the
+work happened, without a model call — and says so: `compaction: the model returned no
+summary; continuing from the task record`. Plain trimming is the fallback only when
+there is no record to continue from, and a compaction you cancel still stops rather
+than rewriting the transcript you were keeping.
 
 ## Working memory
 
 BE-Code keeps a per-workspace record of what the model has already read, looked up
-and decided, under `~/.be-code/engine/<key>/`, and puts it back in the system prompt
-as a `Working memory:` block (after the repository map) on every request, including
-after compaction and on resume — so a long task stops re-reading the same files and a
-compaction summary no longer has to restate what it already knows.
+and decided — a task tree whose documents live in your project (see **Task record**
+below) with its disposable half under `~/.be-code/engine/<key>/` — and puts it back
+in the system prompt as a `Working memory:` block (after the repository map) on every
+request, including after compaction and on resume, so a long task stops re-reading the
+same files and a compaction summary no longer has to restate what it already knows.
+The block is composed fresh every turn: Task Reports for finished work oldest first,
+then the active branch down to the step marked `doing`, then that step's tool calls
+and output *verbatim*, then the durable notes. The active branch and its verbatim step
+are never what gets cut when `engine.budget` bites — finished reports condense first,
+oldest first, down to a `task show <id>` pointer.
 
-- **Reads.** Every `read_file` is digested: an outline of the symbols it touched, the
-  line ranges seen, a content hash, and (once a compaction summary or a `task note
+- **Reads.** Every `read_file` is recorded against the step that made it: an outline
+  of the symbols it touched, the line ranges seen, a content hash, and (once a
+  compaction summary or a `task note
   file:` mentions it) a short note of what mattered. Asking for lines already covered
   by an unchanged file is still answered in full, with the footer `already read at
   turn N (unchanged); outline and notes are in your context` — the tool result is
@@ -362,12 +374,19 @@ compaction summary no longer has to restate what it already knows.
 - **Lookups.** A repeated `search` or `lookup` whose hit files are unchanged is
   answered from a cache instead of re-running, with the footer `(cached; files
   unchanged)`.
-- **The `task` tool.** `action: plan` records the task and its steps before a
-  multi-step change; `step` marks one `doing`/`done`/`skip`; `note` records a fact or
-  decision (`file:` ties it to a file so it need not be re-read; `keep: true` also
-  remembers it in the durable notes, which survive across sessions). The ledger and
-  notes are always shown under `Working memory:`. `/task` prints the ledger, `/task
-  clear` resets the session's working memory; `/notes` prints the durable notes,
+- **The `task` tool.** Five verbs over one task tree, whose nodes are addressed by
+  dotted paths like `2.1.3`: `action: plan` records a task and its steps in one call;
+  `add` creates a node (`parent:` its id, omitted for a new top-level task) and
+  returns its id; `status` marks a node `doing`, `done`, `blocked` or `dropped` (with
+  `reason:` for the last two); `note` records a fact or decision against a node
+  (`file:` ties it to a file so it need not be re-read; `keep: true` also remembers it
+  in the durable notes, which survive across sessions); `show` prints a node, a branch
+  or the whole tree. What the model does while a node is `doing` is recorded against
+  that node, and work done before it named one is adopted by the next node it marks
+  `doing`. The tree and the notes are always shown under `Working memory:`. `/task`
+  prints the tree, `/task show <id>` one branch, `/task open` the path to the
+  documents, and `/task clear` closes every still-open node as `dropped` with the
+  reason `cleared` — it never deletes a document; `/notes` prints the durable notes,
   `/notes add <text>` appends one, `/notes drop N` removes one, `/notes clear` empties
   them. Both are busy-safe in either UI, and in a shared session every attached
   terminal reads and writes the same store.
@@ -384,6 +403,90 @@ and `changes`) for backends where a smaller embedded tool catalog matters more t
 the extra lookups. A headless `be-code run` and a live host on the same workspace share
 the store directory without a lock: the host's in-memory state is authoritative and is
 rewritten at its next flush, and `notes.md` is never cleared by that.
+
+## Task record
+
+The tree is not a database: it is Markdown in your project, one document per
+top-level task, under `<project>/.be-code/tasks/`.
+
+```markdown
+# 001 — fix the parser
+
+- [x] 1. fix the parser
+  - [x] 1.1. find the bug
+    - files: lexer.go (lines 1–120)
+    - cmds: go test ./... — failed
+    - error: FAIL: TestLex
+  - [>] 1.2. fix and verify
+  - [-] 1.3. rewrite the scanner — dropped: not needed after all
+```
+
+Five marks, one per step: `[ ]` todo, `[>]` doing, `[x]` done, `[!]` blocked,
+`[-]` dropped — the last two carrying why, after an em dash. Ids are dotted paths
+that follow a step's position (`2.1.3`), evidence lines sit one level deeper than
+the step that earned them, and everything the engine does not recognise — your own
+prose, a checklist you keep in the same file — is preserved exactly and comes back
+untouched. Edit these files by hand whenever you like: a hand-edited status is your
+intent and is never overridden (two `[>]` marks get a warning naming the documents,
+and neither document is changed). A document the engine cannot parse is renamed
+`NNN-<slug>.broken-<stamp>.md` rather than half-read, and nothing here is ever
+deleted — not by a retitled task, and not by `/task clear`, which closes open steps
+as `dropped` with the reason `cleared` and leaves the documents alone.
+
+`/task` prints the tree, `/task show <id>` one branch, `/task open` the folder. In a
+git repository the first document written adds `.be-code/` to your `.gitignore`, so
+the record is **untracked by default**; delete that one line to commit it. The full
+specification is [`docs/task-format.md`](docs/task-format.md), and a short version is
+written into `.be-code/tasks/README.md` for whoever opens the folder next.
+
+## Context window
+
+On an Ollama backend BE-Code talks to `/api/chat` natively, so the context window is
+something you set rather than something you discover:
+
+```jsonc
+"providers": {
+  "lan": { "type": "ollama", "base_url": "http://192.168.1.150:11434",
+           "context_window": 32768, "keep_alive": "30m",
+           "options": { "temperature": 0.6 } }
+},
+"models": {
+  "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL": { "context_window": 32768 }
+},
+"reload_on_mismatch": "ask"
+```
+
+Resolution for one model is: the `models` entry, else the provider block, else a
+probe of the backend. **A configured `context_window` means no probe** — no
+`/api/ps` read, no Modelfile parse, and above all no loading the model to find out,
+which on a large local model is minutes of startup for a number you already know.
+`context_tokens` is then derived from the window (minus generation headroom) unless
+you set it, in which case your number still wins and BE-Code says at startup how
+much of the window that leaves unused.
+
+**Changing the window of a model that is already loaded makes Ollama reload it, which
+evicts every other user of that server.** So it is a change to a shared service, not
+a setting of ours: `reload_on_mismatch: "ask"` (the default) puts it through the same
+approval prompt as a shell command — `y` reloads, `n` keeps the loaded window and
+clamps the budget to it, `a` saves `reload_on_mismatch: always` to your config.
+`"always"` is that standing consent for this machine's server; `"never"` runs inside
+whatever window the server already has, every time. Each model is asked about once a
+session, whichever way it was answered, and a non-interactive or headless run never
+prompts — it keeps the loaded window, clamps, and prints why. A question nobody
+answered before the session gave up on it is not remembered as a refusal; the next
+resolution asks again. When another client reloads the model underneath a
+running session, BE-Code adapts to *their* window rather than reloading it back: a
+reload war between two clients on one server is the worst outcome available.
+
+Switching model (`/model`, or a pick from `/models`) resolves the new model's
+parameters off the UI thread, so the command returns at once and the window arrives
+as a notice; window, budget and reserve follow the model, and if the new window is
+smaller than the conversation already occupies BE-Code compacts once on the spot
+rather than letting the next request truncate. Nothing outside the loader loads a
+model or sends `num_ctx`. A server too old to serve `/api/chat` (a 404 whose body is
+not Ollama's own JSON error, or a 405 or 501) falls back to the OpenAI-compatible
+endpoint for the rest of the session, with one notice — that path cannot carry a
+window at all.
 
 ## Model profiles
 
@@ -586,11 +689,50 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Config reference (`~/.be-code/config.json`)
 
-- `default_provider`, `model`, `providers{}` — backend selection
-- `temperature` (0.2), `max_tokens`, `context_tokens` (16384) — generation/budget.
+- `default_provider`, `model`, `providers{}` — backend selection. A provider
+  block also carries the parameters every model on that endpoint runs with:
+  `providers.<name>.context_window` (the `num_ctx` BE-Code sends on Ollama's
+  native path), `providers.<name>.keep_alive` (overrides the top-level
+  `keep_alive` for this endpoint) and `providers.<name>.options` ({}), a map
+  passed through to Ollama's options block untouched, so config can reach keys
+  the harness knows nothing about (`top_k`, `top_p`, `repeat_penalty`...).
+  Ignored for `type: openai`, which has no such knob.
+- `models{}` ({}) — the same three keys per model, keyed by the model name
+  exactly as the backend spells it (tag included), e.g.
+  `"models": {"qwen3:8b": {"context_window": 32768, "keep_alive": "30m",
+  "options": {"top_k": 40}}}`. Parameters belong to the model, so these win
+  over the provider block; the `options` maps are merged key by key rather
+  than replaced. Resolution order for one model is: this map, else the
+  provider block, else a probe of the backend. **A configured
+  `context_window` means no probe at all** — no `/api/ps` read, no Modelfile
+  parse, and above all no loading the model to find out, which on a large
+  local model is minutes of startup for a number you already know.
+- An absent `num_ctx` is not neutral: on Ollama it means the server's default
+  window applies, which reloads a model loaded at any other size. So BE-Code
+  sends the window the server already holds wherever it knows it, including
+  for the reviewer and co-worker models, and drops runner-level keys
+  (`num_ctx`, `num_batch`, `num_gpu`, `use_mmap`, …) from `options` with a
+  notice unless `reload_on_mismatch` is `always`. Use `context_window`, not
+  `options.num_ctx`, to set a window.
+- `reload_on_mismatch` (`ask`) — `ask` | `always` | `never`. Sending a
+  `num_ctx` that differs from how a model is currently loaded makes Ollama
+  **reload it, evicting whatever else on that machine was using it**. That is
+  a change to a shared service, so `ask` (the default) puts it through the
+  same approval prompt as a shell command, under the action `model_reload`;
+  `a` at that prompt sets this key to `always`. `never` runs inside whatever
+  window the server already has. A headless or non-interactive run never
+  prompts: it keeps the loaded window, clamps its budget and says why.
+  When another client reloads the model underneath a running session,
+  BE-Code adapts to *their* window rather than reloading it back — a reload
+  war between two clients on a shared box is the worst outcome available.
+- `temperature` (0.2), `max_tokens`, `context_tokens` (unset) — generation/budget.
   `context_tokens` is the total prompt budget (system prompt, tools schema and
-  history) and is clamped to the backend's real window when BE-Code can read
-  it (Ollama: `/api/ps`, Modelfile `num_ctx`). Generation headroom is reserved
+  history). **Leave it out** and it is simply the window the session gets — the
+  configured `context_window` when there is one, otherwise what the backend
+  reports (Ollama: `/api/ps`, Modelfile `num_ctx`). Set, it is a cap and still
+  wins, so existing config files keep behaving — but a cap below the window
+  means the rest of the window goes unused, and BE-Code now says so at startup
+  instead of shrinking the budget in silence. Generation headroom is reserved
   from it: `max_tokens` if set, else a quarter of the window (1k–4k) for plain
   models or a third (4k–16k) for reasoning models, which think before they
   answer. The
@@ -634,6 +776,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
+  `engine.item_cap` (4096) — byte cap on one recorded tool result;
+  `engine.node_cap` (32768) — byte cap on one task node's verbatim buffer, oldest
+  results dropped (and counted) past it;
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
@@ -641,7 +786,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
+v0.11.0 — context handling: a task record that survives compaction, native Ollama
+with a configurable window, and a model loader gated on consent (see the changelog).
+Earlier milestones, from v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
 think-filtering, model compaction, plan mode, git awareness + /commit + /init, custom
 commands + hooks, MCP client, reviewer routing, shell allow/deny + background processes,
 bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Earlier:

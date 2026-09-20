@@ -52,7 +52,7 @@ func TestWebFetchStripsHTMLAndCaps(t *testing.T) {
 	}))
 	defer srv.Close()
 	reg, _ := NewRegistry(t.TempDir(), nil)
-	reg.MaxOutput = 2000
+	reg.SetMaxOutput(2000)
 	reg.AddTool(NewWebFetch())
 	res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "web_fetch", Arguments: `{"url":"` + srv.URL + `/page"}`})
 	if res.IsError {

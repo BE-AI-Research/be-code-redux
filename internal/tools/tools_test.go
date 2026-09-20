@@ -145,7 +145,7 @@ func TestWriteFileRequiresContent(t *testing.T) {
 func TestRegistryMaxOutputTruncates(t *testing.T) {
 	dir := t.TempDir()
 	reg, _ := NewRegistry(dir, func(a, d string) bool { return true })
-	reg.MaxOutput = 1024
+	reg.SetMaxOutput(1024)
 	os.WriteFile(filepath.Join(dir, "big.txt"), []byte(strings.Repeat("0123456789\n", 1000)), 0o644)
 	res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "read_file", Arguments: `{"path":"big.txt"}`})
 	if len(res.Content) > 1024+200 || !strings.Contains(res.Content, "truncated") {

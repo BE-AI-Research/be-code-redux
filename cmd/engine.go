@@ -15,9 +15,11 @@ import (
 // and still answers, it simply remembers nothing.
 type noopLedger struct{}
 
-func (noopLedger) SetPlan(string, []string)                 {}
-func (noopLedger) SetStep(int, string) error                { return nil }
-func (noopLedger) AddNote(string, string, bool, bool) error { return nil }
+func (noopLedger) Plan(string, []string) string                  { return "" }
+func (noopLedger) Add(string, string) (string, error)            { return "", nil }
+func (noopLedger) SetStatusText(string, string, string) error    { return nil }
+func (noopLedger) Note(string, string, string, bool, bool) error { return nil }
+func (noopLedger) ShowText(string) string                        { return "" }
 
 // registerEngineTools adds task and the git lookups per cfg.Engine. An
 // engine.tools value that is neither full nor minimal warns once and is
@@ -46,7 +48,8 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 	if !cfg.Engine.Enabled || ag.Session == nil {
 		return
 	}
-	st, err := engine.Open(reg.Root, ag.Session.ID, resumed, cfg.Engine.NotesCap)
+	st, err := engine.Open(reg.Root, ag.Session.ID, resumed,
+		engine.Limits{NotesCap: cfg.Engine.NotesCap, ItemCap: cfg.Engine.ItemCap, NodeCap: cfg.Engine.NodeCap})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warn: engine: %v; continuing without working memory\n", err)
 		// The store is what remembers; the tools are what the model can
@@ -58,17 +61,17 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 		return
 	}
 	ag.SetEngine(st)
-	registerEngineTools(cfg, reg, st, baselineFunc(st))
+	// The tools reach the store through the agent's fence, never directly: a
+	// store that panics inside a task call is detached with one notice, like
+	// one that panics anywhere else, instead of taking the tool loop down.
+	registerEngineTools(cfg, reg, ag.TaskLedger(), baselineFunc(ag))
 	ag.RefreshSystem()
 }
 
 // baselineFunc reports where the current task began, read straight from the
-// ledger every time. It keeps no state of its own: RunFull records the
+// store every time. It keeps no state of its own: RunFull records the
 // porcelain text as each task starts, and anything cached here would pair a
 // later task's head with the first task's dirty list.
-func baselineFunc(st *engine.Store) tools.BaselineFunc {
-	return func() (string, string) {
-		b := st.Ledger().Baseline
-		return b.Head, b.Dirty
-	}
+func baselineFunc(ag *agent.Agent) tools.BaselineFunc {
+	return ag.EngineBaseline
 }

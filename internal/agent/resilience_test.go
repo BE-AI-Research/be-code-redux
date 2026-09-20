@@ -271,3 +271,130 @@ func TestRunLengthCutoffErrorNamesReasoning(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// fallbackProvider is a backend that has given up its native endpoint.
+type fallbackProvider struct {
+	funcProvider
+	fellBack bool
+}
+
+func (f *fallbackProvider) NativeFallback() bool { return f.fellBack }
+
+// A session running on the fallback endpoint cannot set the model's context
+// window, so it must not look identical to a healthy one — but it is also
+// not an error, so it is said once and only once.
+func TestNativeFallbackIsNoticedOnce(t *testing.T) {
+	p := &fallbackProvider{}
+	p.fn = func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	ag, _ := newTestAgent(t, p, nil)
+	notices := collectNotices(ag)
+	if _, err := ag.Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if hasNotice(*notices, "openai-compatible path") {
+		t.Fatalf("nothing was downgraded: %v", *notices)
+	}
+	p.fellBack = true
+	for i := 0; i < 2; i++ {
+		if _, err := ag.Run(context.Background(), "again"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, s := range *notices {
+		if strings.Contains(strings.ToLower(s), "openai-compatible path") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly one downgrade notice, got %d: %v", n, *notices)
+	}
+}
+
+// TestSetProviderClearsTheNoticeLatches: the downgrade notice and the
+// eviction notice describe *a backend*, and must not outlive the backend
+// they described. Switching providers with a bare assignment left both
+// latched, so the same thing happening on the newly chosen backend was
+// silent — a session quietly unable to set its context window with nothing
+// on screen to say so.
+func TestSetProviderClearsTheNoticeLatches(t *testing.T) {
+	reply := func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	first := &fallbackProvider{fellBack: true}
+	first.fn = reply
+	ag, _ := newTestAgent(t, first, nil)
+	notes := collectNotices(ag)
+
+	ag.Run(context.Background(), "one")
+	if !hasNotice(*notes, "openai-compatible path") {
+		t.Fatalf("no downgrade notice for the first backend: %v", *notes)
+	}
+	before := len(*notes)
+	ag.Run(context.Background(), "two")
+	if len(*notes) != before {
+		t.Fatalf("the same backend reported its downgrade twice: %v", *notes)
+	}
+
+	// A different backend, downgraded for its own reasons. That is news.
+	second := &fallbackProvider{fellBack: true}
+	second.fn = reply
+	ag.SetProvider(second)
+	ag.Run(context.Background(), "three")
+	if len(*notes) == before {
+		t.Fatalf("a downgrade on a newly selected backend was silent: %v", *notes)
+	}
+}
+
+// TestSetProviderClearsTheEvictionLatch: the same rule for "model is not
+// loaded", which is equally a fact about one backend.
+func TestSetProviderClearsTheEvictionLatch(t *testing.T) {
+	reply := func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}
+	first := &statusProvider{funcProvider: &funcProvider{fn: reply}, window: 32768, loaded: false}
+	ag, _ := newTestAgent(t, first, nil)
+	ag.ApplyWindow(32768)
+	notes := collectNotices(ag)
+
+	ag.Run(context.Background(), "one")
+	if !hasNotice(*notes, "not loaded") {
+		t.Fatalf("no eviction notice: %v", *notes)
+	}
+	before := len(*notes)
+
+	second := &statusProvider{funcProvider: &funcProvider{fn: reply}, window: 32768, loaded: false}
+	ag.SetProvider(second)
+	ag.Run(context.Background(), "two")
+	if len(*notes) == before {
+		t.Fatalf("an eviction on a newly selected backend was silent: %v", *notes)
+	}
+}
+
+// TestSetModelReserveSurvivesAnUnsetContextTokens: context_tokens is now
+// routinely unset (it means "derive from the window"), so a SetModel before
+// any window is known must reserve against the budget rather than against a
+// literal 0 — which would drop a thinking model from 4096 tokens of
+// generation headroom to the 1024 floor and truncate its reasoning.
+func TestSetModelReserveSurvivesAnUnsetContextTokens(t *testing.T) {
+	p := &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.ContextTokens = 0 })
+	if ag.Window() != 0 {
+		t.Fatalf("this test is about the no-window-yet case; window %d", ag.Window())
+	}
+	budget := ag.History.Budget
+	if budget <= 0 {
+		t.Fatalf("an unset context_tokens must still leave a usable budget; got %d", budget)
+	}
+	ag.SetModel("qwen3:8b") // a thinking model: a third of the budget, floored at 4096
+	if got, want := ag.History.Reserve, ag.reserveFor(budget); got != want {
+		t.Fatalf("reserve %d; with no window known it follows the budget (%d)", got, want)
+	}
+	if ag.History.Reserve <= 1024 {
+		t.Fatalf("reserve collapsed to the floor: %d", ag.History.Reserve)
+	}
+}

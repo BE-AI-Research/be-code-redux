@@ -289,8 +289,8 @@ func (m *View) handleMenuKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // status bar showed, plus the backend window.
 func (m *View) menuStatus() string {
 	win := "unknown"
-	if m.ag.Window > 0 {
-		win = fmt.Sprintf("%d tokens", m.ag.Window)
+	if w := m.ag.Window(); w > 0 {
+		win = fmt.Sprintf("%d tokens", w)
 	}
 	rows := [][2]string{
 		{"provider", m.prov.Name()},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // MCPServer configures one stdio MCP tool server.
@@ -48,6 +49,11 @@ type EngineConfig struct {
 	Budget int `json:"budget"`
 	// NotesCap caps the durable notes.md, in bytes.
 	NotesCap int `json:"notes_cap"`
+	// ItemCap caps one recorded tool result in the verbatim buffer, and
+	// NodeCap caps that buffer for a whole node. Both in bytes; the
+	// oldest items are dropped (and counted) when a node goes over.
+	ItemCap int `json:"item_cap"`
+	NodeCap int `json:"node_cap"`
 	// Tools is "full" (task, lookup, history, show, changes) or "minimal"
 	// (task and lookup only) for tight compat-mode prompts.
 	Tools string `json:"tools"`
@@ -64,6 +70,29 @@ type ProviderConfig struct {
 	APIKeyEnv string `json:"api_key_env,omitempty"`
 	// DefaultModel used when the top-level model is unset for this provider.
 	DefaultModel string `json:"default_model,omitempty"`
+	// ContextWindow is the num_ctx the harness sends on the native Ollama
+	// path for every model on this endpoint. Set, it means no probe: the
+	// user has told us the answer, and asking the server can cost minutes
+	// when it has to load the model to find out. Overridden per model by a
+	// Models entry. Ignored for type "openai", which has no such knob.
+	ContextWindow int `json:"context_window,omitempty"`
+	// KeepAlive overrides the top-level keep_alive for this endpoint (a Go
+	// duration string; "0" disables residency).
+	KeepAlive string `json:"keep_alive,omitempty"`
+	// Options are passed through to Ollama's options block untouched, so a
+	// config can reach keys the harness knows nothing about (top_k, top_p,
+	// repeat_penalty...). A Models entry's Options override these key by key.
+	Options map[string]any `json:"options,omitempty"`
+}
+
+// ModelConfig carries one model's runtime parameters. Parameters belong to
+// the model rather than to the endpoint serving it, so these win over the
+// provider block. The key is the model name exactly as the backend spells
+// it (tag included).
+type ModelConfig struct {
+	ContextWindow int            `json:"context_window,omitempty"`
+	KeepAlive     string         `json:"keep_alive,omitempty"`
+	Options       map[string]any `json:"options,omitempty"`
 }
 
 // Config is the persisted tool configuration.
@@ -71,6 +100,21 @@ type Config struct {
 	DefaultProvider string                    `json:"default_provider"`
 	Model           string                    `json:"model"`
 	Providers       map[string]ProviderConfig `json:"providers"`
+
+	// Models holds per-model runtime parameters (context window, keep-alive,
+	// passthrough options), keyed by model name. Resolution order for one
+	// model is: this map, else the provider block, else a probe of the
+	// backend. See internal/loader.
+	Models map[string]ModelConfig `json:"models,omitempty"`
+
+	// ReloadOnMismatch decides what happens when a model is already resident
+	// with a window other than the configured one. Sending a different
+	// num_ctx makes Ollama reload the model, evicting whatever else on that
+	// box was using it, so this is a server change and not ours to make
+	// unasked: "ask" (the default) puts it through the approval seam,
+	// "never" runs inside the window the server already has, "always" is
+	// standing consent for this machine's server.
+	ReloadOnMismatch string `json:"reload_on_mismatch,omitempty"` // ask | always | never
 
 	// Agent tuning
 	Temperature float64 `json:"temperature"`
@@ -82,9 +126,14 @@ type Config struct {
 	// more than half the window, and "low" for the rest of a request once
 	// reasoning has exhausted the window.
 	ReasoningEffort string `json:"reasoning_effort"`
-	ContextTokens   int    `json:"context_tokens"` // conversation budget for truncation
-	MaxTurns        int    `json:"max_turns"`      // tool-loop iterations per request
-	MaxRepairs      int    `json:"max_repairs"`    // verification repair attempts
+	// ContextTokens caps the conversation budget. 0 means "derive it from the
+	// model's context window", which is what an absent key now gives you:
+	// guessing a number here is how half a configured 32768-token window used
+	// to disappear with nothing printed. A positive value is still an
+	// explicit cap and still wins, so existing files keep behaving.
+	ContextTokens int `json:"context_tokens,omitempty"`
+	MaxTurns      int `json:"max_turns"`   // tool-loop iterations per request
+	MaxRepairs    int `json:"max_repairs"` // verification repair attempts
 
 	// CompatToolCalls forces prompt-embedded JSON tool calls for models
 	// whose native tool-call support is unreliable. "auto" tries native
@@ -245,9 +294,11 @@ func Default() *Config {
 				BaseURL: "http://localhost:8000/v1",
 			},
 		},
-		Temperature:         0.2,
-		MaxTokens:           0,
-		ContextTokens:       16384,
+		Temperature: 0.2,
+		MaxTokens:   0,
+		// No ContextTokens default on purpose: the model's window is the
+		// honest answer, and a literal here silently capped every window
+		// larger than it.
 		MaxTurns:            24,
 		MaxRepairs:          3,
 		CompatToolCalls:     "auto",
@@ -273,6 +324,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		KeepAlive:        "30m",
+		ReloadOnMismatch: "ask",
 		CompactWithModel: true,
 		RepoMap:          true,
 		RepoMapBudget:    6144,
@@ -281,7 +333,7 @@ func Default() *Config {
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
-		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, Tools: "full"},
+		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, ItemCap: 4096, NodeCap: 32768, Tools: "full"},
 	}
 }
 
@@ -350,6 +402,19 @@ func Load() (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", p, err)
 	}
+	// context_tokens is decoded a second time through a pointer, because
+	// "the user chose 16384" and "this key is not in the file" are different
+	// facts that a plain int flattens into the same number. Absent (or a
+	// nonsense value) means derive it from the model's context window; a
+	// positive value is a cap the user chose and still wins.
+	var shadow struct {
+		ContextTokens *int `json:"context_tokens"`
+	}
+	if json.Unmarshal(data, &shadow) == nil {
+		if shadow.ContextTokens == nil || *shadow.ContextTokens <= 0 {
+			cfg.ContextTokens = 0
+		}
+	}
 	if cfg.ClientThemes == nil {
 		cfg.ClientThemes = map[string]string{}
 	}
@@ -373,8 +438,19 @@ func Load() (*Config, error) {
 	if cfg.Engine.NotesCap == 0 {
 		cfg.Engine.NotesCap = 4096
 	}
+	if cfg.Engine.ItemCap == 0 {
+		cfg.Engine.ItemCap = 4096
+	}
+	if cfg.Engine.NodeCap == 0 {
+		cfg.Engine.NodeCap = 32768
+	}
 	if cfg.Engine.Tools == "" {
 		cfg.Engine.Tools = "full"
+	}
+	// An older file, or one written by hand, has no reload_on_mismatch. The
+	// absent value must mean "ask": a missing consent gate is not a yes.
+	if strings.TrimSpace(cfg.ReloadOnMismatch) == "" {
+		cfg.ReloadOnMismatch = "ask"
 	}
 	return cfg, nil
 }

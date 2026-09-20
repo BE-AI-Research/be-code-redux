@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -40,6 +41,24 @@ func newTestModel(t *testing.T, prep ...func(*agent.Agent)) *View {
 	v.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	return v
 }
+
+// testViewSeq numbers the views newTestView hands out, so two terminals
+// added to one session never collide on the id the roster keys them by.
+var testViewSeq int
+
+// newTestView adds one more terminal to an existing session, at 80x24, the
+// way a second attach would.
+func newTestView(t *testing.T, s *Session) *View {
+	t.Helper()
+	testViewSeq++
+	v := s.NewView(testViewSeq, fmt.Sprintf("term%d", testViewSeq))
+	v.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	return v
+}
+
+// transcriptText is everything this view has rendered into its own buffer
+// so far, exactly as its terminal would show it.
+func (m *View) transcriptText() string { return m.rendered.String() }
 
 // flush delivers every queued broadcast to the given views, in order.
 // Nothing runs a view's mailbox goroutine in a test, so a broadcast raised

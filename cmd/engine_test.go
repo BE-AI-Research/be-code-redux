@@ -81,11 +81,17 @@ func captureStderr(t *testing.T, fn func()) string {
 // closure the changes tool holds must report the current one — a cached
 // dirty list would describe the task before this one.
 func TestBaselineFollowsTheLedger(t *testing.T) {
-	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), t.TempDir(), "s", false, 4096)
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), t.TempDir(), "s", false, engine.Limits{NotesCap: 4096})
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := baselineFunc(st)
+	reg, err := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := agent.New(config.Default(), nil, "test-model", reg, "")
+	ag.SetEngine(st)
+	baseline := baselineFunc(ag)
 	st.SetBaseline(engine.Baseline{Head: "1111111111111111111111111111111111111111", Dirty: " M a.txt\n"})
 	head1, dirty1 := baseline()
 	st.SetBaseline(engine.Baseline{Head: "2222222222222222222222222222222222222222", Dirty: " M b.txt\n"})
@@ -132,13 +138,21 @@ func TestEngineToolsSurviveAStoreThatWillNotOpen(t *testing.T) {
 			t.Fatalf("%s missing after a failed engine.Open: %v", want, reg.Names())
 		}
 	}
-	// The task tool still answers, over the no-op ledger.
-	r := reg.Dispatch(context.Background(), provider.ToolCall{
-		ID: "c1", Name: "task",
-		Arguments: `{"action":"plan","task":"do a thing","steps":["one"]}`,
-	})
-	if r.IsError {
-		t.Fatalf("task over noopLedger: %+v", r)
+	// The task tool still answers, over the no-op ledger — every verb of
+	// it, since a model that gets an error back starts guessing.
+	for _, args := range []string{
+		`{"action":"plan","task":"do a thing","steps":["one"]}`,
+		`{"action":"add","parent":"1","text":"a step"}`,
+		`{"action":"status","id":"1.1","status":"doing"}`,
+		`{"action":"note","text":"a fact","file":"a.go"}`,
+		`{"action":"show","id":"1"}`,
+		// The 0.10.0 shape, over a ledger with no ActiveRootID capability.
+		`{"action":"step","step":2,"status":"done"}`,
+	} {
+		r := reg.Dispatch(context.Background(), provider.ToolCall{ID: "c1", Name: "task", Arguments: args})
+		if r.IsError {
+			t.Fatalf("task over noopLedger %s: %+v", args, r)
+		}
 	}
 	// RefreshSystem ran: the prompt names the git tools it has, but not the
 	// Working memory block it does not have.

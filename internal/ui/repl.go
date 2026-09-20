@@ -41,11 +41,34 @@ type REPL struct {
 	mu    sync.Mutex
 	ask   chan string // set while prompt() waits for an answer during a run
 	busy  bool
+	// inputEnded latches when a one-off prompt consumes the reader's EOF —
+	// Ctrl-D answered an approval instead of the main loop. The readline
+	// goroutine exits on that error, so nothing will ever arrive on lines
+	// again and every later receive would wait for the life of the process.
+	inputEnded bool
+	// promptCtx2 is what one-off approval prompts wait on besides the user.
+	// Background() by default; set for the span of a question whose asker
+	// can give up on it, so a deadline that has expired really does take the
+	// prompt off the screen.
+	promptCtx2 context.Context
 
 	// Review decides where a file change is reviewed (the editor diff, this
 	// terminal, or both with the first answer winning). Set by cmd after
 	// NewREPL; nil when nothing wired it.
 	Review *review.Coordinator
+
+	// OnStart, when set, runs once on this goroutine after the input
+	// reader is up and before the first line is read. It exists for a
+	// question that has to be asked before the session begins and can only
+	// be answered through this terminal's one input stream — the model
+	// loader's consent prompt. Raising it from a goroutine of its own
+	// would put two readers on r.lines and hand the user's answer to
+	// whichever won.
+	//
+	// Ctrl-D at that prompt ends the session, exactly as it does at the
+	// main prompt: Run checks for it and returns rather than waiting on a
+	// reader that has already exited.
+	OnStart func()
 }
 
 type lineEvent struct {
@@ -84,6 +107,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	}
 	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl}
 	ag.Tools.Approve = r.approve
+	ag.Tools.ApproveCtx = r.approveCtx
 	return r, nil
 }
 
@@ -95,8 +119,15 @@ func slashCompleterItems() []readline.PrefixCompleterInterface {
 	return items
 }
 
-// approve renders shell commands and file-write diffs and asks y/N/a.
+// approve renders shell commands and file-write diffs and asks y/N/a, on
+// this terminal's ambient prompt context (see SetPromptContext).
 func (r *REPL) approve(action, detail string) bool {
+	return r.approveCtx(r.promptContext(), action, detail)
+}
+
+// approveCtx is approve for an asker that can give up on its own question,
+// which waits on that asker's context instead. See tools.ApproveCtxFunc.
+func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	switch action {
 	case "shell":
 		if r.Cfg.AutoApproveShell {
@@ -110,10 +141,13 @@ func (r *REPL) approve(action, detail string) bool {
 		}
 		fmt.Println(yell("file change:"))
 		fmt.Println(ColorizeDiff(detail, useColor))
+	case "model_reload":
+		// Not this workspace: a server other people may be using.
+		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	switch strings.ToLower(r.prompt(yell("approve? [y/N/a(lways)] "))) {
+	switch strings.ToLower(r.promptCtx(ctx, yell("approve? [y/N/a(lways)] "))) {
 	case "y", "yes":
 		return true
 	case "a", "always":
@@ -122,6 +156,15 @@ func (r *REPL) approve(action, detail string) bool {
 			r.Cfg.AutoApproveShell = true
 		case "file_write":
 			r.Cfg.ApproveFileWrites = false
+		case "model_reload":
+			// Standing consent for this machine's server, persisted: it is a
+			// statement about the server, not about one run.
+			r.Cfg.ReloadOnMismatch = "always"
+			if err := r.Cfg.Save(); err != nil {
+				fmt.Println(dim("could not save reload_on_mismatch: " + err.Error()))
+			} else {
+				fmt.Println(dim("reload_on_mismatch: always (config saved)"))
+			}
 		case "consult":
 			// Session-wide consent for this one co-worker, recorded on the
 			// agent and never in the config file — the same rule the TUI's
@@ -202,8 +245,15 @@ func (r *REPL) Run(ctx context.Context) error {
 			}
 		}
 	}()
+	if r.OnStart != nil {
+		r.OnStart()
+	}
 	for {
-		ev := <-r.lines
+		ev, ok := r.nextLine()
+		if !ok {
+			fmt.Println()
+			return nil
+		}
 		if ev.err == readline.ErrInterrupt {
 			continue // ^C at prompt clears the line
 		}
@@ -231,8 +281,73 @@ func (r *REPL) Run(ctx context.Context) error {
 	}
 }
 
-// prompt asks a one-off question through readline with a temporary prompt.
-func (r *REPL) prompt(q string) string { return r.promptCtx(context.Background(), q) }
+// prompt asks a one-off question through readline with a temporary prompt,
+// on whatever context the asker set (SetPromptContext) — Background when
+// nobody did.
+func (r *REPL) prompt(q string) string { return r.promptCtx(r.promptContext(), q) }
+
+// underPrompt runs fn on this goroutine, bounded by
+// agent.ModelResolveTimeout, with one-off prompts waiting on the same
+// context — so a question whose asker has given up leaves the screen.
+//
+// On this goroutine is the point. Plain mode has one input stream and the
+// main loop is reading it; anything that raises a question from elsewhere
+// is a second reader, and the two split the user's keystrokes between them.
+// Every model-parameter resolution in this UI goes through here: the
+// startup consent (OnStart) and every /model and /provider switch.
+func (r *REPL) underPrompt(ctx context.Context, fn func(context.Context)) {
+	rctx, cancel := context.WithTimeout(ctx, agent.ModelResolveTimeout)
+	defer cancel()
+	r.SetPromptContext(rctx)
+	defer r.SetPromptContext(nil)
+	fn(rctx)
+}
+
+// ResolveModelParams resolves the current model's parameters inline: the
+// consent question startup could not put to anybody, asked once this
+// terminal is reading. See REPL.OnStart.
+func (r *REPL) ResolveModelParams(ctx context.Context) {
+	r.underPrompt(ctx, r.Agent.ResolveModelNow)
+}
+
+// SetPromptContext makes one-off prompts wait on ctx as well as on the
+// user, so a question whose asker has given up on it leaves the screen.
+// Passing nil restores the default. The model loader's consent is the
+// caller this exists for: it is bounded by agent.ModelResolveTimeout, and
+// that bound has to reach the prompt or it is not a bound at all.
+func (r *REPL) SetPromptContext(ctx context.Context) {
+	r.mu.Lock()
+	r.promptCtx2 = ctx
+	r.mu.Unlock()
+}
+
+func (r *REPL) promptContext() context.Context {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.promptCtx2 != nil {
+		return r.promptCtx2
+	}
+	return context.Background()
+}
+
+// inputDone reports whether the terminal's input has ended.
+func (r *REPL) inputDone() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inputEnded
+}
+
+// nextLine is one iteration of the main loop's read. It reports ok=false
+// when the terminal's input has already ended somewhere else — Ctrl-D
+// answering the startup consent question, or an approval mid-session. The
+// readline goroutine exits on that error, so receiving from r.lines would
+// wait for the life of the process; that is the hang this guards.
+func (r *REPL) nextLine() (lineEvent, bool) {
+	if r.inputDone() {
+		return lineEvent{}, false
+	}
+	return <-r.lines, true
+}
 
 // promptCtx is prompt on a cancellable wait: a shared file-change review can
 // be withdrawn (the editor answered it) while the question is on screen, and
@@ -252,6 +367,14 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 		select {
 		case ev := <-r.lines:
 			if ev.err != nil {
+				if ev.err != readline.ErrInterrupt {
+					// The reader goroutine has exited on this error and
+					// will feed r.lines no more. Record it so Run stops
+					// instead of waiting on a channel nobody writes to.
+					r.mu.Lock()
+					r.inputEnded = true
+					r.mu.Unlock()
+				}
 				return ""
 			}
 			return strings.TrimSpace(ev.line)
@@ -467,24 +590,24 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Println("@path in a message pins that file into context. Tab completes; ↑ history.")
 	case "/models":
-		models, err := r.Provider.ListModels(ctx)
+		// The same rows the TUI's picker shows: size, family, quantization,
+		// the window each is loaded with, and whether it is resident.
+		models, err := provider.ModelDetails(ctx, r.Provider)
 		if err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
 		for _, m := range models {
-			extra := ""
-			if m.SizeBytes > 0 {
-				extra = fmt.Sprintf("  %s %.1fGB %s", m.Family, float64(m.SizeBytes)/1e9, m.Quantization)
-			}
-			fmt.Printf("  %s%s\n", m.ID, dim(extra))
+			fmt.Printf("  %s%s\n", m.ID, dim("  "+m.Describe()))
 		}
 	case "/model":
 		if len(fields) < 2 {
 			fmt.Printf("current model: %s (profile %s)\n", r.Agent.Model, r.Agent.Profile.Family)
 			break
 		}
-		r.Agent.SetModel(fields[1])
+		// Inline, not on a goroutine: the consent question this may raise
+		// is answered through the one input stream this loop is reading.
+		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, fields[1]) })
 		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.Profile.Family)
 	case "/provider":
 		if len(fields) < 2 {
@@ -497,8 +620,9 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			break
 		}
 		r.Provider = p
-		r.Agent.Provider = p
-		r.Agent.SetModel(provider.ResolveModel(r.Cfg, fields[1], ""))
+		r.Agent.SetProvider(p)
+		model := provider.ResolveModel(r.Cfg, fields[1], "")
+		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, model) })
 		fmt.Printf("provider set to %s (model %s)\n", p.Name(), r.Agent.Model)
 	case "/sessions":
 		printSessions()
@@ -617,12 +741,25 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Println(dim("working memory is off (engine.enabled)"))
 			break
 		}
-		if len(fields) > 1 && fields[1] == "clear" {
-			r.Agent.Engine.ClearSession()
-			fmt.Println(dim("working memory cleared for this session"))
-			break
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
 		}
-		fmt.Println(r.Agent.Engine.LedgerText())
+		switch {
+		case len(args) > 0 && args[0] == "clear":
+			r.Agent.Engine.ClearSession()
+			fmt.Println(dim("this session's open work is closed as dropped (reason: cleared); the task documents are untouched"))
+		case len(args) > 0 && args[0] == "open":
+			if r.Agent.Engine.HasTaskDocuments() {
+				fmt.Println(r.Agent.Engine.TasksDir())
+			} else {
+				fmt.Println(dim("no task documents yet; the first one will be written to " + r.Agent.Engine.TasksDir()))
+			}
+		default:
+			for _, line := range TaskLines(r.Agent.Engine, args) {
+				fmt.Println(line)
+			}
+		}
 	case "/notes":
 		if r.Agent.Engine == nil {
 			fmt.Println(dim("working memory is off (engine.enabled)"))
@@ -669,7 +806,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			p, r.Cfg.DefaultProvider, r.Cfg.Model, r.Cfg.UI, r.Cfg.ContextTokens, r.Cfg.MaxTurns,
 			r.Cfg.MaxRepairs, r.Cfg.CompatToolCalls, r.Cfg.ApproveFileWrites, r.Cfg.AutoApproveShell)
 	case "/clear":
-		r.Agent.History.Messages = nil
+		r.Agent.ClearHistory()
 		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
 	case "/undo":
@@ -698,16 +835,17 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		fmt.Printf("%s %s\n", grn("wrote"), path)
 	case "/compact":
-		if err := r.Agent.Compact(ctx); err != nil {
+		if err := r.Agent.CompactNow(ctx); err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
 		fmt.Printf("compacted; context now ~%d tokens\n", r.Agent.History.Tokens())
 	case "/stats":
 		s := r.Agent.Usage()
+		budget, _, _ := r.Agent.History.Scalars()
 		fmt.Printf("requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d\n",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
-			s.Elapsed.Round(100*time.Millisecond), r.Agent.History.Tokens(), r.Agent.History.Budget)
+			s.Elapsed.Round(100*time.Millisecond), r.Agent.History.Tokens(), budget)
 	case "/map":
 		m := r.Agent.RepoMap()
 		if m == "" {

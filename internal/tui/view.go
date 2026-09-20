@@ -561,7 +561,7 @@ func (m *View) showAsk(a *ask) {
 	m.modalVP = viewport.New(m.width-6, m.modalHeight())
 	switch a.Kind {
 	case askApproval:
-		if a.Action == "consult" {
+		if a.Action == "consult" || a.Action == "model_reload" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -591,7 +591,7 @@ func answeredNote(by string) string {
 	if by == "" {
 		return ""
 	}
-	if strings.HasPrefix(by, "answered") {
+	if strings.HasPrefix(by, "answered") || strings.HasPrefix(by, "no answer") {
 		return by
 	}
 	return "answered by " + by
@@ -643,6 +643,17 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.Action == "shell" {
 			m.cfg.AutoApproveShell = true
 			ans = askAnswer{OK: true, Note: "shell auto-approve enabled for this session"}
+		} else if a.Action == "model_reload" {
+			// Standing consent for this machine's server, persisted because
+			// it is a statement about the server rather than about one run:
+			// "this box is mine to reshape". It is not consent to send code
+			// anywhere, which is why it is a key of its own.
+			m.cfg.ReloadOnMismatch = "always"
+			if err := m.cfg.Save(); err != nil {
+				ans = askAnswer{OK: true, Note: "reloading; could not save reload_on_mismatch: " + err.Error()}
+			} else {
+				ans = askAnswer{OK: true, Note: "reload_on_mismatch: always (config saved)"}
+			}
 		} else if a.Action == "consult" {
 			// Session-wide consent for this one co-worker, recorded on the
 			// agent (never in the config file): a standing "yes" to sending
@@ -942,8 +953,10 @@ func (m *View) headerView() string {
 	box := m.st.Border.Render(m.st.Text.Bold(true).Render("BE-Code Redux"))
 	lines := strings.Split(box, "\n")
 	code := "—"
-	if m.ag.Session != nil {
-		code = m.ag.Session.ResumeCode()
+	// CurrentSession, not the field: /clear and /resume replace it from
+	// goroutines of their own.
+	if sess := m.ag.CurrentSession(); sess != nil {
+		code = sess.ResumeCode()
 	}
 	logo := m.st.Accent.Render("session " + code)
 	if len(lines) >= 2 {
@@ -1040,6 +1053,12 @@ func (m *View) viewAsk() string {
 		// whose it is.
 		title = "Co-working model"
 		hint = "y allow this · n decline · a allow " + agent.ConsentCoworker(a.Detail) + " for the session · ↑↓ scroll"
+	case "model_reload":
+		// This one is not about this workspace at all: it reloads a model on
+		// a server other people may be using, so the words have to say whose
+		// machine is being changed rather than whose file.
+		title = "Reload the model on the server"
+		hint = "y reload · n keep the loaded window · a always reload on this server · ↑↓ scroll"
 	}
 	if m.compact() {
 		hint = "y/n/a · ↑↓"
@@ -1245,9 +1264,25 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		m.appendEntryLocked(entry{Kind: entryDim, Text: help})
 	case "/clear":
-		m.ag.History.Messages = nil
-		m.ag.SetSession(store.NewSession(m.prov.Name(), m.ag.Model, m.ag.Tools.Root))
-		m.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
+		// Off the event loop, like /compact beside it. ClearHistory waits
+		// for the turn lock, and whatever holds that lock — a request, or a
+		// post-switch compaction — writes to this session as it goes, which
+		// takes the very lock Update is holding here. Waiting from inside
+		// Update would invert that order and hang the terminal.
+		m.setRunStateLocked(true, "clearing")
+		sess, name, model := m.Session, m.prov.Name(), m.ag.Model
+		go func() {
+			sess.ag.ClearHistory()
+			// Under the session lock from here: SetSession writes what
+			// headerView reads to draw the resume code, so the swap and
+			// the lines that report it land in one critical section rather
+			// than beside a repaint.
+			sess.mu.Lock()
+			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			sess.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
+			sess.finishTurnLocked(nil, nil)
+			sess.mu.Unlock()
+		}()
 	case "/tools":
 		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(m.ag.Tools.Names(), " · ")})
 	case "/config":
@@ -1315,7 +1350,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		ctx := m.runContextLocked()
 		sess := m.Session
 		go func() {
-			if err := sess.ag.Compact(ctx); err != nil {
+			if err := sess.ag.CompactNow(ctx); err != nil {
 				sess.notice("compaction failed: " + err.Error())
 			} else {
 				sess.notice(fmt.Sprintf("compacted; context now ~%d tokens", sess.ag.History.Tokens()))
@@ -1324,10 +1359,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/stats":
 		s := m.ag.Usage()
+		budget, _, _ := m.ag.History.Scalars()
 		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
 			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
 			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
-			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), m.ag.History.Budget)})
+			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), budget)})
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})
@@ -1487,12 +1523,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			m.renderLocalNote("working memory is off (engine.enabled)")
 			return m, nil
 		}
-		if len(fields) > 1 && fields[1] == "clear" {
-			m.ag.Engine.ClearSession()
-			m.renderLocalNote("working memory cleared for this session")
-			return m, nil
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
 		}
-		m.renderLocalLines(strings.Split(m.ag.Engine.LedgerText(), "\n"))
+		switch {
+		case len(args) > 0 && args[0] == "clear":
+			m.ag.Engine.ClearSession()
+			m.renderLocalNote("this session's open work is closed as dropped (reason: cleared); the task documents are untouched")
+		case len(args) > 0 && args[0] == "open":
+			if m.ag.Engine.HasTaskDocuments() {
+				m.renderLocalNote(m.ag.Engine.TasksDir())
+			} else {
+				m.renderLocalNote("no task documents yet; the first one will be written to " + m.ag.Engine.TasksDir())
+			}
+		default:
+			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
+		}
 		return m, nil
 	case "/notes":
 		if m.ag.Engine == nil {
@@ -1585,7 +1632,7 @@ func (m *View) setProvider(name string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.prov = p
-	m.ag.Provider = p
+	m.ag.SetProvider(p)
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
 	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
 	return m, m.pingCmd()
@@ -1612,15 +1659,26 @@ func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	if m.liveCodes()[code] && !m.ownCode(code) {
 		return m.joinLive(code, from)
 	}
-	m.ag.Resume(s)
-	m.seedResumeLocked(s)
+	// Off the event loop, for the reason /clear is: Resume waits for the
+	// turn lock, and whatever holds it writes to this session as it goes,
+	// which takes the lock Update is holding here.
+	m.setRunStateLocked(true, "resuming")
+	sess := m.Session
+	go func() {
+		sess.ag.Resume(s)
+		sess.mu.Lock()
+		sess.seedResumeLocked(s)
+		sess.finishTurnLocked(nil, nil)
+		sess.mu.Unlock()
+	}()
 	return m, nil
 }
 
 // ownCode reports whether code is this program's own session, which is live
 // by definition; resuming it is a no-op, not a switch to itself.
 func (m *View) ownCode(code string) bool {
-	return m.ag.Session != nil && m.ag.Session.ResumeCode() == code
+	sess := m.ag.CurrentSession()
+	return sess != nil && sess.ResumeCode() == code
 }
 
 // joinLive hands from's terminal to the host of a live code instead of

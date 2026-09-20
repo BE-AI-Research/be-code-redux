@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -89,6 +90,17 @@ type Agent struct {
 	// contents for the UI. Toggling the engine mid-run would have to go
 	// through the run state, not through this field.
 	Engine *engine.Store
+	// observeFn is the recorder seam, swappable so the advisory discipline
+	// above can be exercised against a store that panics or answers
+	// nonsense without inventing one on disk. Nil means the real store.
+	observeFn func(engine.Event) string
+	// engineOff latches once a call into the store has panicked: the engine
+	// is detached for the rest of the session (see engineDo). engineFault is
+	// the test seam that makes a call panic without inventing a broken store
+	// on disk, and flushWarned keeps a failing save to one notice.
+	engineOff   atomic.Bool
+	engineFault func(op string)
+	flushWarned atomic.Bool
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -103,9 +115,14 @@ type Agent struct {
 	// UI can report the connection once it owns the screen.
 	IDETools int
 
-	projectNotes   string
-	handoff        string // briefing from the resumed session, kept in the system prompt
-	Window         int    // backend context window when detected (0 = unknown)
+	projectNotes string
+	handoff      string // briefing from the resumed session, kept in the system prompt
+	// window is the backend context window when detected (0 = unknown),
+	// read through Window(). It is atomic because it is written off the
+	// agent goroutine — resolveModel lands a model switch's window from a
+	// goroutine of its own — while a UI reads it to draw the context
+	// wheel.
+	window         atomic.Int64
 	systemOverride string // plan mode: replaces the base coding prompt
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
@@ -123,15 +140,21 @@ type Agent struct {
 	retryBase        time.Duration // first retry delay; doubles per attempt
 	stallAfter       time.Duration // silence before a "waiting for backend" notice
 	unloadedNotified bool          // one notice per eviction, not per turn
-	repoMap          string
+	// nativeFallbackNotified keeps the native-endpoint downgrade to one
+	// notice per session (see noteNativeFallback).
+	nativeFallbackNotified bool
+	repoMap                string
 	// saveDisabled latches on when another live process is found to own the
 	// session file; saveOwner is its pid and saveWarned keeps the warning to
 	// one line per run (see SaveGuard, autosave).
 	saveDisabled bool
 	saveOwner    int
 	saveWarned   bool
-	knownTools   map[string]bool
-	compat       bool // current session uses embedded tool calls
+	// queuedNotices are warnings raised during wiring, before a UI existed.
+	queuedNotices []string
+	queuedMu      sync.Mutex
+	knownTools    map[string]bool
+	compat        bool // current session uses embedded tool calls
 
 	// Co-working state (see cowork.go). coworkers is the usable co-worker
 	// list, resolved once at New and read-only thereafter; consults is the
@@ -163,6 +186,26 @@ type Agent struct {
 	autoVerifyUsed bool
 	toolFailStreak toolFailStreak
 	pendingAdvice  string
+
+	// Model parameters (see the ModelLoader block below). modelMu guards
+	// the model identity a switch rewrites — Model, Profile, compat,
+	// knownTools — together with the loader and the switch generation,
+	// because SetModel runs on a UI goroutine while resolveModel reads the
+	// same fields from its own. It is never held across anything that can
+	// block.
+	modelMu  sync.Mutex
+	loader   ModelLoader
+	modelGen int
+	// sessionMu guards the Session pointer against a UI reading it while
+	// /clear or /resume swaps it from a goroutine of their own. It guards
+	// the pointer, never what it points at.
+	sessionMu sync.Mutex
+	// turnMu is held for the whole of run(). It exists for exactly one
+	// caller outside the loop: the compaction resolveModel does when a
+	// model switch lands a window smaller than the conversation. That is
+	// the only transcript rewrite that does not come from the tool loop,
+	// and it must never interleave with one that does.
+	turnMu sync.Mutex
 }
 
 // toolFailStreak is one run of consecutive failures of the same tool:
@@ -193,7 +236,11 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	}
 	a.applyModel(model)
 	a.History = NewHistory(a.composeSystem(""), cfg.ContextTokens)
-	a.applyReserve(cfg.ContextTokens) // until a real window is detected
+	// NewHistory rescues an unset budget; the reserve must start from the
+	// same number, or an unset context_tokens leaves the floor reserve
+	// against a 16k budget until the real window arrives.
+	budget, _, _ := a.History.Scalars()
+	a.applyReserve(budget) // until a real window is detected
 	if reg.OnBeforeWrite == nil {
 		reg.OnBeforeWrite = func(abs string) error { return a.Checkpoints.Record(abs) }
 	}
@@ -205,8 +252,20 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 	return a
 }
 
-// applyModel re-derives the model profile and tool-call mode.
+// applyModel re-derives the model profile and tool-call mode. It takes
+// modelMu: a switch comes from a UI goroutine, and resolveModel reads the
+// profile from its own to size the reserve.
 func (a *Agent) applyModel(model string) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	a.applyModelLocked(model)
+}
+
+// applyModelLocked is applyModel with modelMu already held, for SetModel,
+// which has to rewrite the system prompt in the same critical section: the
+// prompt is what a model resolution reads when it measures the
+// conversation, and half a switch is not a state anything should measure.
+func (a *Agent) applyModelLocked(model string) {
 	a.Model = model
 	a.Profile = profiles.Detect(model)
 	switch a.Cfg.CompatToolCalls {
@@ -223,19 +282,382 @@ func (a *Agent) applyModel(model string) {
 	}
 }
 
-// SetModel switches models mid-session, refreshing the profile.
-func (a *Agent) SetModel(model string) {
-	a.applyModel(model)
-	if a.History != nil {
-		a.History.System.Content = a.composeSystem("")
-		// A thinking model needs a different reserve than a plain one.
-		w := a.Window
-		if w <= 0 {
-			w = a.Cfg.ContextTokens
-		}
-		a.applyReserve(w)
+// SetProvider switches the backend mid-session. It exists so the notices
+// that describe *a* backend cannot outlive the backend they described: a
+// session that downgraded to the OpenAI path, or lost its model to an
+// eviction, has said so once — and if the user then picks a different
+// provider, the same thing happening there is news again. Assigning
+// a.Provider directly leaves those latches set and the second downgrade
+// silent, which is how a session ends up quietly unable to set its context
+// window with nothing on screen to say so.
+func (a *Agent) SetProvider(p provider.Provider) {
+	a.Provider = p
+	a.nativeFallbackNotified = false
+	a.unloadedNotified = false
+	// A loader speaks for one backend. Carrying the old one across a
+	// provider switch would put another server's num_ctx on the wire — and
+	// raise its consent question about a machine the user has just left —
+	// while the session's own consent record described a different box
+	// entirely. A fresh loader, or none at all if nothing can build one.
+	if LoaderFactory != nil {
+		a.SetLoader(LoaderFactory(a.Cfg, p))
+	} else {
+		a.SetLoader(nil)
 	}
 }
+
+// LoaderFactory builds a model loader for one provider. Injected by cmd,
+// the same import-cycle dodge ReviewerFactory and CoworkerFactory use; nil
+// means a provider switch carries on with no parameter resolution, which is
+// what a test or a scratch agent wants.
+var LoaderFactory func(cfg *config.Config, p provider.Provider) ModelLoader
+
+// SetModel switches models mid-session, refreshing the profile. The switch
+// itself is synchronous — the next request uses the new model whatever the
+// backend says — and the parameter resolution runs behind it.
+func (a *Agent) SetModel(model string) {
+	if l, gen := a.applySwitch(model); l != nil {
+		a.goResolve(l, model, gen)
+	}
+}
+
+// SetModelNow is SetModel with the parameter resolution on the caller's
+// goroutine. Plain mode needs it for the same reason it needs
+// ResolveModelNow: there is one input stream, the REPL loop is reading it,
+// and a consent prompt raised from anywhere else races the user's own
+// keystrokes for the answer. In the probe that cost both halves at once —
+// the "y" reached the main loop as a fresh request to the model, and the
+// prompt then swallowed a later line.
+//
+// The caller bounds ctx and makes its own prompts wait on it; see
+// REPL.underPrompt.
+func (a *Agent) SetModelNow(ctx context.Context, model string) {
+	if l, gen := a.applySwitch(model); l != nil {
+		a.resolveModel(ctx, l, model, gen)
+	}
+}
+
+// applySwitch is the synchronous half of a switch: everything the next
+// request needs whatever the backend later says. It returns the loader and
+// the generation for whoever resolves the parameters, or a nil loader when
+// nobody will.
+func (a *Agent) applySwitch(model string) (ModelLoader, int) {
+	a.modelMu.Lock()
+	a.applyModelLocked(model)
+	if a.History != nil {
+		a.History.System.Content = a.composeSystem("")
+	}
+	a.modelGen++
+	gen, l := a.modelGen, a.loader
+	a.modelMu.Unlock()
+	if a.History != nil {
+		// A thinking model needs a different reserve than a plain one.
+		// Before a real window is known the budget is the best stand-in:
+		// context_tokens is now routinely unset (it means "derive from the
+		// window"), and reserving against 0 would drop a thinking model from
+		// a 4096-token headroom to the 1024 floor.
+		w := a.Window()
+		if w <= 0 {
+			w, _, _ = a.History.Scalars()
+		}
+		a.applyReserve(w) // takes modelMu itself, hence outside the block above
+	}
+	if l == nil {
+		return nil, 0
+	}
+	// Nothing goes on the wire in the meantime. Options belong to the
+	// endpoint, not to a model, so until the resolution lands the provider
+	// would still be carrying the *previous* model's num_ctx — and a
+	// request sent in that gap reloads the new model at a window nobody
+	// consented to, which is precisely what the gate exists to prevent.
+	// Sending none at all leaves the server's own choice alone. Only when
+	// there is a loader to put one back: without one, nothing would ever
+	// restore it.
+	a.clearWireWindow()
+	return l, gen
+}
+
+// clearWireWindow takes the context window off the wire, leaving the
+// passthrough options alone. It is the provider-agnostic half of "we do not
+// know this model's window yet": an endpoint that carries no window has
+// nothing to clear and does not implement the interface.
+func (a *Agent) clearWireWindow() {
+	if w, ok := a.Provider.(provider.WindowClearer); ok {
+		w.ClearWindow()
+	}
+}
+
+// maxResolveRetries bounds reapplyCurrent. Each round is one Apply, and
+// the only way to need another is a switch landing while it ran; a session
+// that switched models this many times inside one resolution is better off
+// with a bare wire than with a window chased round in circles.
+const maxResolveRetries = 8
+
+// reapplyCurrent puts the current model's window back on the wire after a
+// superseded resolution had to take its own off. It touches nothing else —
+// no budget, no compaction: the current model's resolution owns those and
+// is either still running or already done, and both callers would then say
+// the same thing twice.
+//
+// It re-checks after each Apply because the same thing can happen again:
+// another switch landing while this one was on the wire. Every exit leaves
+// either the current model's window there or none at all, never a window
+// belonging to a model the session is not running.
+func (a *Agent) reapplyCurrent(ctx context.Context) {
+	// Being superseded and late is the normal way to arrive here with a dead
+	// context: a consent question sat unanswered until the resolve deadline.
+	// Re-applying on that context would fail the residency read and blank the
+	// current model's already-resolved window behind an untrue "could not
+	// read the backend" notice, so the hand-back gets a short one of its own.
+	if ctx.Err() != nil {
+		fresh, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		ctx = fresh
+	}
+	for i := 0; i < maxResolveRetries; i++ {
+		a.modelMu.Lock()
+		l, model, gen := a.loader, a.Model, a.modelGen
+		a.modelMu.Unlock()
+		if l == nil {
+			return
+		}
+		if _, err := l.Apply(ctx, model); err != nil || ctx.Err() != nil {
+			a.clearWireWindow()
+			return
+		}
+		a.modelMu.Lock()
+		current := gen == a.modelGen
+		a.modelMu.Unlock()
+		if current {
+			return
+		}
+		a.clearWireWindow()
+	}
+	a.clearWireWindow()
+}
+
+// goResolve starts one resolution on its own goroutine, under
+// ModelResolveTimeout. Both callers come through here, because the last
+// time they each carried their own copy of these three lines one of them
+// lost the deadline — and a resolution that cannot time out holds the turn
+// lock for the life of the process if its consent is never answered or its
+// compaction never returns, wedging every later request, /clear and
+// /compact behind it.
+func (a *Agent) goResolve(l ModelLoader, model string, gen int) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), ModelResolveTimeout)
+		defer cancel()
+		a.resolveModel(ctx, l, model, gen)
+	}()
+}
+
+// ModelLoader is the one path to a model's runtime parameters: it resolves
+// them, puts them on the wire, and asks first whenever doing so would
+// change what another application on a shared backend is using. The agent
+// takes an interface rather than importing internal/loader — the same
+// import-cycle dodge ReviewerFactory and CoworkerFactory use — and cmd
+// injects the real one.
+type ModelLoader interface {
+	// Apply makes the model's parameters true on the backend and returns
+	// the window the session should budget against; 0 means unknown.
+	Apply(ctx context.Context, model string) (window int, err error)
+	// OnEvicted is a model that is no longer resident. The next request
+	// reloads it whatever we do, so the reload carries our parameters. No
+	// consent: nothing was holding the model.
+	OnEvicted(ctx context.Context, model string)
+	// OnWindowChanged is another client having reloaded the model at a
+	// different size. The loader adapts and never reloads back.
+	OnWindowChanged(model string, window int)
+	// KeepAlive is how long this model should stay resident: the models
+	// entry, else the provider block, else the top-level setting. 0 means
+	// nothing was configured, and the caller's own default applies.
+	KeepAlive(model string) time.Duration
+}
+
+// ModelResolveTimeout bounds one parameter resolution, consent prompt
+// included. It is generous because the question in the middle of it is one
+// a person has to read; it exists so a session that is never answered does
+// not carry a goroutine for the life of the process.
+//
+// Exported because the caller of ResolveModelNow has to apply it itself,
+// with a context its own approval prompt also waits on (see there).
+const ModelResolveTimeout = 2 * time.Minute
+
+// SetLoader hands the agent the session's model loader. Nil disables the
+// resolution entirely, which is what a test or a scratch agent wants.
+func (a *Agent) SetLoader(l ModelLoader) {
+	a.modelMu.Lock()
+	a.loader = l
+	a.modelMu.Unlock()
+}
+
+// ResolveModel resolves the current model's parameters through the loader,
+// off the caller's goroutine, and lands the window it gets as a notice.
+//
+// Two callers: SetModel, and the UI once it has wired Registry.Approve.
+// The second is why this is public. buildAgent runs before any UI exists,
+// so the consent question spec 9.3 describes has nobody to put it to and is
+// refused — correctly, but silently. Re-running it from runInteractive and
+// runSessionHost is what turns that refusal back into a question.
+func (a *Agent) ResolveModel() {
+	a.FlushQueuedNotices()
+	a.modelMu.Lock()
+	l, model := a.loader, a.Model
+	a.modelGen++
+	gen := a.modelGen
+	a.modelMu.Unlock()
+	if l == nil {
+		return
+	}
+	a.goResolve(l, model, gen)
+}
+
+// ResolveModelNow is ResolveModel on the caller's goroutine. Plain mode
+// needs it: its approval prompt reads the one terminal input stream the
+// REPL loop is also reading, so a question raised from a second goroutine
+// would race the user's own keystrokes. The REPL calls this from its own
+// goroutine, once, before it starts reading lines.
+//
+// It applies no deadline of its own, deliberately. There is no goroutine
+// here to leak, and a deadline applied here would be invisible to the
+// prompt the loader raises through the caller's UI — a timeout that cannot
+// withdraw the question it is timing is a lie. The caller bounds this with
+// ModelResolveTimeout on a context its own prompt also waits on.
+func (a *Agent) ResolveModelNow(ctx context.Context) {
+	a.FlushQueuedNotices()
+	a.modelMu.Lock()
+	l, model := a.loader, a.Model
+	a.modelGen++
+	gen := a.modelGen
+	a.modelMu.Unlock()
+	if l == nil {
+		return
+	}
+	a.resolveModel(ctx, l, model, gen)
+}
+
+// resolveModel is the body of both, fenced against a loader that panics:
+// model parameters are advisory, and a session that cannot learn its window
+// still runs — at the budget it already had.
+func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, gen int) {
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("model parameters for %s could not be resolved: %v", model, r)
+		}
+	}()
+	w, err := l.Apply(ctx, model)
+	// A switch that has been overtaken is not the session's model any more.
+	// Its window must not land on the model the user actually chose: the
+	// answers come back in whatever order the backend gives them.
+	//
+	// Returning is not enough. Apply has *already* put this model's window
+	// on the wire — that is what Apply is for — and options belong to the
+	// endpoint, not to a model, so leaving it there hands one model's
+	// window to another model's request. A slow /model big followed by a
+	// fast /model small ended with small running at big's 65536 while it
+	// was resident at 8192 for somebody else, which is a reload without
+	// consent: the exact thing the gate exists to stop.
+	//
+	// This comes before anything looks at what Apply returned, because an
+	// Apply that declined has touched the wire as well: a residency read
+	// that fails rewrites the endpoint's options to no window plus *its*
+	// model's passthrough map and returns (0, nil). Checked after the
+	// early return below, that left the current model with no window at
+	// all and the overtaken model's options on its requests. A superseded
+	// resolution hands the wire back whatever it came home with.
+	a.modelMu.Lock()
+	stale := gen != a.modelGen
+	a.modelMu.Unlock()
+	if stale {
+		a.clearWireWindow()
+		a.reapplyCurrent(ctx)
+		return
+	}
+	if err != nil || w <= 0 {
+		// Every reason the loader has for declining is one it has already
+		// explained in its own words; repeating it here would say it twice.
+		return
+	}
+	prev := a.Window()
+	if a.ApplyWindow(w) {
+		budget, _, _ := a.History.Scalars()
+		a.notice("%s runs with a %d-token window; budget now %d tokens", model, w, budget)
+	}
+	// A smaller window than the conversation already occupies would make
+	// the next request truncate silently: compact once, now, and say so.
+	//
+	// Measuring the conversation means reading the transcript and the
+	// system prompt, so it happens under both locks that can be rewriting
+	// them: turnMu for a request in flight, modelMu for a switch landing
+	// behind this one. A request holding turnMu is left alone entirely —
+	// the tool loop compacts at the top of every model call, so nothing is
+	// lost, and reading the transcript it is rewriting would be the race
+	// this avoids.
+	if !a.turnMu.TryLock() {
+		if prev > 0 && w < prev {
+			a.notice("%s has a smaller window (%d) than the model this request started with; the request in flight compacts if it needs to", model, w)
+		}
+		return
+	}
+	defer a.turnMu.Unlock()
+	a.modelMu.Lock()
+	tokens := a.History.Tokens() // the system prompt and the transcript
+	a.modelMu.Unlock()
+	if tokens <= a.History.Limit() { // the budget, read under its own lock
+		return
+	}
+	a.notice("the new model's window is smaller than this conversation; compacting once")
+	if err := a.Compact(ctx); err != nil {
+		a.notice("compaction after the model switch failed: %v", err)
+	}
+}
+
+// ClearHistory and CompactNow are the two transcript rewrites a *user* asks
+// for — /clear and /compact — and they exist because the transcript now has
+// more than one writer. Before model switching went through the loader, the
+// tool loop was the only thing that touched History.Messages, and a UI was
+// safe to touch it directly as long as it was not running. It is not the
+// only thing any more: a switch resolves its window on a goroutine of its
+// own and may compact on the spot, and the UI has no way to know that
+// goroutine is there. Both of these take the same turn lock run() holds, so
+// the three writers take turns instead of overlapping.
+//
+// **Neither may be called from inside a Bubble Tea Update.** The lock order
+// in a served session is turn lock first, session lock second: everything
+// that holds the turn lock — a request streaming deltas, a post-switch
+// compaction emitting notices — writes to the session as it goes, and that
+// takes the lock Update is holding. Waiting for the turn lock from inside
+// Update inverts that and deadlocks the terminal. Both UIs call these from
+// a goroutine of their own, with the UI in its busy state.
+func (a *Agent) ClearHistory() {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	a.History.Messages = nil
+}
+
+// CompactNow is Compact under the turn lock, for a UI asking for it
+// directly. The tool loop's own compaction is already inside run().
+func (a *Agent) CompactNow(ctx context.Context) error {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	return a.Compact(ctx)
+}
+
+// modelLoader is the loader as the agent goroutine reads it (checkBackend).
+func (a *Agent) modelLoader() ModelLoader {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.loader
+}
+
+// Loader is this session's model loader, or nil. It is the read half of
+// SetLoader and takes the same lock, because a provider switch replaces the
+// loader from a UI goroutine while the tool loop reads it.
+func (a *Agent) Loader() ModelLoader { return a.modelLoader() }
+
+// Window is the backend context window this session budgets against, or 0
+// when it is unknown.
+func (a *Agent) Window() int { return int(a.window.Load()) }
 
 // SetGuidance sets extra system-prompt text and recomposes the prompt so it
 // takes effect on the next call even when nothing else triggers a refresh.
@@ -300,7 +722,7 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride
 	if sys == "" {
 		sys = BuildSystemPrompt(a.Tools.Specs(), a.compat || a.Cfg.CompatToolCalls == "auto", a.projectNotes)
-		if a.Engine == nil {
+		if a.engine() == nil {
 			// No store, no Working memory block: keep the git sentences (the
 			// tools exist) but drop the paragraph that points at the block.
 			if full := engineGuidance(a.Tools.Specs()); full != "" {
@@ -314,13 +736,13 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
 	}
-	if a.Engine != nil && a.systemOverride == "" {
-		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+	if a.systemOverride == "" {
+		if wm := a.workingMemory(); wm != "" {
 			sys += "\n\nWorking memory:\n" + wm
 		}
 	}
-	if a.handoff != "" {
-		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + a.handoff
+	if h := a.Handoff(); h != "" {
+		sys += "\n\nHandoff from the previous session (honor its requirements and decisions):\n" + h
 	}
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance
@@ -360,6 +782,48 @@ func (a *Agent) notice(format string, args ...any) {
 	}
 }
 
+// Notice delivers one message to whatever UI is wired and reports whether
+// there was one. Startup wiring needs the answer: cmd builds the model
+// loader before any UI exists, and a notice raised then has to fall back to
+// stderr — but the same notice raised later belongs in the transcript,
+// which under a TUI is the only place it can be read at all (stderr is
+// wiped by the alt screen, or is a host log file).
+// QueueNotice holds a notice raised while the session was still being wired,
+// before any UI existed to show it. buildAgent runs ahead of every UI, so a
+// warning printed there reaches stderr only — which under a TUI is wiped by
+// the alt screen and in a hosted session is a log file nobody opens. Queued
+// notices are delivered by FlushQueuedNotices once a UI has wired Events.
+func (a *Agent) QueueNotice(msg string) {
+	a.queuedMu.Lock()
+	if len(a.queuedNotices) < 32 {
+		a.queuedNotices = append(a.queuedNotices, msg)
+	}
+	a.queuedMu.Unlock()
+}
+
+// FlushQueuedNotices delivers what QueueNotice held, in order, once. It is a
+// no-op until a UI has wired OnNotice, so nothing is lost by calling it early.
+func (a *Agent) FlushQueuedNotices() {
+	if a.Events.OnNotice == nil {
+		return
+	}
+	a.queuedMu.Lock()
+	pending := a.queuedNotices
+	a.queuedNotices = nil
+	a.queuedMu.Unlock()
+	for _, m := range pending {
+		a.Events.OnNotice(m)
+	}
+}
+
+func (a *Agent) Notice(msg string) bool {
+	if a.Events.OnNotice == nil {
+		return false
+	}
+	a.Events.OnNotice(msg)
+	return true
+}
+
 // transient emits a status notice that need not be kept: it goes to
 // OnTransient when the UI provides one, otherwise to OnNotice.
 func (a *Agent) transient(format string, args ...any) {
@@ -385,16 +849,15 @@ func (a *Agent) Run(ctx context.Context, userInput string) (string, error) {
 // newTurn=false so the whole request (first attempt plus repairs) is one
 // undo unit and one changed-files set for the reviewer.
 func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string, error) {
+	// Held for the whole request: the only other writer of the transcript
+	// is resolveModel's post-switch compaction, which runs on a goroutine
+	// of its own and steps aside rather than interleave with this.
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 	a.lastGitInfo = ""
-	defer func() {
-		if a.Engine != nil {
-			if err := a.Engine.Flush(); err != nil {
-				a.notice("engine: %v; continuing without working memory", err)
-			}
-		}
-	}()
+	defer a.flushEngine()
 
 	// A streak belongs to one stretch of tool calls; a repair round is a
 	// fresh start, and advice from a previous round has either been
@@ -408,8 +871,21 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.lastUserInput = userInput
 		a.lastFailingTool = ""
 	}
-	if newTurn && a.Engine != nil {
-		a.Engine.EnsureTask(userInput)
+	if newTurn {
+		// Evidence always has a home: if nothing is doing and no task is
+		// open, the user's own message opens one. Everything a tool
+		// returns from here on is recorded against a node the report can
+		// later find it under.
+		//
+		// Before that, anything the user — or a second session on this
+		// workspace — wrote into a task document since the last request is
+		// read back in, so this request works from their edit rather than
+		// over it.
+		a.engineDo("reload", func(st *engine.Store) {
+			st.Reload()
+			a.engineWarnings(st)
+		})
+		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
 	}
 	if a.repoDirty {
 		a.repoDirty = false
@@ -432,9 +908,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	emptyRetries, lengthRetries := 0, 0
 	effort := a.Cfg.ReasoningEffort
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
-		if a.Engine != nil {
-			a.Engine.NextTurn()
-		}
+		a.engineDo("turn", func(st *engine.Store) { st.NextTurn() })
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
@@ -652,8 +1126,24 @@ func (a *Agent) SaveGuard() (blocked bool, owner int) {
 // down from one session must still be able to save the next (/clear, a
 // resume after a blocked save).
 func (a *Agent) SetSession(s *store.Session) {
+	a.sessionMu.Lock()
 	a.Session = s
+	a.sessionMu.Unlock()
 	a.saveDisabled, a.saveOwner, a.saveWarned = false, 0, false
+}
+
+// CurrentSession is the session as a goroutine that is not the agent's own
+// reads it — a UI drawing the resume code in its header, or deciding
+// whether a picked row is this program's own session.
+//
+// The agent's own reads of the field stay bare, and can: every one of them
+// happens under the turn lock, which is also held by the two things that
+// replace the session out of band (ClearHistory's caller, Resume). A UI
+// holds no such lock, so it goes through here.
+func (a *Agent) CurrentSession() *store.Session {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.Session
 }
 
 // autosave persists the conversation; failures are non-fatal by design.
@@ -723,17 +1213,19 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	}
 	var res tools.Result
 	served := false
-	if a.Engine != nil && (call.Name == "search" || call.Name == "lookup" || call.Name == "history") {
+	if call.Name == "search" || call.Name == "lookup" || call.Name == "history" {
 		if args, ok := tools.ParseArgs(call.Arguments); ok {
-			if cached, hit := a.Engine.Cached(call.Name, args); hit {
-				res, served = tools.Result{Content: cached}, true
-			}
+			a.engineDo("cache", func(st *engine.Store) {
+				if cached, hit := st.Cached(call.Name, args); hit {
+					res, served = tools.Result{Content: cached}, true
+				}
+			})
 		}
 	}
 	if !served {
 		res = a.Tools.Dispatch(ctx, call)
 	}
-	if a.Engine != nil && !served {
+	if a.engine() != nil && !served {
 		// The same tolerant parse Dispatch used, so a double-encoded call
 		// is observed exactly as it ran; arguments no tool could run are
 		// simply not observed.
@@ -785,16 +1277,30 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 }
 
 // observe hands a tool result to the engine; a panic there must not take
-// the run down, so it is fenced.
+// the run down, so it is fenced, and what comes back is capped before it is
+// appended to a tool result.
+//
+// Ruling T5-b: it is deliberately *not* bounded in time. A store wedged on
+// its own mutex would make the very next composeSystem block inside Render
+// anyway, so a timeout here saves nothing while costing a parked goroutine,
+// a stall and a notice on every tool call. A bound that cannot hold is
+// worse than none; bounding the store properly means timing every call
+// behind one interface, which is later work.
 func (a *Agent) observe(ev engine.Event) (footer string) {
-	defer func() {
-		if r := recover(); r != nil {
-			a.notice("engine: %v; continuing without working memory", r)
-			footer = ""
+	a.engineDo("observe", func(st *engine.Store) {
+		fn := a.observeFn
+		if fn == nil {
+			fn = st.Observe
 		}
-	}()
-	return a.Engine.Observe(ev)
+		footer = trimAtLine(fn(ev), maxObserveFooter)
+	})
+	return footer
 }
+
+// maxObserveFooter caps what the recorder may append to a tool result. The
+// footer is one sentence by design; anything larger is a bug in the store,
+// and the model should not pay for it in context.
+const maxObserveFooter = 4096
 
 // chatFiltered runs one completion, applying the think-filter to streamed
 // deltas and stored content when the model family emits reasoning blocks,
@@ -882,6 +1388,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if len(a.History.Messages) <= keepTail {
 		return fmt.Errorf("nothing to compact")
 	}
+	// The model and its profile are snapshotted rather than read where they
+	// are used: this runs on the resolution's goroutine after a model
+	// switch, and a *second* switch landing mid-compaction would otherwise
+	// be read half-applied — a summary addressed to one model and stripped
+	// as if it came from another.
+	a.modelMu.Lock()
+	model, stripThink := a.Model, a.Profile.StripThink
+	a.modelMu.Unlock()
 	head := a.History.Messages[:len(a.History.Messages)-keepTail]
 	tail := a.History.Messages[len(a.History.Messages)-keepTail:]
 
@@ -901,7 +1415,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 		if task == "" && m.Role == provider.RoleUser && !isToolResult(m) {
 			task = m.Content
 		}
-		if a.Engine != nil {
+		if st := a.engine(); st != nil {
 			for _, tc := range m.ToolCalls {
 				path := ""
 				if tc.Name == "read_file" {
@@ -912,7 +1426,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 						// the stub is substituted for the read either way.
 						for _, k := range []string{"path", "file", "filename"} {
 							if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
-								path = a.Engine.DigestKey(v)
+								path = st.DigestKey(v)
 								break
 							}
 						}
@@ -921,11 +1435,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 				pending[tc.ID] = path
 			}
 		}
-		if a.Engine != nil && m.Role == provider.RoleTool {
+		if a.engine() != nil && m.Role == provider.RoleTool {
 			if p, ok := pending[m.ToolCallID]; ok {
 				delete(pending, m.ToolCallID)
 				if p != "" {
-					if r, has := a.Engine.HasDigest(p); has {
+					var r engine.Range
+					has := false
+					a.engineDo("digest", func(st *engine.Store) { r, has = st.HasDigest(p) })
+					if has {
 						fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
 						continue
 					}
@@ -954,15 +1471,17 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if prior != "" {
 		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
 	}
-	if a.Engine != nil {
-		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
-			fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
-		}
+	// The same capped block the prompt carries (ruling F-1). Rendered
+	// uncapped it was most of a 16k window by itself, so the request that
+	// exists to relieve an overflowing context overflowed it — and came back
+	// empty, which is the failure this branch was built to survive.
+	if wm := a.workingMemory(); wm != "" {
+		fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
 	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: a.Model,
+		Model: model,
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: compactSystemPrompt},
 			{Role: provider.RoleUser, Content: u.String()},
@@ -971,25 +1490,43 @@ func (a *Agent) Compact(ctx context.Context) error {
 		NoThink:     true, // a summary does not need minutes of deliberation
 	}, nil)
 	if err != nil {
+		// A summary that never arrived is the same situation as one that
+		// arrived empty: the tree is still current, so the session keeps
+		// working from it rather than falling through to blind trimming.
+		// Except when the user cancelled — Esc, or an interrupted
+		// /compact. That is not a backend failing to answer, it is a
+		// person asking to stop, and rewriting history under them is the
+		// opposite of what they asked for.
+		if ctx.Err() != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "compaction: summary request failed: %v\n", err)
+		if a.fromTaskRecord(ctx, tail) {
+			return nil
+		}
 		return err
 	}
 	summary := resp.Content
-	if a.Profile.StripThink {
+	if stripThink {
 		summary = StripThink(summary)
 	}
 	filesOnly := false
-	if a.Engine != nil {
+	if a.engine() != nil {
 		body, files := engine.SplitFilesBlock(summary)
 		if files != "" {
-			a.Engine.ApplyFileNotes(files)
+			a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
 			filesOnly = strings.TrimSpace(body) == ""
 		}
 		summary = body
-		if err := a.Engine.Flush(); err != nil {
-			a.notice("engine: %v; continuing without working memory", err)
-		}
+		a.flushEngine()
 	}
 	if strings.TrimSpace(summary) == "" {
+		// A cancellation is not a backend failure: it reaches here as an
+		// empty reply when the provider returns what it had, and the whole
+		// cancelled path is silent — no diagnostic, no rewritten history.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// An empty summary is the one compaction failure a user actually
 		// sees, and the reply's shape is the only clue to why: say what
 		// the backend reported, and keep the raw head on stderr (the host
@@ -1004,6 +1541,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 			head = head[:400]
 		}
 		fmt.Fprintf(os.Stderr, "compaction: empty summary (%s); reply head: %q\n", why, head)
+		if a.fromTaskRecord(ctx, tail) {
+			return nil
+		}
 		return fmt.Errorf("empty summary: %s", why)
 	}
 	a.History.Messages = append([]provider.Message{
@@ -1015,6 +1555,45 @@ func (a *Agent) Compact(ctx context.Context) error {
 	a.History.CollapseToolResults(0)
 	return nil
 }
+
+// fromTaskRecord is the branch this whole design turns on. When the model's
+// summary call fails or comes back empty, the session continues from the
+// task record instead of falling back to blind trimming: the tree is
+// already current — the recorder wrote it as the work happened, without a
+// model call — so the transcript is the only thing that needs cutting.
+//
+// It returns false when the request was cancelled, or when there is no
+// record to continue from (no engine, or an empty block); those are the
+// cases that still report an error.
+func (a *Agent) fromTaskRecord(ctx context.Context, tail []provider.Message) bool {
+	// A cancelled request is the user asking to stop, not a backend
+	// failing to answer: rewriting history under them is the opposite of
+	// what they asked for, so the caller's error stands.
+	if ctx.Err() != nil || a.engine() == nil {
+		return false
+	}
+	if strings.TrimSpace(a.workingMemory()) == "" {
+		return false
+	}
+	a.notice("compaction: the model returned no summary; continuing from the task record")
+	// The block lives in the system prompt, so recomposing it is what puts
+	// the current tree in front of the model in place of the turns being
+	// dropped here.
+	a.History.System.Content = a.composeSystem(a.lastGitInfo)
+	a.History.Messages = append([]provider.Message{
+		{Role: provider.RoleUser, Content: summaryPrefix + noSummaryNote},
+	}, tail...)
+	a.History.RepairOrphans()
+	a.History.CollapseToolResults(0)
+	return true
+}
+
+// noSummaryNote stands in for the summary in the transcript, and says where
+// the state actually is so the model does not go looking for it in turns
+// that are no longer there.
+const noSummaryNote = "No summary of the earlier turns was produced. " +
+	"The task record under \"Working memory:\" in the system prompt is current: " +
+	"it is what those turns amounted to, and it is what to work from."
 
 // SummaryPrefix marks the user-role message a compaction leaves in place
 // of the turns it summarised; UIs use it to render that message as a
@@ -1049,11 +1628,11 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
 	a.autoVerifyUsed = false
-	if a.Engine != nil {
+	if a.engine() != nil {
 		// A new request gets a fresh task line unless a plan is still in
 		// flight; mid-request repair rounds go through run, which only
 		// fills an empty one.
-		a.Engine.StartTask(userInput)
+		a.engineDo("start task", func(st *engine.Store) { st.StartTask(userInput) })
 		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
 			// The porcelain text itself, not a hash of it: the changes tool
 			// names the files that were already dirty when the task began,
@@ -1061,7 +1640,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 			// like project notes so a repository mid-rebase cannot put a
 			// megabyte of status into the ledger.
 			dirty := trimAtLine(gitctx.Porcelain(ctx, a.Tools.Root), MaxProjectNotes)
-			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: dirty})
+			a.engineDo("baseline", func(st *engine.Store) { st.SetBaseline(engine.Baseline{Head: head, Dirty: dirty}) })
 		}
 	}
 	answer, err := a.Run(ctx, userInput)
