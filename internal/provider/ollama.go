@@ -51,9 +51,8 @@ type Ollama struct {
 // absent value. A config that really wants to pin temperature per endpoint
 // says so in Extra, which is merged last and overrides everything.
 type Options struct {
-	NumCtx     int            `json:"num_ctx,omitempty"`
-	NumPredict int            `json:"num_predict,omitempty"`
-	Extra      map[string]any `json:"-"` // merged in last, from config
+	NumCtx int            `json:"num_ctx,omitempty"`
+	Extra  map[string]any `json:"-"` // merged in last, from config
 }
 
 // NewOllama derives the native API base from the configured base URL, which
@@ -137,11 +136,8 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	// harness's own low-temperature calls (compaction, handoff, review)
 	// would silently run at someone's chat setting.
 	m["temperature"] = req.Temperature
-	switch {
-	case req.MaxTokens > 0:
+	if req.MaxTokens > 0 {
 		m["num_predict"] = req.MaxTokens
-	case o.NumPredict > 0:
-		m["num_predict"] = o.NumPredict
 	}
 	for k, v := range o.Extra {
 		m[k] = v

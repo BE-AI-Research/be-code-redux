@@ -96,20 +96,31 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 	if old := s.ask; old != nil {
 		if old.Kind == askPicker && a.Kind != askPicker {
 			s.ask = nil
+			s.releaseAskLocked()
 			select {
 			case old.reply <- askAnswer{}:
 			default:
 			}
 			s.broadcast(askResolvedMsg{gen: old.Gen, by: "withdrawn", from: noClient})
-		} else {
-			if a.Kind != askPicker {
-				// An approval or a plan: its caller reads the refusal as a
-				// denial, so the transcript has to carry what happened.
-				s.appendEntryLocked(entry{Kind: entryWarn,
-					Text: "another prompt is already open; this request was not shown and counts as denied"})
-			}
+		} else if a.Kind == askPicker {
+			// A list nobody is waiting on gives way to the open question.
 			s.mu.Unlock()
 			return askAnswer{Refused: true}
+		} else {
+			// Two real questions: the newcomer waits its turn. Refusing it
+			// used to read as a denial — a consent modal raised by /model
+			// made the agent's next file write "denied" with nobody having
+			// been asked, and the reverse recorded a refused reload. It
+			// queues behind the open question instead, and its own context
+			// still bounds the wait.
+			free := s.askFree
+			s.mu.Unlock()
+			select {
+			case <-free:
+				return s.Ask(ctx, a)
+			case <-ctx.Done():
+				return askAnswer{Refused: true}
+			}
 		}
 	}
 	s.askGen++
@@ -118,6 +129,7 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 		a.raised(a.Gen)
 	}
 	s.ask = a
+	s.askFree = make(chan struct{})
 	if s.quitCh == nil {
 		s.quitCh = make(chan struct{})
 	}
@@ -207,6 +219,7 @@ func (s *Session) Answer(gen int, ans askAnswer, from int, v *View) (tea.Cmd, bo
 	}
 	a.reply <- ans
 	s.ask = nil
+	s.releaseAskLocked()
 	s.broadcast(askResolvedMsg{gen: gen, by: s.clientLabel(from), from: from})
 	return cmd, true
 }
@@ -222,6 +235,7 @@ func (s *Session) CancelAsk(gen int, by string) {
 		return
 	}
 	s.ask = nil
+	s.releaseAskLocked()
 	select {
 	case a.reply <- askAnswer{}:
 	default:
@@ -296,3 +310,12 @@ func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string
 // noAnswerNote is what every terminal is shown when a question is withdrawn
 // because its deadline passed with nobody answering.
 const noAnswerNote = "no answer; question withdrawn"
+
+// releaseAskLocked wakes whatever is queued behind the question that just
+// resolved. Callers hold s.mu.
+func (s *Session) releaseAskLocked() {
+	if s.askFree != nil {
+		close(s.askFree)
+		s.askFree = nil
+	}
+}

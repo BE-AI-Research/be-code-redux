@@ -308,3 +308,25 @@ func TestLoaderNoticesGoToTheTranscriptWhenThereIsOne(t *testing.T) {
 		t.Fatalf("it went to stderr as well, where a TUI wipes it:\n%s", out)
 	}
 }
+
+// A reviewer or co-worker provider is built fresh and used to skip the loader,
+// so its requests carried no num_ctx — and on Ollama an absent num_ctx means
+// the server default, which reloads a model someone else holds. It now goes
+// through a loader with no approver: it never asks, never reloads, and puts
+// the window the server already holds on the wire.
+func TestASecondaryProviderSendsTheWindowTheServerHolds(t *testing.T) {
+	stub := newOllamaProbeStub(t, `{"models":[{"name":"rev","model":"rev","context_length":8192}]}`)
+	cfg := config.Default()
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "ollama", BaseURL: stub.srv.URL}
+	cfg.Models = map[string]config.ModelConfig{"rev": {ContextWindow: 32768}}
+	p := provider.NewOllama("lan", stub.srv.URL, "")
+
+	secondaryLoad(cfg, p, "rev", nil)
+
+	if got := p.Options().NumCtx; got != 8192 {
+		t.Fatalf("num_ctx %d on the wire; a secondary model must keep the server's 8192, never reload to 32768 and never send nothing", got)
+	}
+	if n := atomic.LoadInt32(&stub.generate); n != 0 {
+		t.Fatalf("a secondary provider loaded a model %d time(s)", n)
+	}
+}

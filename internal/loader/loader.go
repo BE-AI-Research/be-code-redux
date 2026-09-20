@@ -267,12 +267,15 @@ func (l *Loader) Apply(ctx context.Context, model string) (int, error) {
 // num_ctx on the wire here would reload — and evict — a model another
 // application may be holding, with nobody asked, which is the one thing this
 // package exists to prevent. So: no window, a notice, and nothing latched,
-// because nothing was decided.
+// because nothing was decided. This is the least-bad choice, not a safe one:
+// on a real Ollama an absent num_ctx means the server default applies, which
+// reloads a model held at another size. With residency unreadable there is no
+// number that is known not to, and the default is at least the server's own.
 func (l *Loader) unknownResidency(o *provider.Ollama, p Params, model string, err error) (int, error) {
 	o.SetOptions(provider.Options{Extra: p.Options})
 	l.noticeOnce(model, fmt.Sprintf(
 		"could not read the backend's loaded models (%s), so it is unknown whether %s is held at another window; "+
-			"sending no context window this session rather than risking a reload of somebody else's model",
+			"sending no context window, so the server's own default will apply (on Ollama that can itself reload a model held at another size; there is no safe choice while the backend cannot be read)",
 		compactErr(err), model))
 	return 0, nil
 }

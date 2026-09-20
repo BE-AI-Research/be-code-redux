@@ -707,6 +707,13 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   `context_window` means no probe at all** — no `/api/ps` read, no Modelfile
   parse, and above all no loading the model to find out, which on a large
   local model is minutes of startup for a number you already know.
+- An absent `num_ctx` is not neutral: on Ollama it means the server's default
+  window applies, which reloads a model loaded at any other size. So BE-Code
+  sends the window the server already holds wherever it knows it, including
+  for the reviewer and co-worker models, and drops runner-level keys
+  (`num_ctx`, `num_batch`, `num_gpu`, `use_mmap`, …) from `options` with a
+  notice unless `reload_on_mismatch` is `always`. Use `context_window`, not
+  `options.num_ctx`, to set a window.
 - `reload_on_mismatch` (`ask`) — `ask` | `always` | `never`. Sending a
   `num_ctx` that differs from how a model is currently loaded makes Ollama
   **reload it, evicting whatever else on that machine was using it**. That is
@@ -779,7 +786,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
+v0.11.0 — context handling: a task record that survives compaction, native Ollama
+with a configurable window, and a model loader gated on consent (see the changelog).
+Earlier milestones, from v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
 think-filtering, model compaction, plan mode, git awareness + /commit + /init, custom
 commands + hooks, MCP client, reviewer routing, shell allow/deny + background processes,
 bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Earlier:

@@ -237,12 +237,18 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		if err != nil {
 			return nil, "", err
 		}
+		secondaryLoad(c, rp, c.Reviewer.Model, ag)
 		return rp, c.Reviewer.Model, nil
 	}
 
 	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
 	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return provider.FromConfig(c, cw.Provider)
+		cp, err := provider.FromConfig(c, cw.Provider)
+		if err != nil {
+			return nil, err
+		}
+		secondaryLoad(c, cp, cw.Model, ag)
+		return cp, nil
 	}
 
 	if flagResume != "" {
@@ -643,4 +649,27 @@ func startupWarn(ag *agent.Agent, msg string) {
 	if ag != nil {
 		ag.QueueNotice(msg)
 	}
+}
+
+// secondaryLoad puts a reviewer's or co-worker's provider through a loader of
+// its own before it is used. These providers are built fresh by the factories
+// above and used to skip the loader entirely, so their requests carried no
+// num_ctx at all — and on Ollama an absent num_ctx means the server default,
+// not "whatever is loaded": a review of the primary's own model would reload
+// it at 8192 and back again, evicting whoever else shares the server, with
+// nobody asked. The loader has no approver here, which it reads as a refusal:
+// a secondary model is never worth reloading someone else's. It keeps the
+// window the server already holds and puts that on the wire.
+func secondaryLoad(c *config.Config, prov provider.Provider, model string, ag *agent.Agent) {
+	if _, ok := prov.(*provider.Ollama); !ok || model == "" {
+		return
+	}
+	l := loader.New(prov, c, nil, func(msg string) {
+		if ag == nil || !ag.Notice(msg) {
+			fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _ = l.Apply(ctx, model)
 }

@@ -111,6 +111,16 @@ room runs out.
   outcome available. `/models` shows size, family, quantization, the window each
   model is loaded with and whether it is resident.
 
+**Hardening from the whole-branch review.** The working-memory block is capped from
+the live window (about a quarter of the usable context), newest raw output first and
+older output as one-liners, so a model that never calls `task` no longer grows a 36 KB
+prompt. A task document edited by hand mid-session is merged, never overwritten, and a
+fresh session no longer inherits the last one's open task. Every engine call sits
+behind one panic fence. Two approvals queue instead of denying each other. Reviewer and
+co-worker models go through a loader too, runner-level `options` keys cannot bypass
+consent, and startup warnings reach the transcript in hosted sessions. An absent
+`num_ctx` is documented for what it is on Ollama: the server default, not a no-op.
+
 ## v0.10.0 — working memory
 
 - **Reasoning effort.** `reasoning_effort` (config, default `medium`) is sent

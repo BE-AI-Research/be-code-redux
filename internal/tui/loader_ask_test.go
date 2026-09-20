@@ -281,3 +281,52 @@ func TestADeadlineWithdrawalSaysNobodyAnswered(t *testing.T) {
 		t.Fatal("answeredNote must pass the withdrawal note through and stay silent for a cancellation")
 	}
 }
+
+// Two real questions must not deny each other. A consent modal raised by a
+// mid-run /model used to make the agent's next write approval count as
+// denied, unseen; now the second question waits its turn and is answered.
+func TestASecondApprovalQueuesBehindTheFirst(t *testing.T) {
+	tempHome(t)
+	s := newTestSession(t)
+	v := s.NewView(0, "local")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	flush(v)
+
+	first := make(chan askAnswer, 1)
+	go func() {
+		first <- s.Ask(context.Background(), &ask{Kind: askApproval, Action: "model_reload", Detail: "reload?"})
+	}()
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.current() != nil })
+
+	second := make(chan askAnswer, 1)
+	go func() {
+		second <- s.Ask(context.Background(), &ask{Kind: askApproval, Action: "file_write", Detail: "write a.go"})
+	}()
+	select {
+	case ans := <-second:
+		t.Fatalf("the second question was answered %+v while the first was still open", ans)
+	case <-time.After(60 * time.Millisecond):
+	}
+
+	flush(v)
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}) // refuse the reload
+	if ans := <-first; ans.OK {
+		t.Fatal("the first question was refused, not approved")
+	}
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		a := s.current()
+		return a != nil && a.Action == "file_write"
+	})
+	flush(v)
+	v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")}) // approve the write
+	select {
+	case ans := <-second:
+		if !ans.OK || ans.Refused {
+			t.Fatalf("the queued write approval came back %+v; it was answered yes", ans)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queued question was never put to anyone")
+	}
+}
