@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -43,6 +44,24 @@ namespace BECode.VisualStudio
         private WorkspaceFolders? _folders;
         private int _pid;
         private string? _home;
+        private int _port;
+        private string? _token;
+
+        // Fix round 1, I-2: republishing the lock file when
+        // WorkspaceFolders.Changed fires. One lock (_lockWriteGate) guards
+        // both the "is this the newest generation queued" decision and the
+        // pending-folders slot together, so the two can never be updated
+        // out of step with each other — see OnFoldersChanged's own comment
+        // for why splitting them (a GenerationGate check followed by a
+        // separate assignment) would reopen the exact race this exists to
+        // close. Only one republish write is ever in flight
+        // (_lockWriteInProgress); a burst of Changed firings while a write
+        // is running collapses to whatever the LATEST one queued.
+        private readonly object _lockWriteGate = new object();
+        private long _lastQueuedLockGeneration = -1;
+        private bool _lockWriteInProgress;
+        private IReadOnlyList<string>? _pendingLockFolders;
+        private volatile bool _lockRemoved;
 
         protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
         {
@@ -80,6 +99,8 @@ namespace BECode.VisualStudio
 
             _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             _pid = Process.GetCurrentProcess().Id;
+            _port = port;
+            _token = token;
 
             // The lock file must exist before anything else can find this
             // host — written last, once the server is actually listening.
@@ -90,12 +111,113 @@ namespace BECode.VisualStudio
                 folders.Current,
                 "visualstudio",
                 Version)).ConfigureAwait(true);
+
+            // Fix round 1, I-2: from here on, a folder-list change
+            // republishes the lock (off the UI thread, serialised,
+            // superseded generations dropped — see OnFoldersChanged).
+            // Subscribed AFTER the initial write above so the recompute
+            // WorkspaceFolders.InitializeAsync already ran does not race a
+            // redundant republish against it.
+            folders.Changed += OnFoldersChanged;
+
+            string vsVersion;
+            try
+            {
+                vsVersion = (await GetServiceAsync(typeof(SDTE)).ConfigureAwait(true) as EnvDTE80.DTE2)?.Version ?? "unknown";
+            }
+            catch
+            {
+                vsVersion = "unknown";
+            }
+
+            ActivityLog.LogInformation(nameof(BECodePackage), "listening on port " + port + ", " + folders.Current.Count + " workspace folder(s), VS " + vsVersion);
+        }
+
+        /// <summary>
+        /// Fix round 1, I-2: <see cref="WorkspaceFolders.Changed"/>'s
+        /// handler. Runs off the UI thread already (the event is raised
+        /// there). The single <see cref="_lockWriteGate"/> lock makes the
+        /// "is this generation newer than everything already queued"
+        /// decision and the pending-folders assignment ATOMIC together —
+        /// doing them as two separate steps (e.g. a <c>GenerationGate.TryCommit</c>
+        /// check followed by a plain field write) would let a later call
+        /// win the commit but an earlier call win the race to actually set
+        /// the pending value, which is the exact "older list overwrites a
+        /// newer one" bug this exists to prevent.
+        /// </summary>
+        private void OnFoldersChanged(long generation, IReadOnlyList<string> folders)
+        {
+            lock (_lockWriteGate)
+            {
+                if (_lockRemoved || generation <= _lastQueuedLockGeneration)
+                {
+                    return;
+                }
+
+                _lastQueuedLockGeneration = generation;
+                _pendingLockFolders = folders;
+
+                if (_lockWriteInProgress)
+                {
+                    // A write loop is already draining; it will pick up
+                    // this (now the latest) pending value once its current
+                    // write finishes.
+                    return;
+                }
+
+                _lockWriteInProgress = true;
+            }
+
+            ThreadHelper.JoinableTaskFactory.RunAsync(DrainLockWritesAsync).FileAndForget("becode/package/republish");
+        }
+
+        private async Task DrainLockWritesAsync()
+        {
+            while (true)
+            {
+                IReadOnlyList<string>? folders;
+                lock (_lockWriteGate)
+                {
+                    if (_pendingLockFolders == null || _lockRemoved)
+                    {
+                        _lockWriteInProgress = false;
+                        return;
+                    }
+
+                    folders = _pendingLockFolders;
+                    _pendingLockFolders = null;
+                }
+
+                try
+                {
+                    await LockFile.WriteAsync(_home!, new LockInfo(_pid, _port, _token!, folders!, "visualstudio", Version)).ConfigureAwait(false);
+                    ActivityLog.LogInformation(nameof(WorkspaceFolders), "republished lock: " + folders!.Count + " workspace folder(s)");
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(OnFoldersChanged), ex.ToString());
+                }
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
+                // Fix round 1, I-2: stop republishing BEFORE the lock is
+                // removed — set under the same lock OnFoldersChanged and
+                // DrainLockWritesAsync check, so a write already queued or
+                // in flight cannot land AFTER LockFile.Remove below.
+                lock (_lockWriteGate)
+                {
+                    _lockRemoved = true;
+                }
+
+                if (_folders != null)
+                {
+                    _folders.Changed -= OnFoldersChanged;
+                }
+
                 // Host design §2.1: remove the lock FIRST, so the harness
                 // stops finding a dying bridge before the server itself —
                 // which may take a moment to drain in-flight calls — is

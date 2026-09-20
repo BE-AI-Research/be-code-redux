@@ -260,4 +260,70 @@ namespace BECode.Bridge.Tests
             Assert.Equal(2, attempts);
         }
     }
+
+    // Task 6, fix round 1, I-2: the lock-republish ordering guard.
+    public class GenerationGateTests
+    {
+        [Fact]
+        public void NextIsStrictlyIncreasing()
+        {
+            var gate = new GenerationGate();
+            var a = gate.Next();
+            var b = gate.Next();
+            var c = gate.Next();
+
+            Assert.True(a < b);
+            Assert.True(b < c);
+        }
+
+        [Fact]
+        public void InOrderGenerationsAllCommit()
+        {
+            var gate = new GenerationGate();
+            var g1 = gate.Next();
+            var g2 = gate.Next();
+
+            Assert.True(gate.TryCommit(g1));
+            Assert.True(gate.TryCommit(g2));
+        }
+
+        [Fact]
+        public void AnOlderGenerationArrivingAfterANewerOneIsRejected()
+        {
+            var gate = new GenerationGate();
+            var older = gate.Next();
+            var newer = gate.Next();
+
+            // The newer write finishes first (e.g. a faster disk write for
+            // a later-started recompute)...
+            Assert.True(gate.TryCommit(newer));
+
+            // ...and the older one, finishing late, must never win.
+            Assert.False(gate.TryCommit(older));
+        }
+
+        [Fact]
+        public void TheSameGenerationCommittedTwiceOnlySucceedsOnce()
+        {
+            var gate = new GenerationGate();
+            var g = gate.Next();
+
+            Assert.True(gate.TryCommit(g));
+            Assert.False(gate.TryCommit(g));
+        }
+
+        [Fact]
+        public void ANeverIssuedGenerationOfZeroIsRejectedOnceAnythingHasCommitted()
+        {
+            var gate = new GenerationGate();
+            var g1 = gate.Next();
+            Assert.True(gate.TryCommit(g1));
+
+            // Generation 0 (or any value <= the committed high-water mark)
+            // must never be accepted, even though Next() itself never
+            // returns 0 (Interlocked.Increment starts at 1) — defends
+            // against a caller passing an uninitialised default(long).
+            Assert.False(gate.TryCommit(0));
+        }
+    }
 }

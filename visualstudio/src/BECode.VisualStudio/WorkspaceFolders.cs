@@ -27,12 +27,18 @@ namespace BECode.VisualStudio
     {
         private static readonly TimeSpan DebounceDelay = TimeSpan.FromMilliseconds(250);
 
+        /// <summary>The solution-folder project type GUID (I-4/I-10): skipped everywhere loaded projects are enumerated.</summary>
+        private static readonly Guid SolutionFolderTypeGuid = new Guid("{2150E333-8FDC-42A3-9474-1A3956D46DE8}");
+
         private readonly AsyncPackage _package;
         private readonly Debouncer _debouncer;
+        private readonly GenerationGate _generationGate = new GenerationGate();
         private IVsSolution? _solution;
         private uint _solutionEventsCookie;
         private string? _openFolder;
         private volatile IReadOnlyList<string> _current = Array.Empty<string>();
+        private volatile IReadOnlyList<ProjectEntry> _currentProjects = Array.Empty<ProjectEntry>();
+        private volatile bool _disposed;
 
         public WorkspaceFolders(AsyncPackage package)
         {
@@ -48,6 +54,31 @@ namespace BECode.VisualStudio
         /// </summary>
         public IReadOnlyList<string> Current => _current;
 
+        /// <summary>
+        /// Fix round 1, I-4/I-10: every loaded project (solution folders
+        /// already excluded), as of the same recompute that produced
+        /// <see cref="Current"/> — shared by <c>VisualStudioDebugHost.ConfigsAsync</c>
+        /// (listing startable projects) and <c>ErrorListReader</c> (rooting
+        /// a diagnostic's project-relative <c>FileName</c>) so neither
+        /// copies the <see cref="IVsSolution"/> enumeration in
+        /// <see cref="ComputeOnMainThread"/>.
+        /// </summary>
+        public IReadOnlyList<ProjectEntry> CurrentProjects => _currentProjects;
+
+        /// <summary>
+        /// Fix round 1, I-2: fires after every recompute — including the
+        /// initial one — with the generation that recompute claimed (via
+        /// <see cref="GenerationGate.Next"/>, in RECOMPUTE-START order) and
+        /// the folder list it produced. <c>BECodePackage</c> uses this to
+        /// keep the lock file's <c>workspaceFolders</c> current; it owns its
+        /// own <see cref="GenerationGate"/> to decide whether a given
+        /// firing is still the newest one it has seen, since a later
+        /// recompute's write can finish before an earlier one's. Always
+        /// raised off the UI thread (after <see cref="RecomputeAsync"/>'s
+        /// own hop) so a subscriber's own I/O never runs on it.
+        /// </summary>
+        public event Action<long, IReadOnlyList<string>>? Changed;
+
         /// <summary>Called once from <see cref="BECodePackage.InitializeAsync(CancellationToken, IProgress{ServiceProgressData})"/>.</summary>
         public async Task InitializeAsync(CancellationToken ct)
         {
@@ -57,6 +88,27 @@ namespace BECode.VisualStudio
             if (_solution != null)
             {
                 _solution.AdviseSolutionEvents(this, out _solutionEventsCookie);
+
+                // Fix round 1, I-12: Open Folder mode is otherwise detected
+                // only by OnAfterOpenFolder, which never fires for a folder
+                // that was ALREADY open when the package itself finishes
+                // loading (the package can auto-load after Open Folder has
+                // already finished opening — UIContext SolutionExists is
+                // satisfied by Open Folder mode too).
+                try
+                {
+                    if (ErrorHandler.Succeeded(_solution.GetProperty((int)__VSPROPID7.VSPROPID_IsInOpenFolderMode, out var isOpenFolderObj))
+                        && isOpenFolderObj is bool isOpenFolder && isOpenFolder
+                        && ErrorHandler.Succeeded(_solution.GetSolutionInfo(out var folderDir, out _, out _))
+                        && !string.IsNullOrEmpty(folderDir))
+                    {
+                        _openFolder = folderDir;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogError(nameof(InitializeAsync), ex.ToString());
+                }
             }
 
             await RecomputeAsync().ConfigureAwait(true);
@@ -69,21 +121,42 @@ namespace BECode.VisualStudio
 
         private async Task RecomputeAsync()
         {
+            // Fix round 1, I-2: claimed in RECOMPUTE-START order, before any
+            // await — this is what lets BECodePackage's GenerationGate
+            // reject a late-finishing write for a recompute that a
+            // LATER-started one has already superseded, however the two
+            // actually finish relative to each other.
+            var generation = _generationGate.Next();
+
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(CancellationToken.None);
 
             IReadOnlyList<string> next;
+            IReadOnlyList<ProjectEntry> nextProjects;
             try
             {
-                next = ComputeOnMainThread();
+                nextProjects = EnumerateLoadedProjects(_solution);
+                next = ComputeOnMainThread(nextProjects);
             }
             catch (Exception ex)
             {
                 ActivityLog.LogError(nameof(WorkspaceFolders), ex.ToString());
                 next = Array.Empty<string>();
+                nextProjects = Array.Empty<ProjectEntry>();
             }
 
-            await TaskScheduler.Default;
+            // Fix round 1, M-7: assign the volatile fields BEFORE hopping
+            // off the UI thread — Current/CurrentProjects must reflect this
+            // recompute's result as soon as it is known, not only once this
+            // method has also finished hopping to the thread pool.
             _current = next;
+            _currentProjects = nextProjects;
+
+            await TaskScheduler.Default;
+
+            if (!_disposed)
+            {
+                Changed?.Invoke(generation, next);
+            }
         }
 
         // Called only from RecomputeAsync/InitializeAsync, both of which
@@ -95,7 +168,7 @@ namespace BECode.VisualStudio
         // Threading.SwitchToMainThreadAsync (a wrapper) or asserting with
         // ThreadHelper.ThrowIfNotOnUIThread() here instead both left this
         // flagged (design correction — see the report).
-        private IReadOnlyList<string> ComputeOnMainThread()
+        private IReadOnlyList<string> ComputeOnMainThread(IReadOnlyList<ProjectEntry> projects)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
@@ -116,23 +189,11 @@ namespace BECode.VisualStudio
                 folders.Add(solutionDir);
             }
 
-            var guid = Guid.Empty;
-            if (ErrorHandler.Succeeded(_solution.GetProjectEnum((uint)__VSENUMPROJFLAGS.EPF_LOADEDINSOLUTION, ref guid, out var enumHierarchies)) && enumHierarchies != null)
+            foreach (var project in projects)
             {
-                var buffer = new IVsHierarchy[1];
-                while (enumHierarchies.Next(1, buffer, out var fetched) == VSConstants.S_OK && fetched == 1)
+                if (!string.IsNullOrEmpty(project.Dir))
                 {
-                    var hierarchy = buffer[0];
-                    if (hierarchy == null)
-                    {
-                        continue;
-                    }
-
-                    if (ErrorHandler.Succeeded(hierarchy.GetProperty(VSConstants.VSITEMID_ROOT, (int)__VSHPROPID.VSHPROPID_ProjectDir, out var value))
-                        && value is string dir && !string.IsNullOrEmpty(dir))
-                    {
-                        folders.Add(dir);
-                    }
+                    folders.Add(project.Dir);
                 }
             }
 
@@ -141,6 +202,92 @@ namespace BECode.VisualStudio
                 .Where(f => f.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
+        }
+
+        /// <summary>
+        /// Fix round 1, I-4/I-10: every loaded, non-solution-folder project,
+        /// via <see cref="IVsSolution.GetProjectEnum"/> (never
+        /// <c>DTE.Solution.Projects</c> — the enumeration the whole class's
+        /// own doc comment already rules out) — shared by whichever caller
+        /// needs project names/directories, so nobody else re-walks the
+        /// hierarchy tree. A hierarchy with no usable <see cref="EnvDTE.Project"/>
+        /// name is skipped, not included with an empty name.
+        /// </summary>
+        internal static IReadOnlyList<ProjectEntry> EnumerateLoadedProjects(IVsSolution? solution)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+
+            var result = new List<ProjectEntry>();
+            if (solution == null)
+            {
+                return result;
+            }
+
+            var guid = Guid.Empty;
+            if (!ErrorHandler.Succeeded(solution.GetProjectEnum((uint)__VSENUMPROJFLAGS.EPF_LOADEDINSOLUTION, ref guid, out var enumHierarchies)) || enumHierarchies == null)
+            {
+                return result;
+            }
+
+            var buffer = new IVsHierarchy[1];
+            while (enumHierarchies.Next(1, buffer, out var fetched) == VSConstants.S_OK && fetched == 1)
+            {
+                var hierarchy = buffer[0];
+                if (hierarchy == null)
+                {
+                    continue;
+                }
+
+                if (ErrorHandler.Succeeded(hierarchy.GetGuidProperty(VSConstants.VSITEMID_ROOT, (int)__VSHPROPID.VSHPROPID_TypeGuid, out var typeGuid))
+                    && typeGuid == SolutionFolderTypeGuid)
+                {
+                    continue;
+                }
+
+                string? dir = null;
+                if (ErrorHandler.Succeeded(hierarchy.GetProperty(VSConstants.VSITEMID_ROOT, (int)__VSHPROPID.VSHPROPID_ProjectDir, out var dirValue))
+                    && dirValue is string dirText && !string.IsNullOrEmpty(dirText))
+                {
+                    dir = dirText;
+                }
+
+                string? name = null;
+                string? uniqueName = null;
+                if (ErrorHandler.Succeeded(hierarchy.GetProperty(VSConstants.VSITEMID_ROOT, (int)__VSHPROPID.VSHPROPID_ExtObject, out var extObject))
+                    && extObject is EnvDTE.Project dteProject)
+                {
+                    try
+                    {
+                        name = dteProject.Name;
+                    }
+                    catch
+                    {
+                        name = null;
+                    }
+
+                    try
+                    {
+                        uniqueName = dteProject.UniqueName;
+                    }
+                    catch
+                    {
+                        uniqueName = null;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(name))
+                {
+                    // No usable EnvDTE.Project identity (a project that
+                    // failed to load its extensibility object, or a
+                    // hierarchy this enumeration was never meant to see) —
+                    // skipped rather than listed with an empty name.
+                    continue;
+                }
+
+                result.Add(new ProjectEntry(name!, uniqueName ?? name!, dir ?? string.Empty));
+            }
+
+            return result;
         }
 
         // IVsSolutionEvents — every mutation republishes (debounced); every
@@ -265,6 +412,12 @@ namespace BECode.VisualStudio
         /// </summary>
         public void Dispose()
         {
+            // Fix round 1, I-2: stops Changed from firing for a recompute
+            // that was already past the debounce and mid-flight when
+            // Dispose was called — _debouncer.Dispose() only cancels a
+            // still-PENDING (debounced) trigger, not one whose RecomputeAsync
+            // is already running.
+            _disposed = true;
             _debouncer.Dispose();
 
             var solution = _solution;
@@ -288,5 +441,29 @@ namespace BECode.VisualStudio
                 }).FileAndForget("becode/workspacefolders/dispose");
             }
         }
+    }
+
+    /// <summary>
+    /// Fix round 1, I-4/I-10: one loaded, non-solution-folder project, as
+    /// <see cref="WorkspaceFolders.EnumerateLoadedProjects"/> produces it.
+    /// <see cref="UniqueName"/> falls back to <see cref="Name"/> when
+    /// <c>EnvDTE.Project.UniqueName</c> itself throws (some project systems
+    /// do, for a project not fully loaded); <see cref="Dir"/> is empty
+    /// (never null) when <c>VSHPROPID_ProjectDir</c> was unavailable.
+    /// </summary>
+    internal readonly struct ProjectEntry
+    {
+        public ProjectEntry(string name, string uniqueName, string dir)
+        {
+            Name = name;
+            UniqueName = uniqueName;
+            Dir = dir;
+        }
+
+        public string Name { get; }
+
+        public string UniqueName { get; }
+
+        public string Dir { get; }
     }
 }
