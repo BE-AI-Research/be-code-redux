@@ -979,8 +979,11 @@ namespace BECode.Bridge.Tests
         [InlineData("{\"program\":\"./main.go\",\"type\":\"go\"}")]
         [InlineData("{\"program\":\"./main.go\"}")]
         [InlineData("{\"type\":\"python\"}")]
-        public async Task DebugStartWithTheVsCodeOnlyProgramTypeShapeIsRefused(string argsJson)
+        [InlineData("{\"args\":[\"--flag\"]}")]
+        [InlineData("{\"config\":\"WebApp\",\"args\":[\"x\"]}")]
+        public async Task DebugStartWithTheVsCodeOnlyProgramTypeArgsShapeIsRefused(string argsJson)
         {
+            // Ruling S8: args is refused too, alongside program/type.
             var host = NewHost();
             var registry = new ToolRegistry(host);
 
@@ -989,6 +992,19 @@ namespace BECode.Bridge.Tests
             Assert.True(result.IsError);
             Assert.Contains("Visual Studio debugs the startup project", result.Text, StringComparison.Ordinal);
             Assert.Empty(host.DebugHost.StartCalls);
+        }
+
+        [Fact]
+        public async Task DebugStartWithAnEmptyArgsArrayIsNotRefused()
+        {
+            var host = NewHost();
+            host.DebugHost.OnStart = (config, ct) => Task.FromResult(new StopResult(StopKind.Terminated));
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_start", Args("{\"args\":[]}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            Assert.Single(host.DebugHost.StartCalls);
         }
 
         [Fact]
@@ -1284,6 +1300,48 @@ namespace BECode.Bridge.Tests
             var registryLarge = new ToolRegistry(hostLarge);
             var largeResult = await registryLarge.CallAsync("debug_variables", Args("{\"scope\":\"all\"}"), new object(), CancellationToken.None);
             Assert.DoesNotContain("Field = val", largeResult.Text);
+        }
+
+        [Fact]
+        public async Task DebugVariablesCapsAt60PerScope()
+        {
+            // Ruling S7: the tool prints at most 60 variables per scope,
+            // regardless of how many the host resolved.
+            var many = Enumerable.Range(0, 70).Select(i => new VariableInfo($"v{i}", i.ToString(), "int")).ToList();
+            var host = NewHost();
+            host.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            {
+                new VariableScope("Locals", many),
+            });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_variables", Args("{\"scope\":\"all\"}"), new object(), CancellationToken.None);
+
+            Assert.Contains("v59 = 59 (int)", result.Text);
+            Assert.DoesNotContain("v60 = 60 (int)", result.Text);
+            Assert.DoesNotContain("v69 = 69 (int)", result.Text);
+        }
+
+        [Fact]
+        public async Task DebugVariablesCapsChildrenAt20()
+        {
+            // Ruling S7: at most 20 children per variable, even when the
+            // host resolved more (a scope with a single variable easily
+            // qualifies for the <=10-variables expansion rule).
+            var manyChildren = Enumerable.Range(0, 25).Select(i => new VariableInfo($"f{i}", i.ToString(), null)).ToList();
+            var withChildren = new VariableInfo("obj", "{...}", "Foo", manyChildren);
+            var host = NewHost();
+            host.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            {
+                new VariableScope("Locals", new[] { withChildren }),
+            });
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_variables", Args("{\"scope\":\"all\"}"), new object(), CancellationToken.None);
+
+            Assert.Contains("f19 = 19", result.Text);
+            Assert.DoesNotContain("f20 = 20", result.Text);
+            Assert.DoesNotContain("f24 = 24", result.Text);
         }
 
         [Fact]

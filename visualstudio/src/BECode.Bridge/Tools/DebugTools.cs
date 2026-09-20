@@ -43,10 +43,15 @@ namespace BECode.Bridge.Tools
 
         public async Task<ToolResult> Start(JsonElement args, object connection, CancellationToken ct)
         {
-            if (HasNonEmptyStringProperty(args, "program") || HasNonEmptyStringProperty(args, "type"))
+            // Ruling S8: args is refused too, alongside program/type —
+            // Visual Studio takes arguments from the startup project's own
+            // launch profile, not from the caller.
+            if (HasNonEmptyStringProperty(args, "program")
+                || HasNonEmptyStringProperty(args, "type")
+                || HasNonEmptyArrayProperty(args, "args"))
             {
                 return new ToolResult(
-                    "Visual Studio debugs the startup project; use debug_configs to list configurations and pass config, not program/type.",
+                    "Visual Studio debugs the startup project; use debug_configs to list configurations and pass config, not program/type/args.",
                     true);
             }
 
@@ -152,6 +157,14 @@ namespace BECode.Bridge.Tools
                 && args.TryGetProperty(name, out var el)
                 && el.ValueKind == JsonValueKind.String
                 && !string.IsNullOrEmpty(el.GetString());
+        }
+
+        private static bool HasNonEmptyArrayProperty(JsonElement args, string name)
+        {
+            return args.ValueKind == JsonValueKind.Object
+                && args.TryGetProperty(name, out var el)
+                && el.ValueKind == JsonValueKind.Array
+                && el.GetArrayLength() > 0;
         }
 
         // Mirrors vscode's DebugManager.describe(): a stop reads its own top

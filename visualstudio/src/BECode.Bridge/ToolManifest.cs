@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text.Json;
 
 namespace BECode.Bridge
@@ -37,9 +38,16 @@ namespace BECode.Bridge
     {
         private const string ResourceName = "BECode.Bridge.tools.manifest.json";
 
-        public static IReadOnlyList<ManifestEntry> Load()
+        public static IReadOnlyList<ManifestEntry> Load() => Load(typeof(ToolManifest).Assembly);
+
+        /// <summary>
+        /// Fix round 1, F5: takes the assembly to read the resource from, so
+        /// a test can prove the missing-resource guard actually throws by
+        /// passing an assembly that does not embed it (e.g. the test
+        /// assembly itself), rather than trusting that by accident.
+        /// </summary>
+        internal static IReadOnlyList<ManifestEntry> Load(Assembly assembly)
         {
-            var assembly = typeof(ToolManifest).Assembly;
             using var stream = assembly.GetManifestResourceStream(ResourceName)
                 ?? throw new InvalidOperationException($"embedded resource '{ResourceName}' not found in {assembly.FullName}");
 

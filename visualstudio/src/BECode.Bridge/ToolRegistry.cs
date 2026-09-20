@@ -27,14 +27,39 @@ namespace BECode.Bridge
         private readonly IReadOnlyDictionary<string, ToolHandler> _handlers;
         private readonly ReviewTools _reviewTools;
 
-        public ToolRegistry(IEditorHost host)
+        public ToolRegistry(IEditorHost host) : this(host, ToolManifest.Load())
         {
-            var manifest = ToolManifest.Load();
+        }
+
+        /// <summary>
+        /// Fix round 1, F5: takes the manifest entries directly, so a test
+        /// can inject a deliberately mismatched manifest and prove the
+        /// parity guard actually throws — in both directions, naming the
+        /// offender — rather than trusting that by never having deleted it.
+        /// </summary>
+        internal ToolRegistry(IEditorHost host, IReadOnlyList<ManifestEntry> manifest)
+        {
+            var manifestNames = new HashSet<string>(manifest.Select(m => m.Name), StringComparer.Ordinal);
+
+            // Fix round 1, F6: validated before the handler-parity check
+            // below (which, given ToolOverrides only ever names real tools,
+            // would also always catch the same missing entry) so a mismatch
+            // here is reported as what it specifically is — the override
+            // table has an entry this manifest does not — rather than only
+            // ever being visible as an undifferentiated parity failure.
+            var unknownOverrides = ToolOverrides.Descriptions.Keys
+                .Where(n => !manifestNames.Contains(n))
+                .OrderBy(n => n, StringComparer.Ordinal)
+                .ToList();
+            if (unknownOverrides.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"ToolRegistry / ToolOverrides mismatch: override(s) for name(s) not in the manifest [{string.Join(", ", unknownOverrides)}]");
+            }
 
             _reviewTools = new ReviewTools(host);
             var handlers = BuildHandlers(host, _reviewTools);
 
-            var manifestNames = new HashSet<string>(manifest.Select(m => m.Name), StringComparer.Ordinal);
             var missing = manifestNames.Where(n => !handlers.ContainsKey(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
             var extra = handlers.Keys.Where(n => !manifestNames.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
             if (missing.Count > 0 || extra.Count > 0)
@@ -48,7 +73,10 @@ namespace BECode.Bridge
             _handlers = handlers;
             _list = manifest
                 .Where(m => !m.Hidden)
-                .Select(m => new ToolInfo(m.Name, m.Description, m.InputSchema))
+                .Select(m => new ToolInfo(
+                    m.Name,
+                    ToolOverrides.Descriptions.TryGetValue(m.Name, out var overrideText) ? overrideText : m.Description,
+                    m.InputSchema))
                 .ToList();
         }
 
