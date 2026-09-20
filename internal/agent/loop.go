@@ -533,6 +533,40 @@ func (a *Agent) awaitWindow(ctx context.Context) {
 	}
 }
 
+// coldKeepResults is how many of the newest tool results survive
+// tidyBeforeColdRead untouched: the work in hand.
+const coldKeepResults = 2
+
+// tidyBeforeColdRead runs when a resolution has landed and no request is in
+// flight (the caller holds turnMu). Whatever resolved — a start, a resume, a
+// model switch, an approved reload — the server is about to read this prompt
+// from nothing, at around two seconds per thousand tokens on the owner's box.
+//
+// Preservation first: the task record is flushed to disk and the session
+// saved, so a load that fails or a host that dies mid-transition loses
+// nothing. Then the cleanup, and only above Target, the same line compaction
+// aims for: old tool output is stubbed, which is what the next compaction
+// would do anyway, while the newest results stay whole and the current
+// step's own record stays verbatim in Working memory, which this never
+// touches.
+func (a *Agent) tidyBeforeColdRead() {
+	a.flushEngine()
+	h := a.History
+	if h != nil && len(h.Messages) > 0 {
+		// Never for an empty conversation: a session has no file until its
+		// first request, and the live registry depends on that.
+		a.autosave(a.lastUserInput)
+	}
+	if h == nil || h.Tokens() <= h.Target() {
+		return
+	}
+	before := h.Tokens()
+	if n := h.CollapseToolResults(coldKeepResults); n > 0 {
+		a.notice("collapsed %d old tool results before the model loads (%d → %d tokens); the newest %d and the current step's record are untouched",
+			n, before, h.Tokens(), coldKeepResults)
+	}
+}
+
 // goResolve starts one resolution on its own goroutine, under
 // ModelResolveTimeout. Both callers come through here, because the last
 // time they each carried their own copy of these three lines one of them
@@ -707,6 +741,7 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		return
 	}
 	defer a.turnMu.Unlock()
+	a.tidyBeforeColdRead()
 	a.modelMu.Lock()
 	tokens := a.History.Tokens() // the system prompt and the transcript
 	a.modelMu.Unlock()
