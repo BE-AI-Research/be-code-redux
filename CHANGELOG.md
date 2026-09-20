@@ -1,5 +1,15 @@
 # BE-Code Changelog
 
+## v0.14.4 — Windows: a timed-out command takes its children with it
+
+- On Linux a command that times out, is cancelled, or is stopped through the `process` tool
+  is killed together with everything it started, through its process group. Windows has no
+  such group, and the fallback there killed the direct child only: a timed-out `powershell`
+  left the `python`, test runner or dev server it had started running — holding files and
+  ports, with nothing left that knew about it. The teardown now runs `taskkill /T /F /PID`
+  (hidden, bounded to five seconds) and falls back to killing the direct child when that
+  cannot be run. The Windows test for it was written on Linux and has not been run.
+
 ## v0.14.3 — Windows: commands run without opening a window
 
 - **Every command the agent ran opened a console window.** A hosted session runs in a
