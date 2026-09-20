@@ -1142,7 +1142,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		calls := resp.ToolCalls
 		content := resp.Content
 		if len(calls) == 0 && a.Cfg.CompatToolCalls != "never" {
-			content, calls = ParseEmbeddedCalls(content, a.knownTools)
+			content, calls = ParseEmbeddedCallsTyped(content, a.knownTools, SchemaParamTypes(a.Tools.Specs()))
 		}
 
 		if len(calls) == 0 {

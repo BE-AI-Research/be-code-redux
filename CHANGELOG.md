@@ -1,5 +1,23 @@
 # BE-Code Changelog
 
+## v0.14.1 — a tool call in Qwen's own layout is a tool call
+
+The owner's first long run on 0.14.0 stopped mid-task with nothing wrong in any log. The
+saved conversation showed why: at a full context the model wrote its `write_file` call in
+the layout its own chat template teaches —
+`<tool_call><function=write_file><parameter=path>…</parameter>…</function></tool_call>` —
+Ollama passed it through as plain content, and the harness, which only knew the JSON form
+(`<tool_call>{"name":…}</tool_call>`), took a tool call for the model's final answer. The
+run ended; the file was never written.
+
+- `ParseEmbeddedCalls` now accepts that layout, with or without the `<tool_call>` wrapper,
+  any number of calls to a reply (`internal/agent/xmlcalls.go`). Values are text by nature
+  and stay text — a file whose content is valid JSON reaches `write_file` exactly as written
+  — unless the tool's own schema declares the parameter a number, boolean, array or object
+  (`SchemaParamTypes`), which matters for the editor's `ide_*` tools. Exactly one framing
+  newline is taken off each end of a value, no more. Unknown tool names are left as text,
+  as before, and `compat_tool_calls: "never"` still turns every text form off.
+
 ## v0.14.0 — the server's prompt cache, used
 
 The owner asked for faster recovery after a model reload. Measuring it found something

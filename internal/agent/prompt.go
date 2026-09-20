@@ -128,6 +128,13 @@ type embeddedCall struct {
 // variants, because local models are loose about formats. Returns the text
 // with call blocks removed, and the calls found.
 func ParseEmbeddedCalls(content string, known map[string]bool) (string, []provider.ToolCall) {
+	return ParseEmbeddedCallsTyped(content, known, nil)
+}
+
+// ParseEmbeddedCallsTyped is ParseEmbeddedCalls with the tools' parameter
+// types at hand, which the Qwen XML layout needs: its values are text, and
+// only the schema can say that "244" is a number (see xmlcalls.go).
+func ParseEmbeddedCallsTyped(content string, known map[string]bool, typeOf ParamTypeFunc) (string, []provider.ToolCall) {
 	var calls []provider.ToolCall
 	clean := content
 
@@ -165,6 +172,9 @@ func ParseEmbeddedCalls(content string, known map[string]bool) (string, []provid
 	try(tagCallRe)
 	if len(calls) == 0 {
 		try(fenceCallRe)
+	}
+	if len(calls) == 0 {
+		return parseXMLCalls(clean, known, typeOf, 0)
 	}
 	return strings.TrimSpace(clean), calls
 }
