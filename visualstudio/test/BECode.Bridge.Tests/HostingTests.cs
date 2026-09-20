@@ -152,6 +152,27 @@ namespace BECode.Bridge.Tests
         }
     }
 
+    public class LaunchProfilesTests
+    {
+        [Fact]
+        public void ParsesTheProfileNamesInDocumentOrder()
+        {
+            var json = "{\"profiles\":{\"IIS Express\":{\"commandName\":\"IISExpress\"},\"MyApp\":{\"commandName\":\"Project\"}}}";
+            Assert.Equal(new[] { "IIS Express", "MyApp" }, LaunchProfiles.ParseNames(json));
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("not json")]
+        [InlineData("{}")]
+        [InlineData("{\"profiles\": []}")]
+        public void ReturnsEmptyForAnythingUnusable(string? json)
+        {
+            Assert.Empty(LaunchProfiles.ParseNames(json));
+        }
+    }
+
     public class DebouncerTests
     {
         [Fact]
