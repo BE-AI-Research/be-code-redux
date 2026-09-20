@@ -1,11 +1,17 @@
 # BE-Code installer — Windows (PowerShell).
 #
-#   .\install.ps1              install to %LOCALAPPDATA%\Programs\be-code and add to user PATH
-#   .\install.ps1 -NoSetup     skip the first-run setup wizard
+#   .\install.cmd              install to %LOCALAPPDATA%\Programs\be-code and add to user PATH
+#   .\install.cmd -NoSetup     skip the first-run setup wizard
+#
+# install.cmd is a launcher for this script. Run directly, .\install.ps1 is
+# refused on a default Windows ("running scripts is disabled on this system");
+# the launcher — or, by hand —
+#   powershell -NoProfile -ExecutionPolicy Bypass -File ".\install.ps1"
+# bypasses the execution policy for that one process and changes nothing else.
 #
 # Prefers building from source when Go >= 1.22 is installed; otherwise uses
 # a prebuilt dist\be-code-windows-amd64.exe. Re-run to upgrade.
-# Undo with .\uninstall.ps1.
+# Undo with .\uninstall.cmd.
 param(
     [switch]$NoSetup
 )
@@ -77,4 +83,4 @@ if (-not $NoSetup -and -not (Test-Path $cfg)) {
     Say "  be-code doctor   # check backend health"
     Say "  be-code          # start the TUI in a project directory"
 }
-Say "uninstall any time with: .\uninstall.ps1"
+Say "uninstall any time with: .\uninstall.cmd"

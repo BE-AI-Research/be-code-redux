@@ -1,5 +1,23 @@
 # BE-Code Changelog
 
+## v0.14.2 — Windows: the real terminal size, and an installer that runs
+
+First run on Windows by the owner. It worked — including the approved reload to a 49,152
+window, confirmed on screen — with two defects.
+
+- **The session was drawn at 80×24 in the corner of the window.** A shared session's client
+  asked for the terminal size on its *input* handle. Unix answers on any of a terminal's
+  descriptors; on Windows only a console *output* handle can report a size, so the call
+  failed, the 80×24 fallback went to the host on every poll, and resizes were never seen.
+  The client now asks stdout, then stderr, then stdin (`live.terminalSize`).
+- **`.\install.ps1` is refused on a default Windows** ("running scripts is disabled on this
+  system"; a script unpacked from a downloaded zip is blocked even where local ones are
+  allowed). `install.cmd`, `uninstall.cmd` and `visualstudio\build.cmd` are one-line
+  launchers that run the script as `powershell -NoProfile -ExecutionPolicy Bypass -File
+  "<script>"`, passing arguments through. That bypasses the execution policy for the one
+  process and changes nothing about the machine; it is not an elevation — the installer
+  needs no administrator rights. `.gitattributes` pins `*.cmd` to CRLF.
+
 ## v0.14.1 — a tool call in Qwen's own layout is a tool call
 
 The owner's first long run on 0.14.0 stopped mid-task with nothing wrong in any log. The

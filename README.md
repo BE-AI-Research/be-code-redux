@@ -37,8 +37,15 @@ PREFIX=/opt/be ./install.sh   # custom prefix
 ./uninstall.sh --purge    # also delete ~/.be-code (config, sessions, history)
 ```
 
-Windows: `.\install.ps1` / `.\uninstall.ps1 [-Purge]` (installs to
-`%LOCALAPPDATA%\Programs\be-code` and manages the user PATH). Both installers are
+Windows: `.\install.cmd` / `.\uninstall.cmd [-Purge]` (installs to
+`%LOCALAPPDATA%\Programs\be-code` and manages the user PATH; no administrator rights
+needed). The `.cmd` files are one-line launchers for `install.ps1` / `uninstall.ps1`:
+Windows refuses to run unsigned PowerShell scripts by default ("running scripts is
+disabled on this system"), and blocks ones unpacked from a downloaded zip even where
+local scripts are allowed, so the launchers run them as
+`powershell -NoProfile -ExecutionPolicy Bypass -File "<script>"` — a bypass for that one
+process, which changes nothing about the machine's policy. Run that command yourself if
+you prefer; arguments (`-NoSetup`, `-Purge`) pass straight through. Both installers are
 safe to re-run — they upgrade in place.
 
 ## Quick start
