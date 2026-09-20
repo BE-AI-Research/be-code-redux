@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Builds BECode.VisualStudio.sln on Windows and prints the resulting
+    Builds BECode.VisualStudio.csproj on Windows and prints the resulting
     .vsix path. This script is Task 6's Windows half: everything up to
     packaging is proven by `dotnet build` on Linux (see the repo's CI and
     docs/superpowers/specs/2026-09-20-visual-studio-host-design.md); this
@@ -13,9 +13,17 @@
 .DESCRIPTION
     1. Locates MSBuild via vswhere.exe (bundled with every Visual Studio
        2017+ installation, including Build Tools).
-    2. Restores NuGet packages for the solution.
-    3. Builds BECode.VisualStudio.sln in the Release configuration.
-    4. Prints the path to the built .vsix.
+    2. Restores NuGet packages for the VSIX project only.
+    3. Builds BECode.VisualStudio.csproj (NOT the whole solution — the
+       solution also carries BECode.Bridge.FakeHost and the net8.0 test
+       project, and MSBuild from a VS 2022 17.6 install carries the .NET 7
+       SDK and fails those with NETSDK1045 before any .vsix is produced).
+    4. Finds the built .vsix (recursively — an SDK-style project outputs to
+       bin\<Configuration>\net472\, not bin\<Configuration>\ directly) and
+       prints its path.
+    5. Opens the .vsix as a zip and fails loudly if BECode.Bridge.dll is not
+       inside it (fix round 1, C-1) — the one thing this script exists to
+       catch before the owner finds out the hard way inside devenv.exe.
 
     A missing vswhere, a missing MSBuild, or a build failure that looks
     like the VSSDK targets are absent all produce a readable, specific
@@ -26,14 +34,29 @@ param(
     [string]$Configuration = "Release"
 )
 
+# Fix round 1, M-8: with $ErrorActionPreference = "Stop", Write-Error is a
+# TERMINATING error — it throws immediately, so any "exit $code" written
+# after it never runs and the script's real exit code is lost (PowerShell's
+# own default for an uncaught terminating error, not whatever the caller
+# passed). Every error path below prints with Write-Host -ForegroundColor Red
+# (or [Console]::Error.WriteLine for a pre-formatted block) and THEN calls
+# exit explicitly, so the exit code the caller sees is the one this script
+# chose, not an accident of how Write-Error unwinds.
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$solution = Join-Path $repoRoot "BECode.VisualStudio.sln"
+function Write-ErrorBlock {
+    param([string]$Text)
+    [Console]::Error.WriteLine($Text)
+}
+
+# Fix round 1, M-8: $PSScriptRoot (this script's own directory), not
+# Split-Path -Parent $MyInvocation.MyCommand.Path — the latter is empty when
+# this script is dot-sourced rather than invoked directly.
+$repoRoot = $PSScriptRoot
 $vsixProject = Join-Path $repoRoot "src\BECode.VisualStudio\BECode.VisualStudio.csproj"
 
-if (-not (Test-Path $solution)) {
-    Write-Error "build.ps1: could not find $solution — run this script from a checkout of the repo, not a copied-out copy of just this file."
+if (-not (Test-Path $vsixProject)) {
+    Write-ErrorBlock "build.ps1: could not find $vsixProject — run this script from a checkout of the repo, not a copied-out copy of just this file."
     exit 1
 }
 
@@ -54,7 +77,7 @@ function Find-VsWhere {
 function Find-MSBuild {
     $vswhere = Find-VsWhere
     if (-not $vswhere) {
-        Write-Error @"
+        Write-ErrorBlock @"
 build.ps1: could not find vswhere.exe (normally at
 "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe").
 This usually means Visual Studio itself is not installed on this machine —
@@ -65,24 +88,30 @@ with that workload, then re-run this script.
         exit 1
     }
 
-    $installPath = & $vswhere -latest -prerelease -products * `
+    # Fix round 1, C-1: ask vswhere to FIND MSBuild.exe itself under the
+    # installation's own MSBuild tree, rather than hard-coding
+    # "MSBuild\Current\Bin" — VS 2026's own layout there is unverified from
+    # this Linux checkout, and -find is exactly what vswhere exists for.
+    $found = & $vswhere -latest -prerelease -products * `
         -requires Microsoft.VisualStudio.Workload.VisualStudioExtension `
-        -property installationPath
+        -find "MSBuild\**\Bin\MSBuild.exe"
 
-    if (-not $installPath) {
-        Write-Error @"
-build.ps1: vswhere found a Visual Studio installation but none of them has
-the "Visual Studio extension development" workload installed. Open the
-Visual Studio Installer, choose "Modify" on your Visual Studio 2022 or 2026
-install, and check "Visual Studio extension development" under Workloads,
-then re-run this script.
+    if (-not $found) {
+        Write-ErrorBlock @"
+build.ps1: vswhere found no Visual Studio installation with the "Visual
+Studio extension development" workload (or no MSBuild.exe under it). Open
+the Visual Studio Installer, choose "Modify" on your Visual Studio 2022 or
+2026 install, and check "Visual Studio extension development" under
+Workloads, then re-run this script.
 "@
         exit 1
     }
 
-    $msbuild = Join-Path $installPath "MSBuild\Current\Bin\MSBuild.exe"
+    # -find can print more than one match; the first is vswhere's own
+    # preference ordering (newest/most specific installation first).
+    $msbuild = @($found)[0]
     if (-not (Test-Path $msbuild)) {
-        Write-Error "build.ps1: expected MSBuild.exe at $msbuild but it was not there — this Visual Studio installation may be incomplete."
+        Write-ErrorBlock "build.ps1: vswhere reported MSBuild at $msbuild but it was not there — this Visual Studio installation may be incomplete."
         exit 1
     }
 
@@ -92,19 +121,19 @@ then re-run this script.
 $msbuildPath = Find-MSBuild
 Write-Host "build.ps1: using MSBuild at $msbuildPath"
 
-Write-Host "build.ps1: restoring $solution ..."
-& $msbuildPath $solution "/t:Restore" "/p:Configuration=$Configuration" "/nologo" "/verbosity:minimal"
+Write-Host "build.ps1: restoring $vsixProject ..."
+& $msbuildPath $vsixProject "/t:Restore" "/p:Configuration=$Configuration" "/nologo" "/verbosity:minimal"
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "build.ps1: NuGet restore failed (exit code $LASTEXITCODE) — see the MSBuild output above."
+    Write-ErrorBlock "build.ps1: NuGet restore failed (exit code $LASTEXITCODE) — see the MSBuild output above."
     exit $LASTEXITCODE
 }
 
-Write-Host "build.ps1: building $solution ($Configuration) ..."
-& $msbuildPath $solution "/p:Configuration=$Configuration" "/nologo" "/verbosity:minimal"
+Write-Host "build.ps1: building $vsixProject ($Configuration) ..."
+& $msbuildPath $vsixProject "/p:Configuration=$Configuration" "/nologo" "/verbosity:minimal"
 $buildExitCode = $LASTEXITCODE
 
 if ($buildExitCode -ne 0) {
-    Write-Error @"
+    Write-ErrorBlock @"
 build.ps1: build failed (exit code $buildExitCode). If the errors above
 mention GeneratePkgDefFile, VSSDK, VsSDK.targets or a missing
 Microsoft.VsSDK.Common.targets, the "Visual Studio extension development"
@@ -115,13 +144,39 @@ actual compile error.
     exit $buildExitCode
 }
 
+# Fix round 1, C-1(b): an SDK-style project outputs to
+# bin\<Configuration>\net472\, not bin\<Configuration>\ directly — search
+# recursively and take the newest .vsix in case a stale one from an older
+# TargetFramework layout is still sitting there.
 $vsixDir = Join-Path (Split-Path -Parent $vsixProject) "bin\$Configuration"
-$vsix = Get-ChildItem -Path $vsixDir -Filter "*.vsix" -ErrorAction SilentlyContinue |
+$vsix = Get-ChildItem -Path $vsixDir -Filter "*.vsix" -Recurse -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 
 if (-not $vsix) {
-    Write-Error "build.ps1: build reported success but no .vsix was found under $vsixDir — check that CreateVsixContainer is enabled (it is, under the Windows-only condition in BECode.VisualStudio.csproj) and that the workload above is actually installed."
+    Write-ErrorBlock "build.ps1: build reported success but no .vsix was found anywhere under $vsixDir — check that CreateVsixContainer is enabled (it is, under the Windows-only condition in BECode.VisualStudio.csproj) and that the workload above is actually installed."
+    exit 1
+}
+
+# Fix round 1, C-1: the .vsix is a zip file. List its contents and fail
+# loudly if BECode.Bridge.dll is not inside — a silent, empty-handed
+# "success" here is exactly the failure mode this script exists to catch
+# before the owner installs it into devenv.exe and finds out the hard way.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [IO.Compression.ZipFile]::OpenRead($vsix.FullName)
+try {
+    $entryNames = $zip.Entries | ForEach-Object { $_.FullName }
+} finally {
+    $zip.Dispose()
+}
+
+Write-Host ""
+Write-Host "build.ps1: $($vsix.Name) contains:"
+$entryNames | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+$bridgeEntry = $entryNames | Where-Object { $_ -eq "BECode.Bridge.dll" }
+if (-not $bridgeEntry) {
+    Write-ErrorBlock "build.ps1: $($vsix.Name) was built but does NOT contain BECode.Bridge.dll — the bridge would fail to load inside devenv.exe. See host design section 1.1/1.2 and the csproj's ProjectReference to BECode.Bridge."
     exit 1
 }
 

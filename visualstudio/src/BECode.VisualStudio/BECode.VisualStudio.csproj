@@ -91,7 +91,10 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
-    <None Include="source.extension.vsixmanifest">
+    <!-- Fix round 1, M-1: Update, not Include — the SDK's default glob
+         already includes source.extension.vsixmanifest as a None item;
+         Include would duplicate it (CS2002-equivalent MSBuild warning). -->
+    <None Update="source.extension.vsixmanifest">
       <SubType>Designer</SubType>
     </None>
   </ItemGroup>
