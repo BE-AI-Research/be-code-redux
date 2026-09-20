@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text;
 using BECode.Bridge;
@@ -97,6 +99,85 @@ namespace BECode.Bridge.Tests
             var lines = framer.Push(bytes).ToList();
 
             Assert.Equal(new[] { "{\"a\":1}" }, lines);
+        }
+
+        // I1 (review round 1): a non-empty remainder must carry over
+        // correctly into the next Push, not just the "everything up to the
+        // last newline" case the other tests exercise.
+        [Fact]
+        public void NonEmptyRemainderCarriesOverToTheNextPush()
+        {
+            var framer = new LineFramer();
+
+            var lines1 = framer.Push(Encoding.UTF8.GetBytes("a\nb")).ToList();
+            var lines2 = framer.Push(Encoding.UTF8.GetBytes("c\n")).ToList();
+
+            Assert.Equal(new[] { "a" }, lines1);
+            Assert.Equal(new[] { "bc" }, lines2);
+        }
+
+        // I1: a line whose unterminated byte count exceeds the cap must
+        // throw eagerly, from Push itself (Push is not an iterator, so
+        // there is nothing to defer to).
+        [Fact]
+        public void PendingBytesBeyondTheCapThrowInvalidDataException()
+        {
+            var framer = new LineFramer(maxLineBytes: 16);
+            var chunk = Encoding.UTF8.GetBytes(new string('x', 20)); // no '\n', over the 16-byte cap
+
+            var ex = Assert.Throws<InvalidDataException>(() => framer.Push(chunk).ToList());
+            Assert.Contains("16", ex.Message);
+        }
+
+        // I1: the cap must be enforced cumulatively across pushes too, not
+        // just within a single chunk.
+        [Fact]
+        public void PendingBytesAccumulatedAcrossPushesBeyondTheCapThrow()
+        {
+            var framer = new LineFramer(maxLineBytes: 16);
+
+            framer.Push(Encoding.UTF8.GetBytes(new string('x', 10))).ToList();
+            Assert.Throws<InvalidDataException>(() => framer.Push(Encoding.UTF8.GetBytes(new string('y', 10))).ToList());
+        }
+
+        // I1 perf guard: the original implementation reallocated and copied
+        // the *entire* pending buffer on every Push, which is quadratic in
+        // the number of chunks for one long unterminated line (the review
+        // measured an 8 MiB line at ~9s, 32 MiB at ~142s). A 4 MiB line fed
+        // in 8 KiB chunks must complete in well under a second; the bound
+        // here is deliberately generous (2s) so the assertion is not flaky,
+        // while still being far tighter than the quadratic implementation
+        // could ever meet.
+        [Fact]
+        public void FourMebibyteLineInEightKibibyteChunksIsFast()
+        {
+            var framer = new LineFramer();
+            var line = new byte[4 * 1024 * 1024];
+            new Random(1234).NextBytes(line);
+            // Make sure there is no accidental '\n' (0x0A) in the payload,
+            // so this really is one long unterminated line until the final
+            // chunk.
+            for (int i = 0; i < line.Length; i++)
+            {
+                if (line[i] == (byte)'\n')
+                {
+                    line[i] = (byte)'x';
+                }
+            }
+
+            const int chunkSize = 8 * 1024;
+            var stopwatch = Stopwatch.StartNew();
+            System.Collections.Generic.List<string> lastLines = new System.Collections.Generic.List<string>();
+            for (int offset = 0; offset < line.Length; offset += chunkSize)
+            {
+                var len = Math.Min(chunkSize, line.Length - offset);
+                lastLines = framer.Push(line.AsSpan(offset, len)).ToList();
+            }
+            lastLines = framer.Push(Encoding.UTF8.GetBytes("\n")).ToList();
+            stopwatch.Stop();
+
+            Assert.Single(lastLines);
+            Assert.True(stopwatch.ElapsedMilliseconds < 2000, $"expected well under 2000ms, took {stopwatch.ElapsedMilliseconds}ms");
         }
     }
 }
