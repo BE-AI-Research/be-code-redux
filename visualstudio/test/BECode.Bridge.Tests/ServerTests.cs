@@ -1074,6 +1074,155 @@ namespace BECode.Bridge.Tests
             Assert.Contains(errors, e => e.Context.Contains("write", StringComparison.OrdinalIgnoreCase));
         }
 
+        // Fix round 1, C1: requirement 4 says an ORDINARY late reply — a
+        // call that honours its token, takes a little real unwind time, then
+        // returns a normal result (exactly what ReviewTools.ReviewDiff does:
+        // it returns Cancelled as an ordinary result, never a thrown
+        // exception) — must be quiet, not reported through OnError. The
+        // reviewer's probe found the original per-call Abandoned marker
+        // regressed this: 100/100 for any unwind >= 1ms, 0/250 on the
+        // pre-task-3a baseline. ct.IsCancellationRequested at write time is
+        // NOT a safe discriminator (that race is exactly what broke
+        // AWriteFailureIsReportedThroughOnError the first time); this test
+        // is looped 50 times because the fix depends on a lock-based
+        // happens-before edge, not a fixed delay, and a flaky ordering bug
+        // would not necessarily show up on the first iteration.
+        [Fact]
+        public async Task AnOrdinaryLateReplyAfterTeardownNeverReportsAWriteFailure()
+        {
+            for (var iteration = 0; iteration < 50; iteration++)
+            {
+                var callCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var dispatcher = new FakeToolDispatcher
+                {
+                    OnCall = async (name, args, conn, ct) =>
+                    {
+                        try
+                        {
+                            await Task.Delay(Timeout.Infinite, ct);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            // The delay here is the behaviour under test — an
+                            // ordinary unwind time — not a synchronisation
+                            // sleep.
+                            await Task.Delay(20);
+                        }
+
+                        callCompleted.TrySetResult(true);
+                        return new ToolResult("cancelled-ordinarily", false);
+                    },
+                };
+                var errors = new List<(string Context, Exception Exception)>();
+                var (server, port) = await StartServerAsync(dispatcher);
+                server.OnError = (ctx, ex) =>
+                {
+                    lock (errors)
+                    {
+                        errors.Add((ctx, ex));
+                    }
+                };
+                await using var serverLifetime = server;
+
+                var client = await ConnectAsync(port);
+                var stream = client.GetStream();
+                using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+                await InitializeAsync(stream, reader, Token);
+
+                await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"slow-unwind\",\"arguments\":{}}}");
+                await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+
+                client.Close();
+
+                var completedInTime = await Task.WhenAny(callCompleted.Task, Task.Delay(TimeSpan.FromSeconds(5))) == callCompleted.Task;
+                Assert.True(completedInTime, $"iteration {iteration}: the call never completed");
+
+                await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+                Assert.Single(dispatcher.ClosedConnections);
+
+                await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+                Assert.Equal(0, server.ConnectionCount);
+
+                List<(string Context, Exception Exception)> errorsSnapshot;
+                lock (errors)
+                {
+                    errorsSnapshot = new List<(string, Exception)>(errors);
+                }
+
+                Assert.True(errorsSnapshot.Count == 0, $"iteration {iteration}: OnError was invoked: {string.Join(", ", errorsSnapshot.Select(e => e.Context))}");
+            }
+        }
+
+        // Fix round 1, I1: CancellationTokenSource.Cancel() rethrows
+        // (aggregated) any exception a registered callback throws — a
+        // callback registered by dispatcher/tool code, not by BridgeServer.
+        // Unfenced, the reviewer's probe found this skipped the entire rest
+        // of teardown: ConnectionClosed zero times, ConnectionCount stuck at
+        // 1 forever, client.Close() and state.Dispose() never ran, nothing
+        // reported.
+        [Fact]
+        public async Task AThrowingCancellationCallbackDoesNotSkipTeardown()
+        {
+            // ConnectionCount == 1 is true from the moment the TCP connect
+            // is accepted, well before the tools/call handler below has
+            // necessarily started running — waiting on it alone would race
+            // client.Close() against ct.Register below actually registering
+            // the callback. registered is the real synchronisation point.
+            var registered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    ct.Register(() => throw new InvalidOperationException("boom-cancel"));
+                    registered.TrySetResult(true);
+                    try
+                    {
+                        await Task.Delay(Timeout.Infinite, ct);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+
+                    return new ToolResult("unreachable", false);
+                },
+            };
+            var errors = new List<(string Context, Exception Exception)>();
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.OnError = (ctx, ex) =>
+            {
+                lock (errors)
+                {
+                    errors.Add((ctx, ex));
+                }
+            };
+            await using var serverLifetime = server;
+
+            var client = await ConnectAsync(port);
+            var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"blocking\",\"arguments\":{}}}");
+            var registeredInTime = await Task.WhenAny(registered.Task, Task.Delay(TimeSpan.FromSeconds(5))) == registered.Task;
+            Assert.True(registeredInTime, "the cancellation callback was never registered");
+
+            client.Close();
+
+            await WaitForAsync(() => dispatcher.ClosedConnections.Count == 1, TimeSpan.FromSeconds(5));
+            Assert.Single(dispatcher.ClosedConnections);
+
+            await WaitForAsync(() => server.ConnectionCount == 0, TimeSpan.FromSeconds(5));
+            Assert.Equal(0, server.ConnectionCount);
+
+            List<(string Context, Exception Exception)> errorsSnapshot;
+            lock (errors)
+            {
+                errorsSnapshot = new List<(string, Exception)>(errors);
+            }
+
+            Assert.Contains(errorsSnapshot, e => e.Context.IndexOf("cancel", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
         // M10: the default JSON encoder escapes '<', '>', '&' and every
         // non-ASCII character as \uXXXX. Confirms the relaxed encoder is in
         // effect (content is readable on the wire, not just round-trippable
