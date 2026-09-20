@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,12 +56,25 @@ func LockDir() (string, error) {
 func (l *Lock) Covers(workspace string) bool {
 	ws := filepath.Clean(workspace)
 	for _, f := range l.WorkspaceFolders {
-		f = filepath.Clean(f)
-		if ws == f || strings.HasPrefix(ws, f+string(filepath.Separator)) {
+		if covers(ws, filepath.Clean(f), filepath.Separator, runtime.GOOS == "windows") {
 			return true
 		}
 	}
 	return false
+}
+
+// covers is Covers' comparison over two cleaned paths. Windows paths are
+// case-insensitive and the two sides learn theirs from different places —
+// the editor reports the folder as it is on disk, the process inherits
+// whatever its shell was given, and VS Code lower-cases the drive letter —
+// so on Windows the comparison folds case. It matters most where an editor is
+// attached to without --ide: there coverage is the whole decision, there is
+// no newest-lock fallback behind it, and a miss says nothing.
+func covers(ws, folder string, sep byte, foldCase bool) bool {
+	if foldCase {
+		ws, folder = strings.ToLower(ws), strings.ToLower(folder)
+	}
+	return ws == folder || strings.HasPrefix(ws, folder+string(sep))
 }
 
 // liveLocks reads every *.json lock in dir, newest first, pruning locks

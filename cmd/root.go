@@ -365,6 +365,7 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 	}
 	names := reg.AttachMCPPrefixed(sess.Client, "ide_")
 	ag.IDEName = lock.IDEName
+	reg.EditorName = agent.EditorLabel(lock.IDEName)
 	if ag.IDEName == "" {
 		ag.IDEName = "ide"
 	}
@@ -376,13 +377,13 @@ func attachIDE(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, headles
 	if cfg.IDE.AutoContext && !headless {
 		ag.ContextProvider = sess.ContextNote
 	}
-	ag.SetGuidance(agent.IDEGuidance)
+	ag.SetGuidance(agent.IDEGuidanceFor(lock.IDEName))
 	ag.RefreshSystem() // rebuilds the known-tool list (for embedded tool-call parsing) now that ide_* tools are attached, and recomposes the system prompt
 	// The TUI prints this itself (a dimmed transcript line) because stderr
 	// written before the alt screen opens is wiped; plain and headless
 	// runs have no alt screen, so stderr is the right place there.
 	if headless || usePlainUI(cfg) {
-		fmt.Fprintf(os.Stderr, "VS Code connected: %d tools\n", len(names))
+		fmt.Fprintf(os.Stderr, "%s connected: %d tools\n", agent.EditorLabel(lock.IDEName), len(names))
 	}
 	return sess
 }
@@ -660,6 +661,7 @@ func runInteractive(cmd *cobra.Command) error {
 		}
 		// In-process: no client roster, so auto resolves to the editor.
 		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
+		coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 		repl.SetReview(coord)
 		ag.Tools.ReviewWrite = coord.Decide
 		// The "reviewing change in VS Code…" note belongs to reviews that
@@ -677,6 +679,7 @@ func runInteractive(cmd *cobra.Command) error {
 	}
 	s := tui.NewSession(cfg, ag, p)
 	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
+	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }

@@ -116,6 +116,37 @@ func TestLockCovers(t *testing.T) {
 	}
 }
 
+// Windows paths are case-insensitive and the two sides get theirs from
+// different places: Visual Studio reports the solution as it is on disk
+// (C:\Dev\MyApp), a PowerShell cd hands the process whatever was typed
+// (C:\dev\myapp), and VS Code lower-cases the drive letter (c:\...). On the
+// path that attaches without --ide, coverage is the whole decision and a miss
+// is silent, so the comparison has to fold case there. It cannot be tried on
+// a real Windows filesystem from here, hence the pure function.
+func TestCoversFoldsCaseOnWindowsOnly(t *testing.T) {
+	const win, unix = '\\', '/'
+	for _, c := range []struct {
+		name       string
+		ws, folder string
+		sep        byte
+		fold       bool
+		want       bool
+	}{
+		{"windows, same case", `C:\Dev\MyApp\src`, `C:\Dev\MyApp`, win, true, true},
+		{"windows, typed in lower case", `C:\dev\myapp\src`, `C:\Dev\MyApp`, win, true, true},
+		{"windows, lower-case drive letter", `c:\Dev\MyApp`, `C:\Dev\MyApp`, win, true, true},
+		{"windows, the folder itself", `c:\dev\myapp`, `C:\Dev\MyApp`, win, true, true},
+		{"windows, a sibling with the same prefix", `C:\Dev\MyApp2`, `C:\dev\myapp`, win, true, false},
+		{"windows, another project", `C:\Dev\Other`, `C:\Dev\MyApp`, win, true, false},
+		{"unix stays case-sensitive", `/home/u/Proj/src`, `/home/u/proj`, unix, false, false},
+		{"unix, nested", `/home/u/proj/src`, `/home/u/proj`, unix, false, true},
+	} {
+		if got := covers(c.ws, c.folder, c.sep, c.fold); got != c.want {
+			t.Errorf("%s: covers(%q, %q) = %v, want %v", c.name, c.ws, c.folder, got, c.want)
+		}
+	}
+}
+
 func TestLockDirCreatesDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

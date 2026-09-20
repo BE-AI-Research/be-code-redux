@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/ui"
 )
@@ -301,7 +302,7 @@ func (m *View) menuStatus() string {
 		{"session total", fmt.Sprintf("%dk tokens", m.usage.total/1000)},
 	}
 	if m.ag.IDEName != "" {
-		rows = append(rows, [2]string{"editor", m.ag.IDEName})
+		rows = append(rows, [2]string{"editor", agent.EditorLabel(m.ag.IDEName)})
 	}
 	var b strings.Builder
 	for _, r := range rows {

@@ -279,7 +279,7 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// wipes anything printed before it opened. Once only.
 		if !m.ideAnnounced && m.ag.IDEName != "" {
 			m.ideAnnounced = true
-			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("VS Code connected: %d tools", m.ag.IDETools)})
+			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s connected: %d tools", agent.EditorLabel(m.ag.IDEName), m.ag.IDETools)})
 		}
 		// Nudge once toward /init for a project with no notes file yet. The
 		// check itself is latched, not just the hint: this runs on every

@@ -96,6 +96,10 @@ type Registry struct {
 	// nil means yes, preserving the behaviour for callers that wire
 	// ReviewWrite to an editor and nothing else.
 	ReviewInvolvesEditor func() bool
+	// EditorName is what to call the editor a review is shown in ("Visual
+	// Studio"); empty means VS Code, the only editor there was before lock
+	// files said which one they belonged to.
+	EditorName string
 	// OnStatus receives short progress notes for the UI's status line.
 	OnStatus func(msg string)
 	// ShellAllow / ShellDeny are glob patterns matched against shell
@@ -363,4 +367,11 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + fmt.Sprintf("\n... [truncated %d of %d bytes; narrow the request to see more]", len(s)-max, len(s))
+}
+
+func (r *Registry) editorName() string {
+	if r.EditorName == "" {
+		return "VS Code"
+	}
+	return r.EditorName
 }

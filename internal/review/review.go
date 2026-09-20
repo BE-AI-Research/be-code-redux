@@ -54,6 +54,25 @@ type Coordinator struct {
 	editor  Editor
 	term    Terminal
 	clients func() []string
+	// editorName is what the withdrawal note calls the editor; "" is VS Code.
+	editorName string
+}
+
+// SetEditorName names the editor in the note a terminal shows when the
+// editor answered first ("answered in Visual Studio").
+func (c *Coordinator) SetEditorName(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.editorName = name
+}
+
+func (c *Coordinator) editorLabel() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.editorName == "" {
+		return "VS Code"
+	}
+	return c.editorName
 }
 
 // New builds a coordinator. clients reports the labels of the terminals
@@ -206,7 +225,7 @@ func (c *Coordinator) Decide(ctx context.Context, rel, old, new string) tools.Re
 				// Order matters: the terminal must see the note before its
 				// own cancellation wakes it (and before this write's
 				// decision lets the next one raise a fresh prompt).
-				c.term.Withdraw("answered in VS Code")
+				c.term.Withdraw("answered in " + c.editorLabel())
 				cancel()
 			} else {
 				cancel()

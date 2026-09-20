@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -115,6 +116,7 @@ func runSessionHost(code string) error {
 		}
 		return labels
 	})
+	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	// See root.go: the editor-side status note only for reviews that reach it.
