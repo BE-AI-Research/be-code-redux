@@ -10,7 +10,7 @@ It has no window of its own. Install it, open a solution or a folder, and run `b
 
 | Part | State |
 |---|---|
-| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 250 tests |
+| Wire protocol, lock file, the eighteen tools, path confinement, review and accept-all logic (`src/BECode.Bridge`) | Built and tested on Linux: 271 tests |
 | The real BE-Code client against the real bridge, every tool (`internal/ide/contract_test.go`) | Tested on Linux through a scripted host |
 | The Visual Studio host (`src/BECode.VisualStudio`) | **Compiles; never run** |
 | Packaging the `.vsix` (`build.ps1`) | **Never executed** |
@@ -80,4 +80,6 @@ WINDOWS-CHECKLIST.md         what to verify on a real install, and what to send 
 
 On Linux or macOS, `dotnet build` and `dotnet test` in this directory compile every project, the Visual Studio layer included, and run the tests. Only packaging needs Windows. The design is in `../docs/superpowers/specs/2026-09-20-visual-studio-extension-design.md` and `…-visual-studio-host-design.md`.
 
-`System.Text.Json` is held at 6.0.x in `BECode.Bridge` on purpose: inside Visual Studio the library runs in `devenv.exe`, which loads its own copy under binding redirects an extension cannot change. Raising it means raising the minimum Visual Studio version.
+`System.Text.Json` is held at 6.0.x in `BECode.Bridge` on purpose. Inside Visual Studio the library runs in `devenv.exe`, which loads its own copies of these assemblies under binding redirects an extension cannot change; a reference *newer* than the oldest supported Visual Studio carries fails the package load. Because 6.0.x is older than anything 17.6+ redirects to, the `.vsix` can safely ship its own copies too: where Visual Studio has one, Visual Studio's wins; where it has none, ours is found (`[ProvideBindingPath]`). Raising the version means raising the minimum Visual Studio with it.
+
+If something does not work, the extension's own log is `%USERPROFILE%\.be-code\visualstudio.log`.

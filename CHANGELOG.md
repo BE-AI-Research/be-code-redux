@@ -20,7 +20,7 @@ that had been live since shared reviews shipped.
   proposed-write diff in Visual Studio's own difference viewer with Accept, Accept all and
   Reject in an information bar. **The Visual Studio layer compiles against the real SDK —
   on Linux, warnings as errors, SDK analyzers on — and has never been run.** The protocol,
-  the lock file and every tool underneath it are tested (250 tests), and
+  the lock file and every tool underneath it are tested (271 tests), and
   `internal/ide/contract_test.go` drives the real Go client against the real bridge, every
   tool, including a review cancelled mid-flight. `visualstudio/WINDOWS-CHECKLIST.md` is
   what proves the rest, and `visualstudio/README.md` lists what this version does not do:

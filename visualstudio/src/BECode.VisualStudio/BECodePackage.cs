@@ -185,6 +185,11 @@ namespace BECode.VisualStudio
 
         private async Task DrainLockWritesAsync()
         {
+            // RunAsync starts on its caller's thread, and LockFile.WriteAsync
+            // creates directories and files before its first real await:
+            // leave whatever thread raised the change before touching disk.
+            await TaskScheduler.Default;
+
             while (true)
             {
                 IReadOnlyList<string>? folders;
@@ -203,6 +208,24 @@ namespace BECode.VisualStudio
                 try
                 {
                     await LockFile.WriteAsync(_home!, new LockInfo(_pid, _port, _token!, folders!, "visualstudio", Version)).ConfigureAwait(false);
+
+                    // The gate stops a write from STARTING after Dispose, not
+                    // one already past it: if Dispose removed the lock while
+                    // this write was in flight, the write has just put it
+                    // back for a Visual Studio that is closing. Take it away
+                    // again.
+                    bool removedMeanwhile;
+                    lock (_lockWriteGate)
+                    {
+                        removedMeanwhile = _lockRemoved;
+                    }
+
+                    if (removedMeanwhile)
+                    {
+                        LockFile.Remove(_home!, _pid);
+                        continue;
+                    }
+
                     ActivityLog.LogInformation(nameof(WorkspaceFolders), "republished lock: " + folders!.Count + " workspace folder(s)");
                 }
                 catch (Exception ex)
