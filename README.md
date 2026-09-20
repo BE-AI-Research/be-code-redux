@@ -820,3 +820,7 @@ bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Ear
 v0.2.0 (dual UI, wizard, diff approvals, sessions), v0.1.0 (core loop + verification).
 4-platform builds; 21 tested Go packages, the two editor extensions' own suites, and scripted-model e2e (repair loop, MCP attach,
 undo, JSON mode, bench harness) driven through the real binary.
+
+## License
+
+MIT — see `LICENSE`.

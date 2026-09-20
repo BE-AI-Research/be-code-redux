@@ -84,3 +84,7 @@ On Linux or macOS, `dotnet build` and `dotnet test` in this directory compile ev
 `System.Text.Json` is held at 6.0.x in `BECode.Bridge` on purpose. Inside Visual Studio the library runs in `devenv.exe`, which loads its own copies of these assemblies under binding redirects an extension cannot change; a reference *newer* than the oldest supported Visual Studio carries fails the package load. Because 6.0.x is older than anything 17.6+ redirects to, the `.vsix` can safely ship its own copies too: where Visual Studio has one, Visual Studio's wins; where it has none, ours is found (`[ProvideBindingPath]`). Raising the version means raising the minimum Visual Studio with it.
 
 If something does not work, the extension's own log is `%USERPROFILE%\.be-code\visualstudio.log`.
+
+## Licence
+
+MIT — see `../LICENSE`. The .NET libraries carried inside the `.vsix` are Microsoft's, also MIT: `THIRD-PARTY-NOTICES.md`.
