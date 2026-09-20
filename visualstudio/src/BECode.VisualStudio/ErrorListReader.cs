@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using BECode.Bridge;
 using BECode.Bridge.Hosting;
 using EnvDTE;
 using EnvDTE80;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 
@@ -20,12 +22,19 @@ namespace BECode.VisualStudio
     /// <c>Ruling D11</c> (<see cref="IEditorHost.DiagnosticsAsync"/>'s own
     /// doc comment) says a non-null path is matched EXACTLY here, not left
     /// to the tool: <see cref="DiagnosticsAsync"/> does that filtering
-    /// itself. Severity filtering is explicitly NOT this host's job
-    /// (Ruling S4) — every diagnostic is returned regardless of path
-    /// filtering's outcome, and <c>DiagnosticsTools</c> filters by severity.
+    /// itself — fix round 1, I-10, AFTER rooting a non-absolute
+    /// <c>ErrorItem.FileName</c> (build errors from MSBuild often carry a
+    /// project-relative or bare name), since the exact-absolute-path match
+    /// was silently dropping every one of those. Severity filtering is
+    /// explicitly NOT this host's job (Ruling S4) — every diagnostic is
+    /// returned regardless of path filtering's outcome, and
+    /// <c>DiagnosticsTools</c> filters by severity.
     /// </summary>
     internal sealed class ErrorListReader
     {
+        /// <summary>Fix round 1, I-11: the Error List is capped here so an enormous solution cannot make one call read tens of thousands of COM items.</summary>
+        private const int MaxItems = 5000;
+
         private readonly AsyncPackage _package;
 
         public ErrorListReader(AsyncPackage package)
@@ -50,12 +59,46 @@ namespace BECode.VisualStudio
                     return (IReadOnlyList<Diagnostic>)Array.Empty<Diagnostic>();
                 }
 
+                // Fix round 1, I-10: candidate directories to root a
+                // non-absolute FileName against — the owning project's
+                // directory first, then the solution directory — via the
+                // SAME enumeration WorkspaceFolders uses, so no separate
+                // solution walk is written here.
+                var solutionService = await _package.GetServiceAsync(typeof(SVsSolution)).ConfigureAwait(true) as IVsSolution;
+                var projectDirsByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var project in WorkspaceFolders.EnumerateLoadedProjects(solutionService))
+                {
+                    if (!string.IsNullOrEmpty(project.Dir) && !projectDirsByName.ContainsKey(project.Name))
+                    {
+                        projectDirsByName[project.Name] = project.Dir;
+                    }
+                }
+
+                string? solutionDir = null;
+                try
+                {
+                    if (solutionService != null
+                        && ErrorHandler.Succeeded(solutionService.GetSolutionInfo(out var dir, out _, out _))
+                        && !string.IsNullOrEmpty(dir))
+                    {
+                        solutionDir = dir;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ActivityLog.LogWarning(nameof(DiagnosticsAsync), ex.ToString());
+                }
+
                 var result = new List<Diagnostic>();
                 var count = errorItems.Count;
+                var limit = Math.Min(count, MaxItems);
+                var truncated = count > MaxItems;
 
                 // COM collections are 1-based (host design §2.3).
-                for (var i = 1; i <= count; i++)
+                for (var i = 1; i <= limit; i++)
                 {
+                    ct.ThrowIfCancellationRequested();
+
                     ErrorItem? item;
                     try
                     {
@@ -75,7 +118,18 @@ namespace BECode.VisualStudio
                         continue;
                     }
 
-                    var fileName = item.FileName ?? string.Empty;
+                    var rawFileName = item.FileName ?? string.Empty;
+                    var projectName = item.Project;
+
+                    var candidates = new List<string?>(2);
+                    if (!string.IsNullOrEmpty(projectName) && projectDirsByName.TryGetValue(projectName, out var projectDir))
+                    {
+                        candidates.Add(projectDir);
+                    }
+
+                    candidates.Add(solutionDir);
+
+                    var fileName = PathRooting.Root(rawFileName, candidates, File.Exists) ?? rawFileName;
 
                     if (path != null && !string.Equals(fileName, path, StringComparison.OrdinalIgnoreCase))
                     {
@@ -83,7 +137,6 @@ namespace BECode.VisualStudio
                     }
 
                     var description = item.Description ?? string.Empty;
-                    var projectName = item.Project;
                     var source = ErrorSource.ParseCode(description)
                         ?? (string.IsNullOrEmpty(projectName) ? "-" : projectName);
 
@@ -94,6 +147,21 @@ namespace BECode.VisualStudio
                         SeverityFor(item.ErrorLevel),
                         source,
                         description));
+                }
+
+                if (truncated)
+                {
+                    // Fix round 1, I-11: a synthetic diagnostic so the model
+                    // sees the truncation rather than silently getting a
+                    // partial answer — Source "be-code" distinguishes it
+                    // from anything the Error List itself produced.
+                    result.Add(new Diagnostic(
+                        solutionDir ?? string.Empty,
+                        1,
+                        1,
+                        "info",
+                        "be-code",
+                        "Error List truncated at " + MaxItems + " of " + count + " items"));
                 }
 
                 return (IReadOnlyList<Diagnostic>)result;

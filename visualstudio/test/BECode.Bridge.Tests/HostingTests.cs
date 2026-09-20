@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BECode.Bridge.Hosting;
@@ -324,6 +325,118 @@ namespace BECode.Bridge.Tests
             // returns 0 (Interlocked.Increment starts at 1) — defends
             // against a caller passing an uninitialised default(long).
             Assert.False(gate.TryCommit(0));
+        }
+    }
+
+    // Task 6, fix round 1, I-9: the plain-file Activity Log mirror.
+    public class DiagnosticsLogTests
+    {
+        [Fact]
+        public void PathIsRootedUnderTheGivenHome()
+        {
+            Assert.Equal(
+                System.IO.Path.Combine("/tmp/home-for-test", ".be-code", "visualstudio.log"),
+                DiagnosticsLog.PathFor("/tmp/home-for-test"));
+        }
+
+        [Fact]
+        public void FormatsATabSeparatedLineWithTheException()
+        {
+            var ts = new DateTimeOffset(2026, 9, 20, 12, 0, 0, TimeSpan.Zero);
+            var line = DiagnosticsLog.FormatLine(ts, "ERROR", 4242, "BECodePackage", "boom", "System.Exception: boom");
+
+            Assert.Equal(ts.ToString("O") + "\tERROR\t4242\tBECodePackage\tboom\tSystem.Exception: boom", line);
+        }
+
+        [Fact]
+        public void OmitsTheTrailingFieldWhenThereIsNoException()
+        {
+            var ts = DateTimeOffset.UtcNow;
+            var line = DiagnosticsLog.FormatLine(ts, "INFO", 1, "ctx", "hello");
+
+            Assert.Equal(ts.ToString("O") + "\tINFO\t1\tctx\thello", line);
+        }
+
+        [Fact]
+        public void FlattensEmbeddedNewlinesAndTabsSoOneEntryIsOneLine()
+        {
+            var ts = DateTimeOffset.UtcNow;
+            var line = DiagnosticsLog.FormatLine(ts, "ERROR", 1, "ctx", "line one\nline two\r\nline three\ttabbed");
+
+            Assert.DoesNotContain("\n", line.Substring(line.IndexOf("ctx", StringComparison.Ordinal)));
+            Assert.Contains("line one line two line three tabbed", line);
+        }
+
+        [Theory]
+        [InlineData(0, false)]
+        [InlineData(1024 * 1024, false)]
+        [InlineData(1024 * 1024 + 1, true)]
+        [InlineData(5 * 1024 * 1024, true)]
+        public void ShouldTruncateOnlyOverOneMebibyte(long sizeBytes, bool expected)
+        {
+            Assert.Equal(expected, DiagnosticsLog.ShouldTruncate(sizeBytes));
+        }
+    }
+
+    // Task 6, fix round 1, I-10: rooting a diagnostic's project-relative FileName.
+    public class PathRootingTests
+    {
+        [Fact]
+        public void AnAlreadyRootedPathIsReturnedUnchanged()
+        {
+            var result = PathRooting.Root("/repo/src/Foo.cs", new[] { "/repo/other" }, _ => false);
+            Assert.Equal("/repo/src/Foo.cs", result);
+        }
+
+        [Fact]
+        public void PicksTheFirstCandidateWhoseCombinedPathExists()
+        {
+            var existing = new HashSet<string> { System.IO.Path.Combine("/repo/proj2", "Foo.cs") };
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj1", "/repo/proj2" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj2", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void PrefersTheProjectDirectoryOverTheSolutionDirectoryWhenBothExist()
+        {
+            var existing = new HashSet<string>
+            {
+                System.IO.Path.Combine("/repo/proj", "Foo.cs"),
+                System.IO.Path.Combine("/repo", "Foo.cs"),
+            };
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj", "/repo" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void FallsBackToTheFirstCandidateWhenNoneExist()
+        {
+            var result = PathRooting.Root("Foo.cs", new[] { "/repo/proj", "/repo" }, _ => false);
+            Assert.Equal(System.IO.Path.Combine("/repo/proj", "Foo.cs"), result);
+        }
+
+        [Fact]
+        public void EmptyCandidateDirectoriesAreSkipped()
+        {
+            var existing = new HashSet<string> { System.IO.Path.Combine("/repo", "Foo.cs") };
+            var result = PathRooting.Root("Foo.cs", new[] { null, "", "/repo" }, existing.Contains);
+            Assert.Equal(System.IO.Path.Combine("/repo", "Foo.cs"), result);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public void ANullOrEmptyFileNameIsReturnedAsIs(string? fileName)
+        {
+            var result = PathRooting.Root(fileName, new[] { "/repo" }, _ => true);
+            Assert.Equal(fileName, result);
+        }
+
+        [Fact]
+        public void NoCandidateDirectoriesAtAllReturnsTheBareFileName()
+        {
+            var result = PathRooting.Root("Foo.cs", Array.Empty<string>(), _ => false);
+            Assert.Equal("Foo.cs", result);
         }
     }
 }

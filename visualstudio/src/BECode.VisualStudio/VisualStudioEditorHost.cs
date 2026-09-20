@@ -10,6 +10,7 @@ using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.TextManager.Interop;
+using Microsoft.VisualStudio.Threading;
 
 namespace BECode.VisualStudio
 {
@@ -61,14 +62,20 @@ namespace BECode.VisualStudio
                     return new EditorContext(string.Empty, 0, 0, 0, string.Empty, Array.Empty<string>());
                 }
 
-                var open = new List<string>();
+                // Fix round 1, I-11: collect the open documents' names on
+                // the UI thread — Path.IsPathRooted is pure string logic —
+                // and defer File.Exists (synchronous disk I/O) until after
+                // hopping off it below, instead of doing it once per open
+                // document, on the UI thread, on every context call.
+                var openCandidates = new List<string>();
                 try
                 {
                     foreach (Document doc in dte.Documents)
                     {
-                        if (IsRootedExistingFile(doc.FullName))
+                        var fullName = doc.FullName;
+                        if (!string.IsNullOrEmpty(fullName) && Path.IsPathRooted(fullName))
                         {
-                            open.Add(doc.FullName);
+                            openCandidates.Add(fullName);
                         }
                     }
                 }
@@ -88,43 +95,74 @@ namespace BECode.VisualStudio
                     active = null;
                 }
 
-                if (active == null || !IsRootedExistingFile(activeFull))
+                var activeRooted = active != null && !string.IsNullOrEmpty(activeFull) && Path.IsPathRooted(activeFull);
+
+                TextSelection? selection = null;
+                if (activeRooted)
+                {
+                    try
+                    {
+                        selection = active!.Selection as TextSelection;
+                    }
+                    catch
+                    {
+                        selection = null;
+                    }
+                }
+
+                // Everything the rest of this method needs from the
+                // selection is read HERE, on the main thread — none of it
+                // is a live COM reference by the time the hop below runs.
+                var hasSelection = selection != null;
+                var line = 0;
+                var selStart = 0;
+                var selEnd = 0;
+                var selectionEmpty = true;
+                var selectionText = string.Empty;
+                if (selection != null)
+                {
+                    line = selection.ActivePoint.Line;
+                    selectionEmpty = selection.IsEmpty;
+                    if (!selectionEmpty)
+                    {
+                        selStart = selection.TopPoint.Line;
+                        selEnd = selection.BottomPoint.Line;
+                        selectionText = selection.Text ?? string.Empty;
+                    }
+                }
+
+                await TaskScheduler.Default;
+
+                var open = new List<string>();
+                foreach (var candidate in openCandidates)
+                {
+                    if (File.Exists(candidate))
+                    {
+                        open.Add(candidate);
+                    }
+                }
+
+                if (!activeRooted || activeFull == null || !File.Exists(activeFull))
                 {
                     return new EditorContext(string.Empty, 0, 0, 0, string.Empty, open);
                 }
 
-                TextSelection? selection;
-                try
-                {
-                    selection = active.Selection as TextSelection;
-                }
-                catch
-                {
-                    selection = null;
-                }
-
-                if (selection == null)
+                if (!hasSelection)
                 {
                     // A non-text document (a designer): treat as no
                     // selection (host design §3.1). File is non-empty here,
                     // so Line stays non-zero per EditorContext's own
                     // invariant ("0 only alongside an empty File") — there
                     // is no real caret, so 1 is the least-wrong default.
-                    return new EditorContext(activeFull!, 1, 0, 0, string.Empty, open);
+                    return new EditorContext(activeFull, 1, 0, 0, string.Empty, open);
                 }
 
-                var line = selection.ActivePoint.Line;
-
-                if (selection.IsEmpty)
+                if (selectionEmpty)
                 {
-                    return new EditorContext(activeFull!, line, 0, 0, string.Empty, open);
+                    return new EditorContext(activeFull, line, 0, 0, string.Empty, open);
                 }
 
-                var selStart = selection.TopPoint.Line;
-                var selEnd = selection.BottomPoint.Line;
-                var text = selection.Text ?? string.Empty;
-
-                return new EditorContext(activeFull!, line, selStart, selEnd, text, open);
+                return new EditorContext(activeFull, line, selStart, selEnd, selectionText, open);
             });
         }
 
@@ -183,10 +221,5 @@ namespace BECode.VisualStudio
 
         public Task<ReviewDecision> ReviewDiffAsync(ReviewRequest request, CancellationToken ct)
             => _diffReview.ReviewDiffAsync(request, ct);
-
-        private static bool IsRootedExistingFile(string? path)
-        {
-            return !string.IsNullOrEmpty(path) && Path.IsPathRooted(path) && File.Exists(path);
-        }
     }
 }

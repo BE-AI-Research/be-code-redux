@@ -77,6 +77,13 @@ namespace BECode.VisualStudio
 
         private async Task InitializeCoreAsync(CancellationToken ct)
         {
+            // Fix round 1, I-9: resolved and the file mirror initialised as
+            // early as possible, before anything else in this method can
+            // log — neither call needs the UI thread.
+            _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            _pid = Process.GetCurrentProcess().Id;
+            ActivityLog.Initialize(_home);
+
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(ct);
 
             var folders = new WorkspaceFolders(this);
@@ -94,11 +101,26 @@ namespace BECode.VisualStudio
             var server = new BridgeServer(registry, token, Version);
             server.OnError = (context, ex) => ActivityLog.LogError(context, ex.ToString());
 
-            var port = await server.StartAsync().ConfigureAwait(true);
-            _server = server;
+            // Still on the main thread here (needed for the DTE version
+            // lookup below); host/registry/server construction above is all
+            // main-thread VS service work too.
+            string vsVersion;
+            try
+            {
+                vsVersion = (await GetServiceAsync(typeof(SDTE)).ConfigureAwait(true) as EnvDTE80.DTE2)?.Version ?? "unknown";
+            }
+            catch
+            {
+                vsVersion = "unknown";
+            }
 
-            _home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            _pid = Process.GetCurrentProcess().Id;
+            // Fix round 1, I-11 (M-9): BridgeServer.StartAsync (opens a TCP
+            // listener) and LockFile.WriteAsync (file I/O) need nothing from
+            // the UI thread — hop to the pool before either.
+            await TaskScheduler.Default;
+
+            var port = await server.StartAsync().ConfigureAwait(false);
+            _server = server;
             _port = port;
             _token = token;
 
@@ -110,7 +132,7 @@ namespace BECode.VisualStudio
                 token,
                 folders.Current,
                 "visualstudio",
-                Version)).ConfigureAwait(true);
+                Version)).ConfigureAwait(false);
 
             // Fix round 1, I-2: from here on, a folder-list change
             // republishes the lock (off the UI thread, serialised,
@@ -119,16 +141,6 @@ namespace BECode.VisualStudio
             // WorkspaceFolders.InitializeAsync already ran does not race a
             // redundant republish against it.
             folders.Changed += OnFoldersChanged;
-
-            string vsVersion;
-            try
-            {
-                vsVersion = (await GetServiceAsync(typeof(SDTE)).ConfigureAwait(true) as EnvDTE80.DTE2)?.Version ?? "unknown";
-            }
-            catch
-            {
-                vsVersion = "unknown";
-            }
 
             ActivityLog.LogInformation(nameof(BECodePackage), "listening on port " + port + ", " + folders.Current.Count + " workspace folder(s), VS " + vsVersion);
         }
