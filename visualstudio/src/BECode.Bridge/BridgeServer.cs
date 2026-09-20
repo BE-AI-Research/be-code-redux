@@ -86,6 +86,21 @@ namespace BECode.Bridge
         /// </summary>
         internal TimeSpan WriteLockTeardownTimeout { get; set; } = TimeSpan.FromSeconds(1);
 
+        /// <summary>
+        /// Fix round 1, M1 (Ruling R-10): the most <c>tools/call</c>
+        /// dispatcher calls one connection may have running at once. Before
+        /// this task's concurrency rework a connection could hold at most
+        /// one in-flight call; without a cap, a client that pipelines many
+        /// thousands of <c>tools/call</c> lines back to back would now get
+        /// that many live dispatcher calls at once. The ORDERED processor
+        /// (ProcessLineAsync) acquires one slot per call before forking it,
+        /// so at the cap the connection simply stops dispatching further
+        /// lines until a call finishes and frees a slot — back-pressure, not
+        /// an error. Internal and settable so a test can shrink it; default
+        /// 64.
+        /// </summary>
+        internal int MaxConcurrentCallsPerConnection { get; set; } = 64;
+
         public int ConnectionCount
         {
             get
@@ -203,6 +218,14 @@ namespace BECode.Bridge
             public readonly SemaphoreSlim WriteLock = new SemaphoreSlim(1, 1);
             public readonly CancellationTokenSource Cts;
 
+            // Fix round 1, M1: one ticket per in-flight tools/call, sized by
+            // the server's MaxConcurrentCallsPerConnection. Acquired by the
+            // ordered processor before forking a call's task, released once
+            // that task completes (see TrackInFlight below) — at the cap,
+            // acquiring simply blocks the processor from dispatching further
+            // lines until a slot frees up.
+            public readonly SemaphoreSlim CallSlots;
+
             // Authed is only ever touched by the single processor task.
             // ShouldClose is written there too but read from the read loop
             // on a different task, so it needs a visibility guarantee.
@@ -218,17 +241,22 @@ namespace BECode.Bridge
             private readonly object _inFlightLock = new object();
             private readonly HashSet<Task> _inFlight = new HashSet<Task>();
 
-            public ConnectionState(TcpClient client, NetworkStream stream, CancellationTokenSource cts)
+            public ConnectionState(TcpClient client, NetworkStream stream, CancellationTokenSource cts, int maxConcurrentCalls)
             {
                 Client = client;
                 Stream = stream;
                 Cts = cts;
+                CallSlots = new SemaphoreSlim(maxConcurrentCalls, maxConcurrentCalls);
             }
 
             /// <summary>
             /// Registers a forked <c>tools/call</c> task and prunes it the
             /// instant it completes, so a long session never accumulates an
-            /// unbounded list of finished calls.
+            /// unbounded list of finished calls. Also releases the
+            /// <see cref="CallSlots"/> ticket the caller acquired before
+            /// forking this task — every path into TrackInFlight has already
+            /// acquired exactly one, so releasing here, once, on every
+            /// completion (success, fault or cancellation) is exact.
             /// </summary>
             public void TrackInFlight(Task task)
             {
@@ -254,6 +282,8 @@ namespace BECode.Bridge
                             // exception.
                             _ = t.Exception;
                         }
+
+                        CallSlots.Release();
                     },
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
@@ -272,6 +302,7 @@ namespace BECode.Bridge
             {
                 WriteLock.Dispose();
                 Cts.Dispose();
+                CallSlots.Dispose();
             }
         }
 
@@ -296,7 +327,7 @@ namespace BECode.Bridge
                 // socket close, a bad token, the line cap or server disposal
                 // can tell an in-flight tools/call without waiting for it.
                 var cts = CancellationTokenSource.CreateLinkedTokenSource(serverCt);
-                state = new ConnectionState(client, stream, cts);
+                state = new ConnectionState(client, stream, cts, MaxConcurrentCallsPerConnection);
                 var framer = new LineFramer(_maxLineBytes);
 
                 // Requests are READ and DISPATCHED in order: the read loop
@@ -678,6 +709,27 @@ namespace BECode.Bridge
                             break;
 
                         case "tools/call":
+                            // Fix round 1, M1 (Ruling R-10): the ORDERED
+                            // processor acquires a call slot before forking
+                            // — at MaxConcurrentCallsPerConnection already
+                            // in flight, this simply blocks (back-pressure,
+                            // no error) until one finishes and releases its
+                            // slot (TrackInFlight). The acquire observes the
+                            // connection's own token so teardown can never
+                            // hang waiting on it.
+                            try
+                            {
+                                await state.CallSlots.WaitAsync(state.Cts.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (state.Cts.IsCancellationRequested)
+                            {
+                                // Connection tearing down while waiting for a
+                                // slot: the request is simply abandoned, same
+                                // as any other in-flight call caught by
+                                // cancellation — no reply, no OnError.
+                                break;
+                            }
+
                             // R-7: dispatched in order (we reach this line in
                             // strict per-connection order, same as every
                             // other case), but NOT awaited here — it runs on

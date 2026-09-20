@@ -601,12 +601,21 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError()
         {
+            // ConnectionCount == 1 is true from the moment the TCP connect
+            // is accepted, well before this connection's tools/call handler
+            // has necessarily started running — fix round 1, M1 added an
+            // extra await (CallSlots.WaitAsync) before a call is even
+            // forked, so relying on ConnectionCount alone now genuinely
+            // races client.Close() against the dispatcher ever being
+            // invoked at all. started is the real synchronisation point.
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var callReturned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var dispatcher = new FakeToolDispatcher
             {
                 OnCall = async (name, args, conn, ct) =>
                 {
+                    started.TrySetResult(true);
                     await gate.Task; // deliberately ignores ct
                     callReturned.TrySetResult(true);
                     return new ToolResult("late", false);
@@ -629,7 +638,8 @@ namespace BECode.Bridge.Tests
             await InitializeAsync(stream, reader, Token);
 
             await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
-            await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+            var startedInTime = await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))) == started.Task;
+            Assert.True(startedInTime, "the tools/call handler never started");
 
             client.Close();
 
@@ -663,12 +673,19 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task ALateReplyAfterTheConnectionIsGoneIsDroppedQuietly()
         {
+            // See AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError's
+            // comment on started: ConnectionCount alone is not a safe proxy
+            // for "the tools/call handler has started", now that fix round
+            // 1, M1 puts an extra await (CallSlots.WaitAsync) between a line
+            // being dequeued and its call being forked.
+            var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var callCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var dispatcher = new FakeToolDispatcher
             {
                 OnCall = async (name, args, conn, ct) =>
                 {
+                    started.TrySetResult(true);
                     await gate.Task; // deliberately ignores ct, like the straggler above
                     var result = new ToolResult("too-late", false);
                     callCompleted.TrySetResult(true);
@@ -702,7 +719,8 @@ namespace BECode.Bridge.Tests
             try
             {
                 await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"stubborn\",\"arguments\":{}}}");
-                await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+                var startedInTime = await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))) == started.Task;
+                Assert.True(startedInTime, "the tools/call handler never started");
 
                 client.Close();
 
@@ -776,6 +794,97 @@ namespace BECode.Bridge.Tests
             }
 
             Assert.Equal(new HashSet<int>(Enumerable.Range(1, 20)), seenIds);
+        }
+
+        // Fix round 1, M1 (Ruling R-10): before this task's concurrency
+        // rework, one connection could hold at most one in-flight call; the
+        // cap restores an equivalent bound instead of letting a client that
+        // pipelines many thousands of tools/call lines get that many live
+        // dispatcher calls at once. With the cap shrunk to 2, three gated
+        // calls dispatched back to back must leave the third's handler
+        // un-started while the first two are still pending — the ordered
+        // processor itself is blocked acquiring a slot, back-pressure, not
+        // an error — and only once a slot frees up (one gate opened) does
+        // the third handler start.
+        [Fact]
+        public async Task ConcurrentCallsPerConnectionAreCappedAndBackPressured()
+        {
+            var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startedLock = new object();
+            var startedIds = new List<int>();
+            var dispatcher = new FakeToolDispatcher
+            {
+                OnCall = async (name, args, conn, ct) =>
+                {
+                    lock (startedLock)
+                    {
+                        startedIds.Add(int.Parse(name));
+                    }
+
+                    await gate.Task;
+                    return new ToolResult(name, false);
+                },
+            };
+            var (server, port) = await StartServerAsync(dispatcher);
+            server.MaxConcurrentCallsPerConnection = 2;
+            await using var serverLifetime = server;
+
+            using var client = await ConnectAsync(port);
+            using var stream = client.GetStream();
+            using var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+            await InitializeAsync(stream, reader, Token);
+
+            for (var i = 1; i <= 3; i++)
+            {
+                await SendLineAsync(stream, $"{{\"jsonrpc\":\"2.0\",\"id\":{i},\"method\":\"tools/call\",\"params\":{{\"name\":\"{i}\",\"arguments\":{{}}}}}}");
+            }
+
+            await WaitForAsync(
+                () =>
+                {
+                    lock (startedLock)
+                    {
+                        return startedIds.Count == 2;
+                    }
+                },
+                TimeSpan.FromSeconds(5));
+
+            // Give the third every reasonable chance to (incorrectly) start
+            // anyway before asserting it hasn't — a generous but bounded
+            // grace period, not a synchronisation sleep for the positive
+            // case above.
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+            List<int> startedSnapshot;
+            lock (startedLock)
+            {
+                startedSnapshot = new List<int>(startedIds);
+            }
+
+            Assert.Equal(2, startedSnapshot.Count);
+            Assert.DoesNotContain(3, startedSnapshot);
+
+            gate.TrySetResult(true);
+
+            await WaitForAsync(
+                () =>
+                {
+                    lock (startedLock)
+                    {
+                        return startedIds.Count == 3;
+                    }
+                },
+                TimeSpan.FromSeconds(5));
+
+            var seenIds = new HashSet<int>();
+            for (var i = 0; i < 3; i++)
+            {
+                var line = await ReadLineWithTimeoutAsync(reader, ReplyTimeout);
+                Assert.NotNull(line);
+                seenIds.Add(JsonDocument.Parse(line!).RootElement.GetProperty("id").GetInt32());
+            }
+
+            Assert.Equal(new HashSet<int> { 1, 2, 3 }, seenIds);
         }
 
         [Fact]
@@ -1092,11 +1201,18 @@ namespace BECode.Bridge.Tests
         {
             for (var iteration = 0; iteration < 50; iteration++)
             {
+                // ConnectionCount alone is not a safe proxy for "the
+                // tools/call handler has started" — see
+                // AStragglerThatIgnoresItsTokenIsAbandonedAndReportedThroughOnError's
+                // comment on the same pattern (fix round 1, M1 added an
+                // extra await, CallSlots.WaitAsync, before a call is forked).
+                var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var callCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var dispatcher = new FakeToolDispatcher
                 {
                     OnCall = async (name, args, conn, ct) =>
                     {
+                        started.TrySetResult(true);
                         try
                         {
                             await Task.Delay(Timeout.Infinite, ct);
@@ -1130,7 +1246,8 @@ namespace BECode.Bridge.Tests
                 await InitializeAsync(stream, reader, Token);
 
                 await SendLineAsync(stream, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"slow-unwind\",\"arguments\":{}}}");
-                await WaitForAsync(() => server.ConnectionCount == 1, TimeSpan.FromSeconds(5));
+                var startedInTime = await Task.WhenAny(started.Task, Task.Delay(TimeSpan.FromSeconds(5))) == started.Task;
+                Assert.True(startedInTime, $"iteration {iteration}: the tools/call handler never started");
 
                 client.Close();
 
