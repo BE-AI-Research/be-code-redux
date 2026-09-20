@@ -14,10 +14,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- Held at 6.0.x on purpose. Inside Visual Studio this library runs in
+         devenv.exe, which loads its own System.Text.Json under its own
+         binding redirects; an extension cannot change those, and a reference
+         newer than what the oldest supported Visual Studio carries fails the
+         package load with a FileLoadException. Every 6.0.x has assembly
+         version 6.0.0.0. Raising this means raising the VSIX's minimum Visual
+         Studio version with it: see the host design, section 1.1. -->
+    <PackageReference Include="System.Text.Json" Version="6.0.11" />
     <PackageReference Include="System.Memory" Version="4.5.5" />
-    <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+    <PackageReference Include="System.Threading.Channels" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
