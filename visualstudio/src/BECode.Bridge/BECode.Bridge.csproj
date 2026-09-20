@@ -20,4 +20,12 @@
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- vscode/tools.manifest.json (Task 1) is the single source of truth for
+         tool names, descriptions and schemas; ToolManifest.cs reads it back
+         out of this assembly by LogicalName so the resource's identity does
+         not depend on the relative path used here. -->
+    <EmbeddedResource Include="../../../vscode/tools.manifest.json" LogicalName="BECode.Bridge.tools.manifest.json" Link="tools.manifest.json" />
+  </ItemGroup>
+
 </Project>
