@@ -66,8 +66,10 @@ namespace BECode.Bridge.Tests
             Assert.Equal(info.WorkspaceFolders, folders);
         }
 
+        // M7 (review round 1): this assertion is synchronous; there was no
+        // reason for the test method itself to be async.
         [Fact]
-        public async Task PathForMatchesGoSideLayout()
+        public void PathForMatchesGoSideLayout()
         {
             var expected = Path.Combine(_home, ".be-code", "ide", "777.json");
             Assert.Equal(expected, LockFile.PathFor(_home, 777));
@@ -151,6 +153,73 @@ namespace BECode.Bridge.Tests
 
             var mode = File.GetUnixFileMode(path);
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
+        }
+
+        // I2 (review round 1): the final file after an atomic replace (not
+        // just a first-ever write) must still be 0600 — a regression guard
+        // on the create-empty / chmod / write / rename ordering surviving a
+        // second write to the same pid.
+        [Fact]
+        public async Task SecondWriteFileModeIsStillOwnerReadWriteOnly()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            var pid = 7007;
+            await LockFile.WriteAsync(_home, new LockInfo(pid, 1, LockFile.NewToken(), new List<string> { "/a" }, "visualstudio", "1.0.0"));
+            await LockFile.WriteAsync(_home, new LockInfo(pid, 2, LockFile.NewToken(), new List<string> { "/b" }, "visualstudio", "1.0.1"));
+
+            var path = LockFile.PathFor(_home, pid);
+            var mode = File.GetUnixFileMode(path);
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
+        }
+
+        // I2: the ide directory this call creates must be 0700 on Unix,
+        // matching the Go side's os.MkdirAll(d, 0o700).
+        [Fact]
+        public async Task FreshlyCreatedIdeDirectoryIsOwnerOnly()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            var info = SampleInfo(8008);
+            var dir = Path.Combine(_home, ".be-code", "ide");
+            Assert.False(Directory.Exists(dir));
+
+            await LockFile.WriteAsync(_home, info);
+
+            var mode = File.GetUnixFileMode(dir);
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, mode);
+        }
+
+        // I2: a pre-existing ide directory's mode is the user's own choice
+        // and must not be touched by WriteAsync.
+        [Fact]
+        public async Task PreexistingIdeDirectoryModeIsNotChanged()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            var dir = Path.Combine(_home, ".be-code", "ide");
+            Directory.CreateDirectory(dir);
+            File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute); // 0755
+
+            await LockFile.WriteAsync(_home, SampleInfo(9009));
+
+            var mode = File.GetUnixFileMode(dir);
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute,
+                mode);
         }
     }
 }

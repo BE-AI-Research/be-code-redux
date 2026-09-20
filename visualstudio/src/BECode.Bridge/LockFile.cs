@@ -54,37 +54,65 @@ namespace BECode.Bridge
         }
 
         /// <summary>
-        /// Writes the lock file atomically: a temp file in the same
-        /// directory, mode 0600 applied before it is visible under its
-        /// final name, then an atomic move/replace over any prior lock for
-        /// this pid.
+        /// Writes the lock file atomically: an empty temp file in the same
+        /// directory, restricted to 0600 (checked — a chmod failure aborts
+        /// the write and removes the temp file) BEFORE any content
+        /// (including the token) is written into it, then an atomic
+        /// move/replace over any prior lock for this pid.
         /// </summary>
         public static async Task WriteAsync(string home, LockInfo info)
         {
             var dir = LockDir(home);
+            var dirExisted = Directory.Exists(dir);
             Directory.CreateDirectory(dir);
+            if (!dirExisted)
+            {
+                // The Go side creates this directory 0700
+                // (os.MkdirAll(d, 0o700)); match it, but only for a
+                // directory this call itself created — a pre-existing
+                // directory's mode is the user's own choice.
+                TrySetMode(dir, Mode0700);
+            }
 
             var finalPath = PathFor(home, info.Pid);
             var tempPath = Path.Combine(dir, info.Pid.ToString() + "." + Guid.NewGuid().ToString("N") + ".tmp");
 
-            var payload = new
+            // Create the temp file EMPTY first...
+            using (new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                pid = info.Pid,
-                port = info.Port,
-                token = info.Token,
-                workspaceFolders = info.WorkspaceFolders,
-                ideName = info.IdeName,
-                version = info.Version,
-            };
-            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
-
-            using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                await fs.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
-                await fs.FlushAsync().ConfigureAwait(false);
             }
 
-            TrySetOwnerReadWrite(tempPath);
+            try
+            {
+                // ...restrict it to 0600 while it is still empty...
+                SetModeOrThrow(tempPath, Mode0600);
+
+                // ...and only then write the token into it. A chmod
+                // failure, or a write failure, both abort with the temp
+                // file removed rather than leaving a secret-bearing file
+                // at whatever mode the umask happened to give it.
+                var payload = new
+                {
+                    pid = info.Pid,
+                    port = info.Port,
+                    token = info.Token,
+                    workspaceFolders = info.WorkspaceFolders,
+                    ideName = info.IdeName,
+                    version = info.Version,
+                };
+                var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+
+                using (var fs = new FileStream(tempPath, FileMode.Open, FileAccess.Write, FileShare.None))
+                {
+                    await fs.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
+                    await fs.FlushAsync().ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                TryDeleteQuietly(tempPath);
+                throw;
+            }
 
             if (File.Exists(finalPath))
             {
@@ -98,7 +126,12 @@ namespace BECode.Bridge
             }
         }
 
-        /// <summary>Removing a lock that is not there is not an error.</summary>
+        /// <summary>
+        /// Removing a lock that is not there is not an error: the Go side
+        /// prunes locks whose pid is dead without first checking they
+        /// exist, so a missing file (or even a missing ide directory) here
+        /// is the ordinary case, not a failure.
+        /// </summary>
         public static void Remove(string home, int pid)
         {
             try
@@ -116,18 +149,50 @@ namespace BECode.Bridge
             }
         }
 
+        private const int Mode0600 = 384; // 0600 in octal
+        private const int Mode0700 = 448; // 0700 in octal
+
         [DllImport("libc", SetLastError = true)]
         private static extern int chmod(string pathname, int mode);
 
-        private static void TrySetOwnerReadWrite(string path)
+        /// <summary>Chmod, checked: a non-zero result throws with the errno.</summary>
+        private static void SetModeOrThrow(string path, int mode)
         {
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 return;
             }
 
-            const int mode0600 = 384; // 0600 in octal
-            chmod(path, mode0600);
+            var result = chmod(path, mode);
+            if (result != 0)
+            {
+                var errno = Marshal.GetLastWin32Error();
+                throw new IOException($"chmod {path} to {Convert.ToString(mode, 8)} failed (errno {errno})");
+            }
+        }
+
+        /// <summary>Best-effort chmod for cases where a failure is not fatal to the write.</summary>
+        private static void TrySetMode(string path, int mode)
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            chmod(path, mode);
+        }
+
+        private static void TryDeleteQuietly(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch
+            {
+                // best-effort cleanup of a temp file we are already
+                // abandoning because something else went wrong
+            }
         }
     }
 }
