@@ -169,6 +169,24 @@ namespace BECode.Bridge
     public sealed record BreakpointInfo(int Line, string? Condition);
 
     /// <summary>
+    /// Fix round 2, D7: <c>debug_breakpoint</c>'s <c>action</c> argument
+    /// becomes this enum at the seam — exactly the two values
+    /// vscode/tools.manifest.json's <c>debug_breakpoint.action</c> schema
+    /// enumerates. The tool parses the incoming string and refuses an
+    /// unrecognised value itself; the host never sees a raw string.
+    /// </summary>
+    public enum BreakpointAction { Add, Remove }
+
+    /// <summary>
+    /// Fix round 2, D7: <c>debug_step</c>'s <c>step</c> argument becomes this
+    /// enum at the seam — exactly the three values
+    /// vscode/tools.manifest.json's <c>debug_step.step</c> schema
+    /// enumerates. The tool parses the incoming string and refuses an
+    /// unrecognised value itself; the host never sees a raw string.
+    /// </summary>
+    public enum DebugStepKind { Over, Into, Out }
+
+    /// <summary>
     /// One frame of a call stack. <see cref="Path"/> is an ABSOLUTE path
     /// (Ruling S3; <c>DebugTools</c> relativises it for output, exactly
     /// where vscode's own <c>debug_stack</c> handler does), or null when the
@@ -211,24 +229,27 @@ namespace BECode.Bridge
     {
         Task<IReadOnlyList<DebugConfigInfo>> ConfigsAsync(CancellationToken ct);
         Task<StopResult> StartAsync(string? config, CancellationToken ct);
-        Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, string action, string? condition, CancellationToken ct);
+        Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, BreakpointAction action, string? condition, CancellationToken ct);
         Task<StopResult> ContinueAsync(CancellationToken ct);
-        Task<StopResult> StepAsync(string step, CancellationToken ct);
+        Task<StopResult> StepAsync(DebugStepKind step, CancellationToken ct);
         Task<IReadOnlyList<StackFrameInfo>> StackAsync(int depth, CancellationToken ct);
 
         /// <summary>
         /// Every scope's every variable, for <paramref name="frame"/> (the
-        /// top frame when null) — unfiltered by <paramref name="scope"/>;
-        /// <c>DebugTools</c> filters to locals/args/all by scope name, the
-        /// same string matching vscode's <c>variables()</c> does. Children
-        /// (<see cref="VariableInfo.Children"/>) are resolved by the host at
-        /// most ONE level deep, and only for a scope with ten or fewer
-        /// variables in total (Ruling S7) — never walk the object graph
-        /// beyond that. The tool then prints at most 60 variables per scope
-        /// and 20 children per variable; it never asks for more than the
-        /// host already resolved.
+        /// top frame when null) — <c>scope</c> is NOT a parameter here
+        /// (fix round 2, D5): the host returns everything it has, and
+        /// <c>DebugTools</c> filters to locals/args/all by scope NAME (a
+        /// scope whose <see cref="VariableScope.Name"/> contains "local",
+        /// case-insensitively, is locals; one containing "arg" is
+        /// arguments — the host SHOULD name them "Locals" and "Arguments").
+        /// Children (<see cref="VariableInfo.Children"/>) are resolved by
+        /// the host at most ONE level deep, and only for a scope with ten
+        /// or fewer variables in total (Ruling S7) — never walk the object
+        /// graph beyond that. The tool then prints at most 60 variables per
+        /// scope and 20 children per variable; it never asks for more than
+        /// the host already resolved.
         /// </summary>
-        Task<IReadOnlyList<VariableScope>> VariablesAsync(int? frame, string scope, CancellationToken ct);
+        Task<IReadOnlyList<VariableScope>> VariablesAsync(int? frame, CancellationToken ct);
         Task<EvaluateResult> EvaluateAsync(string expression, int? frame, CancellationToken ct);
         Task<DebugOutputResult> OutputAsync(int since, CancellationToken ct);
         Task StopAsync(CancellationToken ct);

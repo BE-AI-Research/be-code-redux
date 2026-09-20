@@ -98,6 +98,16 @@ namespace BECode.Bridge.Tools
             return null;
         }
 
+        /// <summary>
+        /// Fix round 2, D1: lines and columns are 1-based everywhere across
+        /// the seam; the tools clamp an incoming value to a minimum of 1
+        /// before it ever reaches the host (mirroring vscode's own
+        /// <c>Math.max(0, line-1)</c> clamp, one layer up — vscode clamps
+        /// the 0-based position it derives; this clamps the 1-based value
+        /// the seam itself carries).
+        /// </summary>
+        public static int ClampToMinimumOne(int value) => value < 1 ? 1 : value;
+
         public static bool GetBool(JsonElement args, string name, bool defaultValue = false)
         {
             if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty(name, out var el))

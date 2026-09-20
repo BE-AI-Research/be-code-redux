@@ -81,16 +81,16 @@ namespace BECode.Bridge.Tests
         public Func<string?, CancellationToken, Task<StopResult>>? OnStart { get; set; }
         public List<string?> StartCalls { get; } = new List<string?>();
 
-        public Func<string, int, string, string?, CancellationToken, Task<IReadOnlyList<BreakpointInfo>>>? OnSetBreakpoint { get; set; }
+        public Func<string, int, BreakpointAction, string?, CancellationToken, Task<IReadOnlyList<BreakpointInfo>>>? OnSetBreakpoint { get; set; }
 
         public Func<CancellationToken, Task<StopResult>>? OnContinue { get; set; }
-        public Func<string, CancellationToken, Task<StopResult>>? OnStep { get; set; }
+        public Func<DebugStepKind, CancellationToken, Task<StopResult>>? OnStep { get; set; }
 
         public Func<int, CancellationToken, Task<IReadOnlyList<StackFrameInfo>>> OnStack { get; set; } =
             (depth, ct) => Task.FromResult<IReadOnlyList<StackFrameInfo>>(Array.Empty<StackFrameInfo>());
 
-        public Func<int?, string, CancellationToken, Task<IReadOnlyList<VariableScope>>> OnVariables { get; set; } =
-            (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(Array.Empty<VariableScope>());
+        public Func<int?, CancellationToken, Task<IReadOnlyList<VariableScope>>> OnVariables { get; set; } =
+            (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(Array.Empty<VariableScope>());
 
         public Func<string, int?, CancellationToken, Task<EvaluateResult>>? OnEvaluate { get; set; }
 
@@ -108,7 +108,7 @@ namespace BECode.Bridge.Tests
             return OnStart != null ? OnStart(config, ct) : Task.FromResult(new StopResult(StopKind.Terminated));
         }
 
-        public Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, string action, string? condition, CancellationToken ct) =>
+        public Task<IReadOnlyList<BreakpointInfo>> SetBreakpointAsync(string path, int line, BreakpointAction action, string? condition, CancellationToken ct) =>
             OnSetBreakpoint != null
                 ? OnSetBreakpoint(path, line, action, condition, ct)
                 : Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>());
@@ -116,12 +116,12 @@ namespace BECode.Bridge.Tests
         public Task<StopResult> ContinueAsync(CancellationToken ct) =>
             OnContinue != null ? OnContinue(ct) : Task.FromResult(new StopResult(StopKind.Terminated));
 
-        public Task<StopResult> StepAsync(string step, CancellationToken ct) =>
+        public Task<StopResult> StepAsync(DebugStepKind step, CancellationToken ct) =>
             OnStep != null ? OnStep(step, ct) : Task.FromResult(new StopResult(StopKind.Terminated));
 
         public Task<IReadOnlyList<StackFrameInfo>> StackAsync(int depth, CancellationToken ct) => OnStack(depth, ct);
 
-        public Task<IReadOnlyList<VariableScope>> VariablesAsync(int? frame, string scope, CancellationToken ct) => OnVariables(frame, scope, ct);
+        public Task<IReadOnlyList<VariableScope>> VariablesAsync(int? frame, CancellationToken ct) => OnVariables(frame, ct);
 
         public Task<EvaluateResult> EvaluateAsync(string expression, int? frame, CancellationToken ct) =>
             OnEvaluate != null ? OnEvaluate(expression, frame, ct) : Task.FromResult(new EvaluateResult("", null));

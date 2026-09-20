@@ -198,6 +198,39 @@ namespace BECode.Bridge.Tests
             Assert.Empty(host.OpenCalls);
         }
 
+        [Theory]
+        [InlineData(0)]
+        [InlineData(-5)]
+        public async Task OpenClampsANonPositiveLineToOneBeforeCallingTheHost(int rawLine)
+        {
+            // D1: lines are 1-based everywhere across the seam; the tool
+            // clamps to a minimum of 1 before the host ever sees it.
+            var host = NewHost();
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("open", Args($"{{\"path\":\"sample.go\",\"line\":{rawLine}}}"), new object(), CancellationToken.None);
+
+            Assert.False(result.IsError);
+            var call = Assert.Single(host.OpenCalls);
+            Assert.Equal(1, call.Line);
+        }
+
+        [Fact]
+        public async Task OpenAnswersFileNotFoundWhenTheHostThrows()
+        {
+            // D9: the host throws FileNotFoundException for a path that does
+            // not exist; the tool turns that into an ordinary isError result
+            // naming the path as given.
+            var host = NewHost();
+            host.OnOpen = (path, line, ct) => throw new System.IO.FileNotFoundException();
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("open", Args("{\"path\":\"missing.go\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Equal("file not found: missing.go", result.Text);
+        }
+
         // ---- definition ----
 
         [Fact]
@@ -270,6 +303,21 @@ namespace BECode.Bridge.Tests
             Assert.True(result.IsError);
             Assert.Contains("outside the workspace", result.Text, StringComparison.Ordinal);
             Assert.False(called);
+        }
+
+        [Fact]
+        public async Task DefinitionClampsNonPositiveLineAndColToOneBeforeCallingTheHost()
+        {
+            var host = NewHost();
+            int? seenLine = null;
+            int? seenCol = null;
+            host.OnDefinition = (path, line, col, ct) => { seenLine = line; seenCol = col; return Task.FromResult<IReadOnlyList<Location>?>(Array.Empty<Location>()); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("definition", Args("{\"path\":\"sample.go\",\"line\":0,\"col\":-5}"), new object(), CancellationToken.None);
+
+            Assert.Equal(1, seenLine);
+            Assert.Equal(1, seenCol);
         }
 
         // ---- references ----
@@ -370,6 +418,21 @@ namespace BECode.Bridge.Tests
             Assert.Equal("no references found", result.Text);
         }
 
+        [Fact]
+        public async Task ReferencesClampsNonPositiveLineAndColToOneBeforeCallingTheHost()
+        {
+            var host = NewHost();
+            int? seenLine = null;
+            int? seenCol = null;
+            host.OnReferences = (path, line, col, ct) => { seenLine = line; seenCol = col; return Task.FromResult<IReadOnlyList<Location>?>(Array.Empty<Location>()); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("references", Args("{\"path\":\"sample.go\",\"line\":0,\"col\":-5}"), new object(), CancellationToken.None);
+
+            Assert.Equal(1, seenLine);
+            Assert.Equal(1, seenCol);
+        }
+
         // ---- hover ----
 
         [Fact]
@@ -409,6 +472,21 @@ namespace BECode.Bridge.Tests
 
             Assert.True(result.IsError);
             Assert.Equal("not available for this file type", result.Text);
+        }
+
+        [Fact]
+        public async Task HoverClampsNonPositiveLineAndColToOneBeforeCallingTheHost()
+        {
+            var host = NewHost();
+            int? seenLine = null;
+            int? seenCol = null;
+            host.OnHover = (path, line, col, ct) => { seenLine = line; seenCol = col; return Task.FromResult<string?>(""); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("hover", Args("{\"path\":\"sample.go\",\"line\":0,\"col\":-5}"), new object(), CancellationToken.None);
+
+            Assert.Equal(1, seenLine);
+            Assert.Equal(1, seenCol);
         }
 
         // ---- diagnostics (vscode/src/lib/format.ts's formatDiagnostics/severitiesFor) ----
@@ -1218,6 +1296,48 @@ namespace BECode.Bridge.Tests
         }
 
         [Fact]
+        public async Task DebugBreakpointWithAnUnrecognisedActionIsErrorNamingTheAllowedValues()
+        {
+            var host = NewHost();
+            var called = false;
+            host.DebugHost.OnSetBreakpoint = (path, line, action, condition, ct) => { called = true; return Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>()); };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_breakpoint", Args("{\"path\":\"sample.go\",\"line\":1,\"action\":\"toggle\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("add", result.Text, StringComparison.Ordinal);
+            Assert.Contains("remove", result.Text, StringComparison.Ordinal);
+            Assert.False(called);
+        }
+
+        [Fact]
+        public async Task DebugBreakpointWithNoActionArgumentDefaultsToAdd()
+        {
+            var host = NewHost();
+            BreakpointAction? seenAction = null;
+            host.DebugHost.OnSetBreakpoint = (path, line, action, condition, ct) => { seenAction = action; return Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>()); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("debug_breakpoint", Args("{\"path\":\"sample.go\",\"line\":1}"), new object(), CancellationToken.None);
+
+            Assert.Equal(BreakpointAction.Add, seenAction);
+        }
+
+        [Fact]
+        public async Task DebugBreakpointClampsANonPositiveLineToOneBeforeCallingTheHost()
+        {
+            var host = NewHost();
+            int? seenLine = null;
+            host.DebugHost.OnSetBreakpoint = (path, line, action, condition, ct) => { seenLine = line; return Task.FromResult<IReadOnlyList<BreakpointInfo>>(Array.Empty<BreakpointInfo>()); };
+            var registry = new ToolRegistry(host);
+
+            await registry.CallAsync("debug_breakpoint", Args("{\"path\":\"sample.go\",\"line\":0}"), new object(), CancellationToken.None);
+
+            Assert.Equal(1, seenLine);
+        }
+
+        [Fact]
         public async Task DebugContinueDescribesTheNextStop()
         {
             var host = NewHost();
@@ -1241,19 +1361,38 @@ namespace BECode.Bridge.Tests
         }
 
         [Theory]
-        [InlineData("over")]
-        [InlineData("into")]
-        [InlineData("out")]
-        public async Task DebugStepPassesTheStepValueThroughToTheHost(string step)
+        [InlineData("over", DebugStepKind.Over)]
+        [InlineData("into", DebugStepKind.Into)]
+        [InlineData("out", DebugStepKind.Out)]
+        public async Task DebugStepParsesTheStepValueIntoTheEnumForTheHost(string step, DebugStepKind expected)
         {
+            // D7: step becomes an enum at the seam; the tool parses the
+            // manifest's three string values into it.
             var host = NewHost();
-            string? seen = null;
+            DebugStepKind? seen = null;
             host.DebugHost.OnStep = (s, ct) => { seen = s; return Task.FromResult(new StopResult(StopKind.Terminated)); };
             var registry = new ToolRegistry(host);
 
             await registry.CallAsync("debug_step", Args($"{{\"step\":\"{step}\"}}"), new object(), CancellationToken.None);
 
-            Assert.Equal(step, seen);
+            Assert.Equal(expected, seen);
+        }
+
+        [Fact]
+        public async Task DebugStepWithAnUnrecognisedValueIsErrorNamingTheAllowedValues()
+        {
+            var host = NewHost();
+            var called = false;
+            host.DebugHost.OnStep = (s, ct) => { called = true; return Task.FromResult(new StopResult(StopKind.Terminated)); };
+            var registry = new ToolRegistry(host);
+
+            var result = await registry.CallAsync("debug_step", Args("{\"step\":\"sideways\"}"), new object(), CancellationToken.None);
+
+            Assert.True(result.IsError);
+            Assert.Contains("over", result.Text, StringComparison.Ordinal);
+            Assert.Contains("into", result.Text, StringComparison.Ordinal);
+            Assert.Contains("out", result.Text, StringComparison.Ordinal);
+            Assert.False(called);
         }
 
         [Fact]
@@ -1306,11 +1445,13 @@ namespace BECode.Bridge.Tests
         [Fact]
         public async Task DebugVariablesDefaultsScopeToLocalsAndFiltersByName()
         {
+            // D5: scope is no longer sent to the host at all — it returns
+            // every scope it has, and the tool alone filters.
             var host = NewHost();
-            string? seenScope = null;
-            host.DebugHost.OnVariables = (frame, scope, ct) =>
+            var hostCalled = false;
+            host.DebugHost.OnVariables = (frame, ct) =>
             {
-                seenScope = scope;
+                hostCalled = true;
                 return Task.FromResult<IReadOnlyList<VariableScope>>(new[]
                 {
                     new VariableScope("Locals", new[] { new VariableInfo("x", "1", "int") }),
@@ -1321,7 +1462,7 @@ namespace BECode.Bridge.Tests
 
             var result = await registry.CallAsync("debug_variables", Args("{}"), new object(), CancellationToken.None);
 
-            Assert.Equal("locals", seenScope);
+            Assert.True(hostCalled);
             Assert.Equal("Locals:\n  x = 1 (int)", result.Text);
         }
 
@@ -1329,7 +1470,7 @@ namespace BECode.Bridge.Tests
         public async Task DebugVariablesScopeAllShowsEveryScope()
         {
             var host = NewHost();
-            host.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            host.DebugHost.OnVariables = (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
             {
                 new VariableScope("Locals", new[] { new VariableInfo("x", "1", "int") }),
                 new VariableScope("Arguments", new[] { new VariableInfo("a", "2", "int") }),
@@ -1349,7 +1490,7 @@ namespace BECode.Bridge.Tests
 
             // Small scope (<=10 vars): children of a variable that has them are shown.
             var hostSmall = NewHost();
-            hostSmall.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            hostSmall.DebugHost.OnVariables = (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
             {
                 new VariableScope("Locals", new[] { new VariableInfo("x", "1", "int"), withChildren }),
             });
@@ -1361,7 +1502,7 @@ namespace BECode.Bridge.Tests
             var many = Enumerable.Range(0, 11).Select(i => new VariableInfo($"v{i}", i.ToString(), "int")).ToList();
             many[10] = withChildren;
             var hostLarge = NewHost();
-            hostLarge.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            hostLarge.DebugHost.OnVariables = (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
             {
                 new VariableScope("Locals", many),
             });
@@ -1377,7 +1518,7 @@ namespace BECode.Bridge.Tests
             // regardless of how many the host resolved.
             var many = Enumerable.Range(0, 70).Select(i => new VariableInfo($"v{i}", i.ToString(), "int")).ToList();
             var host = NewHost();
-            host.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            host.DebugHost.OnVariables = (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
             {
                 new VariableScope("Locals", many),
             });
@@ -1399,7 +1540,7 @@ namespace BECode.Bridge.Tests
             var manyChildren = Enumerable.Range(0, 25).Select(i => new VariableInfo($"f{i}", i.ToString(), null)).ToList();
             var withChildren = new VariableInfo("obj", "{...}", "Foo", manyChildren);
             var host = NewHost();
-            host.DebugHost.OnVariables = (frame, scope, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
+            host.DebugHost.OnVariables = (frame, ct) => Task.FromResult<IReadOnlyList<VariableScope>>(new[]
             {
                 new VariableScope("Locals", new[] { withChildren }),
             });

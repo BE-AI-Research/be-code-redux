@@ -72,7 +72,14 @@ namespace BECode.Bridge.Tools
                 return errLine!;
             }
 
-            var action = ToolArgs.GetString(args, "action") ?? "add";
+            // D7: action becomes an enum at the seam; the tool parses and
+            // refuses an unrecognised value itself, naming what's allowed.
+            var actionArg = ToolArgs.GetString(args, "action");
+            if (!TryParseBreakpointAction(actionArg, out var action))
+            {
+                return new ToolResult("'action' must be one of: add, remove", true);
+            }
+
             var condition = ToolArgs.GetString(args, "condition");
 
             var (abs, _, resolveErr) = await ToolPaths.ResolveAsync(_host, path, ct).ConfigureAwait(false);
@@ -81,7 +88,9 @@ namespace BECode.Bridge.Tools
                 return resolveErr;
             }
 
-            var breakpoints = await _host.Debug.SetBreakpointAsync(abs!, line, action, condition, ct).ConfigureAwait(false);
+            // D1: lines are 1-based across the seam; clamp before the host
+            // ever sees it.
+            var breakpoints = await _host.Debug.SetBreakpointAsync(abs!, ToolArgs.ClampToMinimumOne(line), action, condition, ct).ConfigureAwait(false);
             if (breakpoints.Count == 0)
             {
                 return new ToolResult($"no breakpoints in {path}", false);
@@ -99,9 +108,16 @@ namespace BECode.Bridge.Tools
 
         public async Task<ToolResult> Step(JsonElement args, object connection, CancellationToken ct)
         {
-            if (!ToolArgs.TryRequireString(args, "step", out var step, out var err))
+            if (!ToolArgs.TryRequireString(args, "step", out var stepArg, out var err))
             {
                 return err!;
+            }
+
+            // D7: step becomes an enum at the seam; the tool parses and
+            // refuses an unrecognised value itself, naming what's allowed.
+            if (!TryParseStepKind(stepArg, out var step))
+            {
+                return new ToolResult("'step' must be one of: over, into, out", true);
             }
 
             var stop = await _host.Debug.StepAsync(step, ct).ConfigureAwait(false);
@@ -120,7 +136,9 @@ namespace BECode.Bridge.Tools
         {
             var frame = ToolArgs.GetInt(args, "frame");
             var scope = ToolArgs.GetString(args, "scope") ?? "locals";
-            var scopes = await _host.Debug.VariablesAsync(frame, scope, ct).ConfigureAwait(false);
+            // D5: scope is no longer sent to the host — it returns every
+            // scope it has, and the tool alone decides which to show.
+            var scopes = await _host.Debug.VariablesAsync(frame, ct).ConfigureAwait(false);
             return new ToolResult(FormatVariables(scopes, scope), false);
         }
 
@@ -165,6 +183,47 @@ namespace BECode.Bridge.Tools
                 && args.TryGetProperty(name, out var el)
                 && el.ValueKind == JsonValueKind.Array
                 && el.GetArrayLength() > 0;
+        }
+
+        // D7: vscode/tools.manifest.json's debug_breakpoint.action enum is
+        // exactly ["add", "remove"]; absent defaults to "add" (matching
+        // vscode's own `a.action === "remove" ? remove : add`).
+        private static bool TryParseBreakpointAction(string? raw, out BreakpointAction action)
+        {
+            switch (raw)
+            {
+                case null:
+                case "add":
+                    action = BreakpointAction.Add;
+                    return true;
+                case "remove":
+                    action = BreakpointAction.Remove;
+                    return true;
+                default:
+                    action = default;
+                    return false;
+            }
+        }
+
+        // D7: vscode/tools.manifest.json's debug_step.step enum is exactly
+        // ["over", "into", "out"].
+        private static bool TryParseStepKind(string raw, out DebugStepKind step)
+        {
+            switch (raw)
+            {
+                case "over":
+                    step = DebugStepKind.Over;
+                    return true;
+                case "into":
+                    step = DebugStepKind.Into;
+                    return true;
+                case "out":
+                    step = DebugStepKind.Out;
+                    return true;
+                default:
+                    step = default;
+                    return false;
+            }
         }
 
         // Mirrors vscode's DebugManager.describe(): a stop reads its own top

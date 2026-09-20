@@ -1,3 +1,4 @@
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -65,7 +66,22 @@ namespace BECode.Bridge.Tools
             }
 
             var line = ToolArgs.GetInt(args, "line");
-            await _host.OpenAsync(abs!, line, ct).ConfigureAwait(false);
+
+            // D9: the host throws FileNotFoundException for a path that
+            // does not exist; the tool answers isError:true naming the path
+            // as given, rather than letting the exception escape.
+            try
+            {
+                // D1: lines are 1-based across the seam; clamp before the
+                // host ever sees it.
+                var hostLine = line.HasValue ? ToolArgs.ClampToMinimumOne(line.Value) : (int?)null;
+                await _host.OpenAsync(abs!, hostLine, ct).ConfigureAwait(false);
+            }
+            catch (FileNotFoundException)
+            {
+                return new ToolResult($"file not found: {path}", true);
+            }
+
             return new ToolResult($"opened {path}{(line.HasValue ? ":" + line.Value : "")}", false);
         }
 
@@ -92,7 +108,7 @@ namespace BECode.Bridge.Tools
                 return resolveErr;
             }
 
-            var locations = await _host.DefinitionAsync(abs!, line, col, ct).ConfigureAwait(false);
+            var locations = await _host.DefinitionAsync(abs!, ToolArgs.ClampToMinimumOne(line), ToolArgs.ClampToMinimumOne(col), ct).ConfigureAwait(false);
             if (locations == null)
             {
                 return new ToolResult("not available for this file type", true);
@@ -140,7 +156,7 @@ namespace BECode.Bridge.Tools
             // Ruling S5: the host returns every reference; the TOTAL count
             // (before slicing) goes in the header, and only the first `max`
             // are printed — matching vscode's own res.length-before-slice.
-            var locations = await _host.ReferencesAsync(abs!, line, col, ct).ConfigureAwait(false);
+            var locations = await _host.ReferencesAsync(abs!, ToolArgs.ClampToMinimumOne(line), ToolArgs.ClampToMinimumOne(col), ct).ConfigureAwait(false);
             if (locations == null)
             {
                 return new ToolResult("not available for this file type", true);
@@ -178,7 +194,7 @@ namespace BECode.Bridge.Tools
                 return resolveErr;
             }
 
-            var text = await _host.HoverAsync(abs!, line, col, ct).ConfigureAwait(false);
+            var text = await _host.HoverAsync(abs!, ToolArgs.ClampToMinimumOne(line), ToolArgs.ClampToMinimumOne(col), ct).ConfigureAwait(false);
             if (text == null)
             {
                 return new ToolResult("not available for this file type", true);
