@@ -221,5 +221,67 @@ namespace BECode.Bridge.Tests
                 | UnixFileMode.OtherRead | UnixFileMode.OtherExecute,
                 mode);
         }
+
+        // The Go side makes the whole path 0700 (os.MkdirAll(d, 0o700)). A
+        // .be-code left at the umask default can be group-writable, and
+        // whoever can write it can swap the ide directory for their own and
+        // plant a lock the client would dial.
+        [Fact]
+        public async Task FreshlyCreatedDotdirIsOwnerOnly()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            var dotdir = Path.Combine(_home, ".be-code");
+            Assert.False(Directory.Exists(dotdir));
+
+            await LockFile.WriteAsync(_home, SampleInfo(8118));
+
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                File.GetUnixFileMode(dotdir));
+        }
+
+        // ...and a .be-code that was already there keeps the mode its owner
+        // gave it, while the ide directory this call creates is still 0700.
+        [Fact]
+        public async Task PreexistingDotdirModeIsNotChanged()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return;
+            }
+
+            var dotdir = Path.Combine(_home, ".be-code");
+            Directory.CreateDirectory(dotdir);
+            var mode0755 = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+                | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+            File.SetUnixFileMode(dotdir, mode0755);
+
+            await LockFile.WriteAsync(_home, SampleInfo(8228));
+
+            Assert.Equal(mode0755, File.GetUnixFileMode(dotdir));
+            Assert.Equal(
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                File.GetUnixFileMode(Path.Combine(dotdir, "ide")));
+        }
+
+        // A rename that fails must not strand the temp file: it is 0600, but
+        // it carries the token and nothing would ever sweep it.
+        [Fact]
+        public async Task AFailedRenameLeavesNoTempFile()
+        {
+            var pid = 3333;
+            var final = LockFile.PathFor(_home, pid);
+            // A directory where the lock file should go makes the rename fail.
+            Directory.CreateDirectory(final);
+
+            await Assert.ThrowsAnyAsync<Exception>(() => LockFile.WriteAsync(_home, SampleInfo(pid)));
+
+            Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(final)!, "*.tmp"));
+        }
     }
 }

@@ -62,15 +62,23 @@ namespace BECode.Bridge
         /// </summary>
         public static async Task WriteAsync(string home, LockInfo info)
         {
+            var dotdir = Path.Combine(home, ".be-code");
             var dir = LockDir(home);
+            var dotdirExisted = Directory.Exists(dotdir);
             var dirExisted = Directory.Exists(dir);
             Directory.CreateDirectory(dir);
+            // The Go side creates this path 0700 (os.MkdirAll(d, 0o700));
+            // match it, but only for a directory this call itself created —
+            // a pre-existing directory's mode is the user's own choice. Both
+            // levels matter: whoever can write .be-code can swap the ide
+            // directory for their own and plant a lock the client would dial.
+            if (!dotdirExisted)
+            {
+                TrySetMode(dotdir, Mode0700);
+            }
+
             if (!dirExisted)
             {
-                // The Go side creates this directory 0700
-                // (os.MkdirAll(d, 0o700)); match it, but only for a
-                // directory this call itself created — a pre-existing
-                // directory's mode is the user's own choice.
                 TrySetMode(dir, Mode0700);
             }
 
@@ -107,22 +115,25 @@ namespace BECode.Bridge
                     await fs.WriteAsync(bytes, 0, bytes.Length).ConfigureAwait(false);
                     await fs.FlushAsync().ConfigureAwait(false);
                 }
+
+                // The rename sits inside the same fence: a temp file that
+                // carries the token must not outlive a failed write, and
+                // nothing would ever sweep it.
+                if (File.Exists(finalPath))
+                {
+                    // File.Replace is the atomic swap; it requires the
+                    // destination to already exist, unlike File.Move.
+                    File.Replace(tempPath, finalPath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, finalPath);
+                }
             }
             catch
             {
                 TryDeleteQuietly(tempPath);
                 throw;
-            }
-
-            if (File.Exists(finalPath))
-            {
-                // File.Replace is the atomic swap; it requires the
-                // destination to already exist, unlike File.Move.
-                File.Replace(tempPath, finalPath, null);
-            }
-            else
-            {
-                File.Move(tempPath, finalPath);
             }
         }
 

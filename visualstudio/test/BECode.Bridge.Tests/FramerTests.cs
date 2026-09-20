@@ -142,17 +142,18 @@ namespace BECode.Bridge.Tests
 
         // I1 perf guard: the original implementation reallocated and copied
         // the *entire* pending buffer on every Push, which is quadratic in
-        // the number of chunks for one long unterminated line (the review
-        // measured an 8 MiB line at ~9s, 32 MiB at ~142s). A 4 MiB line fed
-        // in 8 KiB chunks must complete in well under a second; the bound
-        // here is deliberately generous (2s) so the assertion is not flaky,
-        // while still being far tighter than the quadratic implementation
-        // could ever meet.
+        // the number of chunks for one long unterminated line. The size is
+        // what gives the guard teeth: at 4 MiB the quadratic code took about
+        // 2.2 s in a Debug build but only 0.9 s in Release, so a 2 s bound
+        // let it through. At 16 MiB it needs about 14 s even in Release,
+        // against roughly half a second for the linear code, so a 4 s bound
+        // is far from both.
         [Fact]
-        public void FourMebibyteLineInEightKibibyteChunksIsFast()
+        public void SixteenMebibyteLineInEightKibibyteChunksIsFast()
         {
-            var framer = new LineFramer();
-            var line = new byte[4 * 1024 * 1024];
+            // The cap is not under test here; keep it well clear of the line.
+            var framer = new LineFramer(64 * 1024 * 1024);
+            var line = new byte[16 * 1024 * 1024];
             new Random(1234).NextBytes(line);
             // Make sure there is no accidental '\n' (0x0A) in the payload,
             // so this really is one long unterminated line until the final
@@ -177,7 +178,7 @@ namespace BECode.Bridge.Tests
             stopwatch.Stop();
 
             Assert.Single(lastLines);
-            Assert.True(stopwatch.ElapsedMilliseconds < 2000, $"expected well under 2000ms, took {stopwatch.ElapsedMilliseconds}ms");
+            Assert.True(stopwatch.ElapsedMilliseconds < 4000, $"expected well under 4000ms, took {stopwatch.ElapsedMilliseconds}ms");
         }
     }
 }
