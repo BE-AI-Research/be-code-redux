@@ -81,6 +81,7 @@ func (r *recorder) recordWith(n *Node, ev Event, turn int, snap fileSnap) string
 		Turn: turn,
 	}
 	n.Evidence.Raw = append(n.Evidence.Raw, item)
+	n.Calls++
 	r.capNode(n)
 
 	if ev.IsError {

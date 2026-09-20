@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // This file is the deterministic half of the prompt block: a finished
@@ -144,9 +145,37 @@ func rungText(n *Node, rung int) string {
 // from.
 func statusLine(n *Node) string {
 	if n.Reason != "" && (n.Status == StatusBlocked || n.Status == StatusDropped) {
-		return fmt.Sprintf("%s. %s — %s: %s", n.ID, n.Text, n.Status, n.Reason)
+		return fmt.Sprintf("%s. %s — %s: %s%s", n.ID, n.Text, n.Status, n.Reason, spent(n))
 	}
-	return fmt.Sprintf("%s. %s — %s", n.ID, n.Text, n.Status)
+	return fmt.Sprintf("%s. %s — %s%s", n.ID, n.Text, n.Status, spent(n))
+}
+
+// spent is what a finished step cost: " (18m, 31 tool calls)". Only for a
+// node that was worked on and is closed — the figure is then fixed, so the
+// line never changes from one turn to the next — and empty otherwise.
+func spent(n *Node) string {
+	if n.Started.IsZero() || n.Closed.IsZero() || n.Calls == 0 {
+		return ""
+	}
+	calls := "tool calls"
+	if n.Calls == 1 {
+		calls = "tool call"
+	}
+	return fmt.Sprintf(" (%s, %d %s)", ShortDuration(n.Closed.Sub(n.Started)), n.Calls, calls)
+}
+
+// ShortDuration renders a duration the way a person says it: 40s, 18m, 2h05m.
+func ShortDuration(d time.Duration) string {
+	switch {
+	case d < 0:
+		return "0s"
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
 }
 
 // leftLines lists every blocked or dropped descendant of n with why,

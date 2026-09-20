@@ -24,15 +24,24 @@ func (s Status) terminal() bool {
 }
 
 type Node struct {
-	ID       string    `json:"id"`
-	Text     string    `json:"text"`
-	Status   Status    `json:"status"`
-	Reason   string    `json:"reason,omitempty"`
-	Opened   time.Time `json:"opened"`
-	Closed   time.Time `json:"closed,omitempty"`
+	ID     string    `json:"id"`
+	Text   string    `json:"text"`
+	Status Status    `json:"status"`
+	Reason string    `json:"reason,omitempty"`
+	Opened time.Time `json:"opened"`
+	Closed time.Time `json:"closed,omitempty"`
+	// Started is when the node first became doing, and Calls the tool calls
+	// recorded against it since. Neither is in the Markdown document; they
+	// persist in state.json (nodeTimes) and come back matched on the node's
+	// text, since ids are positional and the document may have been edited.
+	Started  time.Time `json:"started,omitempty"`
+	Calls    int       `json:"calls,omitempty"`
 	Children []*Node   `json:"children,omitempty"`
 	Evidence Evidence  `json:"evidence,omitempty"`
 }
+
+// now is the package clock, replaceable in tests.
+var now = time.Now
 
 type Tree struct {
 	Roots []*Node `json:"roots"`
@@ -161,8 +170,11 @@ func (t *Tree) SetStatus(id string, s Status, reason string) *Node {
 			prev.Status = StatusTodo
 		}
 	}
+	if s == StatusDoing && n.Started.IsZero() {
+		n.Started = now()
+	}
 	if s.terminal() && n.Closed.IsZero() {
-		n.Closed = time.Now()
+		n.Closed = now()
 	}
 	if !s.terminal() {
 		n.Closed = time.Time{}
