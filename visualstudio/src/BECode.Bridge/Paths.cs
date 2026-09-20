@@ -97,36 +97,59 @@ namespace BECode.Bridge
         // an absolute file:// URI, not a relative one, which the caller's
         // ".." guard was supposed to reject via TS's `!isAbsolute(r)` but
         // never actually ran against, since nothing checked for it here.
-        // Ported by hand instead: pure string/segment work on
-        // Path.GetFullPath output, no escaping to get wrong, and an
-        // explicit root comparison that returns null (no relative path
-        // exists) across two different roots instead of ever producing an
-        // absolute path as a "relative" answer.
+        // Ported by hand instead: pure string/segment work, no escaping to
+        // get wrong, and an explicit root comparison that returns null (no
+        // relative path exists) across two different roots instead of ever
+        // producing an absolute path as a "relative" answer.
         private static string? RelativeIfInside(string folder, string abs)
         {
             var f = Path.GetFullPath(folder);
+            return RelativeIfInsideCore(f, abs, Path.DirectorySeparatorChar, PathComparison, DefaultRootOf);
+        }
 
-            if (!string.Equals(Path.GetPathRoot(f), Path.GetPathRoot(abs), PathComparison))
+        private static string DefaultRootOf(string p) => Path.GetPathRoot(p) ?? "";
+
+        /// <summary>
+        /// Fix round 2, T1: the pure, platform-independent core of the
+        /// "inside" check — <paramref name="folder"/> and
+        /// <paramref name="abs"/> already absolute/normalised,
+        /// <paramref name="separator"/>/<paramref name="comparison"/>/
+        /// <paramref name="rootOf"/> all injected — so this project's
+        /// Windows-specific behaviour (drive letters, case-insensitivity,
+        /// backslash separators) has real test coverage on this Linux
+        /// machine: <see cref="System.IO.Path"/>'s own drive-letter handling
+        /// only activates on a real Windows OS, so nothing exercising
+        /// <see cref="RelPath"/> directly could ever prove those paths
+        /// correct here. <paramref name="rootOf"/> mirrors
+        /// <see cref="System.IO.Path.GetPathRoot(string)"/>'s contract (the
+        /// drive/UNC-root prefix on Windows, <c>"/"</c> on POSIX); returns
+        /// null when <paramref name="abs"/> is not <paramref name="folder"/>
+        /// itself or a path beneath it, or when the two have different
+        /// roots (no relative path exists between them) — never an absolute
+        /// path masquerading as a relative answer.
+        /// </summary>
+        internal static string? RelativeIfInsideCore(string folder, string abs, char separator, StringComparison comparison, Func<string, string> rootOf)
+        {
+            if (!string.Equals(rootOf(folder), rootOf(abs), comparison))
             {
                 // Different roots (e.g. different drives on Windows): there
                 // is no relative path between them.
                 return null;
             }
 
-            if (string.Equals(abs, f, PathComparison))
+            if (string.Equals(abs, folder, comparison))
             {
                 return string.Empty;
             }
 
-            var withSep = f.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                ? f
-                : f + Path.DirectorySeparatorChar;
-            if (!abs.StartsWith(withSep, PathComparison))
+            var sepString = separator.ToString();
+            var withSep = folder.EndsWith(sepString, StringComparison.Ordinal) ? folder : folder + separator;
+            if (!abs.StartsWith(withSep, comparison))
             {
                 return null;
             }
 
-            return abs.Substring(withSep.Length).Replace('\\', '/');
+            return abs.Substring(withSep.Length).Replace(separator, '/');
         }
 
         private static string? TryRelative(string folder, string fsPath)

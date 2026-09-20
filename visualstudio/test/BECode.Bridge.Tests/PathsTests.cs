@@ -116,5 +116,76 @@ namespace BECode.Bridge.Tests
 
             Assert.Equal(literalName, Paths.RelPath(_folders, path));
         }
+
+        [Fact]
+        public void RelPathPrefersTheFirstFolderThatContainsThePathAmongNestedRoots()
+        {
+            // T1: folders are tried in order; "/ws" contains "/ws/sub/a.go"
+            // and comes first, so the answer is relative to "/ws" ("sub/a.go"),
+            // not to the more specific "/ws/sub" ("a.go").
+            Assert.Equal("sub/a.go", Paths.RelPath(new[] { "/ws", "/ws/sub" }, "/ws/sub/a.go"));
+        }
+
+        // ---- T1: Paths.RelativeIfInsideCore is the pure, injectable core of
+        // RelPath's "inside" check (separator, comparison and root-extraction
+        // all passed in) — this is what makes the port's Windows-specific
+        // behaviour (drive letters, case-insensitivity, backslash separators)
+        // testable on this Linux machine at all, since System.IO.Path's own
+        // drive-letter handling only activates on a real Windows OS.
+
+        // A minimal stand-in for Path.GetPathRoot on Windows: "C:\" is the
+        // root of "C:\ws\sub", not a substring match — good enough for these
+        // tests without depending on any real OS behaviour.
+        private static string WindowsDriveRootOf(string p) => p.Length >= 3 && p[1] == ':' ? p.Substring(0, 3) : "";
+
+        [Fact]
+        public void RelativeIfInsideCoreTreatsDifferentDrivesAsHavingNoRelativePath()
+        {
+            var result = Paths.RelativeIfInsideCore(@"C:\ws", @"D:\x\y.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Null(result);
+        }
+
+        [Fact]
+        public void RelativeIfInsideCoreTreatsDriveLettersCaseInsensitively()
+        {
+            var result = Paths.RelativeIfInsideCore(@"C:\ws", @"c:\ws\a.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Equal("a.go", result);
+        }
+
+        [Fact]
+        public void RelativeIfInsideCoreTurnsBackslashesIntoForwardSlashesInTheOutput()
+        {
+            var result = Paths.RelativeIfInsideCore(@"C:\ws", @"C:\ws\sub\a.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Equal("sub/a.go", result);
+        }
+
+        [Fact]
+        public void RelativeIfInsideCoreReturnsEmptyForTheFolderItself()
+        {
+            var result = Paths.RelativeIfInsideCore(@"C:\ws", @"C:\ws", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Equal(string.Empty, result);
+        }
+
+        [Fact]
+        public void RelativeIfInsideCoreHandlesATrailingSeparatorOnTheFolder()
+        {
+            var withTrailingSep = Paths.RelativeIfInsideCore(@"C:\ws\", @"C:\ws\a.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+            var withoutTrailingSep = Paths.RelativeIfInsideCore(@"C:\ws", @"C:\ws\a.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Equal("a.go", withTrailingSep);
+            Assert.Equal("a.go", withoutTrailingSep);
+        }
+
+        [Fact]
+        public void RelativeIfInsideCoreRejectsAPathNotBeneathTheFolder()
+        {
+            var result = Paths.RelativeIfInsideCore(@"C:\ws", @"C:\ws-evil\a.go", '\\', StringComparison.OrdinalIgnoreCase, WindowsDriveRootOf);
+
+            Assert.Null(result);
+        }
     }
 }

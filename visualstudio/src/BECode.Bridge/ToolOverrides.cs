@@ -18,7 +18,11 @@ namespace BECode.Bridge
         public static readonly IReadOnlyDictionary<string, string> Descriptions = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["debug_configs"] = "List what Visual Studio can debug: the solution's startup projects and their launch profiles. Pass a name to debug_start as config.",
-            ["debug_start"] = "Start debugging in Visual Studio. Use config (a startup project or launch profile name from debug_configs), or omit it to debug the current startup project. program, type and args are not supported here: Visual Studio debugs the startup project with its launch profile's arguments. Returns where execution stopped.",
+            // Fix round 2, T2: the tool itself enforces a 60s wait
+            // (DebugTools.Describe's Timeout case) — the description should
+            // say so rather than leaving the model to guess how long
+            // debug_start might block.
+            ["debug_start"] = "Start debugging in Visual Studio. Use config (a startup project or launch profile name from debug_configs), or omit it to debug the current startup project. program, type and args are not supported here: Visual Studio debugs the startup project with its launch profile's arguments. Returns where execution stopped (60s max).",
         };
     }
 }

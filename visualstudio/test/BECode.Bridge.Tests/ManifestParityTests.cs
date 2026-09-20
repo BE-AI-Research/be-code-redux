@@ -179,6 +179,24 @@ namespace BECode.Bridge.Tests
         }
 
         [Fact]
+        public void ToolOverridesTextIsPinnedLiterally()
+        {
+            // T2: a typo here previously failed no test — the override
+            // table's own JSON-schema-adjacent nature (it's read as plain
+            // text by the model) means the exact wording matters and
+            // deserves the same literal-string protection a manifest entry
+            // gets for free from ManifestHasEighteenEntriesInTheDocumentedOrder's
+            // parity check. debug_start's text ends by naming the 60s wait
+            // the tool actually enforces (DebugTools.Describe's Timeout case).
+            Assert.Equal(
+                "List what Visual Studio can debug: the solution's startup projects and their launch profiles. Pass a name to debug_start as config.",
+                ToolOverrides.Descriptions["debug_configs"]);
+            Assert.Equal(
+                "Start debugging in Visual Studio. Use config (a startup project or launch profile name from debug_configs), or omit it to debug the current startup project. program, type and args are not supported here: Visual Studio debugs the startup project with its launch profile's arguments. Returns where execution stopped (60s max).",
+                ToolOverrides.Descriptions["debug_start"]);
+        }
+
+        [Fact]
         public void AnOverrideForANameNotInTheManifestThrowsAtConstruction()
         {
             // debug_start is one of ToolOverrides' two names; a manifest
