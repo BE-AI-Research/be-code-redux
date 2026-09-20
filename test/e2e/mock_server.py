@@ -52,19 +52,22 @@ state = {"n": 0, "consult_n": 0}
 TRIM_STUB = "old tool result removed"
 
 # Since the cached prompt layout, Working memory and the git summary are not
-# in the system prompt: they ride at the end of the last message, after this
-# header (tailHeader in internal/agent/prefill.go), so that nothing in front
-# of the conversation changes from turn to turn. harness_state is the system
-# prompt plus whatever follows that header — and nothing before it, so a tool
-# result the same message carries can never satisfy an assertion about the
-# engine's block.
-TAIL_HEADER = "Harness state, refreshed on every request"
+# in the system prompt: the harness attaches them to a message — the request's
+# own, or the newest one after the history has been rewritten — under this
+# header (tailHeader in internal/agent/prefill.go), and leaves them there, so
+# that nothing already sent ever changes. harness_state is the system prompt
+# plus the newest such block — and nothing before its header, so a tool result
+# the same message carries can never satisfy an assertion about the engine's
+# block.
+TAIL_HEADER = "Harness state at this point"
 
 def harness_state(body):
     sys_prompt = body["messages"][0].get("content") or ""
-    last = body["messages"][-1].get("content") or ""
-    if len(body["messages"]) > 1 and TAIL_HEADER in last:
-        return sys_prompt + "\n" + last.split(TAIL_HEADER, 1)[1]
+    for m in reversed(body["messages"][1:]):
+        c = m.get("content") or ""
+        if TAIL_HEADER in c:
+            return sys_prompt + "\n" + c.split(TAIL_HEADER, 1)[1]
+    return sys_prompt + "\n" + last.split(TAIL_HEADER, 1)[1]
     return sys_prompt
 ENG = {"n": 0, "summarized": False}
 

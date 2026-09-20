@@ -78,3 +78,24 @@ func TestTheNudgeDefaultsToTwentyAndCanBeTurnedOff(t *testing.T) {
 		t.Fatalf("a negative step_nudge must turn it off:\n%s", out)
 	}
 }
+
+// Mid-run the block is not re-sent, so the same line rides on a tool result:
+// once when the threshold is passed, then every tenth call, never on each.
+func TestTheMidRunNudgeFiresOnceThenEveryTenCalls(t *testing.T) {
+	s := nudgeStore(t, 5)
+	id := s.Plan("t", []string{"a"})
+	s.SetStatus(id+".1", StatusDoing, "")
+	var fired []int
+	for i := 1; i <= 30; i++ {
+		observeN(s, 1)
+		if line := s.StepNudge(); line != "" {
+			fired = append(fired, i)
+			if !strings.Contains(line, fmt.Sprintf("open for %d tool calls", i)) {
+				t.Fatalf("call %d: %q", i, line)
+			}
+		}
+	}
+	if fmt.Sprint(fired) != "[6 16 26]" {
+		t.Fatalf("fired at %v, want [6 16 26]", fired)
+	}
+}

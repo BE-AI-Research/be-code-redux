@@ -805,7 +805,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   Working memory tells the model to finish it, split it or note why (negative turns it off);
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
-- `prompt_layout` (`cached`) — `cached` keeps the system prompt unchanged for the length of a request and sends what changes every turn (Working memory, the git summary) at the end of the request, so the server's prompt cache covers everything but the new text; `classic` puts them back in the system prompt, as every version before 0.14 did. Try `classic` only if a model behaves worse with the block at the end.
+- `prompt_layout` (`cached`) — `cached` never changes or takes back anything it has sent: the system prompt is stable for the length of a request, the git summary and Working memory are attached to your message when a request begins and stay in the history, and a fresh snapshot is attached only after a compaction or trim. A local server's prompt cache then covers everything but the new text (measured: about 6 s a turn against 11–41 s). `classic` re-sends Working memory in the system prompt every turn, as every version before 0.14 did.
 - `prompt_prefill` (true) — after anything that empties the server's prompt cache (a model load or reload, a resume, `/compact`), the prompt the next turn will send is sent ahead with generation off, in the background, and cancelled the moment you press Enter. Native Ollama only. `/stats` shows what the server spent reading prompts and how often its cache missed.
 - `time_awareness` (true) — gives the model a clock: every tool result ends with `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each of your messages with when it was sent. Appended text only, never the system prompt, so the server's prompt cache is untouched; about fifteen tokens a tool call.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
@@ -813,7 +813,8 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
+v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
+after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
 for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or
 explained. v0.12.0 — a Visual Studio 2022/2026 extension beside the VS Code one (compiled against the

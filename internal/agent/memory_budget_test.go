@@ -39,23 +39,24 @@ func workingMemoryOf(system string) string {
 	return system[i+len("\n\nWorking memory:\n"):]
 }
 
-// shownBeyondTheConversation is everything a request carries that the history
-// does not hold: the system prompt and, in the cached layout, the volatile
-// tail that rides on the last message. Tests about what the model is told
-// read it here, whichever layout put it there.
+// shownBeyondTheConversation is what the harness tells the model about its
+// own state: the system prompt and, in the cached layout, the state block the
+// next request would attach. Tests about what the model is told read it here,
+// whichever layout puts it where.
 func shownBeyondTheConversation(ag *Agent) string {
 	return ag.History.System.Content + ag.volatileTail()
 }
 
-// requestState is the same thing read off a request that was actually sent.
+// requestState is the same thing read off a request that was actually sent:
+// the system prompt plus the newest state block any message carries.
 func requestState(req provider.ChatRequest) string {
 	if len(req.Messages) == 0 {
 		return ""
 	}
 	out := req.Messages[0].Content
-	if last := req.Messages[len(req.Messages)-1].Content; len(req.Messages) > 1 {
-		if i := strings.Index(last, tailHeader); i >= 0 {
-			out += last[i:]
+	for i := len(req.Messages) - 1; i > 0; i-- {
+		if c := req.Messages[i].Content; strings.Contains(c, tailHeader) {
+			return out + c[strings.Index(c, tailHeader):]
 		}
 	}
 	return out
@@ -117,6 +118,13 @@ func runProbe(t *testing.T, window int, engineOn bool) (largest int, last string
 		if len(last) > largest {
 			largest = len(last)
 		}
+	}
+	// The block is attached when a request begins and when the history is
+	// rewritten, not on every turn; what the harness would attach next is
+	// the block as it stands at the end of the run, measured with the rest.
+	last = workingMemoryOf(shownBeyondTheConversation(ag))
+	if len(last) > largest {
+		largest = len(last)
 	}
 	return largest, last, summaries
 }

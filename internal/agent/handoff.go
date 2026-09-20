@@ -149,6 +149,7 @@ func (a *Agent) heuristicHandoff() string {
 	seen := map[string]bool{}
 	var files []string
 	for _, m := range a.History.Messages {
+		m.Content = StripHarnessState(m.Content)
 		switch {
 		case m.Role == provider.RoleUser && !isToolResult(m) && !strings.HasPrefix(m.Content, summaryPrefix):
 			if task == "" {

@@ -64,7 +64,9 @@ func TestReadsAreDigestedAndTheBlockReachesTheSystemPrompt(t *testing.T) {
 	if !strings.Contains(toolMsg, "already read at turn 1 (unchanged)") {
 		t.Fatalf("no footer:\n%s", toolMsg)
 	}
-	sys := requestState(p.reqs[2])
+	// Mid-run the block is not re-sent (the conversation is its own record
+	// there); what the next state would carry is what is checked.
+	sys := shownBeyondTheConversation(ag)
 	// read_file numbers the trailing empty line after the final newline, so
 	// a three-line file reads as lines 1–4; the digest records what the
 	// model was actually shown.

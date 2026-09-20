@@ -1,5 +1,61 @@
 # BE-Code Changelog
 
+## v0.14.0 — the server's prompt cache, used
+
+The owner asked for faster recovery after a model reload. Measuring it found something
+larger. On a real five-read task against Ollama 0.34 the server's prompt cache missed on
+**nine requests out of nine**, and 225 of the run's 296 seconds went on re-reading a prompt
+that had barely changed. After this release the same task spends 52 seconds reading prompts
+and finishes in about half the time; every request but one reads only its own new text,
+about six seconds, however long the conversation has grown.
+
+What the measurements showed, each one on the owner's server:
+
+- The cache is only reusable when a request **strictly extends** the previous one. Working
+  memory in the middle of the system prompt (every version until now) changes after nearly
+  every tool call, so everything behind it was re-read every turn. Moving the block to the
+  end of the last message and *removing it again* next turn was no better — 11 s, 18 s,
+  25 s, 41 s, 39 s over five reads — because taking anything back sends the server to an
+  older checkpoint of the model's state, and every checkpoint it had also ended in a block
+  that was no longer there. (Qwen3.8 is a hybrid model; the server cannot rewind it to an
+  arbitrary token.) The same five reads sent strictly append-only: about 6 s each, flat.
+- The **reasoning level is part of the prompt**: a 13k-token conversation read in 0.3 s at
+  the level it was cached with, 19 s at another, and 29 s with no level at all.
+- A request with generation off is accepted and costs one token; a cancelled one keeps
+  what it had read; the keep-alive touch does not disturb the cache.
+
+What changed:
+
+- **A prompt that is never taken back** (`prompt_layout`, `cached` by default). The system
+  prompt holds only what is stable for the length of a request. The git summary and the
+  Working memory block are attached to your message when a request begins — as part of the
+  stored history, under a `Harness state at this point` header — and stay there. In between,
+  the conversation is its own record, and what the harness has to say mid-run (the time
+  footer, a repeated call, a step open too long) goes on the end of the tool result it is
+  about. A fresh snapshot is attached only when the history has just been rewritten — a
+  compaction, a collapse, a trim — which is both when the cache is cold regardless and
+  when Working memory holds what the conversation no longer does. The rewrite is noticed by
+  comparing what was last sent, so nothing that edits history has to announce itself.
+  Replays, compaction, the handoff and consultations read messages without the block
+  (`agent.StripHarnessState`). `prompt_layout: "classic"` restores the old arrangement.
+- **The reasoning level holds steady.** It still steps down a level once the prompt passes
+  its compaction target, but it no longer steps back up until the history is rewritten: one
+  change, and one full read, per compaction cycle instead of one every time the prompt
+  hovered at the line. `reasoning_effort: low` avoids even that one.
+- **Background prompt processing** (`prompt_prefill`, on). After anything that empties the
+  cache — start, resume, `/model`, an approved reload, `/compact` — the request the next
+  turn will send goes to the server ahead of time with generation off, at the real
+  reasoning level, while you are still typing. It is cancelled the moment you press Enter.
+  Native Ollama only, through a new optional `provider.Prefiller`.
+- **Save, then tidy, before a cold read.** When a model is about to load or reload with no
+  request in flight, the task record is flushed and the session saved first; then, above
+  the compaction target, old tool results are stubbed so the loading model has less to
+  read. The newest two results stay whole, and the current step's verbatim record lives in
+  Working memory, which this never touches.
+- **The cost is visible.** `/stats` and `run --json` report what the server spent reading
+  prompts and loading the model, and how many prompt reads its cache did not cover; a read
+  of eight seconds or more is said as a status line while it happens.
+
 ## v0.13.0 — pacing and a clock
 
 Watching a 27B model work overnight: it took whole milestones on as one step, went round

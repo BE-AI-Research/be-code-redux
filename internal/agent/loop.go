@@ -218,7 +218,13 @@ type Agent struct {
 	// again (repeat.go). Agent goroutine only, like toolFailStreak.
 	repeats repeatTracker
 	// prefill is the one background prompt-cache warm-up (prefill.go).
-	prefill       prefillState
+	prefill prefillState
+	// sentPrint is the conversation as last sent, one hash a message
+	// (markSent): how a rewrite of what the server has cached is noticed.
+	sentPrint []uint64
+	// effortLowered: the reasoning level has stepped down in this
+	// compaction cycle and stays down until a rewrite (steadyEffort).
+	effortLowered bool
 	pendingAdvice string
 
 	// Model parameters (see the ModelLoader block below). modelMu guards
@@ -1071,6 +1077,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		expanded = a.stampUser(expanded)
 	}
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
+	if newTurn && a.cachedLayout() {
+		// The state rides on the request's own message, which nothing has
+		// seen yet, and stays there: see the layout note in prefill.go.
+		a.attachState()
+	}
 
 	emptyRetries, lengthRetries := 0, 0
 	effort := a.Cfg.ReasoningEffort
@@ -1409,6 +1420,15 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			}
 		}
 	}
+	// A step open too long is said here, on the result, because in the
+	// cached layout Working memory is not re-sent between requests.
+	if a.cachedLayout() {
+		a.engineDo("nudge", func(st *engine.Store) {
+			if line := st.StepNudge(); line != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + line
+			}
+		})
+	}
 	// Measured before the footer below is added, so the footer itself never
 	// makes two results differ. A cached answer counts: it is the same call.
 	if footer := a.repeats.note(call, res); footer != "" {
@@ -1602,6 +1622,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 	// unrelated result as a digested read.
 	pending := map[string]string{}
 	for i, m := range head {
+		m.Content = StripHarnessState(m.Content) // the request carries the block once, below
 		if i == 0 && strings.HasPrefix(m.Content, summaryPrefix) {
 			prior = strings.TrimPrefix(m.Content, summaryPrefix)
 			continue
