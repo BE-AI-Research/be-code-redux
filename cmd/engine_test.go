@@ -85,7 +85,13 @@ func TestBaselineFollowsTheLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := baselineFunc(st)
+	reg, err := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := agent.New(config.Default(), nil, "test-model", reg, "")
+	ag.SetEngine(st)
+	baseline := baselineFunc(ag)
 	st.SetBaseline(engine.Baseline{Head: "1111111111111111111111111111111111111111", Dirty: " M a.txt\n"})
 	head1, dirty1 := baseline()
 	st.SetBaseline(engine.Baseline{Head: "2222222222222222222222222222222222222222", Dirty: " M b.txt\n"})

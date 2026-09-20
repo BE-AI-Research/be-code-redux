@@ -136,16 +136,24 @@ func (s *Store) migrateLedger(path string) error {
 	}
 
 	s.markDirtyLocked()
+	// The lift's own document, by name. Decided before the flush and not
+	// after: Flush only adopts the names it chose once it has succeeded, so
+	// asking again after a failure gives this same answer, but asking first
+	// does not depend on that.
+	own := s.docNamesLocked()[roots]
 	// Write the lifted tree out now. Until this succeeds the migration
 	// exists only in memory, and a normal session does not flush until a
 	// request completes — so a Ctrl-C at the prompt would otherwise lose it.
 	if err := s.Flush(); err != nil {
 		var fe flushError
-		// The documents are written in root order and the lift appended
-		// exactly one root, so its own document is the (roots+1)-th write:
-		// anything less and the lift itself reached no disk, however many
-		// older tasks' documents were rewritten along the way.
-		if errors.As(err, &fe) && fe.wroteN > roots {
+		// The question is whether the lift's *own* document reached the disk,
+		// and the only honest way to ask it is by name. Counting writes
+		// answered it only while documents went out in root order with none
+		// skipped; a root that gets no document (a spent unfiled one) or one
+		// written out of order (a split root, ruling T3-g) made the count
+		// name the wrong document — and a wrong "yes" here is the duplicate
+		// migration that took five rounds to close.
+		if errors.As(err, &fe) && fe.wrote[own] {
 			// Ruling T3-f. The lifted task's own document is written, so
 			// the lift has happened; only the dotdir state (or a document
 			// after this one) failed to persist. Restoring

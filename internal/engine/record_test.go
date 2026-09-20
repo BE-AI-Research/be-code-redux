@@ -175,3 +175,54 @@ func TestEvidenceFollowsTheDoingNode(t *testing.T) {
 		t.Fatalf("b: %+v", b.Evidence.Cmds)
 	}
 }
+
+// TestADroppedItemIsDistilledFirst is C1's third bullet: the node cap takes
+// an item's verbatim output, never the fact that the command ran and failed.
+// Before, a long-lived node — the unfiled one above all — reported only its
+// last few calls when it finally closed.
+func TestADroppedItemIsDistilledFirst(t *testing.T) {
+	r := newRec(4096, 600)
+	n := &Node{ID: "1", Status: StatusDoing}
+	r.record(n, Event{Tool: "shell", Args: map[string]any{"command": "go test ./parser"},
+		Content: "--- FAIL: TestQuote\n" + strings.Repeat("noise\n", 40), IsError: true}, 1)
+	r.record(n, Event{Tool: "search", Args: map[string]any{"pattern": "Quote"},
+		Content: "parser.go:12:func Quote() {}\n" + strings.Repeat("x", 300)}, 2)
+	for i := 0; i < 4; i++ {
+		r.record(n, Event{Tool: "shell", Args: map[string]any{"command": "echo filler"},
+			Content: strings.Repeat("y", 300)}, 3+i)
+	}
+	if n.Evidence.Dropped < 2 {
+		t.Fatalf("the cap dropped %d items; the test needs the first two gone", n.Evidence.Dropped)
+	}
+	for _, it := range n.Evidence.Raw {
+		if it.Args == "go test ./parser" {
+			t.Fatal("the failing command is still in the buffer, so nothing was proven")
+		}
+	}
+	found := false
+	for _, c := range n.Evidence.Cmds {
+		if c.Cmd == "go test ./parser" && !c.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the dropped command is not in the durable record: %+v", n.Evidence.Cmds)
+	}
+	if len(n.Evidence.Errors) == 0 || !strings.Contains(n.Evidence.Errors[0], "go test ./parser: --- FAIL: TestQuote") {
+		t.Fatalf("the dropped error is not in the durable record: %+v", n.Evidence.Errors)
+	}
+	if len(n.Evidence.Lookups) == 0 || len(n.Evidence.Lookups[0].Hits) != 1 {
+		t.Fatalf("the dropped lookup is not in the durable record: %+v", n.Evidence.Lookups)
+	}
+	// Closing the node must not record the same command twice.
+	r.distill(n)
+	count := 0
+	for _, c := range n.Evidence.Cmds {
+		if c.Cmd == "go test ./parser" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("the dropped command is recorded %d times after the node closed", count)
+	}
+}

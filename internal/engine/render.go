@@ -2,62 +2,130 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 )
 
+// DefaultBudget is the block's byte cap when the caller names none.
+const DefaultBudget = 6144
+
+// condensedMarker closes a block whose finished reports were dropped or cut.
+const condensedMarker = "(reports condensed)"
+
+// minNewestRaw is the least the newest raw item's output is ever cut to: the
+// last thing the model did is the one piece of verbatim evidence the block
+// always carries.
+const minNewestRaw = 256
+
+// maxChangedCheck bounds the file the [changed since read] check will hash.
+const maxChangedCheck = 4 << 20
+
 // Render builds the Working memory: block the system prompt carries. In
 // order: a Task Report (report.go) for every terminal root, oldest first;
 // the active branch — the path from the top-level task to the doing node,
-// with sibling statuses so what remains is visible; the doing node's raw
-// buffer, verbatim, because that is the lossless part; then the durable
-// notes. Ruling T4-b: when nothing is doing (a task planned but not yet
-// started), the active section falls back to the newest root that is not
-// wholly finished, showing its own status and its children — that is
-// exactly when the model most needs to see the plan it just made. inMap
-// reports whether the repository map already lists a file's symbols, so the
-// active node's own file listing does not repeat an outline the model has
-// already been shown.
+// with sibling statuses so what remains is visible; what the doing node has
+// done, the newest of it verbatim; its files; then the durable notes. Ruling
+// T4-b: when nothing is doing (a task planned but not yet started), the
+// active section falls back to the newest root that is not wholly finished,
+// showing its own status and its children — that is exactly when the model
+// most needs to see the plan it just made. inMap reports whether the
+// repository map already lists a file's symbols, so the active node's own
+// file listing does not repeat an outline the model has already been shown.
 //
-// The budget is a ladder, not a cliff: composed at full detail, measured,
-// and while it is over budget the oldest report condenses one rung —
-// buildReport (full) -> reportHeadline -> reportOneLine -> reportPointer —
-// before the next-oldest report starts condensing. The active branch and
-// its verbatim step are never a rung; they are the work in flight. If
-// every report has condensed all the way to its pointer and the block
-// still does not fit, whole reports are dropped oldest-first, and if even
-// the single newest one still does not fit beside the active branch it is
-// trimmed to what remains rather than dropped outright.
+// **The budget wins (ruling F-1).** The whole block is at most budget bytes,
+// whatever the tree holds. The spec once promised both a 32 KiB verbatim
+// node and a 6144-byte block, and kept the first: a model that never calls
+// task leaves everything on one unfiled node that stays doing all session,
+// so the block reached 36 KB, three quarters of a 16k window, and the engine
+// built to survive compaction was what forced it. The budget is a ladder,
+// not a cliff, and each rung gives up the least valuable thing left:
+//
+//  1. finished reports condense oldest first — full, headline, one line,
+//     pointer (report.go);
+//  2. the doing node's raw items turn into distilled one-liners, oldest
+//     first, until only the newest is verbatim;
+//  3. file outlines go;
+//  4. reports are dropped oldest first, the last one cut rather than
+//     dropped when the rest already fits;
+//  5. durable notes lose their oldest lines;
+//  6. the newest raw item's output is cut, down to a third of the budget;
+//  7. the distilled one-liners lose their oldest lines;
+//  8. file rows lose their oldest, then the last notes go;
+//  9. the newest raw item is cut again, never below minNewestRaw.
+//
+// Nothing is lost by any of it: the full verbatim buffer stays in the state
+// file, and `task show <id>` prints it.
+//
+// The tree is copied under the lock and rendered outside it, because the
+// [changed since read] marker has to look at the disk.
 func (s *Store) Render(budget int, inMap func(string) bool) string {
+	if budget <= 0 {
+		budget = DefaultBudget
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	t := Tree{Roots: copyNodes(s.tree.Roots)}
+	notes := strings.TrimRight(s.notes, "\n")
+	root := s.root
+	s.mu.Unlock()
+	return renderBlock(&t, notes, budget, inMap, func(f FileRef) bool { return changedSinceRead(root, f) })
+}
 
+// changedSinceRead reports whether a file the record describes no longer has
+// the content it described. A reference with no hash describes nothing in
+// particular, so it is never stale; a file that has gone is.
+func changedSinceRead(root string, f FileRef) bool {
+	if f.Hash == "" || f.Path == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(f.Path)))
+	if err != nil || info.IsDir() {
+		return true
+	}
+	if info.Size() > maxChangedCheck {
+		return false
+	}
+	_, hash, _, _, ok := fileState(root, f.Path)
+	return !ok || hash != f.Hash
+}
+
+func renderBlock(t *Tree, notes string, budget int, inMap func(string) bool, changed func(FileRef) bool) string {
 	var roots []*Node
-	for _, r := range s.tree.Roots {
+	for _, r := range t.Roots {
 		// A spent unfiled root is a harness artefact, not work: it would
 		// otherwise report itself as "unfiled — dropped: adopted by 3.1",
 		// a phantom task in the model's own picture of what it has done.
-		if s.tree.Terminal(r) && !spentUnfiled(r) {
+		if t.Terminal(r) && !spentUnfiled(r) {
 			roots = append(roots, r)
 		}
 	}
-	tail := joinBlock(activeBranchText(&s.tree, inMap), strings.TrimRight(s.notes, "\n"))
-	if len(roots) == 0 {
-		return tail
-	}
-
+	ap := newActiveParts(t, inMap, changed)
+	opts := ap.full()
 	rung := make([]int, len(roots))
 	reports := make([]string, len(roots))
 	for i, r := range roots {
 		reports[i] = rungText(r, rung[i])
 	}
-	compose := func(reports []string) string {
-		return joinBlock(strings.Join(reports, "\n\n"), tail)
+	noteLines := []string(nil)
+	if strings.TrimSpace(notes) != "" {
+		noteLines = strings.Split(notes, "\n")
 	}
+	condensed := false
 
-	out := compose(reports)
-	for len(out) > budget {
+	compose := func() string {
+		out := joinBlock(strings.Join(reports, "\n\n"), ap.text(opts), strings.Join(noteLines, "\n"))
+		if condensed {
+			out = strings.TrimRight(out, "\n") + "\n" + condensedMarker
+		}
+		return out
+	}
+	over := func() bool { return len(compose()) > budget }
+
+	// 1. The ladder: the oldest report condenses one rung at a time before
+	// the next-oldest starts.
+	for over() {
 		i := -1
 		for j := range rung {
 			if rung[j] < maxRung {
@@ -69,42 +137,80 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 			break
 		}
 		rung[i]++
-		// Only the report that just condensed needs re-rendering; every
-		// other report's text is unchanged by this step.
 		reports[i] = rungText(roots[i], rung[i])
-		out = compose(reports)
 	}
-	if len(out) <= budget {
-		return out
+	// 2. Raw items become one-liners, oldest first; the newest stays whole.
+	for over() && opts.verbatim > 1 {
+		opts.verbatim--
 	}
-
-	// Every report is at its floor and the block still does not fit. The
-	// active branch stays whole regardless — it is never what gets cut —
-	// so what gives is the reports, oldest first, dropped entirely down to
-	// the single newest one; if even that alone does not fit beside the
-	// active branch, it is trimmed rather than dropped, so something of the
-	// most recent finished work survives over nothing at all.
-	for len(reports) > 1 && len(out) > budget {
+	// 3. Outlines.
+	if over() {
+		opts.outlines = false
+	}
+	// 4. Reports go, oldest first. The last is cut to fit rather than
+	// dropped, so something of the most recent finished work survives — but
+	// only when everything else already fits, or it would be squeezing the
+	// work in flight to keep a sliver of history.
+	for over() && len(reports) > 1 {
 		reports = reports[1:]
-		out = compose(reports)
+		condensed = true
 	}
-	if len(out) > budget && len(reports) == 1 {
-		avail := budget - len(tail)
-		if tail != "" {
-			avail -= 2 // the blank line joinBlock puts between sections
+	if over() && len(reports) == 1 {
+		condensed = true
+		last := reports[0]
+		reports = nil
+		if avail := budget - len(compose()) - 2; avail > 0 {
+			// trimLines treats budget<=0 as "no limit", hence the guard.
+			if cut := trimLines(last, avail); cut != "" {
+				reports = []string{cut}
+			}
 		}
-		// trimLines treats budget<=0 as "no limit", so a non-positive avail
-		// has to drop the report outright rather than call it.
-		if avail <= 0 {
-			reports = nil
-		} else if trimmed := trimLines(reports[0], avail); trimmed != "" {
-			reports[0] = trimmed
-		} else {
-			reports = nil
-		}
-		out = compose(reports)
 	}
-	return strings.TrimRight(out, "\n") + "\n(reports condensed)"
+	// 5. Durable notes, oldest lines first, down to the newest few.
+	for over() && len(noteLines) > 3 {
+		noteLines = noteLines[1:]
+	}
+	// 6. The newest raw item gives up its tail, down to a third of the
+	// budget: one large read is worth less than every line that says what
+	// else was done and every file row that says what has been seen.
+	capNewest := func(floor int) {
+		if !over() || len(ap.rawItems()) == 0 {
+			return
+		}
+		newest := ap.raw[len(ap.raw)-1]
+		size := len(newest.Out)
+		if opts.newestCap > 0 && opts.newestCap < size {
+			size = opts.newestCap
+		}
+		want := size - (len(compose()) - budget) - len(truncatedNote) - 8
+		if want < floor {
+			want = floor
+		}
+		if want < size {
+			opts.newestCap = want
+		}
+	}
+	capNewest(budget / 3)
+	// 7. The distilled lines, oldest first.
+	for over() && opts.hidden < ap.distilledLen(opts) {
+		opts.hidden++
+	}
+	// 8. File rows, oldest first, then what is left of the notes.
+	for over() && opts.hideFiles < len(ap.fileRows()) {
+		opts.hideFiles++
+	}
+	for over() && len(noteLines) > 0 {
+		noteLines = noteLines[1:]
+	}
+	// 9. The newest raw item again, to its floor.
+	capNewest(minNewestRaw)
+	out := compose()
+	if len(out) > budget {
+		// Only a branch path longer than the whole budget gets here. The cap
+		// still holds.
+		out = trimLines(out, budget)
+	}
+	return out
 }
 
 // TreeText is the /task listing: the whole tree, exactly as ShowText("").
@@ -112,30 +218,81 @@ func (s *Store) TreeText() string {
 	return s.ShowText("")
 }
 
-// activeBranchText renders the path from a root down to the doing node,
-// with sibling statuses at each level, closed by the doing node's raw
-// buffer verbatim (the lossless part) and, when it has read a file, that
-// file's current listing. When nothing is doing at all, ruling T4-b's
-// fallback applies: the newest root that is not wholly finished renders its
-// own status and its children, with no doing node to descend into and
-// nothing verbatim to show — a plan the model made but has not started yet
-// is exactly when it most needs to see it.
-func activeBranchText(t *Tree, inMap func(string) bool) string {
+// activeParts is the active section taken apart, so Render can give up one
+// piece of it at a time.
+type activeParts struct {
+	id       string   // the doing node, "" when nothing is doing
+	header   string   // "Active task:" and the path with sibling statuses
+	recorded []string // the doing node's durable record, one line each
+	raw      []RawItem
+	dropped  int
+	files    []FileRef
+	stale    map[string]bool
+	inMap    func(string) bool
+}
+
+// activeOpts is how much of the active section one render shows.
+type activeOpts struct {
+	verbatim  int  // how many of the newest raw items render in full
+	hidden    int  // how many of the oldest distilled lines are left out
+	outlines  bool // file outlines
+	hideFiles int  // how many of the oldest file rows are left out
+	newestCap int  // byte cap on the newest raw item's output; 0 for none
+}
+
+// rawItems and fileRows are nil-safe reads for Render's ladder.
+func (p *activeParts) rawItems() []RawItem {
+	if p == nil {
+		return nil
+	}
+	return p.raw
+}
+
+func (p *activeParts) fileRows() []FileRef {
+	if p == nil {
+		return nil
+	}
+	return p.files
+}
+
+func (p *activeParts) full() activeOpts {
+	if p == nil {
+		return activeOpts{}
+	}
+	return activeOpts{verbatim: len(p.raw), outlines: true}
+}
+
+// distilledLen is how many distilled lines a render at o would show in full:
+// the durable record plus every raw item that is not verbatim.
+func (p *activeParts) distilledLen(o activeOpts) int {
+	if p == nil {
+		return 0
+	}
+	return len(p.recorded) + len(p.raw) - o.verbatim
+}
+
+// newActiveParts reads the active section off the tree: the path from a root
+// down to the doing node, with sibling statuses at each level, and the doing
+// node's evidence. When nothing is doing at all, ruling T4-b's fallback
+// applies: the newest root that is not wholly finished renders its own
+// status and its children, with no doing node to descend into — a plan the
+// model made but has not started yet is exactly when it most needs to see
+// it.
+func newActiveParts(t *Tree, inMap func(string) bool, changed func(FileRef) bool) *activeParts {
 	path := t.ActiveBranch()
+	var b strings.Builder
 	if len(path) == 0 {
 		r := newestOpenRoot(t)
 		if r == nil {
-			return ""
+			return nil
 		}
-		var b strings.Builder
 		b.WriteString("Active task:\n")
 		fmt.Fprintf(&b, "%s\n", statusLine(r))
 		for _, c := range r.Children {
 			fmt.Fprintf(&b, "  %s\n", statusLine(c))
 		}
-		return strings.TrimRight(b.String(), "\n")
+		return &activeParts{header: strings.TrimRight(b.String(), "\n")}
 	}
-	var b strings.Builder
 	b.WriteString("Active task:\n")
 	fmt.Fprintf(&b, "%s\n", statusLine(path[0]))
 	for depth := 1; depth < len(path); depth++ {
@@ -144,13 +301,170 @@ func activeBranchText(t *Tree, inMap func(string) bool) string {
 		}
 	}
 	doing := path[len(path)-1]
-	if raw := rawBlock(doing.Evidence.Raw, doing.Evidence.Dropped); raw != "" {
-		b.WriteString("\n" + raw + "\n")
+	p := &activeParts{
+		id:      doing.ID,
+		header:  strings.TrimRight(b.String(), "\n"),
+		raw:     doing.Evidence.Raw,
+		dropped: doing.Evidence.Dropped,
+		files:   doing.Evidence.Files,
+		stale:   map[string]bool{},
+		inMap:   inMap,
 	}
-	if files := activeFilesBlock(doing.Evidence.Files, inMap); files != "" {
-		b.WriteString("\n" + files + "\n")
+	for _, nt := range doing.Evidence.Notes {
+		key := "note"
+		if nt.Decision {
+			key = "decision"
+		}
+		p.recorded = append(p.recorded, key+": "+oneLine(nt.Text, distilledWidth))
+	}
+	for _, c := range doing.Evidence.Cmds {
+		p.recorded = append(p.recorded, oneLine(c.Cmd, distilledWidth)+" — "+okWord(c.OK))
+	}
+	for _, l := range doing.Evidence.Lookups {
+		p.recorded = append(p.recorded, fmt.Sprintf("%s %s → %d hit(s)", l.Tool, oneLine(l.Query, distilledWidth), len(l.Hits)))
+	}
+	for _, e := range doing.Evidence.Errors {
+		p.recorded = append(p.recorded, "error: "+oneLine(e, 2*distilledWidth))
+	}
+	if changed != nil {
+		for _, f := range p.files {
+			if changed(f) {
+				p.stale[f.Path] = true
+			}
+		}
+	}
+	return p
+}
+
+// distilledWidth bounds the argument half of a distilled line.
+const distilledWidth = 120
+
+// oneLine is a text's first line, bounded, for a distilled row.
+func oneLine(s string, max int) string {
+	line := firstLine(s, max)
+	if len(line) < len(strings.TrimSpace(s)) {
+		line += " …"
+	}
+	return line
+}
+
+// distilledLine is one raw item the way distillation will eventually record
+// it: what was called and how it came out, without the output.
+func distilledLine(it RawItem) string {
+	line := strings.TrimSpace(it.Tool + " " + oneLine(it.Args, distilledWidth))
+	switch it.Tool {
+	case "search", "lookup", "history":
+		if it.OK {
+			return fmt.Sprintf("%s → %d hit(s)", line, len(parseHits(it.Out)))
+		}
+	}
+	if it.OK {
+		return line + " — ok"
+	}
+	first := firstOutputLine(it.Out)
+	if first == "" {
+		first = "(no output)"
+	}
+	return line + " — failed: " + oneLine(first, distilledWidth)
+}
+
+// text renders the active section at o.
+func (p *activeParts) text(o activeOpts) string {
+	if p == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(p.header + "\n")
+	if p.id == "" {
+		return strings.TrimRight(b.String(), "\n")
+	}
+
+	verbatim := o.verbatim
+	if verbatim > len(p.raw) {
+		verbatim = len(p.raw)
+	}
+	if verbatim < 0 {
+		verbatim = 0
+	}
+	distilled := append([]string(nil), p.recorded...)
+	for _, it := range p.raw[:len(p.raw)-verbatim] {
+		distilled = append(distilled, distilledLine(it))
+	}
+	if len(distilled) > 0 {
+		// The pointer is only worth its bytes when a verbatim item was
+		// actually turned into a line here.
+		if verbatim < len(p.raw) {
+			fmt.Fprintf(&b, "\nearlier (distilled; task show %s prints the buffer in full):\n", p.id)
+		} else {
+			b.WriteString("\nearlier:\n")
+		}
+		hidden := o.hidden
+		if hidden > len(distilled) {
+			hidden = len(distilled)
+		}
+		if hidden > 0 {
+			fmt.Fprintf(&b, "  (%d earlier line(s) not shown)\n", hidden)
+		}
+		for _, line := range distilled[hidden:] {
+			fmt.Fprintf(&b, "  - %s\n", line)
+		}
+	}
+
+	shown := p.raw[len(p.raw)-verbatim:]
+	if len(shown) > 0 || p.dropped > 0 {
+		b.WriteString("\nraw:\n")
+		for i, it := range shown {
+			out := strings.TrimRight(it.Out, "\n")
+			if o.newestCap > 0 && i == len(shown)-1 {
+				out = excerpt(out, o.newestCap)
+			}
+			fmt.Fprintf(&b, "  %s %s\n", it.Tool, it.Args)
+			if out == "" {
+				continue
+			}
+			for _, line := range strings.Split(out, "\n") {
+				fmt.Fprintf(&b, "    %s\n", line)
+			}
+		}
+		if p.dropped > 0 {
+			fmt.Fprintf(&b, "  (%d item(s) dropped)\n", p.dropped)
+		}
+	}
+
+	if len(p.files) > 0 {
+		b.WriteString("\nfiles:\n")
+		hide := o.hideFiles
+		if hide > len(p.files) {
+			hide = len(p.files)
+		}
+		if hide > 0 {
+			fmt.Fprintf(&b, "  (%d earlier file(s) not shown)\n", hide)
+		}
+		for _, f := range p.files[hide:] {
+			b.WriteString("  " + renderFile(f))
+			if p.stale[f.Path] {
+				b.WriteString(" " + changedMarker)
+			}
+			if o.outlines && len(f.Outline) > 0 && (p.inMap == nil || !p.inMap(f.Path)) {
+				b.WriteString("\n    outline: " + strings.Join(f.Outline, ", "))
+			}
+			b.WriteByte('\n')
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// changedMarker is what the prompt's guidance points at: "do not read those
+// files again unless they are marked changed".
+const changedMarker = "[changed since read]"
+
+// truncatedNote is what excerpt appends when it cuts.
+const truncatedNote = "\n… (truncated)"
+
+// activeBranchText is the active section at full detail.
+func activeBranchText(t *Tree, inMap func(string) bool) string {
+	p := newActiveParts(t, inMap, nil)
+	return p.text(p.full())
 }
 
 // newestOpenRoot is the last root that is not wholly finished — the same
@@ -166,11 +480,12 @@ func newestOpenRoot(t *Tree) *Node {
 	return nil
 }
 
-// rawBlock renders a node's verbatim buffer: every tool call still in
-// flight, exactly as the model saw it. This is what "the doing node
-// verbatim" means — it is never condensed and never summarised. dropped is
-// Evidence.Dropped, the count of raw items the node cap already discarded;
-// a node whose buffer was capped is never allowed to read as complete.
+// rawBlock renders a node's whole verbatim buffer, exactly as the model saw
+// it. The prompt block no longer prints it this way — it is budgeted there
+// (ruling F-1) — but `task show <id>` does, which is what keeps the lossless
+// part reachable. dropped is Evidence.Dropped, the count of raw items the
+// node cap already distilled and discarded; a node whose buffer was capped
+// is never allowed to read as complete.
 func rawBlock(items []RawItem, dropped int) string {
 	if len(items) == 0 && dropped == 0 {
 		return ""
@@ -189,28 +504,6 @@ func rawBlock(items []RawItem, dropped int) string {
 	}
 	if dropped > 0 {
 		fmt.Fprintf(&b, "  (%d item(s) dropped)\n", dropped)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// activeFilesBlock lists the doing node's own file references — the
-// analogue of the 0.10.0 digest row, and the one place an outline still
-// appears, suppressed by inMap exactly as it was there. A finished report
-// never carries an outline: it is a fixed rollup of what happened, not a
-// live symbol map, and repeating it there would only fight the repository
-// map for the same bytes.
-func activeFilesBlock(files []FileRef, inMap func(string) bool) string {
-	if len(files) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("files:\n")
-	for _, f := range files {
-		b.WriteString("  " + renderFile(f))
-		if len(f.Outline) > 0 && (inMap == nil || !inMap(f.Path)) {
-			b.WriteString("\n    outline: " + strings.Join(f.Outline, ", "))
-		}
-		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

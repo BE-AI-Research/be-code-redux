@@ -91,8 +91,15 @@ func TestASingleReportIsSqueezedRatherThanDroppedWhenBudgetIsImpossible(t *testi
 		Content: "--- FAIL: TestQuote\n    parser_test.go:88: unexpected EOF\n"})
 
 	tail := activeBranchText(&s.tree, func(string) bool { return false })
-	budget := len(tail) + 5 // room for barely a sliver of the finished report
+	// Room for the active branch, the marker and barely a sliver of the
+	// finished report. The marker counts: the budget caps the whole block
+	// (ruling F-1), so a block that spent its last byte on the branch has
+	// nowhere to say its reports were cut.
+	budget := len(tail) + len("\n\n") + 5 + len("\n"+condensedMarker)
 	block := s.Render(budget, func(string) bool { return false })
+	if len(block) > budget {
+		t.Fatalf("over budget: %d bytes of %d:\n%s", len(block), budget, block)
+	}
 	if !strings.Contains(block, "the live task") || !strings.Contains(block, "parser_test.go:88: unexpected EOF") {
 		t.Fatalf("active branch was not kept whole:\n%s", block)
 	}
@@ -132,5 +139,90 @@ func TestTrimLinesIsUTF8Safe(t *testing.T) {
 	}
 	if len(out) > 5 {
 		t.Fatalf("trimmed string exceeds budget: %q (%d bytes)", out, len(out))
+	}
+}
+
+// probeStore is the whole-branch review's probe at the engine's own level:
+// sixteen reads of 6 KB files with no task call between them, so everything
+// lands on one unfiled node that stays doing.
+func probeStore(t *testing.T) *Store {
+	t.Helper()
+	s, root := openTest(t, "s1", false)
+	s.EnsureRoot("read every file and say what is in them")
+	for i := 0; i < 16; i++ {
+		var b strings.Builder
+		fmt.Fprintf(&b, "package probe\n\n// sentinel-file-%02d\n", i)
+		for n := 0; b.Len() < 6*1024; n++ {
+			fmt.Fprintf(&b, "func F%02d_%03d() int { return %d } // padding padding padding\n", i, n, n)
+		}
+		rel := fmt.Sprintf("f%02d.go", i)
+		writeFile(t, root, rel, b.String())
+		s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": rel}, Content: numbered(b.String(), 1)})
+	}
+	return s
+}
+
+// TestTheBlockNeverExceedsItsBudget is C1 and ruling F-1: the budget caps
+// the whole block, the newest raw item is always there, and an older one
+// leaves a line rather than vanishing. The three budgets are what an 8k, a
+// 16k and a 32k window derive.
+func TestTheBlockNeverExceedsItsBudget(t *testing.T) {
+	s := probeStore(t)
+	for _, budget := range []int{2048, 4608, 6144} {
+		block := s.Render(budget, func(string) bool { return false })
+		if len(block) > budget {
+			t.Fatalf("budget %d: the block is %d bytes", budget, len(block))
+		}
+		if !strings.Contains(block, "sentinel-file-15") {
+			t.Fatalf("budget %d: the newest raw item is missing:\n%s", budget, block)
+		}
+		if strings.Contains(block, "sentinel-file-00") {
+			t.Fatalf("budget %d: the oldest read is still verbatim:\n%s", budget, block)
+		}
+		if !strings.Contains(block, "read_file f14.go — ok") {
+			t.Fatalf("budget %d: an older read left no distilled line:\n%s", budget, block)
+		}
+		if !strings.Contains(block, "task show 1.1") {
+			t.Fatalf("budget %d: nothing says how to reach the full buffer:\n%s", budget, block)
+		}
+	}
+}
+
+// TestTaskShowPrintsTheWholeBuffer: what the block gives up stays reachable.
+func TestTaskShowPrintsTheWholeBuffer(t *testing.T) {
+	s := probeStore(t)
+	shown := s.ShowText("1.1")
+	// NodeCap holds the newest eight or so 4 KiB items; every one of them is
+	// printed whole, not just the newest.
+	for _, want := range []string{"sentinel-file-15", "sentinel-file-12", "sentinel-file-10"} {
+		if !strings.Contains(shown, want) {
+			t.Fatalf("task show 1.1 does not print %s", want)
+		}
+	}
+	if strings.Contains(s.ShowText(""), "sentinel-file-15") {
+		t.Fatal("the whole-tree listing prints a verbatim buffer")
+	}
+}
+
+// TestAFileThatChangedSinceItWasReadIsMarked is M1: the prompt tells the
+// model not to re-read a listed file "unless they are marked changed", so
+// the mark has to exist.
+func TestAFileThatChangedSinceItWasReadIsMarked(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	s.EnsureRoot("look")
+	writeFile(t, root, "a.go", "package a\n")
+	writeFile(t, root, "b.go", "package b\n")
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: numbered("package a\n", 1)})
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "b.go"}, Content: numbered("package b\n", 1)})
+	if block := s.Render(4096, nil); strings.Contains(block, changedMarker) {
+		t.Fatalf("an unchanged file is marked changed:\n%s", block)
+	}
+	writeFile(t, root, "a.go", "package a\n\nfunc New() {}\n")
+	block := s.Render(4096, nil)
+	if !strings.Contains(block, "a.go (lines 1–1) "+changedMarker) {
+		t.Fatalf("a.go changed on disk and is not marked:\n%s", block)
+	}
+	if strings.Contains(block, "b.go (lines 1–1) "+changedMarker) {
+		t.Fatalf("b.go did not change and is marked:\n%s", block)
 	}
 }

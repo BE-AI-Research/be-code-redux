@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
@@ -44,11 +45,13 @@ func (a *Agent) WriteHandoff(ctx context.Context, withModel bool) (string, error
 		}
 		h = a.heuristicHandoff()
 	}
-	if a.Engine != nil {
+	if a.engine() != nil {
 		// Drop the previous exit's line first: a resumed briefing carries
 		// one, and appending would stack a copy per exit.
 		h = stripStoppedAt(h)
-		if at := a.Engine.StoppedAt(); at != "" {
+		at := ""
+		a.engineDo("stopped at", func(st *engine.Store) { at = st.StoppedAt() })
+		if at != "" {
 			h += "\n\nStopped at: " + at
 		}
 	}

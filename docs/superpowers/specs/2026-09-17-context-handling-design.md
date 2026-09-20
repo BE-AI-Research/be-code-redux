@@ -113,14 +113,27 @@ The `Working memory:` block becomes a task view, composed fresh every turn, in t
 
 1. **Task Reports** for finished branches, inline, oldest first.
 2. **The active branch** — the path from the top-level task to the `doing` node, with sibling statuses so what remains is visible.
-3. **The `doing` node verbatim** — the lossless part.
+3. **The `doing` node verbatim** — the lossless part, within the budget of 6.1.
 4. **Durable notes** (`keep: true`), as today.
 
 ### 6.1 The budget ladder
 
-The block is capped by `engine.budget` (default 6144 bytes, as today). Under the cap a report renders in full. As the block approaches the cap, reports condense oldest first, through: full → headline plus outcomes and decisions → one line → a pointer the model opens with `task show <id>`.
+*Amended 2026-09-19 by ruling F-1, after the whole-branch review.* As first written this section contradicted the rest of the spec. §4.3 lets the `doing` node hold 32 KiB of verbatim output, §6 caps the block at 6144 bytes, and this section said the active branch "and its verbatim step are never what gets cut" — so whenever the two collided the cap lost. They collide in the common case: a model that never calls `task` leaves everything on one `unfiled` node that stays `doing` for the whole session, and the block reached about 36 KB. At a 16k window that forced seven summary calls where a run with the engine off needs none, the compaction request embedded the same block and overflowed the window — producing the empty summaries §7 exists to survive — and after a switch to a smaller window the system prompt could not be shrunk at all. **The budget wins.**
 
-**The active branch and its verbatim step are never what gets cut.** They are the work in flight. If the cap cannot be met with them intact, the block reports that reports were condensed and carries on.
+The **whole** block is capped at a byte budget derived from the live window: about 25% of `History.Limit()` converted to bytes, with a floor of 2 KB, never above `engine.budget` (default 6144). The agent computes it and passes it in; `internal/engine` never imports `agent`. The compaction request (§7) carries the same capped block.
+
+Inside that budget the block gives up the least valuable thing first:
+
+1. finished reports condense oldest first, through: full → headline plus outcomes and decisions → one line → a pointer the model opens with `task show <id>`;
+2. the `doing` node's raw items render newest first — the newest verbatim, older ones as distilled one-liners (what was called and how it came out), oldest first;
+3. file outlines go;
+4. reports are dropped oldest first, and the block says `(reports condensed)`;
+5. durable notes, then the distilled one-liners, then file rows, lose their oldest lines, each saying how many are not shown;
+6. last, the newest raw item's output is cut to the room that is left.
+
+**The newest raw item is always present**, and nothing is lost by any of this: the full verbatim buffer stays in the dotdir state (§5.3), and `task show <id>` prints it whole. "Lossless" in §6 item 3 now means *reachable*, not *always in the prompt* — which for anything older than the newest items was never deliverable at a 16k window.
+
+The node cap of §4.3 changes to match: an item is **distilled before it is dropped**, so a command that ran, and the first line of its error, stay in the durable record when the cap takes its verbatim output.
 
 ## 7. Compaction
 

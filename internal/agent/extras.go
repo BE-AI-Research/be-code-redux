@@ -63,9 +63,7 @@ func (a *Agent) planAgent() *Agent {
 
 // ExecutePlan runs the approved plan through the normal loop.
 func (a *Agent) ExecutePlan(ctx context.Context, request, plan string) (string, *ReviewedReport, error) {
-	if a.Engine != nil {
-		a.Engine.Plan(request, engine.ParsePlanSteps(plan))
-	}
+	a.engineDo("plan", func(st *engine.Store) { st.Plan(request, engine.ParsePlanSteps(plan)) })
 	return a.RunFull(ctx, fmt.Sprintf(planExecutePrefix, request, plan))
 }
 

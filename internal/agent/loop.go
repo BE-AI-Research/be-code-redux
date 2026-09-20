@@ -94,6 +94,13 @@ type Agent struct {
 	// above can be exercised against a store that panics or answers
 	// nonsense without inventing one on disk. Nil means the real store.
 	observeFn func(engine.Event) string
+	// engineOff latches once a call into the store has panicked: the engine
+	// is detached for the rest of the session (see engineDo). engineFault is
+	// the test seam that makes a call panic without inventing a broken store
+	// on disk, and flushWarned keeps a failing save to one notice.
+	engineOff   atomic.Bool
+	engineFault func(op string)
+	flushWarned atomic.Bool
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -700,7 +707,7 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	sys := a.systemOverride
 	if sys == "" {
 		sys = BuildSystemPrompt(a.Tools.Specs(), a.compat || a.Cfg.CompatToolCalls == "auto", a.projectNotes)
-		if a.Engine == nil {
+		if a.engine() == nil {
 			// No store, no Working memory block: keep the git sentences (the
 			// tools exist) but drop the paragraph that points at the block.
 			if full := engineGuidance(a.Tools.Specs()); full != "" {
@@ -714,8 +721,8 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
 	}
-	if a.Engine != nil && a.systemOverride == "" {
-		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
+	if a.systemOverride == "" {
+		if wm := a.workingMemory(); wm != "" {
 			sys += "\n\nWorking memory:\n" + wm
 		}
 	}
@@ -807,13 +814,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 	a.lastGitInfo = ""
-	defer func() {
-		if a.Engine != nil {
-			if err := a.Engine.Flush(); err != nil {
-				a.notice("engine: %v; continuing without working memory", err)
-			}
-		}
-	}()
+	defer a.flushEngine()
 
 	// A streak belongs to one stretch of tool calls; a repair round is a
 	// fresh start, and advice from a previous round has either been
@@ -827,12 +828,21 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.lastUserInput = userInput
 		a.lastFailingTool = ""
 	}
-	if newTurn && a.Engine != nil {
+	if newTurn {
 		// Evidence always has a home: if nothing is doing and no task is
 		// open, the user's own message opens one. Everything a tool
 		// returns from here on is recorded against a node the report can
 		// later find it under.
-		a.Engine.EnsureRoot(userInput)
+		//
+		// Before that, anything the user — or a second session on this
+		// workspace — wrote into a task document since the last request is
+		// read back in, so this request works from their edit rather than
+		// over it.
+		a.engineDo("reload", func(st *engine.Store) {
+			st.Reload()
+			a.engineWarnings(st)
+		})
+		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
 	}
 	if a.repoDirty {
 		a.repoDirty = false
@@ -855,9 +865,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	emptyRetries, lengthRetries := 0, 0
 	effort := a.Cfg.ReasoningEffort
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
-		if a.Engine != nil {
-			a.Engine.NextTurn()
-		}
+		a.engineDo("turn", func(st *engine.Store) { st.NextTurn() })
 		// Anything the user typed while tools were running goes in now,
 		// after the results the model was waiting on.
 		a.deliverInbox()
@@ -1162,17 +1170,19 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	}
 	var res tools.Result
 	served := false
-	if a.Engine != nil && (call.Name == "search" || call.Name == "lookup" || call.Name == "history") {
+	if call.Name == "search" || call.Name == "lookup" || call.Name == "history" {
 		if args, ok := tools.ParseArgs(call.Arguments); ok {
-			if cached, hit := a.Engine.Cached(call.Name, args); hit {
-				res, served = tools.Result{Content: cached}, true
-			}
+			a.engineDo("cache", func(st *engine.Store) {
+				if cached, hit := st.Cached(call.Name, args); hit {
+					res, served = tools.Result{Content: cached}, true
+				}
+			})
 		}
 	}
 	if !served {
 		res = a.Tools.Dispatch(ctx, call)
 	}
-	if a.Engine != nil && !served {
+	if a.engine() != nil && !served {
 		// The same tolerant parse Dispatch used, so a double-encoded call
 		// is observed exactly as it ran; arguments no tool could run are
 		// simply not observed.
@@ -1234,17 +1244,14 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 // worse than none; bounding the store properly means timing every call
 // behind one interface, which is later work.
 func (a *Agent) observe(ev engine.Event) (footer string) {
-	defer func() {
-		if r := recover(); r != nil {
-			a.notice("engine: %v; continuing without working memory", r)
-			footer = ""
+	a.engineDo("observe", func(st *engine.Store) {
+		fn := a.observeFn
+		if fn == nil {
+			fn = st.Observe
 		}
-	}()
-	fn := a.observeFn
-	if fn == nil {
-		fn = a.Engine.Observe
-	}
-	return trimAtLine(fn(ev), maxObserveFooter)
+		footer = trimAtLine(fn(ev), maxObserveFooter)
+	})
+	return footer
 }
 
 // maxObserveFooter caps what the recorder may append to a tool result. The
@@ -1365,7 +1372,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 		if task == "" && m.Role == provider.RoleUser && !isToolResult(m) {
 			task = m.Content
 		}
-		if a.Engine != nil {
+		if st := a.engine(); st != nil {
 			for _, tc := range m.ToolCalls {
 				path := ""
 				if tc.Name == "read_file" {
@@ -1376,7 +1383,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 						// the stub is substituted for the read either way.
 						for _, k := range []string{"path", "file", "filename"} {
 							if v, _ := args[k].(string); strings.TrimSpace(v) != "" {
-								path = a.Engine.DigestKey(v)
+								path = st.DigestKey(v)
 								break
 							}
 						}
@@ -1385,11 +1392,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 				pending[tc.ID] = path
 			}
 		}
-		if a.Engine != nil && m.Role == provider.RoleTool {
+		if a.engine() != nil && m.Role == provider.RoleTool {
 			if p, ok := pending[m.ToolCallID]; ok {
 				delete(pending, m.ToolCallID)
 				if p != "" {
-					if r, has := a.Engine.HasDigest(p); has {
+					var r engine.Range
+					has := false
+					a.engineDo("digest", func(st *engine.Store) { r, has = st.HasDigest(p) })
+					if has {
 						fmt.Fprintf(&b, "[tool] (read %s lines %d–%d; digested)\n", p, r.From, r.To)
 						continue
 					}
@@ -1418,10 +1428,12 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if prior != "" {
 		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
 	}
-	if a.Engine != nil {
-		if wm := a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap); wm != "" {
-			fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
-		}
+	// The same capped block the prompt carries (ruling F-1). Rendered
+	// uncapped it was most of a 16k window by itself, so the request that
+	// exists to relieve an overflowing context overflowed it — and came back
+	// empty, which is the failure this branch was built to survive.
+	if wm := a.workingMemory(); wm != "" {
+		fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
 	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
@@ -1456,16 +1468,14 @@ func (a *Agent) Compact(ctx context.Context) error {
 		summary = StripThink(summary)
 	}
 	filesOnly := false
-	if a.Engine != nil {
+	if a.engine() != nil {
 		body, files := engine.SplitFilesBlock(summary)
 		if files != "" {
-			a.Engine.ApplyFileNotes(files)
+			a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
 			filesOnly = strings.TrimSpace(body) == ""
 		}
 		summary = body
-		if err := a.Engine.Flush(); err != nil {
-			a.notice("engine: %v; continuing without working memory", err)
-		}
+		a.flushEngine()
 	}
 	if strings.TrimSpace(summary) == "" {
 		// A cancellation is not a backend failure: it reaches here as an
@@ -1516,10 +1526,10 @@ func (a *Agent) fromTaskRecord(ctx context.Context, tail []provider.Message) boo
 	// A cancelled request is the user asking to stop, not a backend
 	// failing to answer: rewriting history under them is the opposite of
 	// what they asked for, so the caller's error stands.
-	if ctx.Err() != nil || a.Engine == nil {
+	if ctx.Err() != nil || a.engine() == nil {
 		return false
 	}
-	if strings.TrimSpace(a.Engine.Render(a.Cfg.Engine.Budget, a.inRepoMap)) == "" {
+	if strings.TrimSpace(a.workingMemory()) == "" {
 		return false
 	}
 	a.notice("compaction: the model returned no summary; continuing from the task record")
@@ -1575,11 +1585,11 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
 	a.autoVerifyUsed = false
-	if a.Engine != nil {
+	if a.engine() != nil {
 		// A new request gets a fresh task line unless a plan is still in
 		// flight; mid-request repair rounds go through run, which only
 		// fills an empty one.
-		a.Engine.StartTask(userInput)
+		a.engineDo("start task", func(st *engine.Store) { st.StartTask(userInput) })
 		if head := gitctx.Head(ctx, a.Tools.Root); head != "" {
 			// The porcelain text itself, not a hash of it: the changes tool
 			// names the files that were already dirty when the task began,
@@ -1587,7 +1597,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 			// like project notes so a repository mid-rebase cannot put a
 			// megabyte of status into the ledger.
 			dirty := trimAtLine(gitctx.Porcelain(ctx, a.Tools.Root), MaxProjectNotes)
-			a.Engine.SetBaseline(engine.Baseline{Head: head, Dirty: dirty})
+			a.engineDo("baseline", func(st *engine.Store) { st.SetBaseline(engine.Baseline{Head: head, Dirty: dirty}) })
 		}
 	}
 	answer, err := a.Run(ctx, userInput)

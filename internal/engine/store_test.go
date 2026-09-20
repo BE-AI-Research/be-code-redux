@@ -95,7 +95,10 @@ func TestTreeSurvivesReopen(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	s2, err := OpenAt(dir, root, "s2", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	// Resumed: the same work carries on, doing mark and all. (A session that
+	// continues nothing takes that mark back — see
+	// TestAFreshSessionOpensItsOwnTask.)
+	s2, err := OpenAt(dir, root, "s2", true, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +108,64 @@ func TestTreeSurvivesReopen(t *testing.T) {
 	}
 	if tr.Find(id+".1").Status != StatusDoing {
 		t.Fatal("status did not survive")
+	}
+}
+
+// TestAFreshSessionOpensItsOwnTask is I1. OpenAt's own comment said a session
+// id mismatch drops the active node; the code only skipped the verbatim
+// buffers, so a new session filed its evidence under — and retitled — the
+// task the last one left open.
+func TestAFreshSessionOpensItsOwnTask(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	s, _ := OpenAt(dir, root, "s1", false, testLimits())
+	id := s.Plan("fix the parser", []string{"find the bug", "fix and verify"})
+	s.SetStatus(id+".1", StatusDoing, "")
+	s.Observe(Event{Tool: "shell", Args: map[string]any{"command": "go test ./parser"}, Content: "ok\n"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := OpenAt(dir, root, "s2", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := fresh.tree.Doing(); d != nil {
+		t.Fatalf("a fresh session inherited the doing node %s", d.ID)
+	}
+	fresh.StartTask("add a changelog entry")
+	got := fresh.EnsureRoot("add a changelog entry")
+	if got == id {
+		t.Fatalf("the fresh session's request was filed under the previous session's task %s", id)
+	}
+	fresh.Observe(Event{Tool: "shell", Args: map[string]any{"command": "git log"}, Content: "abc\n"})
+	tr := fresh.Tree()
+	if old := tr.Find(id); old.Text != "fix the parser" || old.Status.terminal() {
+		t.Fatalf("the previous task was retitled or closed: %+v", old)
+	}
+	if old := tr.Find(id + ".1"); old.Status != StatusTodo || len(old.Evidence.Raw) != 0 {
+		t.Fatalf("the previous step is %s with %d raw items; it should be todo and untouched", old.Status, len(old.Evidence.Raw))
+	}
+	if d := fresh.tree.Doing(); d == nil || !strings.HasPrefix(d.ID, got+".") && d.ID != got {
+		t.Fatalf("the new evidence is not under the new task %s: %s", got, fresh.TreeText())
+	}
+	// Only one new root, however many of the three entry points run.
+	if n := len(tr.Roots); n != 2 {
+		t.Fatalf("%d roots, want the old task and one new one:\n%s", n, fresh.TreeText())
+	}
+
+	// A resumed session is the same work: it keeps its task and its step.
+	resumed, err := OpenAt(dir, root, "s3", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := resumed.tree.Doing(); d == nil {
+		t.Fatal("a resumed session lost its doing node")
+	}
+	before := len(resumed.Tree().Roots)
+	resumed.StartTask("carry on")
+	resumed.EnsureRoot("carry on")
+	if after := len(resumed.Tree().Roots); after != before {
+		t.Fatalf("a resumed session opened a new task (%d roots, was %d)", after, before)
 	}
 }
 
@@ -178,6 +239,8 @@ func TestWarnsOnMultipleDoingMarks(t *testing.T) {
 	afterA, _ := os.ReadFile(docA)
 	afterB, _ := os.ReadFile(docB)
 
+	// The warning is handed to whoever owns the store (TakeWarnings), not
+	// printed: in a hosted session stderr is a log file nobody opens (I4).
 	var s2 *Store
 	stderr := captureStderr(t, func() {
 		s2, err = OpenAt(dir, root, "s2", false, testLimits())
@@ -185,8 +248,15 @@ func TestWarnsOnMultipleDoingMarks(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(stderr, "warn:") || !strings.Contains(stderr, "001-first-task.md") || !strings.Contains(stderr, "002-second-task.md") {
-		t.Fatalf("no warning naming both documents:\n%s", stderr)
+	if stderr != "" {
+		t.Fatalf("the engine wrote to stderr: %q", stderr)
+	}
+	warned := strings.Join(s2.TakeWarnings(), "\n")
+	if !strings.Contains(warned, "001-first-task.md") || !strings.Contains(warned, "002-second-task.md") {
+		t.Fatalf("no warning naming both documents:\n%s", warned)
+	}
+	if again := s2.TakeWarnings(); len(again) != 0 {
+		t.Fatalf("a warning was delivered twice: %v", again)
 	}
 	// Neither document is touched: no id-repair note, no rewritten status —
 	// the files on disk are exactly what the hand edit left them as.
@@ -411,8 +481,16 @@ func TestTheRedundantReadFooterSurvivesAReopen(t *testing.T) {
 	if !strings.Contains(f, "already read at turn 1") {
 		t.Fatalf("footer lost across the reopen: %q", f)
 	}
-	if fs := filesIn(again); len(fs) != 1 || len(fs[0].Outline) == 0 {
-		t.Fatalf("outline lost across the reopen: %+v", fs)
+	// A fresh session files the second read under a task of its own (I1), so
+	// the file is recorded once per task; every record of it has its outline.
+	fs := filesIn(again)
+	if len(fs) == 0 {
+		t.Fatal("no file record after the reopen")
+	}
+	for _, f := range fs {
+		if len(f.Outline) == 0 {
+			t.Fatalf("outline lost across the reopen: %+v", fs)
+		}
 	}
 }
 

@@ -61,7 +61,10 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 		return
 	}
 	ag.SetEngine(st)
-	registerEngineTools(cfg, reg, st, baselineFunc(st))
+	// The tools reach the store through the agent's fence, never directly: a
+	// store that panics inside a task call is detached with one notice, like
+	// one that panics anywhere else, instead of taking the tool loop down.
+	registerEngineTools(cfg, reg, ag.TaskLedger(), baselineFunc(ag))
 	ag.RefreshSystem()
 }
 
@@ -69,9 +72,6 @@ func attachEngine(cfg *config.Config, reg *tools.Registry, ag *agent.Agent, resu
 // store every time. It keeps no state of its own: RunFull records the
 // porcelain text as each task starts, and anything cached here would pair a
 // later task's head with the first task's dirty list.
-func baselineFunc(st *engine.Store) tools.BaselineFunc {
-	return func() (string, string) {
-		b := st.Baseline()
-		return b.Head, b.Dirty
-	}
+func baselineFunc(ag *agent.Agent) tools.BaselineFunc {
+	return ag.EngineBaseline
 }

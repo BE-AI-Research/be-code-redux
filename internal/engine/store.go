@@ -106,16 +106,17 @@ type Digest struct {
 // state is the dotdir half of the store: everything that is not the user's
 // to read, and all of it disposable.
 type state struct {
-	// Active is the doing node's id, for a human reading state.json. It is
-	// never read back: the document's own [>] mark is the truth, because
-	// the user may have moved it there by hand.
-	Active    string               `json:"active,omitempty"`
-	Turn      int                  `json:"turn"`
-	Raw       map[string][]RawItem `json:"raw,omitempty"`
-	Docs      map[string]string    `json:"docs,omitempty"`
-	Session   string               `json:"session,omitempty"`
-	Baseline  Baseline             `json:"baseline,omitempty"`
-	NotesHash string               `json:"notes_hash,omitempty"`
+	// Active is the doing node's id as the engine last wrote it. The
+	// document's own [>] mark is the truth about what is doing, because the
+	// user may have moved it by hand; this is read back for one thing only —
+	// a fresh session uses it to tell the engine's own mark, which it takes
+	// back, from one the user placed, which it leaves (startFresh).
+	Active   string               `json:"active,omitempty"`
+	Turn     int                  `json:"turn"`
+	Raw      map[string][]RawItem `json:"raw,omitempty"`
+	Docs     map[string]string    `json:"docs,omitempty"`
+	Session  string               `json:"session,omitempty"`
+	Baseline Baseline             `json:"baseline,omitempty"`
 	// Files is what a Markdown document has no business carrying: the
 	// content hash and the outline of each file the record names. Without
 	// it the cross-session redundant-read check cannot fire at all (it
@@ -157,6 +158,12 @@ func sameRanges(a, b []Range) bool {
 // every getter hands back a deep copy, so no caller ever shares storage
 // with the live tree.
 type Store struct {
+	// flushMu serialises whole flushes and reloads. Flush releases mu for its
+	// file writes, so without this two concurrent flushes could finish in
+	// either order and leave the older snapshot on disk. It is always taken
+	// before mu, never while holding it.
+	flushMu sync.Mutex
+
 	mu   sync.Mutex
 	dir  string // ~/.be-code/engine/<key>
 	root string // the workspace
@@ -166,8 +173,12 @@ type Store struct {
 	rec  recorder
 
 	// docs maps a document's file name to the sha256 of the content the
-	// engine last wrote, so an edit made outside is recognisable.
+	// engine last saw on disk — loaded, written or merged — so an edit made
+	// outside is recognisable. base is that same content as a tree: the
+	// common ancestor merge.go needs to tell the user's edit from the
+	// engine's own change.
 	docs map[string]string
+	base map[string]*Node
 	// files is the document each root is written to, by root position.
 	files []string
 	// extra keeps the lines a parse did not recognise, by root position, so
@@ -185,6 +196,21 @@ type Store struct {
 
 	lookups []Lookup // newest last; in memory only
 	cached  map[string]string
+
+	// noWorkspace is set when .be-code or .be-code/tasks is a symbolic link:
+	// the engine then reads and writes nothing under the workspace at all,
+	// since every path it would touch resolves somewhere it was never given.
+	noWorkspace bool
+	// freshRoot is set on a session that is not a continuation of the one
+	// that wrote the state: its first request opens a task of its own rather
+	// than carrying on inside whatever the last session left open.
+	freshRoot bool
+
+	// warnings are things the human must hear that the engine has no way to
+	// say itself: it has no UI, and its stderr is a log file in a hosted
+	// session. Whoever owns the store drains them (TakeWarnings).
+	warnMu   sync.Mutex
+	warnings []string
 
 	dirty bool
 	// mutSeq counts state changes. Flush releases the lock for its file
@@ -231,8 +257,8 @@ func Open(root, sessionID string, resumed bool, lim Limits) (*Store, error) {
 // workspace documents, which always win over the dotdir: they are the
 // user's file and they may have been edited since we wrote them. A session
 // id that differs from the stored one on a non-resume start drops the
-// verbatim buffers and the active node — not the tree, which is the
-// workspace's record and not the session's.
+// verbatim buffers and the active node (startFresh) — not the tree, which is
+// the workspace's record and not the session's.
 func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -245,15 +271,13 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 		s.notes = string(b)
 	}
 	s.turn, s.baseline = st.Turn, st.Baseline
-	for name, h := range st.Docs {
-		s.docs[name] = h
-	}
+	s.checkWorkspace()
 	s.loadDocs()
 	s.restoreFileMemos(st.Files)
 	if resumed || st.Session == sessionID {
 		s.restoreRaw(st.Raw)
 	} else {
-		s.markDirtyLocked()
+		s.startFresh(st.Active)
 	}
 
 	// A ledger.json present is the whole test for "not migrated yet": the
@@ -268,7 +292,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 				// files stay aside, so the lift is on disk and the next
 				// open will neither duplicate it nor repeat it. Only the
 				// dotdir state was lost, which this session can rewrite.
-				fmt.Fprintf(os.Stderr, "warn: engine: the working memory was migrated but its state could not be saved (%v); the task documents are written and the 0.10.0 files are set aside\n", unsaved.err)
+				s.warnf("the working memory was migrated but its state could not be saved (%v); the task documents are written and the 0.10.0 files are set aside", unsaved.err)
 				return s, nil
 			}
 			var retry retryableError
@@ -276,23 +300,80 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 				// The store was put back exactly as it was, so there is
 				// nothing half-converted to rename aside and the next open
 				// simply tries again.
-				fmt.Fprintf(os.Stderr, "warn: engine: could not migrate the working memory (%v); the 0.10.0 store is untouched and will be tried again\n", retry.err)
+				s.warnf("could not migrate the working memory (%v); the 0.10.0 store is untouched and will be tried again", retry.err)
 				return s, nil
 			}
 			aside := dir + ".broken-" + stamp()
 			if rerr := os.Rename(dir, aside); rerr != nil {
 				return nil, err
 			}
-			fmt.Fprintf(os.Stderr, "warn: engine: could not migrate the working memory (%v); starting fresh, the old store is at %s\n", err, aside)
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				return nil, err
 			}
 			fresh := newStore(dir, root, sessionID, lim)
+			fresh.warnf("could not migrate the working memory (%v); starting fresh, the old store is at %s", err, aside)
+			fresh.checkWorkspace()
 			fresh.loadDocs()
 			return fresh, nil
 		}
 	}
 	return s, nil
+}
+
+// startFresh is what a session that continues nothing does to the tree it
+// inherits: the step the last session left doing goes back to todo, and the
+// first request opens a task of its own. Without it a fresh session filed
+// its evidence under, and retitled, whatever task the previous one happened
+// to leave open — a different piece of work entirely. The old task is not
+// closed: it is unfinished, and saying otherwise would be a guess.
+//
+// Only the engine's *own* mark is taken back: active is the doing node the
+// last flush recorded in state.json. A [>] the user has since moved to
+// another step by hand is their intent (spec §5.2) — it stays, and the
+// session carries on there instead of opening a task of its own.
+func (s *Store) startFresh(active string) {
+	if n := s.tree.Find(active); active != "" && n != nil && n.Status == StatusDoing {
+		n.Status = StatusTodo
+	}
+	s.freshRoot = s.tree.Doing() == nil
+	s.markDirtyLocked()
+}
+
+// checkWorkspace refuses a symlinked .be-code or .be-code/tasks. Every path
+// the engine writes, rewrites or renames is built under those two names, so a
+// link there sends unapproved writes wherever it points — outside the
+// workspace the user confined the session to. Lstat, not Stat: the question
+// is what the name is, not what it leads to.
+func (s *Store) checkWorkspace() {
+	for _, p := range []string{filepath.Join(s.root, workspaceDir), s.tasksDir()} {
+		if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			s.noWorkspace = true
+			s.warnf("%s is a symbolic link; the task record will not be read from or written to it, and working memory lasts only for this session", p)
+			return
+		}
+	}
+}
+
+// warnf records something the human has to be told.
+func (s *Store) warnf(format string, args ...any) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	if len(s.warnings) < 64 {
+		s.warnings = append(s.warnings, fmt.Sprintf(format, args...))
+	}
+}
+
+// TakeWarnings returns what the engine needs the human to hear and forgets
+// it. The engine cannot say any of it itself: in a hosted session its stderr
+// is a log file, and under a TUI it is wiped by the alternate screen — which
+// is where a quarantined document's warning used to go. The agent drains
+// this into its notice path; cmd drains it at startup.
+func (s *Store) TakeWarnings() []string {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	out := s.warnings
+	s.warnings = nil
+	return out
 }
 
 func newStore(dir, root, sessionID string, lim Limits) *Store {
@@ -301,6 +382,7 @@ func newStore(dir, root, sessionID string, lim Limits) *Store {
 		root:     root,
 		lim:      lim.withDefaults(),
 		docs:     map[string]string{},
+		base:     map[string]*Node{},
 		reserved: map[string]bool{},
 		session:  sessionID,
 	}
@@ -318,6 +400,9 @@ func stamp() string { return time.Now().Format("20060102-150405") }
 // task: the alternative — half-parsing and rewriting — would destroy the
 // user's work to save our own.
 func (s *Store) loadDocs() {
+	if s.noWorkspace {
+		return
+	}
 	dir := s.tasksDir()
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -326,7 +411,7 @@ func (s *Store) loadDocs() {
 	var names []string
 	for _, e := range ents {
 		n := e.Name()
-		if e.IsDir() || !strings.HasSuffix(n, ".md") || n == "README.md" || strings.Contains(n, ".broken-") {
+		if e.IsDir() || !isTaskDoc(n) {
 			continue
 		}
 		names = append(names, n)
@@ -343,7 +428,7 @@ func (s *Store) loadDocs() {
 			os.Rename(filepath.Join(dir, name), filepath.Join(dir, aside))
 			// Losing a task must never be silent: the model will not
 			// mention what it cannot see, so the user has to hear it here.
-			fmt.Fprintf(os.Stderr, "warn: engine: %s could not be read (%v); moved aside as %s and its task is not loaded\n", name, perr, aside)
+			s.warnf("%s could not be read (%v); moved aside as %s and its task is not loaded", name, perr, aside)
 			delete(s.docs, name)
 			s.markDirtyLocked()
 			continue
@@ -357,6 +442,9 @@ func (s *Store) loadDocs() {
 			continue
 		}
 		s.docs[name] = hashBytes(b)
+		// base is what the disk holds, before any id repair: it is compared
+		// by text and by evidence line, never by root id.
+		s.base[name] = stripRaw(copyNodes(tr.Roots[:1]))[0]
 		for _, r := range tr.Roots {
 			s.tree.Roots = append(s.tree.Roots, r)
 			s.files = append(s.files, name)
@@ -364,8 +452,69 @@ func (s *Store) loadDocs() {
 			extra = nil // only the first root of a document owns its prose
 		}
 	}
+	s.dropSplitDuplicates()
 	s.repairRootIDs()
 	s.warnMultipleDoing()
+}
+
+// dropSplitDuplicates undoes the one thing a failure inside Flush's split can
+// leave behind. A task added by hand to another task's document is written to
+// a file of its own *before* its source document is rewritten without it
+// (ruling T3-g), because the other order loses the task outright; a process
+// that dies between the two leaves the task in both files, and loading both
+// would show it twice. The copy still inside the source document is dropped
+// here — only when it is the same in every respect, so two tasks someone
+// really did give the same title are never folded together — and the store
+// is marked dirty so the source document is finally rewritten without it.
+func (s *Store) dropSplitDuplicates() {
+	firstOf := map[string]int{}
+	for i, name := range s.files {
+		if _, ok := firstOf[name]; !ok {
+			firstOf[name] = i
+		}
+	}
+	for i := len(s.tree.Roots) - 1; i >= 0; i-- {
+		if firstOf[s.files[i]] == i {
+			continue // the root its document is named for
+		}
+		for j, other := range s.tree.Roots {
+			if j == i || s.files[j] == s.files[i] || firstOf[s.files[j]] != j {
+				continue
+			}
+			if sameSubtree(s.tree.Roots[i], other) {
+				s.tree.Roots = append(s.tree.Roots[:i], s.tree.Roots[i+1:]...)
+				s.files = append(s.files[:i], s.files[i+1:]...)
+				s.extra = append(s.extra[:i], s.extra[i+1:]...)
+				s.markDirtyLocked()
+				break
+			}
+		}
+	}
+}
+
+// sameSubtree reports whether two nodes record the same thing: text, status,
+// reason and evidence as a document prints them, all the way down. Ids are
+// not compared — they are positional, and the two copies sit in different
+// places.
+func sameSubtree(a, b *Node) bool {
+	if a.Text != b.Text || a.Status != b.Status || a.Reason != b.Reason || len(a.Children) != len(b.Children) {
+		return false
+	}
+	la, lb := evidenceLines(a.Evidence), evidenceLines(b.Evidence)
+	if len(la) != len(lb) {
+		return false
+	}
+	for i := range la {
+		if la[i] != lb[i] {
+			return false
+		}
+	}
+	for i := range a.Children {
+		if !sameSubtree(a.Children[i], b.Children[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // warnMultipleDoing tells the human, once per open, when more than one step
@@ -403,7 +552,7 @@ func (s *Store) warnMultipleDoing() {
 	if total < 2 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warn: engine: %d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last\n", total, strings.Join(docs, ", "))
+	s.warnf("%d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last", total, strings.Join(docs, ", "))
 }
 
 // repairRootIDs makes every root's id its position in the tree, noting the
@@ -534,15 +683,18 @@ func (s *Store) markDirtyLocked() {
 var tmpSeq uint64
 
 // flushError is what a failed Flush returns, carrying the one fact a caller
-// cannot recover afterwards: how many task documents had already reached the
+// cannot recover afterwards: which task documents had already reached the
 // workspace. The migration needs it (ruling T3-f) — once *its own* document
 // is written the lift has happened and the legacy files must stay aside — and
-// a count rather than a flag is what lets it tell its own document apart from
-// an older task's, since the documents are written in root order. Every other
-// caller sees an ordinary error, since Error and Unwrap defer to the cause.
+// it has to be the set of names, not a count. A count only identifies a
+// document while the documents are written in root order, and they no longer
+// are: a root split out of a hand-edited document is written before the
+// document it came from (ruling T3-g, corrected), and roots that get no
+// document at all are skipped. Every other caller sees an ordinary error,
+// since Error and Unwrap defer to the cause.
 type flushError struct {
-	err    error
-	wroteN int
+	err   error
+	wrote map[string]bool
 }
 
 func (e flushError) Error() string { return e.err.Error() }
@@ -661,31 +813,57 @@ func (s *Store) HasTaskDocuments() bool {
 	return len(s.docs) > 0
 }
 
-// Flush writes every task document, the dotdir state and the durable notes
-// when anything changed. The whole snapshot is taken under the lock; the
-// file writes happen with it released, so a slow disk never blocks a tool
-// call. dirty is cleared afterwards only if every write succeeded and
-// nothing changed in the meantime.
+// Flush writes every task document that changed, the dotdir state and the
+// durable notes. The whole snapshot is taken under the lock; the file writes
+// happen with it released, so a slow disk never blocks a tool call. dirty is
+// cleared afterwards only if every write succeeded and nothing changed in the
+// meantime.
+//
+// It never replaces content it has not seen. Before anything is rendered the
+// documents are read back and whatever changed on disk is merged into the
+// tree (reconcile, merge.go); and each write looks once more at the file it
+// is about to replace (writeDoc), copying it aside if it is still not what
+// the engine last saw there.
 func (s *Store) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
-	if !s.dirty {
-		s.mu.Unlock()
+	dirty := s.dirty
+	s.mu.Unlock()
+	if !dirty {
 		return nil
 	}
+	s.reconcile()
+
+	s.mu.Lock()
 	seq := s.mutSeq
 	dir, root := s.dir, s.root
 
-	type docWrite struct{ name, body string }
+	type docWrite struct {
+		name, body, known string
+		base              *Node
+		split             bool
+	}
 	names := s.docNamesLocked()
-	writes := make([]docWrite, 0, len(names))
+	var writes []docWrite
 	docs := map[string]string{}
 	for i, r := range s.tree.Roots {
+		if s.noWorkspace {
+			break
+		}
 		if spentUnfiled(r) {
 			continue
 		}
 		body := RenderDocWithExtra(docNumber(names[i], i), r.Text, r, s.extraAt(i))
-		writes = append(writes, docWrite{name: names[i], body: body})
 		docs[names[i]] = hashBytes([]byte(body))
+		writes = append(writes, docWrite{
+			name: names[i], body: body, known: s.docs[names[i]],
+			base: stripRaw(copyNodes([]*Node{r}))[0],
+			// Split out of a document the user added a second task to: it
+			// has a source file, and that file is not the one it is going to.
+			split: i < len(s.files) && s.files[i] != "" && s.files[i] != names[i],
+		})
 	}
 	stateBytes, err := json.Marshal(s.stateLocked(docs))
 	if err != nil {
@@ -695,9 +873,30 @@ func (s *Store) Flush() error {
 	notes := []byte(s.notes)
 	s.mu.Unlock()
 
-	// wroteN counts documents written, in root order, so a caller can ask
-	// whether one particular root's document reached disk.
-	wroteN := 0
+	// Ruling T3-g, corrected. A root split out of a document is written
+	// before the document it came from is rewritten without it: the other way
+	// round, a failure between the two erases the hand-added task from the
+	// only file that held it.
+	sort.SliceStable(writes, func(i, j int) bool { return writes[i].split && !writes[j].split })
+
+	wrote := map[string]bool{}
+	written := map[string]docWrite{}
+	// Whatever reached the disk is remembered as seen, on the failure paths
+	// too: a retry must recognise this flush's own documents, or it would
+	// find "content it has not seen" under its own names and set copies of
+	// its own work aside.
+	remember := func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for name, w := range written {
+			s.docs[name] = hashBytes([]byte(w.body))
+			s.base[name] = w.base
+		}
+	}
+	fail := func(err error) error {
+		remember()
+		return flushError{err: err, wrote: wrote}
+	}
 	if len(writes) > 0 {
 		tasks := filepath.Join(root, workspaceDir, "tasks")
 		if err := os.MkdirAll(tasks, 0o755); err != nil {
@@ -705,28 +904,72 @@ func (s *Store) Flush() error {
 		}
 		ensureReadme(tasks)
 		for _, w := range writes {
-			if err := writeAtomic(filepath.Join(tasks, w.name), []byte(w.body), 0o644); err != nil {
-				return flushError{err: err, wroteN: wroteN}
+			if w.known == hashBytes([]byte(w.body)) {
+				// What is there is already this. Not writing it is what keeps
+				// a request that changed one task from touching every
+				// document in the project.
+				wrote[w.name] = true
+				continue
 			}
-			wroteN++
+			if err := s.writeDoc(tasks, w.name, []byte(w.body), w.known); err != nil {
+				return fail(err)
+			}
+			wrote[w.name] = true
+			written[w.name] = w
 		}
 		ensureGitignore(root)
 	}
 	if err := writeAtomic(filepath.Join(dir, "state.json"), stateBytes, 0o600); err != nil {
-		return flushError{err: err, wroteN: wroteN}
+		return fail(err)
 	}
 	if err := writeAtomic(filepath.Join(dir, "notes.md"), notes, 0o600); err != nil {
-		return flushError{err: err, wroteN: wroteN}
+		return fail(err)
 	}
 
+	remember()
 	s.mu.Lock()
-	s.docs = docs
-	s.files = names
+	if !s.noWorkspace {
+		for i, name := range names {
+			if i < len(s.tree.Roots) {
+				for len(s.files) <= i {
+					s.files = append(s.files, "")
+				}
+				s.files[i] = name
+			}
+		}
+	}
 	if s.mutSeq == seq {
 		s.dirty = false
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// writeDoc replaces one task document, but only over content the engine has
+// seen. known is the hash it last saw there ("" for a name it has never
+// written). reconcile has already merged every document that parsed, so what
+// reaches here as a mismatch is what no merge could take: a document the user
+// broke or emptied, a file that appeared under a name about to be used, or an
+// edit that landed in the instant since. The on-disk version is copied aside
+// as NNN-<slug>.edited-<stamp>.md before the record is written, so neither
+// side is lost, and the human is told.
+func (s *Store) writeDoc(tasks, name string, body []byte, known string) error {
+	path := filepath.Join(tasks, name)
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link; not writing through it", path)
+	}
+	if cur, err := os.ReadFile(path); err == nil && hashBytes(cur) != known && hashBytes(cur) != hashBytes(body) {
+		aside, err := freeName(filepath.Join(tasks, strings.TrimSuffix(name, ".md")+editedSuffix+stamp()))
+		if err != nil {
+			return err
+		}
+		aside += ".md"
+		if err := writeAtomic(aside, cur, 0o644); err != nil {
+			return err
+		}
+		s.warnf("%s changed on disk in a way that could not be merged; that version is kept as %s and the task record was written over the original", name, filepath.Base(aside))
+	}
+	return writeAtomic(path, body, 0o644)
 }
 
 // docNamesLocked decides which file each root is written to. Two rules, and
@@ -813,12 +1056,11 @@ func (s *Store) extraAt(i int) []string {
 // stateLocked snapshots the dotdir half. Callers hold s.mu.
 func (s *Store) stateLocked(docs map[string]string) state {
 	st := state{
-		Turn:      s.turn,
-		Docs:      docs,
-		Session:   s.session,
-		Baseline:  s.baseline,
-		NotesHash: hashBytes([]byte(s.notes)),
-		Files:     s.fileMemosLocked(),
+		Turn:     s.turn,
+		Docs:     docs,
+		Session:  s.session,
+		Baseline: s.baseline,
+		Files:    s.fileMemosLocked(),
 	}
 	if d := s.tree.Doing(); d != nil {
 		st.Active = d.ID
@@ -932,12 +1174,13 @@ func (s *Store) Baseline() Baseline {
 // that deletes files in someone's project on one keystroke is not a reset
 // (ruling T3-a). Nothing here touches the durable notes.
 func (s *Store) ClearSession() {
+	snap := s.rawSnaps()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	s.tree.Walk(func(n *Node, _ int) {
 		if len(n.Evidence.Raw) > 0 {
-			s.rec.distill(n)
+			s.rec.distillWith(n, snap)
 		}
 		if n.Status.terminal() {
 			return
@@ -955,9 +1198,11 @@ func (s *Store) ClearSession() {
 // Plan records a task and its steps and returns the new root's id. A node
 // still doing is distilled first, so its evidence is never left raw.
 func (s *Store) Plan(text string, steps []string) string {
+	snap := s.rawSnaps()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.closeDoingLocked()
+	s.closeDoingLocked(snap)
+	s.freshRoot = false // a plan is a task of this session's own
 	n := s.tree.Add("", firstLine(text, 200))
 	for _, st := range steps {
 		if strings.TrimSpace(st) != "" {
@@ -986,6 +1231,7 @@ func (s *Store) Add(parent, text string) (string, error) {
 // SetStatus moves one node. Leaving doing, or reaching a terminal status,
 // distills that node's verbatim buffer into its durable record.
 func (s *Store) SetStatus(id string, status Status, reason string) error {
+	snap := s.rawSnaps()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.tree.Find(id)
@@ -999,12 +1245,12 @@ func (s *Store) SetStatus(id string, status Status, reason string) error {
 		// "previous work", it is this node's own first minutes.
 		s.adoptUnfiledLocked(n)
 		if prev := s.tree.Doing(); prev != nil && prev != n {
-			s.rec.distill(prev)
+			s.rec.distillWith(prev, snap)
 		}
 	}
 	s.tree.SetStatus(id, status, reason)
 	if status.terminal() {
-		s.rec.distill(n)
+		s.rec.distillWith(n, snap)
 	}
 	s.markDirtyLocked()
 	return nil
@@ -1076,9 +1322,10 @@ func (s *Store) Note(id, text, file string, decision, keep bool) error {
 func (s *Store) EnsureRoot(text string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r := s.activeRootLocked(); r != nil {
+	if r := s.activeRootLocked(); r != nil && !s.freshRoot {
 		return r.ID
 	}
+	s.freshRoot = false
 	n := s.tree.Add("", firstLine(text, 200))
 	s.markDirtyLocked()
 	return n.ID
@@ -1124,6 +1371,15 @@ func (s *Store) ShowText(id string) string {
 		return "no node " + id
 	}
 	renderNode(&b, n, 0)
+	// A named node also prints its verbatim buffer, whole. The prompt block
+	// is budgeted and shows only the newest of it (ruling F-1); this is the
+	// way back to the rest, which is why the block names this command.
+	sub := Tree{Roots: []*Node{n}}
+	sub.Walk(func(m *Node, _ int) {
+		if raw := rawBlock(m.Evidence.Raw, m.Evidence.Dropped); raw != "" {
+			fmt.Fprintf(&b, "\n%s, verbatim — %s\n", m.ID, raw)
+		}
+	})
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -1147,7 +1403,10 @@ func (s *Store) activeNodeLocked() *Node {
 		return d
 	}
 	host := s.activeRootLocked()
-	if host == nil {
+	if host == nil || s.freshRoot {
+		// No task open — or only one a previous session left, which is not
+		// this session's to file evidence under.
+		s.freshRoot = false
 		n := s.tree.Add("", unfiledText)
 		n.Status = StatusDoing
 		s.markDirtyLocked()
@@ -1208,7 +1467,7 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 			s.tree.Remove(u)
 		} else {
 			u.Status = StatusDropped
-			u.Reason = "adopted by " + n.ID
+			u.Reason = adoptedBy + n.ID
 		}
 		s.markDirtyLocked()
 	}
@@ -1227,9 +1486,18 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 //
 // Only a childless one: anything filed under it is real work, and a node
 // that still has children is a task like any other.
+//
+// And only one adoption really emptied (ruling T5-d): dropped, with the
+// reason adoption writes. Text and childlessness alone would also match a
+// real task someone titled "unfiled", which would then silently get no
+// document and no report, and a root-level unfiled node still doing.
 func spentUnfiled(n *Node) bool {
-	return n != nil && n.Text == unfiledText && len(n.Children) == 0
+	return n != nil && n.Text == unfiledText && len(n.Children) == 0 &&
+		n.Status == StatusDropped && strings.HasPrefix(n.Reason, adoptedBy)
 }
+
+// adoptedBy starts the reason adoption gives the node it emptied.
+const adoptedBy = "adopted by "
 
 // isRootLocked reports whether n is a top-level task. A root owns a
 // document, and its position owns that document's place in s.files.
@@ -1283,11 +1551,37 @@ func mergeEvidence(dst *Evidence, src Evidence) {
 	dst.Dropped += src.Dropped
 }
 
-func (s *Store) closeDoingLocked() {
+func (s *Store) closeDoingLocked(snap snapFunc) {
 	if prev := s.tree.Doing(); prev != nil {
-		s.rec.distill(prev)
+		s.rec.distillWith(prev, snap)
 		prev.Status = StatusTodo
 	}
+}
+
+// rawSnaps reads every workspace file a verbatim buffer names, before the
+// caller takes the lock, and returns them as the lookup distillation uses.
+// Distilling under the mutex used to read each of those files from disk with
+// every other engine call — the prompt's Render above all — parked behind it.
+// A file that is not in the map (a call recorded between this snapshot and
+// the lock) reads as unknown, which merges its ranges and leaves its hash
+// alone: recordWith already merged that call from its whole result.
+func (s *Store) rawSnaps() snapFunc {
+	s.mu.Lock()
+	paths := map[string]bool{}
+	s.tree.Walk(func(n *Node, _ int) {
+		for _, it := range n.Evidence.Raw {
+			if it.Path != "" {
+				paths[it.Path] = true
+			}
+		}
+	})
+	root := s.root
+	s.mu.Unlock()
+	snaps := make(map[string]fileSnap, len(paths))
+	for p := range paths {
+		snaps[p] = snapFile(root, p)
+	}
+	return func(rel string) fileSnap { return snaps[rel] }
 }
 
 // fileRefFor finds or creates n's record of one file.
@@ -1363,7 +1657,7 @@ func (s *Store) StartTask(text string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r := s.activeRootLocked(); r != nil {
+	if r := s.activeRootLocked(); r != nil && !s.freshRoot {
 		for _, c := range r.Children {
 			if c.Text == unfiledText {
 				continue
@@ -1378,6 +1672,7 @@ func (s *Store) StartTask(text string) {
 		}
 		return
 	}
+	s.freshRoot = false
 	s.tree.Add("", line)
 	s.markDirtyLocked()
 }

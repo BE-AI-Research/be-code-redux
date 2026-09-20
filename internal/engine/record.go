@@ -106,6 +106,15 @@ func (r *recorder) recordWith(n *Node, ev Event, turn int, snap fileSnap) string
 // capNode drops the oldest raw items until the node is under its byte cap,
 // counting what it dropped. A record that quietly loses half its evidence
 // while still reading as complete is worse than one that admits the gap.
+//
+// An item is distilled before it goes (ruling F-1). What the cap takes is
+// the verbatim output, which is large and transient; the fact that a
+// command ran and how it came out is neither, and losing it here meant a
+// long-running node — above all the unfiled one a model that never calls
+// task works under for the whole session — reported only its last few
+// calls when it finally closed. The file half needs nothing: recordWith
+// merged it from the whole result when the call was recorded, so no I/O
+// happens here, which matters because the Store calls this under its lock.
 func (r *recorder) capNode(n *Node) {
 	total := 0
 	for _, it := range n.Evidence.Raw {
@@ -117,6 +126,7 @@ func (r *recorder) capNode(n *Node) {
 	// over-budget is safer than a node with none at all.
 	for total > r.lim.NodeCap && len(n.Evidence.Raw) > 1 {
 		drop := n.Evidence.Raw[0]
+		r.distillItem(n, drop, nil)
 		total -= len(drop.Out) + len(drop.Args)
 		n.Evidence.Raw = n.Evidence.Raw[1:]
 		n.Evidence.Dropped++
@@ -173,41 +183,61 @@ func (r *recorder) readFooter(n *Node, rel string, want Range, snap fileSnap) st
 	return ""
 }
 
+// snapFunc reads one workspace file for distillation. The Store hands in a
+// lookup over snapshots it took before locking; standing alone, the
+// recorder reads the disk.
+type snapFunc func(rel string) fileSnap
+
 // distill turns the raw buffer into the durable record and empties it. It
 // reads only the buffer, never the transcript, so it does not depend on the
 // transcript still existing — which after a compaction it does not.
 func (r *recorder) distill(n *Node) {
+	r.distillWith(n, func(rel string) fileSnap { return snapFile(r.root, rel) })
+}
+
+// distillWith is distill over file snapshots the caller already has, so the
+// Store never reads a file while it holds its mutex.
+func (r *recorder) distillWith(n *Node, snap snapFunc) {
 	if n == nil {
 		return
 	}
 	for _, it := range n.Evidence.Raw {
-		switch it.Tool {
-		case "read_file", "write_file", "edit_file":
-			// Idempotent with the merge recordWith already did, so a node
-			// distilled twice — or one whose store merged as it went — is
-			// the same record either way.
-			r.mergeFile(n, it, snapFile(r.root, it.Path))
-		case "shell", "process":
-			n.Evidence.Cmds = append(n.Evidence.Cmds, CmdRef{
-				Cmd: it.Args, OK: it.OK, Excerpt: excerpt(it.Out, 240),
-			})
-		case "search", "lookup", "history":
-			n.Evidence.Lookups = append(n.Evidence.Lookups, LookupRef{
-				Tool: it.Tool, Query: it.Args, Hits: parseHits(it.Out),
-			})
-		}
-		if !it.OK {
-			line := firstOutputLine(it.Out)
-			if line == "" {
-				line = "(no output)"
-			}
-			// Spec 4.2: an error names the command that produced it.
-			// Errors stays []string (later tasks consume that shape), so
-			// the command and the line share one entry.
-			n.Evidence.Errors = append(n.Evidence.Errors, it.Args+": "+line)
-		}
+		r.distillItem(n, it, snap)
 	}
 	n.Evidence.Raw = nil
+}
+
+// distillItem folds one raw item into the node's durable record. A nil snap
+// skips the file half, for a caller that knows recordWith has already merged
+// it (capNode).
+func (r *recorder) distillItem(n *Node, it RawItem, snap snapFunc) {
+	switch it.Tool {
+	case "read_file", "write_file", "edit_file":
+		// Idempotent with the merge recordWith already did, so a node
+		// distilled twice — or one whose store merged as it went — is
+		// the same record either way.
+		if snap != nil {
+			r.mergeFile(n, it, snap(it.Path))
+		}
+	case "shell", "process":
+		n.Evidence.Cmds = append(n.Evidence.Cmds, CmdRef{
+			Cmd: it.Args, OK: it.OK, Excerpt: excerpt(it.Out, 240),
+		})
+	case "search", "lookup", "history":
+		n.Evidence.Lookups = append(n.Evidence.Lookups, LookupRef{
+			Tool: it.Tool, Query: it.Args, Hits: parseHits(it.Out),
+		})
+	}
+	if !it.OK {
+		line := firstOutputLine(it.Out)
+		if line == "" {
+			line = "(no output)"
+		}
+		// Spec 4.2: an error names the command that produced it.
+		// Errors stays []string (later tasks consume that shape), so
+		// the command and the line share one entry.
+		n.Evidence.Errors = append(n.Evidence.Errors, it.Args+": "+line)
+	}
 }
 
 // mergeFile folds one read/write/edit raw item into the node's FileRef
@@ -398,5 +428,5 @@ func excerpt(s string, n int) string {
 			cut = cut[:len(cut)-1]
 		}
 	}
-	return cut + "\n… (truncated)"
+	return cut + truncatedNote
 }
