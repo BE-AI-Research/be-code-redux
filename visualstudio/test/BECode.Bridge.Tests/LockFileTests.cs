@@ -1,0 +1,156 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Threading.Tasks;
+using BECode.Bridge;
+using Xunit;
+
+namespace BECode.Bridge.Tests
+{
+    // Every test here uses a fresh temp directory as "home" — LockFile must
+    // never touch the real ~/.be-code, which is exactly why LockFile takes
+    // home as a parameter.
+    public class LockFileTests : IDisposable
+    {
+        private readonly string _home;
+
+        public LockFileTests()
+        {
+            _home = Directory.CreateTempSubdirectory("becode-bridge-lockfile-tests-").FullName;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                Directory.Delete(_home, recursive: true);
+            }
+            catch
+            {
+                // best-effort cleanup
+            }
+        }
+
+        private static LockInfo SampleInfo(int pid) => new LockInfo(
+            Pid: pid,
+            Port: 54321,
+            Token: LockFile.NewToken(),
+            WorkspaceFolders: new List<string> { "/workspace/one", "/workspace/two" },
+            IdeName: "visualstudio",
+            Version: "1.0.0");
+
+        [Fact]
+        public async Task WrittenFileHasExactlyTheSixExpectedKeys()
+        {
+            var info = SampleInfo(4242);
+
+            await LockFile.WriteAsync(_home, info);
+
+            var path = LockFile.PathFor(_home, info.Pid);
+            var json = await File.ReadAllTextAsync(path);
+            using var doc = JsonDocument.Parse(json);
+
+            var keys = doc.RootElement.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+            var expected = new[] { "ideName", "pid", "port", "token", "version", "workspaceFolders" };
+            Assert.Equal(expected, keys);
+
+            Assert.Equal(info.Pid, doc.RootElement.GetProperty("pid").GetInt32());
+            Assert.Equal(info.Port, doc.RootElement.GetProperty("port").GetInt32());
+            Assert.Equal(info.Token, doc.RootElement.GetProperty("token").GetString());
+            Assert.Equal(info.IdeName, doc.RootElement.GetProperty("ideName").GetString());
+            Assert.Equal(info.Version, doc.RootElement.GetProperty("version").GetString());
+            var folders = doc.RootElement.GetProperty("workspaceFolders").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Equal(info.WorkspaceFolders, folders);
+        }
+
+        [Fact]
+        public async Task PathForMatchesGoSideLayout()
+        {
+            var expected = Path.Combine(_home, ".be-code", "ide", "777.json");
+            Assert.Equal(expected, LockFile.PathFor(_home, 777));
+        }
+
+        [Fact]
+        public async Task SecondWriteReplacesAtomicallyAndLeavesNoTempFile()
+        {
+            var pid = 9001;
+            var first = new LockInfo(pid, 1111, LockFile.NewToken(), new List<string> { "/a" }, "visualstudio", "1.0.0");
+            var second = new LockInfo(pid, 2222, LockFile.NewToken(), new List<string> { "/b" }, "visualstudio", "1.0.1");
+
+            await LockFile.WriteAsync(_home, first);
+            await LockFile.WriteAsync(_home, second);
+
+            var path = LockFile.PathFor(_home, pid);
+            var json = await File.ReadAllTextAsync(path);
+            using var doc = JsonDocument.Parse(json);
+            Assert.Equal(second.Port, doc.RootElement.GetProperty("port").GetInt32());
+            Assert.Equal(second.Token, doc.RootElement.GetProperty("token").GetString());
+
+            var dir = Path.GetDirectoryName(path)!;
+            var allFiles = Directory.GetFiles(dir);
+            Assert.Single(allFiles);
+            Assert.Equal(path, allFiles[0]);
+        }
+
+        [Fact]
+        public void RemoveOfAMissingFileDoesNotThrow()
+        {
+            // No lock was ever written for this pid, and the ide directory
+            // itself does not exist yet.
+            var exception = Record.Exception(() => LockFile.Remove(_home, 123456));
+            Assert.Null(exception);
+        }
+
+        [Fact]
+        public async Task RemoveDeletesAnExistingLock()
+        {
+            var info = SampleInfo(555);
+            await LockFile.WriteAsync(_home, info);
+            var path = LockFile.PathFor(_home, info.Pid);
+            Assert.True(File.Exists(path));
+
+            LockFile.Remove(_home, info.Pid);
+
+            Assert.False(File.Exists(path));
+        }
+
+        [Fact]
+        public void NewTokenIsSixtyFourLowerCaseHexCharacters()
+        {
+            var token = LockFile.NewToken();
+
+            Assert.Equal(64, token.Length);
+            Assert.Matches("^[0-9a-f]{64}$", token);
+        }
+
+        [Fact]
+        public void TwoNewTokenCallsDiffer()
+        {
+            var a = LockFile.NewToken();
+            var b = LockFile.NewToken();
+
+            Assert.NotEqual(a, b);
+        }
+
+        [Fact]
+        public async Task WrittenFileModeIsOwnerReadWriteOnly()
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                // File modes are not meaningful on Windows; there is
+                // nothing to assert there.
+                return;
+            }
+
+            var info = SampleInfo(6006);
+            await LockFile.WriteAsync(_home, info);
+            var path = LockFile.PathFor(_home, info.Pid);
+
+            var mode = File.GetUnixFileMode(path);
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
+        }
+    }
+}
