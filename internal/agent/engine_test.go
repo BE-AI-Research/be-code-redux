@@ -273,7 +273,7 @@ func TestCompactUsesDigestsAndFeedsFileNotesBack(t *testing.T) {
 	if !strings.Contains(transcript, "(read a.go lines 1–2; digested)") || strings.Contains(transcript, "package a") {
 		t.Fatalf("summary transcript still carries the read:\n%s", transcript)
 	}
-	if !strings.Contains(u, "Working memory:") || !strings.Contains(summaryReq.Messages[0].Content, "Do not restate anything already in Working memory.") {
+	if !strings.Contains(u, "Working memory:") || !strings.Contains(summaryReq.Messages[0].Content, "do not copy its task list or file outlines") {
 		t.Fatalf("summary request lacks the block or the instruction:\n%s\n%s", summaryReq.Messages[0].Content, u)
 	}
 	if filesOf(st)[0].Note != "defines A" {
@@ -369,6 +369,78 @@ func TestCompactContinuesFromTheRecordOnAFilesOnlySummary(t *testing.T) {
 	}
 	if filesOf(st)[0].Note != "defines A" {
 		t.Fatalf("file note not applied: %+v", filesOf(st))
+	}
+}
+
+// Seen twice in one night on the owner's VM: the model answers the summary
+// request with its trailing files: list and nothing else. The list is still
+// applied, and the model is asked once more for the part it skipped — in the
+// same exchange, so it can see what it already wrote.
+func TestCompactAsksOnceMoreWhenOnlyTheFilesListCameBack(t *testing.T) {
+	var summaryCalls int
+	var retry provider.ChatRequest
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if strings.HasPrefix(req.Messages[0].Content, "Summarize this coding-agent") {
+			summaryCalls++
+			if summaryCalls == 1 {
+				return &provider.ChatResponse{Content: "files:\n- a.go — defines A\n"}, nil
+			}
+			retry = req
+			return &provider.ChatResponse{Content: "The user wants small steps. A is defined in a.go."}, nil
+		}
+		return &provider.ChatResponse{Content: "ok"}, nil
+	}}
+	ag, dir := newTestAgent(t, p, nil)
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\nfunc A() {}\n"), 0o644)
+	st := withEngine(t, ag)
+	st.NextTurn()
+	st.EnsureRoot("read a.go")
+	st.Observe(engine.Event{Tool: "read_file", Args: map[string]any{"path": "a.go"}, Content: "    1\tpackage a\n    2\tfunc A() {}\n"})
+	for _, m := range []provider.Message{
+		{Role: provider.RoleUser, Content: "read a.go, and keep the steps small"},
+		{Role: provider.RoleAssistant, Content: "A is defined."},
+		{Role: provider.RoleUser, Content: "next"},
+		{Role: provider.RoleAssistant, Content: "ok"},
+	} {
+		ag.History.Add(m)
+	}
+	var notices []string
+	ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if summaryCalls != 2 {
+		t.Fatalf("expected exactly one retry, saw %d summary calls", summaryCalls)
+	}
+	if n := len(retry.Messages); n != 4 || retry.Messages[2].Role != provider.RoleAssistant ||
+		!strings.Contains(retry.Messages[2].Content, "files:") ||
+		!strings.Contains(retry.Messages[3].Content, "summary") {
+		t.Fatalf("the retry should show the model its own files list and ask for the summary: %+v", retry.Messages)
+	}
+	if !strings.Contains(ag.History.Messages[0].Content, "The user wants small steps") {
+		t.Fatalf("the summary was not used: %q", ag.History.Messages[0].Content)
+	}
+	if containsAny(notices, "continuing from the task record") {
+		t.Fatalf("a recovered summary is not a failure: %v", notices)
+	}
+	if filesOf(st)[0].Note != "defines A" {
+		t.Fatalf("file note from the first reply was lost: %+v", filesOf(st))
+	}
+}
+
+// The prompt asks for the summary before the list and says it may not be
+// skipped: "Do not restate Working memory … End with files:" read, to a small
+// model with a full task tree in front of it, as "only the list is wanted".
+func TestCompactPromptPutsTheSummaryFirst(t *testing.T) {
+	i, j := strings.Index(compactSystemPrompt, "summary first"), strings.Index(compactSystemPrompt, "`files:`")
+	if i < 0 || j < 0 || i > j {
+		t.Fatalf("summary must be demanded before the files list:\n%s", compactSystemPrompt)
+	}
+	if !strings.Contains(compactSystemPrompt, "never empty") {
+		t.Fatalf("the prompt does not forbid an empty summary:\n%s", compactSystemPrompt)
+	}
+	if !strings.HasPrefix(compactSystemPrompt, "Summarize this coding-agent") {
+		t.Fatal("tests and the e2e mock recognise the request by this prefix")
 	}
 }
 

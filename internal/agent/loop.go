@@ -1620,19 +1620,47 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 		return err
 	}
-	summary := resp.Content
-	if stripThink {
-		summary = StripThink(summary)
-	}
-	filesOnly := false
-	if a.engine() != nil {
-		body, files := engine.SplitFilesBlock(summary)
-		if files != "" {
-			a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
-			filesOnly = strings.TrimSpace(body) == ""
+	// split takes the trailing files: block off a reply and applies it; what
+	// is left is the summary, and filesOnly says the list was all there was.
+	split := func(r *provider.ChatResponse) (summary string, filesOnly bool) {
+		summary = r.Content
+		if stripThink {
+			summary = StripThink(summary)
 		}
-		summary = body
-		a.flushEngine()
+		if a.engine() != nil {
+			body, files := engine.SplitFilesBlock(summary)
+			if files != "" {
+				a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
+				filesOnly = strings.TrimSpace(body) == ""
+			}
+			summary = body
+			a.flushEngine()
+		}
+		return summary, filesOnly
+	}
+	summary, filesOnly := split(resp)
+	if filesOnly && ctx.Err() == nil {
+		// The list without the summary: a small model with a full task tree
+		// in front of it reads "do not restate Working memory" as "only the
+		// list is wanted". Its notes are already applied. Ask once more, in
+		// the same exchange so it can see what it wrote — a second request
+		// from scratch gets the same answer.
+		again, rerr := a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: compactSystemPrompt},
+				{Role: provider.RoleUser, Content: u.String()},
+				{Role: provider.RoleAssistant, Content: resp.Content},
+				{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
+			},
+			Temperature: 0.1,
+			NoThink:     true,
+		}, nil)
+		if rerr == nil {
+			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
+				summary, resp = s2, again
+			}
+		}
 	}
 	if strings.TrimSpace(summary) == "" {
 		// A cancellation is not a backend failure: it reaches here as an
@@ -1716,7 +1744,7 @@ const SummaryPrefix = "[Conversation summary — earlier turns compacted]\n"
 
 const summaryPrefix = SummaryPrefix
 
-const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text. Do not restate anything already in Working memory. End with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
+const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Write the summary first, as plain prose under 400 words, and it is never empty. Preserve, in this order: the original task; every requirement, constraint, convention or standing instruction the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Working memory is kept separately, so do not copy its task list or file outlines — but when it already covers the work, still state the task, the user's standing instructions and the current state in a few lines. After the summary, end with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
 
 func looksLikeToolsUnsupported(err error) bool {
 	s := strings.ToLower(err.Error())

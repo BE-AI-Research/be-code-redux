@@ -27,6 +27,13 @@ until the model server was rebooted. Three defects in a row, each making the nex
   and retries, else stops with an error that says what does not fit (how much of it is
   system prompt and tool schemas, which no compaction removes) and what fixes it:
   `ollama stop <model>`, `reload_on_mismatch: "always"`, or `/clear`.
+- **A compaction summary that was only its `files:` list.** The same VM log showed it
+  twice in one night: the model answered the summary request with the trailing file list
+  and no summary — the long-unexplained "empty summary" of 0.10.0. With a full task tree in
+  front of it, "do not restate Working memory … end with `files:`" reads as "only the list
+  is wanted". The prompt now asks for the summary first and says it is never empty, and a
+  files-only reply is asked once more for the summary in the same exchange (its file notes
+  are kept either way). Two failures still continue from the task record, as before.
 - **An API key pasted into `web_search.api_key_env` was printed at every start** — to
   stderr, into the session host's log on disk, and from the tool's own error into the
   model's context and the saved session. That setting holds the *name* of a variable;
