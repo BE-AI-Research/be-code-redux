@@ -222,6 +222,19 @@ func (l fencedLedger) ShowText(id string) (out string) {
 	return out
 }
 
+// SetOwner and SetScope are plain wrappers, like the neighbouring methods
+// above: they go through the fence and nothing more. A later task replaces
+// them with versions that also trigger sub-agent scheduling.
+func (l fencedLedger) SetOwner(id, owner string, pinned bool) (err error) {
+	l.a.engineDo("task owner", func(st *engine.Store) { err = st.SetOwner(id, owner, pinned) })
+	return err
+}
+
+func (l fencedLedger) SetScope(id string, scope []string) (err error) {
+	l.a.engineDo("task scope", func(st *engine.Store) { err = st.SetScope(id, scope) })
+	return err
+}
+
 // ActiveRootID is the task tool's optional taskRoots capability.
 func (l fencedLedger) ActiveRootID() (id string) {
 	l.a.engineDo("task root", func(st *engine.Store) { id = st.ActiveRootID() })

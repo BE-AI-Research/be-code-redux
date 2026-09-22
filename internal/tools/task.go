@@ -23,7 +23,15 @@ type TaskLedger interface {
 	SetStatusText(id, status, reason string) error
 	Note(id, text, file string, decision, keep bool) error
 	ShowText(id string) string
+	// SetOwner and SetScope assign a step to a sub-agent (spec §1.1). The
+	// model's assignments are never pinned; pinning is the operator's.
+	SetOwner(id, owner string, pinned bool) error
+	SetScope(id string, scope []string) error
 }
+
+// taskReplier answers a sub-agent's open ask_main; the agent's ledger
+// implements it, a bare store does not.
+type taskReplier interface{ Reply(id, text string) error }
 
 // taskRoots is an optional capability on a ledger: naming the task in
 // flight is what lets the tool resolve a 0.10.0 step number against the
@@ -33,10 +41,17 @@ type TaskLedger interface {
 // the agent treats a backend's extras.
 type taskRoots interface{ ActiveRootID() string }
 
-type taskTool struct{ l TaskLedger }
+type taskTool struct {
+	l     TaskLedger
+	under string
+}
 
 // NewTask builds the task tool over a ledger.
 func NewTask(l TaskLedger) Tool { return &taskTool{l: l} }
+
+// NewTaskUnder is the task tool a sub-agent gets: add, status, note and
+// show, only for nodes under root.
+func NewTaskUnder(l TaskLedger, root string) Tool { return &taskTool{l: l, under: root} }
 
 func (t *taskTool) Name() string { return "task" }
 
@@ -46,8 +61,8 @@ func (t *taskTool) Description() string {
 
 func (t *taskTool) Schema() json.RawMessage {
 	return schema(`{"type":"object","properties":{
-		"action":{"type":"string","enum":["plan","add","status","note","show"],"description":"plan | add | status | note | show"},
-		"text":{"type":"string","description":"plan: the task in one line; add: the step; note: the fact or decision"},
+		"action":{"type":"string","enum":["plan","add","status","note","show","owner","scope","reply"],"description":"plan | add | status | note | show | owner (assign a step to a sub-agent) | scope (paths it may write) | reply (answer a sub-agent's question)"},
+		"text":{"type":"string","description":"plan: the task in one line; add: the step; note: the fact or decision; reply: the answer"},
 		"steps":{"type":"array","items":{"type":"string"},"description":"plan: the steps in order"},
 		"id":{"type":"string","description":"the node, a dotted path like 2.1.3"},
 		"parent":{"type":"string","description":"add: the node to add under; omit for a new top-level task"},
@@ -55,7 +70,9 @@ func (t *taskTool) Schema() json.RawMessage {
 		"reason":{"type":"string","description":"status: why, for blocked and dropped"},
 		"file":{"type":"string","description":"note: the file this note is about"},
 		"decision":{"type":"boolean","description":"note: this is a decision, not just a fact"},
-		"keep":{"type":"boolean","description":"note: also remember this across sessions"}},
+		"keep":{"type":"boolean","description":"note: also remember this across sessions"},
+		"owner":{"type":"string","description":"owner: a sub-agent's name, or main"},
+		"paths":{"type":"array","items":{"type":"string"},"description":"scope: workspace paths the owner may write"}},
 		"required":["action"]}`)
 }
 
@@ -70,6 +87,22 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 			action = "status"
 		} else {
 			action = "add"
+		}
+	}
+	if t.under != "" {
+		switch action {
+		case "plan", "owner", "scope", "reply":
+			return Result{IsError: true, Content: action + " is not available to a sub-agent; use ask_main if the plan must change"}
+		}
+		id := argString(args, "id", "node", "step", "task")
+		if action == "add" {
+			id = argString(args, "parent", "under", "parent_id")
+		}
+		if id == "" {
+			return Result{IsError: true, Content: "name a step under " + t.under}
+		}
+		if id != t.under && !strings.HasPrefix(id, t.under+".") {
+			return Result{IsError: true, Content: id + " is outside your step " + t.under}
 		}
 	}
 	switch action {
@@ -113,8 +146,62 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 		return Result{Content: "noted"}
 	case "show", "list", "tree":
 		return Result{Content: t.l.ShowText(argString(args, "id", "node", "step", "task"))}
+	case "owner", "assign":
+		id := argString(args, "id", "node", "step", "task")
+		owner := strings.TrimSpace(argString(args, "owner", "to", "who"))
+		if owner == "main" {
+			owner = ""
+		}
+		if err := t.l.SetOwner(id, owner, false); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		if owner == "" {
+			return Result{Content: id + " is yours again"}
+		}
+		return Result{Content: id + " assigned to " + owner + "; set its scope with action scope if it has none"}
+	case "scope":
+		id := argString(args, "id", "node", "step", "task")
+		paths := argStrings(args, "paths", "scope", "files")
+		switch {
+		case len(paths) == 0:
+			// argStrings only reads a JSON array; a plain comma list arrives
+			// as one string, which argString does read.
+			if s := argString(args, "paths", "scope", "files"); s != "" {
+				paths = splitCommaList(s)
+			}
+		case len(paths) == 1 && strings.Contains(paths[0], ","):
+			paths = splitCommaList(paths[0])
+		}
+		if err := t.l.SetScope(id, paths); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		return Result{Content: id + " scope: " + strings.Join(paths, ", ")}
+	case "reply", "answer":
+		r, ok := t.l.(taskReplier)
+		if !ok {
+			return Result{IsError: true, Content: "no sub-agent is asking"}
+		}
+		id := argString(args, "id", "node", "step", "task")
+		text := argString(args, "text", "answer", "reply")
+		if err := r.Reply(id, text); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		return Result{Content: "reply delivered to the sub-agent on " + id}
 	}
 	return Result{IsError: true, Content: "task needs an action (plan, add, status, note, show)"}
+}
+
+// splitCommaList splits a comma-separated string, trimming and dropping
+// empty entries — the plain-string form of "paths" a small model sends
+// alongside the JSON-array form the schema documents.
+func splitCommaList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // resolveStepNumber turns a 0.10.0 step number into the dotted id of that

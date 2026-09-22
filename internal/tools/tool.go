@@ -15,6 +15,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 const timeSecond = time.Second
@@ -112,6 +113,13 @@ type Registry struct {
 	// model but do not roll back the triggering action.
 	Hooks map[string][]string
 
+	// scope and checks confine a sub-agent's registry (spec §2.4): writes
+	// only under scope, shell only for exactly one of checks. Both nil on
+	// the main registry. label names the sub-agent in approval details.
+	scope  []string
+	checks []string
+	label  string
+
 	tools  []Tool
 	byName map[string]Tool
 	procs  *ProcessManager
@@ -153,6 +161,57 @@ func (r *Registry) Subset(names ...string) *Registry {
 		}
 	}
 	return sub
+}
+
+// Scoped is a sub-agent's registry: reads anywhere, writes under scope,
+// shell only for the project's own checks, and none of the tools that
+// reach outside the workspace (process, consult, web, editor, MCP). It
+// shares the main registry's approval seam, so a write is approved and
+// checkpointed exactly as the main model's is.
+func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
+	sub := r.Subset("read_file", "write_file", "edit_file", "list_dir", "search", "shell",
+		"lookup", "history", "show", "changes")
+	sub.ApproveCtx = r.ApproveCtx
+	sub.ReviewWrite = r.ReviewWrite
+	sub.ReviewInvolvesEditor = r.ReviewInvolvesEditor
+	sub.EditorName = r.EditorName
+	sub.OnStatus = r.OnStatus
+	sub.scope, sub.checks, sub.label = scope, checks, label
+	sub.maxOutput.Store(r.maxOutput.Load())
+	if r.Approve != nil {
+		parent := r.Approve
+		sub.Approve = func(action, detail string) bool {
+			return parent(action, "sub-agent "+label+":\n"+detail)
+		}
+	}
+	// The tools hold a pointer to the registry they were built with; rebind
+	// them to this one so confinement reads sub.scope.
+	sub.tools, sub.byName = nil, map[string]Tool{}
+	for _, t := range []Tool{&readFileTool{r: sub}, &writeFileTool{r: sub}, &editFileTool{r: sub},
+		&listDirTool{r: sub}, &searchTool{r: sub}, &shellTool{r: sub}} {
+		sub.add(t)
+	}
+	for _, n := range []string{"lookup", "history", "show", "changes"} {
+		if t, ok := r.byName[n]; ok {
+			sub.add(t)
+		}
+	}
+	return sub
+}
+
+// checkScope refuses a write outside a scoped registry's scope.
+func (r *Registry) checkScope(absPath string) error {
+	if r.scope == nil {
+		return nil
+	}
+	rel, err := filepath.Rel(r.Root, absPath)
+	if err != nil {
+		return err
+	}
+	if !subagent.InScope(r.scope, filepath.ToSlash(rel)) {
+		return fmt.Errorf("path is outside your scope (%s); use ask_main if you need it widened", strings.Join(r.scope, ", "))
+	}
+	return nil
 }
 
 // AddTool registers an externally-provided tool (e.g. an MCP server tool).

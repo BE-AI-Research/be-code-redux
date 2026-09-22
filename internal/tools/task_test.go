@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -56,6 +57,12 @@ func (r *recTree) Note(id, text, file string, decision, keep bool) error {
 }
 
 func (r *recTree) ShowText(id string) string { r.showArg = id; return "tree text" }
+
+// SetOwner and SetScope are trivial no-ops here: recTree's existing tests
+// never exercise the owner/scope verbs, and ownerLedger below overrides both
+// with real ones for the tests that do.
+func (r *recTree) SetOwner(id, owner string, pinned bool) error { return nil }
+func (r *recTree) SetScope(id string, scope []string) error     { return nil }
 
 func boolStr(b bool) string {
 	if b {
@@ -242,5 +249,83 @@ func TestLegacyStepNumbersResolveUnderTheActiveTask(t *testing.T) {
 	runTask(t, NewTask(plain), `{"action":"step","step":2,"status":"done"}`)
 	if got := plain.status[0]; got[0] != "2" {
 		t.Fatalf("with no active task the number became %q", got[0])
+	}
+}
+
+// ownerLedger extends this file's existing fake (recTree) with SetOwner,
+// SetScope and Reply, for the owner/scope/reply verbs and NewTaskUnder.
+type ownerLedger struct {
+	recTree
+	owners  map[string]string
+	pinned  map[string]bool
+	scopes  map[string][]string
+	replies map[string]string
+}
+
+func (l *ownerLedger) SetOwner(id, owner string, pinned bool) error {
+	if l.pinned[id] && !pinned {
+		return errors.New(id + " was assigned by the operator; ask them to change it")
+	}
+	l.owners[id] = owner
+	l.pinned[id] = pinned
+	return nil
+}
+func (l *ownerLedger) SetScope(id string, scope []string) error { l.scopes[id] = scope; return nil }
+func (l *ownerLedger) Reply(id, text string) error              { l.replies[id] = text; return nil }
+
+func newOwnerLedger() *ownerLedger {
+	return &ownerLedger{owners: map[string]string{}, pinned: map[string]bool{}, scopes: map[string][]string{}, replies: map[string]string{}}
+}
+
+func TestTaskOwnerScopeReply(t *testing.T) {
+	l := newOwnerLedger()
+	tool := NewTask(l)
+	res := tool.Run(context.Background(), map[string]any{"action": "owner", "id": "3.2", "owner": "big"})
+	if res.IsError || l.owners["3.2"] != "big" || l.pinned["3.2"] {
+		t.Fatalf("owner: %+v %v", res, l.owners)
+	}
+	l.pinned["3.3"] = true
+	res = tool.Run(context.Background(), map[string]any{"action": "owner", "id": "3.3", "owner": "big"})
+	if !res.IsError || !strings.Contains(res.Content, "assigned by the operator") {
+		t.Fatalf("pinned: %+v", res)
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "scope", "id": "3.2", "paths": []any{"internal/scan", "docs"}})
+	if res.IsError || len(l.scopes["3.2"]) != 2 {
+		t.Fatalf("scope: %+v %v", res, l.scopes)
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "scope", "id": "3.2", "paths": "a, b"})
+	if res.IsError || len(l.scopes["3.2"]) != 2 || l.scopes["3.2"][1] != "b" {
+		t.Fatalf("scope from a string: %+v %v", res, l.scopes)
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "reply", "id": "3.2", "text": "use the old tokenizer"})
+	if res.IsError || l.replies["3.2"] != "use the old tokenizer" {
+		t.Fatalf("reply: %+v %v", res, l.replies)
+	}
+}
+
+func TestTaskUnderRestrictsToTheSubtree(t *testing.T) {
+	l := newOwnerLedger()
+	tool := NewTaskUnder(l, "3.2")
+	for _, action := range []string{"plan", "owner", "scope", "reply"} {
+		res := tool.Run(context.Background(), map[string]any{"action": action, "id": "3.2.1", "text": "x", "owner": "big"})
+		if !res.IsError {
+			t.Fatalf("%s allowed under a subtree", action)
+		}
+	}
+	res := tool.Run(context.Background(), map[string]any{"action": "status", "id": "3.3", "status": "done"})
+	if !res.IsError || !strings.Contains(res.Content, "outside your step 3.2") {
+		t.Fatalf("status outside the subtree: %+v", res)
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "status", "id": "", "status": "done"})
+	if !res.IsError {
+		t.Fatal("an empty id must be refused under a subtree")
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "add", "parent": "3.2", "text": "update the tests"})
+	if res.IsError {
+		t.Fatalf("add under the subtree refused: %+v", res)
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "status", "id": "3.2.1", "status": "done"})
+	if res.IsError {
+		t.Fatalf("status inside the subtree refused: %+v", res)
 	}
 }

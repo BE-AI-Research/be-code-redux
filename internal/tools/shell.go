@@ -32,6 +32,21 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 	if command == "" {
 		return Result{IsError: true, Content: "command is required"}
 	}
+	if t.r.checks != nil {
+		allowed := false
+		for _, c := range t.r.checks {
+			if command == c {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return Result{IsError: true, Content: "only the project's checks may be run: " + strings.Join(t.r.checks, ", ")}
+		}
+		// An exact check never prompts and is never denied: it is what the
+		// harness itself runs at verification.
+		return t.execute(ctx, command, args)
+	}
 	switch classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny) {
 	case cmdDenied:
 		return Result{IsError: true, Content: "this command matches the deny list and will never run; use a safer alternative"}
@@ -42,6 +57,13 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 			return Result{IsError: true, Content: "user denied this command; propose an alternative or ask what to do"}
 		}
 	}
+	return t.execute(ctx, command, args)
+}
+
+// execute is the part of Run after the approval decision: the pre_shell
+// hook, timeout parsing and the actual RunShell call. A scoped registry's
+// exact-check path calls this directly, skipping the approval switch above.
+func (t *shellTool) execute(ctx context.Context, command string, args map[string]any) Result {
 	if note := t.r.runHooks(ctx, "pre_shell", "COMMAND", command); note != "" {
 		return Result{IsError: true, Content: "pre_shell hook blocked or failed:\n" + note}
 	}

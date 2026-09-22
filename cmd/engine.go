@@ -20,6 +20,8 @@ func (noopLedger) Add(string, string) (string, error)            { return "", ni
 func (noopLedger) SetStatusText(string, string, string) error    { return nil }
 func (noopLedger) Note(string, string, string, bool, bool) error { return nil }
 func (noopLedger) ShowText(string) string                        { return "" }
+func (noopLedger) SetOwner(string, string, bool) error           { return nil }
+func (noopLedger) SetScope(string, []string) error               { return nil }
 
 // registerEngineTools adds task and the git lookups per cfg.Engine. An
 // engine.tools value that is neither full nor minimal warns once and is
