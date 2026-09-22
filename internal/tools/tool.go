@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -113,12 +114,16 @@ type Registry struct {
 	// model but do not roll back the triggering action.
 	Hooks map[string][]string
 
-	// scope and checks confine a sub-agent's registry (spec §2.4): writes
-	// only under scope, shell only for exactly one of checks. Both nil on
-	// the main registry. label names the sub-agent in approval details.
+	// scoped is true only for a registry Scoped built. Both confinement
+	// guards (checkScope, the shell tool's checks gate) key off this, not
+	// off scope/checks being nil — a nil scope or nil checks on a scoped
+	// registry must fail CLOSED (refuse everything), not fall open to the
+	// main registry's behaviour. scope and checks confine a sub-agent's
+	// registry (spec §2.4): writes only under scope, shell only for exactly
+	// one of checks.
+	scoped bool
 	scope  []string
 	checks []string
-	label  string
 
 	tools  []Tool
 	byName map[string]Tool
@@ -171,12 +176,16 @@ func (r *Registry) Subset(names ...string) *Registry {
 func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	sub := r.Subset("read_file", "write_file", "edit_file", "list_dir", "search", "shell",
 		"lookup", "history", "show", "changes")
-	sub.ApproveCtx = r.ApproveCtx
+	// A scoped registry drives no model-parameter resolution of its own: it
+	// runs no loader. Leaving ApproveCtx set would let a caller bypass the
+	// "sub-agent <label>:" prefix below by asking through that seam instead.
+	sub.ApproveCtx = nil
 	sub.ReviewWrite = r.ReviewWrite
 	sub.ReviewInvolvesEditor = r.ReviewInvolvesEditor
 	sub.EditorName = r.EditorName
 	sub.OnStatus = r.OnStatus
-	sub.scope, sub.checks, sub.label = scope, checks, label
+	sub.scoped = true
+	sub.scope, sub.checks = scope, checks
 	sub.maxOutput.Store(r.maxOutput.Load())
 	if r.Approve != nil {
 		parent := r.Approve
@@ -191,6 +200,13 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 		&listDirTool{r: sub}, &searchTool{r: sub}, &shellTool{r: sub}} {
 		sub.add(t)
 	}
+	// lookup/history/show/changes are shared by reference, bound to the
+	// PARENT registry, not sub: that is safe only because all four are
+	// read-only today. If a future git tool can write, it must be rebound
+	// to sub (like the six above) before it can be added here — sharing it
+	// by reference would let a sub-agent write through the parent's
+	// confinement instead of its own. TestScopedToolsAreBoundOrReadOnlyAllowlisted
+	// pins this.
 	for _, n := range []string{"lookup", "history", "show", "changes"} {
 		if t, ok := r.byName[n]; ok {
 			sub.add(t)
@@ -199,19 +215,70 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	return sub
 }
 
-// checkScope refuses a write outside a scoped registry's scope.
+// checkScope refuses a write outside a scoped registry's scope. It keys
+// off r.scoped, not off r.scope being non-nil: a scoped registry with a
+// nil or empty scope must refuse every write (fail closed), never fall
+// back to the main registry's unconfined behaviour, which is what a bare
+// "r.scope == nil" check would do for a node with no assigned scope yet.
+//
+// It also resolves symlinks along the way. resolve() only checks the path
+// textually, so a symlink already inside the scope (created before the
+// sub-agent was scoped in, or by the sub-agent itself through a shell
+// check) can point anywhere; os.WriteFile follows it. realExistingPath
+// walks up to the nearest ancestor that actually exists (a write may be
+// creating new path components, which cannot be resolved because they are
+// not there yet) and resolves symlinks from there, so what gets checked
+// against Root and scope is where the write actually lands.
 func (r *Registry) checkScope(absPath string) error {
-	if r.scope == nil {
+	if !r.scoped {
 		return nil
 	}
-	rel, err := filepath.Rel(r.Root, absPath)
+	denied := fmt.Errorf("path is outside your scope (%s); use ask_main if you need it widened", strings.Join(r.scope, ", "))
+	real, err := realExistingPath(absPath)
 	if err != nil {
 		return err
 	}
+	root := r.Root
+	if rr, err := filepath.EvalSymlinks(r.Root); err == nil {
+		root = rr
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return denied
+	}
 	if !subagent.InScope(r.scope, filepath.ToSlash(rel)) {
-		return fmt.Errorf("path is outside your scope (%s); use ask_main if you need it widened", strings.Join(r.scope, ", "))
+		return denied
 	}
 	return nil
+}
+
+// realExistingPath resolves symlinks in absPath, walking up to the nearest
+// ancestor that exists (the target itself, or its parent directories, may
+// not exist yet — a write can create them) and rejoining whatever of the
+// original path had not been created yet onto the resolved ancestor. A
+// path with no existing ancestor at all (unreachable in practice: Root
+// itself always exists) is returned as given.
+func realExistingPath(absPath string) (string, error) {
+	p := absPath
+	var tail []string
+	for {
+		if _, err := os.Lstat(p); err == nil {
+			real, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return "", err
+			}
+			for i := len(tail) - 1; i >= 0; i-- {
+				real = filepath.Join(real, tail[i])
+			}
+			return real, nil
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return absPath, nil
+		}
+		tail = append(tail, filepath.Base(p))
+		p = parent
+	}
 }
 
 // AddTool registers an externally-provided tool (e.g. an MCP server tool).

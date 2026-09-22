@@ -32,7 +32,16 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 	if command == "" {
 		return Result{IsError: true, Content: "command is required"}
 	}
-	if t.r.checks != nil {
+	// A scoped registry never falls through to the allow/deny/approval path
+	// below, even with a nil or empty checks list — nil must fail closed
+	// (refuse everything), not fall open to the main registry's behaviour.
+	// An exact check also never prompts and is never denied against
+	// ShellDeny: those globs exist to keep the main model from running
+	// something destructive under approval, but the harness itself is the
+	// one running the project's own detected checks at verification, so a
+	// scoped registry's exact-check path deliberately bypasses ShellDeny
+	// too.
+	if t.r.scoped {
 		allowed := false
 		for _, c := range t.r.checks {
 			if command == c {
@@ -43,8 +52,6 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 		if !allowed {
 			return Result{IsError: true, Content: "only the project's checks may be run: " + strings.Join(t.r.checks, ", ")}
 		}
-		// An exact check never prompts and is never denied: it is what the
-		// harness itself runs at verification.
 		return t.execute(ctx, command, args)
 	}
 	switch classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny) {

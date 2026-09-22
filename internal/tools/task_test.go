@@ -124,7 +124,7 @@ func TestTaskActionAliasesAndErrors(t *testing.T) {
 	r := &recTree{}
 	tool := NewTask(r)
 	if res := runTask(t, tool, `{}`); !res.IsError ||
-		res.Content != "task needs an action (plan, add, status, note, show)" {
+		res.Content != "task needs an action (plan, add, status, note, show, owner, scope, reply)" {
 		t.Fatalf("no action: %+v", res)
 	}
 	// decision and fact are note.
@@ -198,6 +198,7 @@ func TestTaskDescriptionAndSchema(t *testing.T) {
 	tool := NewTask(&recTree{})
 	d := tool.Description()
 	for _, want := range []string{"action=plan", "action=add", "action=status", "action=note", "action=show",
+		"action=owner", "action=scope", "action=reply",
 		"dotted paths like 2.1.3", "keep exactly one node doing"} {
 		if !strings.Contains(d, want) {
 			t.Fatalf("description lacks %q:\n%s", want, d)
@@ -327,5 +328,76 @@ func TestTaskUnderRestrictsToTheSubtree(t *testing.T) {
 	res = tool.Run(context.Background(), map[string]any{"action": "status", "id": "3.2.1", "status": "done"})
 	if res.IsError {
 		t.Fatalf("status inside the subtree refused: %+v", res)
+	}
+}
+
+// TestTaskUnderRefusesLegacyStepBareNumber is the fix for finding 2: the
+// subtree guard used to test the RAW id, but the "status" case then
+// resolves a legacy step number against the MAIN model's active root
+// (resolveStepNumber). "step":"3" under subtree "3" passed the guard by
+// coincidence (id == t.under) while the node actually closed, after
+// resolution, was root+".3" — some other task entirely when root != "3".
+func TestTaskUnderRefusesLegacyStepBareNumber(t *testing.T) {
+	l := newOwnerLedger()
+	l.root = "7" // the main task's active root: unrelated to this subtree
+	tool := NewTaskUnder(l, "3")
+	res := tool.Run(context.Background(), map[string]any{"action": "step", "step": "3", "status": "done"})
+	if !res.IsError {
+		t.Fatalf("a legacy bare step number must be refused under a subtree, never resolved against the main task's root: %+v", res)
+	}
+	if len(l.status) != 0 {
+		t.Fatalf("the escape landed on the wrong node: %v", l.status)
+	}
+	// A dotted id in the same shape is already an address inside the
+	// subtree and must still work.
+	res = tool.Run(context.Background(), map[string]any{"action": "step", "step": "3.1", "status": "done"})
+	if res.IsError {
+		t.Fatalf("a dotted legacy id inside the subtree was refused: %+v", res)
+	}
+}
+
+// TestTaskOwnerAndScopeRefuseEmptyArguments is the fix for finding 3: an
+// empty id must be refused for both owner and scope, and scope with no
+// usable paths must be refused rather than silently clearing the node's
+// scope and reporting success.
+func TestTaskOwnerAndScopeRefuseEmptyArguments(t *testing.T) {
+	l := newOwnerLedger()
+	tool := NewTask(l)
+	res := tool.Run(context.Background(), map[string]any{"action": "owner", "owner": "big"})
+	if !res.IsError {
+		t.Fatal("owner with no id must be refused")
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "scope", "paths": []any{"a"}})
+	if !res.IsError {
+		t.Fatal("scope with no id must be refused")
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "scope", "id": "3.2"})
+	if !res.IsError || !strings.Contains(res.Content, "at least one path") {
+		t.Fatalf("scope with no paths must be refused, not clear the scope: %+v", res)
+	}
+	if _, ok := l.scopes["3.2"]; ok {
+		t.Fatalf("scope was set despite the empty-paths refusal: %v", l.scopes["3.2"])
+	}
+	res = tool.Run(context.Background(), map[string]any{"action": "scope", "id": "3.2", "paths": []any{}})
+	if !res.IsError || !strings.Contains(res.Content, "at least one path") {
+		t.Fatalf("scope with an empty paths array must be refused: %+v", res)
+	}
+}
+
+// TestTaskScopeEchoesCleanedPaths: the reply must reflect what was actually
+// stored, not the raw argument, so the model sees exactly what it may now
+// write.
+func TestTaskScopeEchoesCleanedPaths(t *testing.T) {
+	l := newOwnerLedger()
+	tool := NewTask(l)
+	res := tool.Run(context.Background(), map[string]any{"action": "scope", "id": "3.4", "paths": []any{"./internal/scan/"}})
+	if res.IsError {
+		t.Fatalf("scope: %+v", res)
+	}
+	if len(l.scopes["3.4"]) != 1 || l.scopes["3.4"][0] != "internal/scan" {
+		t.Fatalf("scope not cleaned before storage: %v", l.scopes["3.4"])
+	}
+	if !strings.Contains(res.Content, "internal/scan") || strings.Contains(res.Content, "./") {
+		t.Fatalf("echoed content was not the cleaned list: %q", res.Content)
 	}
 }
