@@ -167,6 +167,59 @@ func TestCloseAsAndInterrupt(t *testing.T) {
 	}
 }
 
+// TestCloseAsMustNotSkipASiblingWhenRemovingASpentUnfiledChild is a
+// regression test for a bug in CloseAs's close closure: it ranged over
+// x.Children while a recursive call could remove an element from that same
+// slice (a spent, childless "unfiled" node). Removing element i shifts the
+// slice's tail left in the backing array; the outer range loop, still
+// working from the header it captured before the mutation, then reads
+// stale/shifted data for every index after i. With only one real sibling
+// after the removed node the shift happens to leave a harmless duplicate
+// (the loop still visits that one sibling, just via a second stale slot),
+// so the shape needs two real siblings after the unfiled one to actually
+// expose it: the first of the two is skipped outright — left open inside a
+// subtree CloseAs reports as closed — and the second is visited twice
+// (harmless on its own, since a second close of an already-terminal node is
+// a no-op, but it is the tell that a sibling went unvisited).
+func TestCloseAsMustNotSkipASiblingWhenRemovingASpentUnfiledChild(t *testing.T) {
+	s := testStore(t)
+	s.SetCards(cardsForTest())
+	root := s.Plan("port the scanner", nil)
+	if err := s.SetOwner(root, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.Add(root, "first step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Built the way the store itself opens an unfiled node: no raw
+	// evidence, no children, so CloseAs removes it rather than closing it.
+	s.tree.Add(root, unfiledText)
+	second, err := s.Add(root, "second step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.Add(root, "third step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetDispatched(root, true)
+	if err := s.CloseAs(root, "big", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{first, second, third} {
+		n := s.tree.Find(id)
+		if n == nil || n.Status != StatusDone || n.DoneBy != "big" {
+			t.Fatalf("%s after CloseAs: %+v", id, n)
+		}
+	}
+	for _, c := range s.tree.Find(root).Children {
+		if c.Text == unfiledText {
+			t.Fatalf("the spent unfiled node must be gone: %+v", c)
+		}
+	}
+}
+
 func TestStepsAndDispatchContext(t *testing.T) {
 	s, root := planOwned(t)
 	steps := s.Steps()

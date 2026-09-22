@@ -1496,7 +1496,12 @@ func (s *Store) CloseAs(id, owner, status, reason string) error {
 	}
 	var close func(x *Node)
 	close = func(x *Node) {
-		for _, c := range x.Children {
+		// A snapshot, not x.Children itself: a recursive call below can
+		// remove an element from that slice (a spent unfiled child), and
+		// ranging over a slice while it is mutated under you skips or
+		// revisits whatever the removal shifted.
+		kids := append([]*Node(nil), x.Children...)
+		for _, c := range kids {
 			close(c)
 		}
 		if x.Status.terminal() {
