@@ -57,6 +57,22 @@ place instead of renumbering its siblings.
 **Ids** are dotted paths — `2.1.3` is the third child of the first child of the
 second task — and they follow position, not anything typed by hand.
 
+**Owner, scope and order** are optional trailing fields, each separated from the
+text and from one another by two or more spaces:
+
+    - [ ] 3.2. port internal/scan  @big  scope: internal/scan, internal/scan_test.go
+    - [ ] 3.3. write the migration note  @claude!  scope: docs/scanner.md  after: 3.2
+
+`@name` assigns the step to a co-worker with `sub_agent: true` in the config; the
+main model is the owner when there is no tag, and is never written. `@name!` was
+assigned by the operator, and the model will not change it. `scope:` is the
+comma-separated list of workspace paths the sub-agent may write under; a step with
+an owner and no scope is not ready. `after:` names the steps that must be closed
+first, replacing the default rule that earlier siblings close first. Children of an
+assigned step belong to the same owner and carry no tag; one written there is
+ignored with a note. A closed step a sub-agent did reads `done by big (14m, 22 tool
+calls)` in its report.
+
 **The five marks**, one per step:
 
 | mark  | status    | meaning                 |

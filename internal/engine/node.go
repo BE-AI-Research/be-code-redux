@@ -38,6 +38,19 @@ type Node struct {
 	Calls    int       `json:"calls,omitempty"`
 	Children []*Node   `json:"children,omitempty"`
 	Evidence Evidence  `json:"evidence,omitempty"`
+	// Owner is the co-worker that owns this step ("" is the main model);
+	// OwnerPinned means the operator assigned it ("@name!" in the document)
+	// and the model may not change it. Scope is what the owner may write;
+	// After overrides the positional ready rule. DoneBy is stamped when a
+	// sub-agent closes the node. Dispatched and DispatchedAt are transient
+	// render state the store sets on its copy of the tree (spec §1.5).
+	Owner        string   `json:"owner,omitempty"`
+	OwnerPinned  bool     `json:"owner_pinned,omitempty"`
+	Scope        []string `json:"scope,omitempty"`
+	After        []string `json:"after,omitempty"`
+	DoneBy       string   `json:"done_by,omitempty"`
+	Dispatched   bool     `json:"-"`
+	DispatchedAt string   `json:"-"`
 }
 
 // now is the package clock, replaceable in tests.
@@ -133,6 +146,19 @@ func (t Tree) Find(id string) *Node {
 		}
 	})
 	return found
+}
+
+// OwnerOf is the owner of the nearest node up the tree, id itself
+// included, that has one; "" is the main model. Children of an assigned
+// node carry no tag of their own (spec §1.1).
+func (t Tree) OwnerOf(id string) string {
+	parts := strings.Split(id, ".")
+	for i := len(parts); i > 0; i-- {
+		if n := t.Find(strings.Join(parts[:i], ".")); n != nil && n.Owner != "" {
+			return n.Owner
+		}
+	}
+	return ""
 }
 
 // Walk visits every node, parents before children, in document order.

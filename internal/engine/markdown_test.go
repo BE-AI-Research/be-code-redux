@@ -129,3 +129,55 @@ func TestEvidenceUnderAChecklistStaysInTheChecklist(t *testing.T) {
 		t.Fatalf("the line was relocated out of the checklist:\n%s", out)
 	}
 }
+
+const ownedDoc = `# 003 — port the scanner
+
+- [>] 3. port the scanner to the new tokenizer
+  - [x] 3.1. list the call sites
+  - [ ] 3.2. port internal/scan  @big  scope: internal/scan, internal/scan_test.go
+    - [ ] 3.2.1. replace the token loop
+    - [ ] 3.2.2. update the tests
+  - [ ] 3.3. write the migration note  @claude!  scope: docs/scanner.md  after: 3.2
+  - [ ] 3.4. email  @bob about the release
+`
+
+func TestOwnedRoundTrip(t *testing.T) {
+	tr, _, err := ParseDoc(ownedDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := tr.Roots[0]
+	n32 := r.Children[1]
+	if n32.Owner != "big" || n32.OwnerPinned || len(n32.Scope) != 2 || n32.Scope[1] != "internal/scan_test.go" {
+		t.Fatalf("3.2 parsed as %+v", n32)
+	}
+	n33 := r.Children[2]
+	if n33.Owner != "claude" || !n33.OwnerPinned || n33.Scope[0] != "docs/scanner.md" || len(n33.After) != 1 || n33.After[0] != "3.2" {
+		t.Fatalf("3.3 parsed as %+v", n33)
+	}
+	if n34 := r.Children[3]; n34.Owner != "" || n34.Text != "email  @bob about the release" {
+		t.Fatalf("an @ in the middle of the text is text: %+v", n34)
+	}
+	if tr.OwnerOf("3.2.1") != "big" || tr.OwnerOf("3.1") != "" {
+		t.Fatal("OwnerOf must walk up to the nearest owner")
+	}
+	out := RenderDoc("003", "port the scanner", r)
+	if out != ownedDoc {
+		t.Fatalf("round trip differs:\n--- got ---\n%s\n--- want ---\n%s", out, ownedDoc)
+	}
+}
+
+func TestChildOwnerIsIgnoredWithANote(t *testing.T) {
+	doc := "# 001 — t\n\n- [ ] 1. t\n  - [ ] 1.1. a  @big  scope: x\n    - [ ] 1.1.1. b  @claude\n"
+	tr, _, err := ParseDoc(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := tr.Roots[0].Children[0].Children[0]
+	if c.Owner != "" {
+		t.Fatalf("child owner kept: %q", c.Owner)
+	}
+	if len(c.Evidence.Notes) != 1 || c.Evidence.Notes[0].Text != "owner @claude ignored: 1.1 is owned by big" {
+		t.Fatalf("note: %+v", c.Evidence.Notes)
+	}
+}

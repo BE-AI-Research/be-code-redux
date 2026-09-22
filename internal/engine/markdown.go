@@ -58,6 +58,87 @@ var evidenceLine = regexp.MustCompile(`^([ \t]*)- (files|cmds|lookups|note|decis
 // linesRange matches the "(lines 1–120, 200–240)" suffix of a files bullet.
 var linesRange = regexp.MustCompile(`^(\d+)[–-](\d+)$`)
 
+// trailingField matches one trailing field of a node line — "  @owner",
+// "  @owner!", "  scope: a, b" or "  after: 3.1, 3.2" — separated from the
+// text (and from each other) by two or more spaces. A value may contain
+// single spaces but never two in a row, which is what lets one field end
+// where the next begins. ParseDoc peels fields off the end until none
+// match, so their order does not matter on read; renderFields writes them
+// owner, scope, after.
+var trailingField = regexp.MustCompile(`^(.*?)\s{2,}(?:@([A-Za-z0-9_.-]+)(!?)|scope:\s*((?:\S| \S)+?)|after:\s*((?:\S| \S)+?))\s*$`)
+
+type nodeFields struct {
+	owner  string
+	pinned bool
+	scope  []string
+	after  []string
+}
+
+// splitFields separates a node's trailing fields from its text.
+func splitFields(text string) (string, nodeFields) {
+	var f nodeFields
+	for {
+		m := trailingField.FindStringSubmatch(text)
+		if m == nil {
+			return text, f
+		}
+		text = m[1]
+		switch {
+		case m[2] != "":
+			f.owner, f.pinned = m[2], m[3] == "!"
+		case m[4] != "":
+			f.scope = splitList(m[4])
+		case m[5] != "":
+			f.after = splitList(m[5])
+		}
+	}
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// renderFields is the trailing fields of a node line, or "".
+func renderFields(n *Node) string {
+	var b strings.Builder
+	if n.Owner != "" {
+		b.WriteString("  @" + n.Owner)
+		if n.OwnerPinned {
+			b.WriteByte('!')
+		}
+	}
+	if len(n.Scope) > 0 {
+		b.WriteString("  scope: " + strings.Join(n.Scope, ", "))
+	}
+	if len(n.After) > 0 {
+		b.WriteString("  after: " + strings.Join(n.After, ", "))
+	}
+	return b.String()
+}
+
+// ownerNodeAbove is the nearest ancestor on the parse stack with an owner.
+func ownerNodeAbove(stack []*Node) *Node {
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i].Owner != "" {
+			return stack[i]
+		}
+	}
+	return nil
+}
+
+func ownerAbove(stack []*Node) string {
+	if n := ownerNodeAbove(stack); n != nil {
+		return n.Owner
+	}
+	return ""
+}
+
 // RenderDoc writes a root node as a document.
 func RenderDoc(num, title string, root *Node) string {
 	return RenderDocWithExtra(num, title, root, nil)
@@ -86,7 +167,7 @@ func renderNode(b *strings.Builder, n *Node, depth int) {
 	if !ok {
 		mark = " "
 	}
-	fmt.Fprintf(b, "%s- [%s] %s. %s", ind, mark, n.ID, n.Text)
+	fmt.Fprintf(b, "%s- [%s] %s. %s%s", ind, mark, n.ID, n.Text, renderFields(n))
 	if n.Reason != "" && (n.Status == StatusBlocked || n.Status == StatusDropped) {
 		fmt.Fprintf(b, " — %s: %s", n.Status, n.Reason)
 	}
@@ -288,7 +369,9 @@ func ParseDoc(text string) (*Tree, []string, error) {
 				return nil, nil, fmt.Errorf("line %d: a step is indented under nothing", i+1)
 			}
 			text, reason := splitReason(strings.TrimSpace(m[4]))
+			text, fields := splitFields(text)
 			n := &Node{Text: text, Status: st, Reason: reason, Opened: now}
+			n.Owner, n.OwnerPinned, n.Scope, n.After = fields.owner, fields.pinned, fields.scope, fields.after
 			if st.terminal() {
 				n.Closed = now
 			}
@@ -308,6 +391,11 @@ func ParseDoc(text string) (*Tree, []string, error) {
 				p := stack[depth-1]
 				p.Children = append(p.Children, n)
 				want = p.ID + "." + strconv.Itoa(len(p.Children))
+			}
+			if inherited := ownerAbove(stack[:depth]); inherited != "" && n.Owner != "" {
+				n.Evidence.Notes = append(n.Evidence.Notes,
+					NoteRef{Text: fmt.Sprintf("owner @%s ignored: %s is owned by %s", n.Owner, ownerNodeAbove(stack[:depth]).ID, inherited)})
+				n.Owner, n.OwnerPinned = "", false
 			}
 			// Ids are read from the document, but position is what the tree
 			// is built on: a missing, wrong or duplicate id is repaired to
