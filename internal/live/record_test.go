@@ -65,6 +65,18 @@ func TestLiveCodeIgnoresRecordsWhoseHostIsGone(t *testing.T) {
 
 // Logs of hosts that are gone are kept for LogMaxAge and then pruned by
 // List; a live host's log is never touched, however old.
+func TestRecordWithUsersRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	r := Record{Code: "ABCDEF", PID: 1, Socket: "s", Workspace: "w", Model: "m", Token: "t"}.WithUsers([]string{"alice", "bob"})
+	if err := r.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(dir, "ABCDEF")
+	if err != nil || len(got.Users) != 2 || got.Users[1] != "bob" {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
 func TestListPrunesOldLogsOfDeadHostsOnly(t *testing.T) {
 	dir := t.TempDir()
 	me := Record{Code: "LIVE01", PID: os.Getpid(), Socket: SocketPath(dir, "LIVE01"), Token: "t"}
