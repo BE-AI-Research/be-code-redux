@@ -164,3 +164,32 @@ func TestHyphenatedIDsNeverShareAThread(t *testing.T) {
 		t.Fatalf("ob's threads misattribute b-ob's message: %+v", ts)
 	}
 }
+
+// The exclusive-name rule (enforced in the TUI) hands a second claimant a
+// suffixed ID (alice01) and a renamer a brand-new ID (alicia). The inbox must
+// treat each as its own correspondent: a suffixed or renamed ID never shares a
+// thread with the bare name it came from. "alice01" begins with "alice", so a
+// prefix- or truncation-based match would bleed one thread into the other.
+func TestSuffixedAndRenamedIDsKeepSeparateThreads(t *testing.T) {
+	dir := t.TempDir()
+	Send(dir, "alice", "bob", "i am alice")
+	Send(dir, "alice01", "bob", "i am alice01")
+	Send(dir, "alicia", "bob", "i renamed")
+	// bob sees three distinct correspondents, never two or one.
+	ts, _ := Threads(dir, "bob")
+	if len(ts) != 3 {
+		t.Fatalf("bob's threads: %+v", ts)
+	}
+	th, _ := Thread(dir, "bob", "alice")
+	if len(th) != 1 || th[0].From != "alice" {
+		t.Fatalf("alice's thread: %+v", th)
+	}
+	th, _ = Thread(dir, "bob", "alice01")
+	if len(th) != 1 || th[0].From != "alice01" {
+		t.Fatalf("alice01's thread: %+v", th)
+	}
+	th, _ = Thread(dir, "bob", "alicia")
+	if len(th) != 1 || th[0].From != "alicia" {
+		t.Fatalf("alicia's thread: %+v", th)
+	}
+}
