@@ -132,3 +132,24 @@ func TestACorruptMessageFileIsSkipped(t *testing.T) {
 		t.Fatalf("thread %+v %v", th, err)
 	}
 }
+
+// IDs may contain '-', and so does the file name's own separator: a filter on
+// the suffix "-ob.json" matched a message from "b-ob". The sender is what
+// follows the first '-' (the nanosecond prefix is all digits), exactly.
+func TestHyphenatedIDsNeverShareAThread(t *testing.T) {
+	dir := t.TempDir()
+	Send(dir, "b-ob", "alice", "from b-ob")
+	Send(dir, "ob", "alice", "from ob")
+	th, _ := Thread(dir, "alice", "ob")
+	if len(th) != 1 || th[0].From != "ob" {
+		t.Fatalf("ob's thread: %+v", th)
+	}
+	th, _ = Thread(dir, "alice", "b-ob")
+	if len(th) != 1 || th[0].From != "b-ob" {
+		t.Fatalf("b-ob's thread: %+v", th)
+	}
+	ts, _ := Threads(dir, "ob")
+	if len(ts) != 1 || ts[0].With != "alice" || ts[0].Latest.From != "ob" {
+		t.Fatalf("ob's threads misattribute b-ob's message: %+v", ts)
+	}
+}

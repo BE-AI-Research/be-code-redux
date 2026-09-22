@@ -68,7 +68,15 @@ func Watch(ctx context.Context, dir string, every time.Duration, onNew func(m Me
 				}
 			}
 		}
-		sort.Strings(fresh)
+		// Time order across recipients: the file name begins with the send
+		// time, so sort on it, and on the directory only to break ties.
+		sort.Slice(fresh, func(i, j int) bool {
+			fi, fj := fresh[i][strings.IndexByte(fresh[i], '/')+1:], fresh[j][strings.IndexByte(fresh[j], '/')+1:]
+			if fi != fj {
+				return fi < fj
+			}
+			return fresh[i] < fresh[j]
+		})
 		for _, key := range fresh {
 			b, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(key)))
 			if err != nil {

@@ -127,7 +127,10 @@ func received(dir, owner, sender string) ([]Message, error) {
 		if e.IsDir() || !strings.HasSuffix(name, ".json") || name == "read.json" || strings.HasPrefix(name, ".tmp") {
 			continue
 		}
-		if sender != "" && !strings.HasSuffix(name, "-"+sender+".json") {
+		// The sender is what follows the first '-': the prefix is all
+		// digits, and an ID may itself contain '-', so a suffix match
+		// would hand "b-ob"'s messages to "ob".
+		if sender != "" && senderOf(name) != sender {
 			continue
 		}
 		b, err := os.ReadFile(filepath.Join(dir, owner, name))
@@ -143,7 +146,21 @@ func received(dir, owner, sender string) ([]Message, error) {
 	return out, nil
 }
 
+// senderOf is the sender a message file name records, "" if malformed.
+func senderOf(name string) string {
+	i := strings.IndexByte(name, '-')
+	if i < 0 || !strings.HasSuffix(name, ".json") {
+		return ""
+	}
+	return strings.TrimSuffix(name[i+1:], ".json")
+}
+
 // Threads is one summary per correspondent of me, newest first.
+//
+// What I sent lives in the recipients' directories, so this reads every user
+// directory on each call. Deliberate: the mailbox has no index and no daemon
+// to keep one, a person's inbox is a few hundred files at most, and /inbox is
+// opened by a hand, not a loop.
 func Threads(dir, me string) ([]ThreadSummary, error) {
 	in, err := received(dir, me, "")
 	if err != nil {

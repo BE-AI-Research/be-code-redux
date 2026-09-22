@@ -86,3 +86,33 @@ func TestWatchFindsAMessageWrittenOnThePollsOwnTick(t *testing.T) {
 	defer mu.Unlock()
 	t.Fatalf("delivered %d of %d", got, n)
 }
+
+// Delivery is in time order across recipients, not in directory-name order:
+// a message to "zack" sent before one to "abe" is delivered first.
+func TestWatchDeliversAcrossUsersInTimeOrder(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var got []string
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Watch(ctx, dir, 500*time.Millisecond, func(m Message) { mu.Lock(); got = append(got, m.To); mu.Unlock() })
+	time.Sleep(20 * time.Millisecond) // past the baseline, well before the first poll
+	Send(dir, "x", "zack", "first")
+	time.Sleep(2 * time.Millisecond)
+	Send(dir, "x", "abe", "second")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 || got[0] != "zack" || got[1] != "abe" {
+		t.Fatalf("order %v", got)
+	}
+}
