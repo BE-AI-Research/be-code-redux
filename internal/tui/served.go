@@ -196,12 +196,7 @@ func (r *runner) onClients(infos []live.ClientInfo) {
 		// nothing SetClients or the agent goroutine reads under s.mu either.
 		// SetClients has already resolved identity for every new client by
 		// the time it returns, so this sees each one's ID if it has one yet.
-		ids := make([]string, 0, len(infos))
-		for _, c := range infos {
-			if id := r.s.identityOf(c.ID).ID; id != "" {
-				ids = append(ids, id)
-			}
-		}
+		ids := r.s.attachedIDs(infos)
 		rec, dir := r.rec, r.recDir
 		go func() { _ = rec.WithUsers(ids).Save(dir) }()
 	}

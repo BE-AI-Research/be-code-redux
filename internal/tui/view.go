@@ -211,11 +211,15 @@ type View struct {
 	// own join line yet (once per view, not once per session). mentionBusy is
 	// set by Task 10: the name of whoever's @agent question is in flight, if
 	// any, shown in the chat footer.
-	room        []store.ChatLine
-	chatVP      viewport.Model
-	chatUnseen  int
-	joinedChat  bool
-	mentionBusy string
+	room       []store.ChatLine
+	chatVP     viewport.Model
+	chatUnseen int
+	// ownToast is a notice for this terminal alone (a DM for its identity);
+	// the session's toast is shared by every view. Same expiry.
+	ownToast      string
+	ownToastUntil time.Time
+	joinedChat    bool
+	mentionBusy   string
 
 	// dm (dm.go, modeInbox/modeDM) is this terminal's own view of its DM
 	// threads: which ones exist, which is open, and that thread's own
@@ -390,6 +394,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.toast != "" && !m.now().Before(m.toastUntil) {
 			m.toast = ""
 		}
+		if m.ownToast != "" && !m.now().Before(m.ownToastUntil) {
+			m.ownToast = ""
+		}
 		return m, nil
 	case noticeMsg:
 		// This terminal's own note (its backend ping): rendered here, not
@@ -480,10 +487,12 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// served session may have several terminals attached under
 		// different chat identities at once (see TestAnArrivingDMPingsTheOwnerOnly).
 		if msg.m.To == m.userID() {
+			m.ownToast, m.ownToastUntil = "DM from "+msg.m.From, m.now().Add(toastFor)
 			m.reloadThreads()
 			if m.mode == modeDM && m.dm.with == msg.m.From {
 				m.openThread(m.dm.with)
 			}
+			return m, tea.Tick(toastFor+100*time.Millisecond, func(t time.Time) tea.Msg { return toastTickMsg(t) })
 		}
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
@@ -1050,12 +1059,12 @@ func (m *View) View() string {
 		}
 		transcript = strings.Join(lines, "\n") + "\n" + box
 	}
-	if m.toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
+	if toast := m.shownToast(); toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
 		// The notice row borrows the last transcript row so the input rows
 		// never move.
 		lines := strings.Split(transcript, "\n")
 		if len(lines) > 0 {
-			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+m.toast, m.width))
+			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+toast, m.width))
 			transcript = strings.Join(lines, "\n")
 		}
 	}
@@ -1858,4 +1867,13 @@ func (m *View) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 	}
 	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)})
 	return m, nil
+}
+
+// shownToast is the notice row's text: this terminal's own notice first,
+// else the session's.
+func (m *View) shownToast() string {
+	if m.ownToast != "" {
+		return m.ownToast
+	}
+	return m.toast
 }

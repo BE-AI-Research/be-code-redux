@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -35,7 +36,9 @@ func (s *Session) deliverDM(m inbox.Message) {
 	if !owned {
 		return // another host's user, or nobody's yet
 	}
-	s.toastLocked("DM from " + m.From)
+	// No session-wide toast: several terminals may be attached under
+	// different identities, and a DM is for one of them. Each view raises
+	// its own toast when it sees the message is for its ID.
 	s.broadcast(inboxMsg{m: m})
 }
 
@@ -66,6 +69,22 @@ type dmState struct {
 	with    string
 	msgs    []inbox.Message
 	vp      viewport.Model
+	// online is the last answer to "is `with` attached anywhere", and when
+	// it was taken: View renders on the cursor blink, and reading every
+	// live record each frame is a disk scan for nothing.
+	online   bool
+	onlineAt time.Time
+}
+
+// onlineTTL is how long a thread's online answer is trusted.
+const onlineTTL = 5 * time.Second
+
+// withOnline is online(with), cached per thread for onlineTTL.
+func (m *View) withOnline() bool {
+	if m.dm.onlineAt.IsZero() || m.now().Sub(m.dm.onlineAt) > onlineTTL {
+		m.dm.online, m.dm.onlineAt = m.online(m.dm.with), m.now()
+	}
+	return m.dm.online
 }
 
 // reloadThreads is a genuine refresh from disk: called when this terminal
@@ -132,6 +151,9 @@ func (m *View) enterDM(with string) (tea.Model, tea.Cmd) {
 // read mark is per correspondent, so the other threads' badges are exactly
 // what the disk says after a reload.
 func (m *View) openThread(with string) {
+	if with != m.dm.with {
+		m.dm.onlineAt = time.Time{}
+	}
 	m.dm.with = with
 	m.dm.msgs, _ = inbox.Thread(m.inboxDir, m.userID(), with)
 	if n := len(m.dm.msgs); n > 0 {
@@ -316,7 +338,7 @@ func (m *View) viewDM() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, left, m.st.Dim.Render(strings.Repeat("│\n", m.dm.vp.Height)), right)
 	}
 	name := m.dm.with
-	if !m.online(m.dm.with) {
+	if !m.withOnline() {
 		name += " (not online)"
 	}
 	footer := " dm " + name + " · Esc back"

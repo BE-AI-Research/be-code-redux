@@ -81,8 +81,11 @@ func TestAnArrivingDMPingsTheOwnerOnly(t *testing.T) {
 	if va.unreadDMs() != 1 || vb.unreadDMs() != 0 {
 		t.Fatalf("unread a=%d b=%d", va.unreadDMs(), vb.unreadDMs())
 	}
-	if !strings.Contains(va.toast, "DM from carol") {
-		t.Fatalf("toast %q", va.toast)
+	if !strings.Contains(va.shownToast(), "DM from carol") {
+		t.Fatalf("toast %q", va.shownToast())
+	}
+	if vb.shownToast() != "" {
+		t.Fatalf("bob's terminal saw alice's DM: %q", vb.shownToast())
 	}
 	// With alice's thread open, the line appears at once.
 	va.slashCommand("/dm carol")
@@ -101,5 +104,26 @@ func TestNarrowDMHidesTheContactColumn(t *testing.T) {
 	v.slashCommand("/dm bob")
 	if out := v.View(); strings.Contains(out, "│") || !strings.Contains(out, "Tab") {
 		t.Fatalf("narrow view:\n%s", out)
+	}
+}
+
+// The "(not online)" check reads every live record; the DM view renders on
+// the cursor blink, so the answer is cached for a few seconds.
+func TestOnlineCheckIsCachedAcrossRenders(t *testing.T) {
+	s, v := dmSession(t, "alice")
+	calls := 0
+	s.onlineFn = func(string) bool { calls++; return false }
+	inbox.Send(s.inboxDir, "bob", "alice", "x")
+	v.slashCommand("/dm bob")
+	for i := 0; i < 20; i++ {
+		v.View()
+	}
+	if calls != 1 {
+		t.Fatalf("online checked %d times over 20 renders", calls)
+	}
+	v.slashCommand("/dm carol") // a different thread asks afresh
+	v.View()
+	if calls != 2 {
+		t.Fatalf("a new thread did not re-check: %d", calls)
 	}
 }

@@ -195,3 +195,17 @@ func (m *View) clientIP() string {
 	}
 	return ""
 }
+
+// attachedIDs is the chat ID of each terminal in infos that has one, read
+// under mu: s.ids is written by binds from any terminal's Update.
+func (s *Session) attachedIDs(infos []live.ClientInfo) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(infos))
+	for _, c := range infos {
+		if id := s.ids[c.ID].ID; id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
