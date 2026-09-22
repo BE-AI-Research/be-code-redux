@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -706,6 +707,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			}
 			fmt.Println(line)
 		}
+	case "/agents":
+		for _, l := range AgentLines(r.Agent, fields[1:]) {
+			fmt.Println(l)
+		}
 	case "/consult":
 		who, q := "", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))
 		// The first word is a co-worker name only when it names one that
@@ -744,6 +749,12 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		var args []string
 		if len(fields) > 1 {
 			args = fields[1:]
+		}
+		if lines, ok := TaskVerb(r.Agent, args); ok {
+			for _, l := range lines {
+				fmt.Println(l)
+			}
+			break
 		}
 		switch {
 		case len(args) > 0 && args[0] == "clear":
@@ -1015,6 +1026,31 @@ func Events() agent.Events {
 				fmt.Println(dim("(partial)"))
 			}
 			fmt.Println(dim(fmt.Sprintf("%s read %d files in %s", res.Coworker, res.Read, res.Elapsed.Round(time.Second))))
+		},
+		OnSubAgentStart: func(d subagent.Dispatch) {
+			endThinking()
+			verb := "started"
+			if d.Interrupted {
+				verb = "resumed"
+			}
+			fmt.Println(dim(fmt.Sprintf("%s %s %s %s", d.Owner, verb, d.Node, d.Text)))
+		},
+		OnSubAgentAsk: func(a subagent.Ask) {
+			endThinking()
+			fmt.Printf("%s %s\n", cyan(fmt.Sprintf("%s (%s)?", a.Owner, a.Node)), a.Question)
+		},
+		OnSubAgentEnd: func(hb subagent.HandBack) {
+			endThinking()
+			label := fmt.Sprintf("%s (%s)", hb.Owner, hb.Node)
+			switch hb.Status {
+			case "done":
+				fmt.Printf("%s %s\n", cyan(label+">"), hb.Summary)
+				fmt.Println(dim(fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, strings.Join(hb.Files, ", "))))
+			case "interrupted":
+				fmt.Println(dim(label + " interrupted"))
+			default:
+				fmt.Println(dim(fmt.Sprintf("%s %s: %s", label, hb.Status, hb.Reason)))
+			}
 		},
 		OnReasoning: func(t string) {
 			if thinking == 0 {

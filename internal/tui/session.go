@@ -19,9 +19,13 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/ui"
 )
+
+// subAgentGlyph is what the bottom line shows per running sub-agent.
+type subAgentGlyph struct{ Name, At string }
 
 // Session is the shared core of a BE-Code UI: one per host, whatever the
 // number of terminals watching it. It owns everything the terminals have in
@@ -175,6 +179,11 @@ type Session struct {
 	// session under its assertions. nil in production, set before anything
 	// else runs.
 	startTurnHook func(string)
+
+	// runningSubs is the bottom line's view of running sub-agents (set in
+	// NewSession from ag.RunningSubAgents; a test seam swaps it so
+	// bottomLine can be exercised without a real runner).
+	runningSubs func() []subAgentGlyph
 }
 
 // NewSession builds the shared core and wires the agent's callbacks to it.
@@ -196,6 +205,13 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		holders: map[int]bool{},
 		joined:  map[int]bool{},
 		ids:     map[int]identity{},
+	}
+	s.runningSubs = func() []subAgentGlyph {
+		var out []subAgentGlyph
+		for _, r := range ag.RunningSubAgents() {
+			out = append(out, subAgentGlyph{Name: r.Name, At: r.At})
+		}
+		return out
 	}
 	if p, err := inbox.UsersPath(); err == nil {
 		s.usersPath = p
@@ -284,6 +300,9 @@ func wireEvents(s *Session) {
 		OnConsultStart:    s.onConsultStart,
 		OnConsultProgress: s.onConsultProgress,
 		OnConsultEnd:      s.onConsultEnd,
+		OnSubAgentStart:   s.onSubAgentStart,
+		OnSubAgentAsk:     s.onSubAgentAsk,
+		OnSubAgentEnd:     s.onSubAgentEnd,
 	}
 	ag.Tools.OnStatus = s.setStatus
 }
@@ -703,6 +722,58 @@ func (s *Session) onConsultEnd(res agent.ConsultResult, err error) {
 			res.Coworker, res.Read, res.Elapsed.Round(time.Second))})
 	}
 	s.statusNote = "thinking"
+	s.broadcast(statusMsg(s.statusNote))
+}
+
+// ---- sub-agents ----------------------------------------------------------
+//
+// Dispatch, ask and hand-back are the same shape as a consultation's events
+// above — recorded on the session and broadcast, never appended to one
+// view directly, so every attached terminal sees a sub-agent's work exactly
+// once.
+
+// onSubAgentStart is Events.OnSubAgentStart: the step handed to a sub-agent.
+func (s *Session) onSubAgentStart(d subagent.Dispatch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	verb := "started"
+	if d.Interrupted {
+		verb = "resumed"
+	}
+	s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s %s %s %s", d.Owner, verb, d.Node, d.Text)})
+	s.broadcast(statusMsg(s.statusNote))
+}
+
+// onSubAgentAsk is Events.OnSubAgentAsk: a sub-agent's question to the main
+// model, answered with /task reply.
+func (s *Session) onSubAgentAsk(a subagent.Ask) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	s.appendEntryLocked(entry{Kind: entryCoworkAsk, Label: fmt.Sprintf("%s (%s)", a.Owner, a.Node), Text: a.Question})
+}
+
+// onSubAgentEnd is Events.OnSubAgentEnd: the sub-agent's hand-back — done,
+// blocked or interrupted.
+func (s *Session) onSubAgentEnd(hb subagent.HandBack) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	label := fmt.Sprintf("%s (%s)", hb.Owner, hb.Node)
+	switch hb.Status {
+	case "done":
+		s.appendEntryLocked(entry{Kind: entryCowork, Label: label, Text: hb.Summary})
+		files := "nothing"
+		if len(hb.Files) > 0 {
+			files = strings.Join(hb.Files, ", ")
+		}
+		s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, files)})
+	case "interrupted":
+		s.appendEntryLocked(entry{Kind: entryDim, Text: label + " interrupted"})
+	default:
+		s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s %s: %s", label, hb.Status, hb.Reason)})
+	}
 	s.broadcast(statusMsg(s.statusNote))
 }
 

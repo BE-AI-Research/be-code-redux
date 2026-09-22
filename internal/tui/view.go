@@ -1150,6 +1150,13 @@ func (m *View) bottomLine() string {
 	if m.ag.IDEName != "" {
 		line += m.st.Accent.Render(" " + m.ideMarker())
 	}
+	if m.runningSubs != nil {
+		if subs := m.runningSubs(); len(subs) == 1 {
+			line += m.st.Accent.Render(" ⚙ " + subs[0].Name + " " + subs[0].At)
+		} else if len(subs) > 1 {
+			line += m.st.Accent.Render(fmt.Sprintf(" ⚙ %d lanes", len(subs)))
+		}
+	}
 	if n := len(m.clients); n > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
@@ -1724,6 +1731,14 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		if len(fields) > 1 {
 			args = fields[1:]
 		}
+		if lines, ok := ui.TaskVerb(m.ag, args); ok {
+			if args[0] == "reply" && len(lines) == 1 && strings.HasPrefix(lines[0], "reply delivered") {
+				// The answer is part of the shared record: every terminal sees it.
+				m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("reply to %s: %s", args[1], strings.Join(args[2:], " "))})
+			}
+			m.renderLocalLines(lines)
+			return m, nil
+		}
 		switch {
 		case len(args) > 0 && args[0] == "clear":
 			m.ag.Engine.ClearSession()
@@ -1737,6 +1752,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		default:
 			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
 		}
+		return m, nil
+	case "/agents":
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
+		}
+		m.renderLocalLines(ui.AgentLines(m.ag, args))
 		return m, nil
 	case "/notes":
 		if m.ag.Engine == nil {

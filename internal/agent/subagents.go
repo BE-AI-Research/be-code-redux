@@ -93,6 +93,10 @@ type SubAgentState struct {
 	Node, State           string
 	Calls                 int
 	Since                 time.Time
+	// At is what the bottom line shows: the doing node inside Node's
+	// dispatched subtree when the store can name one, else Node itself
+	// (the coarser root id); "" only when Node is ("" — no run).
+	At string
 }
 
 // EnableSubAgents wires the runner for the co-workers that are sub-agents
@@ -713,8 +717,12 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		return nil
 	}
 	steps := a.subSteps("sub-agent states")
+	// The store handle is read before mu, like steps above: the invariant
+	// this package documents at the top is that no call into the engine
+	// store is ever made while mu is held, so DoingUnderID (below) runs
+	// after mu is released, from a second pass over the built rows.
+	st := a.engine()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	var out []SubAgentState
 	names := make([]string, 0, len(s.cws))
 	for n := range s.cws {
@@ -731,6 +739,7 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		if runs := byOwner[n]; len(runs) > 0 {
 			r := runs[0]
 			row.Node, row.Since = r.d.Node, r.started
+			row.At = row.Node
 			if r.scratch != nil {
 				row.Calls = r.scratch.Usage().ToolCalls
 			}
@@ -749,6 +758,17 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		_, waiting := subagent.Ready(steps, s.cards, s.runningLocked())
 		for _, w := range waiting {
 			out = append(out, SubAgentState{Name: w.Owner, SubAgent: true, Node: w.ID, State: "waiting: " + w.Reason})
+		}
+	}
+	s.mu.Unlock()
+	if st != nil {
+		for i := range out {
+			if out[i].Node == "" {
+				continue
+			}
+			if at := st.DoingUnderID(out[i].Node); at != "" {
+				out[i].At = at
+			}
 		}
 	}
 	return out

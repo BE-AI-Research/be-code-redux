@@ -1598,6 +1598,17 @@ func (s *Store) Touched(id string) []string {
 // was already written).
 const InterruptedNote = "interrupted "
 
+// DoingUnderID is the id of the doing node inside a dispatched subtree,
+// or "" — the bottom line's "⚙ big 3.2.2".
+func (s *Store) DoingUnderID(rootID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d := s.tree.DoingUnder(rootID); d != nil {
+		return d.ID
+	}
+	return ""
+}
+
 // Steps is the ready rule's view of the tree (spec §2.1).
 func (s *Store) Steps() []subagent.Step {
 	s.mu.Lock()
