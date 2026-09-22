@@ -29,7 +29,7 @@ const maxBackendRetries = 5
 func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxBackendRetries; attempt++ {
-		resp, err := a.chatFiltered(ctx, req)
+		resp, err := a.chatInLane(ctx, req)
 		a.noteNativeFallback()
 		if err == nil {
 			return resp, nil
@@ -54,6 +54,20 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 		return nil, fmt.Errorf("backend unavailable after %d retries: %w", maxBackendRetries, lastErr)
 	}
 	return nil, lastErr
+}
+
+// chatInLane is chatFiltered inside the server's lane when lanes exist.
+// One call, one lane: the retry loop above takes it afresh each attempt, so
+// a sub-agent sharing the server is not shut out for the whole backoff.
+func (a *Agent) chatInLane(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	if a.laneAcquire != nil {
+		release, err := a.laneAcquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+	return a.chatFiltered(ctx, req)
 }
 
 // isRetryableBackendError distinguishes "the server is busy/restarting/

@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/repomap"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -44,6 +45,11 @@ type Events struct {
 	OnConsultStart    func(name, question, origin string)
 	OnConsultProgress func(name string, filesRead int)
 	OnConsultEnd      func(res ConsultResult, err error)
+	// Sub-agents (spec §3.2): a dispatch began, one asked the main model,
+	// one ended (Status done, blocked or interrupted).
+	OnSubAgentStart func(d subagent.Dispatch)
+	OnSubAgentAsk   func(ask subagent.Ask)
+	OnSubAgentEnd   func(hb subagent.HandBack)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -260,6 +266,11 @@ type Agent struct {
 	modelMu  sync.Mutex
 	loader   ModelLoader
 	modelGen int
+	// subs is the sub-agent runner, nil unless EnableSubAgents ran.
+	// laneAcquire wraps every model call once lanes exist (spec §2.2).
+	subs        *subAgents
+	laneAcquire func(ctx context.Context) (func(), error)
+
 	// sessionMu guards the Session pointer against a UI reading it while
 	// /clear or /resume swaps it from a goroutine of their own. It guards
 	// the pointer, never what it points at.
@@ -957,6 +968,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance
 	}
+	// Stable for the session, so the prompt cache never pays for it: the
+	// block says what sub-agents are, never what any one of them is doing.
+	if a.subs != nil && a.systemOverride == "" {
+		sys += "\n\n" + subAgentGuidance
+	}
 	// A scratch agent (plan mode, a consultation) keeps the summary here: it
 	// is fixed for the few turns such an agent lives, so it costs the cache
 	// nothing, and its prompt stays in one piece.
@@ -1070,6 +1086,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	a.stopPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
+	// A task document edited by hand between turns is picked up before the
+	// model is called, so an assignment made in an editor starts working
+	// without waiting for the model to touch the task tool.
+	if a.subs != nil {
+		a.ScheduleSubAgents()
+	}
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 	a.lastGitInfo = ""
@@ -1462,6 +1484,19 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		if args, ok := tools.ParseArgs(call.Arguments); ok {
 			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
+			}
+		}
+	}
+	// A task call may have assigned or scoped a step, and a write may have
+	// landed inside a scope a sub-agent is holding. Both are answered here,
+	// on the result, for the same reason the nudge below is.
+	if a.subs != nil {
+		if call.Name == "task" {
+			a.ScheduleSubAgents()
+		}
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if note := a.subs.ownedNote(call.Name, args); note != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + note
 			}
 		}
 	}
