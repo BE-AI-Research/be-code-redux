@@ -193,6 +193,10 @@ func (m *View) handleChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyPgDown:
 		m.chatVP.HalfViewDown()
 		return m, nil
+	case tea.KeyRunes:
+		if m.input.Value() == "" && string(k.Runes) == "/" {
+			return m.openPalette("")
+		}
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)

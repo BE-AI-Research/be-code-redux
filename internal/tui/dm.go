@@ -193,9 +193,9 @@ func (m *View) openThread(with string) {
 
 func (m *View) handleInboxKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if v := strings.TrimSpace(m.input.Value()); v != "" {
-		// A slash command is being typed (started by the "/" rune case
-		// below): keys here edit and submit that line, not the thread list,
-		// so /back and /dm <name> work from the inbox too.
+		// The input line carries text (a command, or a filter handed back by a
+		// cancelled palette): keys here edit and submit that line, not the
+		// thread list, so /back and /dm <name> still work from the inbox.
 		switch k.Type {
 		case tea.KeyEnter:
 			m.input.Reset()
@@ -235,7 +235,7 @@ func (m *View) handleInboxKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.reloadThreads()
 			}
 		case "/":
-			m.input.SetValue("/")
+			return m.openPalette("")
 		}
 	}
 	return m, nil
@@ -275,6 +275,10 @@ func (m *View) handleDMKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyPgDown:
 		m.dm.vp.HalfViewDown()
 		return m, nil
+	case tea.KeyRunes:
+		if m.input.Value() == "" && string(k.Runes) == "/" {
+			return m.openPalette("")
+		}
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)
