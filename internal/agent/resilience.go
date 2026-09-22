@@ -56,18 +56,30 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 	return nil, lastErr
 }
 
-// chatInLane is chatFiltered inside the server's lane when lanes exist.
-// One call, one lane: the retry loop above takes it afresh each attempt, so
-// a sub-agent sharing the server is not shut out for the whole backoff.
-func (a *Agent) chatInLane(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
-	if a.laneAcquire != nil {
-		release, err := a.laneAcquire(ctx)
-		if err != nil {
-			return nil, err
-		}
-		defer release()
+// inLane runs one model call inside the primary's lane on its server, when
+// lanes exist (spec §2.2). The lane is not re-entrant: never call this from
+// inside another inLane. Every site that reaches a.Provider.Chat on the
+// primary's server goes through it — the tool loop below, the compaction
+// summary and its retry, the handoff, the init overview and the commit
+// message — because a compaction colliding with a sub-agent on one Ollama is
+// exactly the overload the lane exists to prevent.
+func (a *Agent) inLane(ctx context.Context, fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
+	if a.laneAcquire == nil {
+		return fn()
 	}
-	return a.chatFiltered(ctx, req)
+	release, err := a.laneAcquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return fn()
+}
+
+// chatInLane is chatFiltered inside the server's lane. One call, one lane:
+// the retry loop above takes it afresh each attempt, so a sub-agent sharing
+// the server is not shut out for the whole backoff.
+func (a *Agent) chatInLane(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return a.inLane(ctx, func() (*provider.ChatResponse, error) { return a.chatFiltered(ctx, req) })
 }
 
 // isRetryableBackendError distinguishes "the server is busy/restarting/

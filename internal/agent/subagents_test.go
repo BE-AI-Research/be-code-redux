@@ -399,6 +399,45 @@ func TestPrimaryModelCallsTakeTheLane(t *testing.T) {
 	}
 }
 
+// The scheduler runs on the primary's own goroutine (at the top of run, and
+// after every task call), so a store that panics there must detach the
+// engine like any other advisory call — not end the session.
+func TestSchedulingSurvivesAPanickingStore(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	f.assign(t)
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	f.ag.engineFault = func(op string) {
+		if strings.HasPrefix(op, "sub-agent ") {
+			panic("the store exploded in " + op)
+		}
+	}
+	f.ag.ScheduleSubAgents()
+	if len(f.ag.RunningSubAgents()) != 0 {
+		t.Fatal("a detached engine must yield no steps and dispatch nothing")
+	}
+	// The primary keeps working, and the fence said so exactly once.
+	if _, err := f.ag.Run(context.Background(), "still alive?"); err != nil {
+		t.Fatalf("the primary must survive a panicking store in the scheduler: %v", err)
+	}
+	// Exactly one detach notice, and it names the scheduler's own read. The
+	// op matters: engineFault only fires from inside engineDo, so a Steps()
+	// call put back in front of the fence would not panic there at all and
+	// the first recovered panic would name a later op instead.
+	n := 0
+	for _, m := range notices {
+		if strings.Contains(m, "continuing without working memory") {
+			n++
+			if !strings.Contains(m, "engine: sub-agent schedule failed") {
+				t.Fatalf("the scheduler's Steps() read is not behind the fence: %q", m)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected one detach notice, got %d: %q", n, notices)
+	}
+}
+
 func TestSubAgentStatesAndGuidance(t *testing.T) {
 	f := newSubFixture(t, &scriptedProvider{}, nil)
 	states := f.ag.SubAgentStates()

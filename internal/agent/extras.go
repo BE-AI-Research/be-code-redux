@@ -77,14 +77,17 @@ func (a *Agent) GenerateCommit(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no changes to commit (or not a git repository)")
 	}
 	a.awaitWindow(ctx) // never send with no window on the wire
-	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: a.Model,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: "Write a single-line git commit message (max 72 chars, imperative mood, conventional-commits style when it fits) for this diff. Output ONLY the message."},
-			{Role: provider.RoleUser, Content: diff},
-		},
-		Temperature: 0.1,
-	}, nil)
+	// In the lane: /commit is a UI command, never inside a turn's own call.
+	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+		return a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: a.Model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: "Write a single-line git commit message (max 72 chars, imperative mood, conventional-commits style when it fits) for this diff. Output ONLY the message."},
+				{Role: provider.RoleUser, Content: diff},
+			},
+			Temperature: 0.1,
+		}, nil)
+	})
 	if err != nil {
 		return "", err
 	}

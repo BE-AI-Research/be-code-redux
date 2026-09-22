@@ -1779,15 +1779,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
-	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: model,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: compactSystemPrompt},
-			{Role: provider.RoleUser, Content: u.String()},
-		},
-		Temperature: 0.1,
-		NoThink:     true, // a summary does not need minutes of deliberation
-	}, nil)
+	// In the lane: compaction runs between turns, never inside chatWithRetry's
+	// hold, so taking it here cannot nest.
+	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+		return a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: compactSystemPrompt},
+				{Role: provider.RoleUser, Content: u.String()},
+			},
+			Temperature: 0.1,
+			NoThink:     true, // a summary does not need minutes of deliberation
+		}, nil)
+	})
 	if err != nil {
 		// A summary that never arrived is the same situation as one that
 		// arrived empty: the tree is still current, so the session keeps
@@ -1830,17 +1834,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// list is wanted". Its notes are already applied. Ask once more, in
 		// the same exchange so it can see what it wrote — a second request
 		// from scratch gets the same answer.
-		again, rerr := a.Provider.Chat(ctx, provider.ChatRequest{
-			Model: model,
-			Messages: []provider.Message{
-				{Role: provider.RoleSystem, Content: compactSystemPrompt},
-				{Role: provider.RoleUser, Content: u.String()},
-				{Role: provider.RoleAssistant, Content: resp.Content},
-				{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
-			},
-			Temperature: 0.1,
-			NoThink:     true,
-		}, nil)
+		again, rerr := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+			return a.Provider.Chat(ctx, provider.ChatRequest{
+				Model: model,
+				Messages: []provider.Message{
+					{Role: provider.RoleSystem, Content: compactSystemPrompt},
+					{Role: provider.RoleUser, Content: u.String()},
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
+				},
+				Temperature: 0.1,
+				NoThink:     true,
+			}, nil)
+		})
 		if rerr == nil {
 			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
 				summary, resp = s2, again

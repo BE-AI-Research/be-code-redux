@@ -133,8 +133,8 @@ func (a *Agent) SubAgentsEnabled() bool { return a.subs != nil }
 // but this configuration cannot re-dispatch: they are blocked, handed
 // back, and noticed, so nobody waits for something that will not come.
 func (a *Agent) resumeSubAgents() {
-	st := a.engine()
-	if st == nil {
+	steps := a.subSteps("sub-agent resume")
+	if len(steps) == 0 {
 		return
 	}
 	s := a.subs
@@ -142,9 +142,9 @@ func (a *Agent) resumeSubAgents() {
 	cards := s.cards
 	running := s.runningLocked()
 	s.mu.Unlock()
-	_, waiting := subagent.Ready(st.Steps(), cards, running)
+	_, waiting := subagent.Ready(steps, cards, running)
 	for _, w := range waiting {
-		step := findStep(st.Steps(), w.ID)
+		step := findStep(steps, w.ID)
 		if step == nil || !step.Interrupted {
 			continue
 		}
@@ -170,6 +170,21 @@ func findStep(steps []subagent.Step, id string) *subagent.Step {
 	return nil
 }
 
+// subSteps is the ready rule's view of the tree, behind the engine fence
+// like every other call the agent makes into the store: a panicking store
+// detaches the engine and yields no steps, and the scheduler then simply
+// does nothing rather than ending the session.
+//
+// It is deliberately read *before* subAgents.mu is taken by every caller.
+// The store has its own lock, so holding mu across the read would buy no
+// consistency — and it would put engineDo's notice, which a UI handles on
+// its own goroutine, underneath the runner's mutex.
+func (a *Agent) subSteps(op string) []subagent.Step {
+	var steps []subagent.Step
+	a.engineDo(op, func(st *engine.Store) { steps = st.Steps() })
+	return steps
+}
+
 func (s *subAgents) runningLocked() map[string]bool {
 	m := map[string]bool{}
 	for id := range s.runs {
@@ -183,8 +198,11 @@ func (s *subAgents) runningLocked() map[string]bool {
 // on a model or a modal.
 func (a *Agent) ScheduleSubAgents() {
 	s := a.subs
-	st := a.engine()
-	if s == nil || st == nil {
+	if s == nil {
+		return
+	}
+	steps := a.subSteps("sub-agent schedule")
+	if len(steps) == 0 {
 		return
 	}
 	s.mu.Lock()
@@ -192,7 +210,7 @@ func (a *Agent) ScheduleSubAgents() {
 	if s.stopping {
 		return
 	}
-	ready, _ := subagent.Ready(st.Steps(), s.cards, s.runningLocked())
+	ready, _ := subagent.Ready(steps, s.cards, s.runningLocked())
 	for _, c := range ready {
 		if len(s.runs) >= a.Cfg.SubAgents.MaxConcurrent {
 			return
@@ -200,18 +218,26 @@ func (a *Agent) ScheduleSubAgents() {
 		if s.hold[c.ID] {
 			continue
 		}
-		a.dispatchLocked(c)
+		a.dispatchLocked(steps, c)
 	}
 }
 
-func (a *Agent) dispatchLocked(c subagent.Candidate) {
+func (a *Agent) dispatchLocked(steps []subagent.Step, c subagent.Candidate) {
 	s := a.subs
-	st := a.engine()
-	step := findStep(st.Steps(), c.ID)
+	step := findStep(steps, c.ID)
 	if step == nil {
 		return
 	}
-	text, children, ctxText := st.DispatchContext(c.ID)
+	var text, ctxText string
+	var children []string
+	got := false
+	a.engineDo("sub-agent dispatch", func(st *engine.Store) {
+		text, children, ctxText = st.DispatchContext(c.ID)
+		got = true
+	})
+	if !got {
+		return // the engine detached under us: nothing to dispatch from
+	}
 	d := subagent.Dispatch{Node: c.ID, Owner: c.Owner, Text: text, Children: children,
 		Scope: step.Scope, MaxTurns: a.Cfg.SubAgents.MaxTurns, Context: ctxText,
 		Interrupted: step.Interrupted, Touched: step.Touched}
@@ -228,7 +254,7 @@ func (a *Agent) dispatchLocked(c subagent.Candidate) {
 	run := &subRun{d: d, cw: s.cws[c.Owner], ctx: ctx, cancel: cancel, started: time.Now(),
 		reply: make(chan string, 1), done: make(chan struct{})}
 	s.runs[c.ID] = run
-	st.SetDispatched(c.ID, true)
+	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
 	s.wg.Add(1)
 	go a.runSub(run)
 }
@@ -302,14 +328,11 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	if scratch != nil {
 		hb.Calls = scratch.Usage().ToolCalls
 	}
-	st := a.engine()
 	switch {
 	case interrupt:
 		hb.Status = "interrupted"
 		files := []string{}
-		if st != nil {
-			files = st.Touched(run.d.Node)
-		}
+		a.engineDo("sub-agent touched", func(st *engine.Store) { files = st.Touched(run.d.Node) })
 		// The engine formats the note itself, so the shape Steps() parses
 		// back is written in exactly one place.
 		a.engineDo("sub-agent interrupt", func(st *engine.Store) {
@@ -435,6 +458,14 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 // askMain parks the sub-agent on one question (spec §2.7).
 func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, error) {
 	s := a.subs
+	// An answer that lost the race with its own timeout is still in the
+	// buffer; it belongs to the question that timed out, not to this one.
+	// Drained here, before the question is registered: while question is ""
+	// ReplyAsk refuses, so no legitimate answer can be in flight yet.
+	select {
+	case <-run.reply:
+	default:
+	}
 	s.mu.Lock()
 	if run.question != "" {
 		s.mu.Unlock()
@@ -602,6 +633,7 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 	if s == nil {
 		return nil
 	}
+	steps := a.subSteps("sub-agent states")
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []SubAgentState
@@ -634,8 +666,8 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		}
 		out = append(out, row)
 	}
-	if st := a.engine(); st != nil {
-		_, waiting := subagent.Ready(st.Steps(), s.cards, s.runningLocked())
+	if len(steps) > 0 {
+		_, waiting := subagent.Ready(steps, s.cards, s.runningLocked())
 		for _, w := range waiting {
 			out = append(out, SubAgentState{Name: w.Owner, SubAgent: true, Node: w.ID, State: "waiting: " + w.Reason})
 		}
