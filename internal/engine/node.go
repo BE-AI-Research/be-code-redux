@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -61,6 +62,54 @@ type Tree struct {
 	// nudge is Limits.StepNudge, carried on the copy Render makes so the
 	// renderer stays a function of the tree it is given. Never persisted.
 	nudge int
+	// dispatched names the roots of subtrees a sub-agent is working (spec
+	// §1.3): each is its own pen with its own doing node. Not persisted;
+	// the store sets it.
+	dispatched map[string]bool
+}
+
+// SetDispatched marks or clears a subtree root as dispatched.
+func (t *Tree) SetDispatched(rootID string, on bool) {
+	if t.dispatched == nil {
+		t.dispatched = map[string]bool{}
+	}
+	if on {
+		t.dispatched[rootID] = true
+	} else {
+		delete(t.dispatched, rootID)
+	}
+}
+
+// Dispatched lists the dispatched roots in id order.
+func (t *Tree) Dispatched() []string {
+	ids := make([]string, 0, len(t.dispatched))
+	for id := range t.dispatched {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// penOf is the dispatched root that contains id, or "" for the main
+// model's pen. Ids are positional, so containment is a prefix test.
+func (t *Tree) penOf(id string) string {
+	for r := range t.dispatched {
+		if id == r || strings.HasPrefix(id, r+".") {
+			return r
+		}
+	}
+	return ""
+}
+
+// DoingUnder is the doing node inside one dispatched subtree.
+func (t *Tree) DoingUnder(rootID string) *Node {
+	var found *Node
+	t.Walk(func(n *Node, _ int) {
+		if found == nil && n.Status == StatusDoing && (n.ID == rootID || strings.HasPrefix(n.ID, rootID+".")) {
+			found = n
+		}
+	})
+	return found
 }
 
 // Add appends a child under parent ("" for a new root) and returns it. Ids
@@ -173,26 +222,34 @@ func (t *Tree) Walk(fn func(n *Node, depth int)) {
 	rec(t.Roots, 0)
 }
 
+// Doing is the main model's doing node: the one not inside any dispatched
+// subtree. A sub-agent's doing node is DoingUnder its root.
 func (t *Tree) Doing() *Node {
-	var d *Node
+	var found *Node
 	t.Walk(func(n *Node, _ int) {
-		if n.Status == StatusDoing {
-			d = n
+		if found == nil && n.Status == StatusDoing && t.penOf(n.ID) == "" {
+			found = n
 		}
 	})
-	return d
+	return found
 }
 
-// SetStatus moves one node. Exactly one node is doing at a time, so a new
-// doing node sends the previous one back to todo; the caller (Task 2) is
-// what distils it first.
+// SetStatus moves one node. Exactly one node is doing at a time per pen, so
+// a new doing node sends the previous one in its own pen back to todo; the
+// caller (Task 2) is what distils it first.
 func (t *Tree) SetStatus(id string, s Status, reason string) *Node {
 	n := t.Find(id)
 	if n == nil {
 		return nil
 	}
 	if s == StatusDoing {
-		if prev := t.Doing(); prev != nil && prev != n {
+		var prev *Node
+		if pen := t.penOf(id); pen != "" {
+			prev = t.DoingUnder(pen)
+		} else {
+			prev = t.Doing()
+		}
+		if prev != nil && prev != n {
 			prev.Status = StatusTodo
 		}
 	}

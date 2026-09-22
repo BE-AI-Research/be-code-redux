@@ -67,10 +67,37 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 	}
 	s.mu.Lock()
 	t := Tree{Roots: copyNodes(s.tree.Roots), nudge: s.lim.StepNudge}
+	// A copy of the dispatched set, not the live map: Render runs outside
+	// the lock, and every other part of this copy — the nodes above — is
+	// already its own, never shared with the live tree.
+	if len(s.tree.dispatched) > 0 {
+		t.dispatched = make(map[string]bool, len(s.tree.dispatched))
+		for k, v := range s.tree.dispatched {
+			t.dispatched[k] = v
+		}
+	}
+	for _, r := range s.tree.Dispatched() {
+		if n := t.Find(r); n != nil {
+			n.Dispatched = true
+			if d := t.DoingUnder(r); d != nil {
+				n.DispatchedAt = d.ID
+			}
+			n.Calls = subtreeCalls(n)
+		}
+	}
 	notes := strings.TrimRight(s.notes, "\n")
 	root := s.root
 	s.mu.Unlock()
 	return renderBlock(&t, notes, budget, inMap, func(f FileRef) bool { return changedSinceRead(root, f) })
+}
+
+// subtreeCalls sums Calls over a subtree, for the running line.
+func subtreeCalls(n *Node) int {
+	total := n.Calls
+	for _, c := range n.Children {
+		total += subtreeCalls(c)
+	}
+	return total
 }
 
 // changedSinceRead reports whether a file the record describes no longer has

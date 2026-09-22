@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 const (
@@ -186,6 +187,10 @@ type Store struct {
 
 	tree Tree
 	rec  recorder
+
+	// cards is what SetCards was last given: the sub-agent cards, for
+	// owner/scope validation and the load-time warnings.
+	cards map[string]subagent.Card
 
 	// docs maps a document's file name to the sha256 of the content the
 	// engine last saw on disk — loaded, written or merged — so an edit made
@@ -474,6 +479,14 @@ func (s *Store) loadDocs() {
 	s.dropSplitDuplicates()
 	s.repairRootIDs()
 	s.warnMultipleDoing()
+	// warnOwners takes s.mu itself; loadDocs runs before the store is
+	// shared with anything else (OpenAt, single-threaded), so nothing else
+	// holds the lock here. Cards normally arrive after Open via SetCards,
+	// which warns itself; this call only matters for a reload with cards
+	// already set.
+	if s.cards != nil {
+		s.warnOwners()
+	}
 }
 
 // dropSplitDuplicates undoes the one thing a failure inside Flush's split can
@@ -545,16 +558,20 @@ func sameSubtree(a, b *Node) bool {
 // node in isolation, only with the pair), so stderr is the only place left
 // to say it.
 func (s *Store) warnMultipleDoing() {
-	var docs []string
-	seen := map[string]bool{}
-	total := 0
+	docsByPen := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	total := map[string]int{}
 	var walk func(n *Node, doc string)
 	walk = func(n *Node, doc string) {
 		if n.Status == StatusDoing {
-			total++
-			if !seen[doc] {
-				seen[doc] = true
-				docs = append(docs, doc)
+			pen := s.tree.penOf(n.ID)
+			total[pen]++
+			if seen[pen] == nil {
+				seen[pen] = map[string]bool{}
+			}
+			if !seen[pen][doc] {
+				seen[pen][doc] = true
+				docsByPen[pen] = append(docsByPen[pen], doc)
 			}
 		}
 		for _, c := range n.Children {
@@ -568,10 +585,17 @@ func (s *Store) warnMultipleDoing() {
 		}
 		walk(r, doc)
 	}
-	if total < 2 {
-		return
+	pens := make([]string, 0, len(total))
+	for pen := range total {
+		pens = append(pens, pen)
 	}
-	s.warnf("%d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last", total, strings.Join(docs, ", "))
+	sort.Strings(pens)
+	for _, pen := range pens {
+		if total[pen] < 2 {
+			continue
+		}
+		s.warnf("%d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last", total[pen], strings.Join(docsByPen[pen], ", "))
+	}
 }
 
 // repairRootIDs makes every root's id its position in the tree, noting the
@@ -1302,7 +1326,13 @@ func (s *Store) SetStatus(id string, status Status, reason string) error {
 		// so the evidence arrives verbatim — the unfiled node is not
 		// "previous work", it is this node's own first minutes.
 		s.adoptUnfiledLocked(n)
-		if prev := s.tree.Doing(); prev != nil && prev != n {
+		var prev *Node
+		if pen := s.tree.penOf(id); pen != "" {
+			prev = s.tree.DoingUnder(pen)
+		} else {
+			prev = s.tree.Doing()
+		}
+		if prev != nil && prev != n {
 			s.rec.distillWith(prev, snap)
 		}
 	}
@@ -1338,6 +1368,271 @@ func parseStatus(s string) (Status, bool) {
 		return StatusDropped, true
 	}
 	return "", false
+}
+
+// parentID is everything before an id's last dot, or "" for a root.
+func parentID(id string) string {
+	if i := strings.LastIndexByte(id, '.'); i >= 0 {
+		return id[:i]
+	}
+	return ""
+}
+
+// SetCards tells the store which owners exist and what each may be given;
+// SetOwner and SetScope validate against it, and warnOwners' warnings use
+// it.
+func (s *Store) SetCards(cards map[string]subagent.Card) {
+	s.mu.Lock()
+	s.cards = cards
+	s.mu.Unlock()
+	s.warnOwners()
+}
+
+// warnOwners warns once per call about assignments the config cannot
+// honour: an owner that is not a sub-agent, or a scope outside its
+// max_scope. It takes s.mu itself, so it must never be called from code
+// already holding it.
+func (s *Store) warnOwners() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tree.Walk(func(n *Node, _ int) {
+		if n.Owner == "" || n.Status.terminal() {
+			return
+		}
+		card, ok := s.cards[n.Owner]
+		switch {
+		case !ok || !card.SubAgent:
+			s.warnf("task %s: %s is not a sub-agent; add \"sub_agent\": true to its coworkers entry", n.ID, n.Owner)
+		case !subagent.Within(n.Scope, card.MaxScope):
+			s.warnf("task %s: %s may only own paths under %s", n.ID, n.Owner, strings.Join(card.MaxScope, ", "))
+		}
+	})
+}
+
+// SetOwner assigns a node (spec §1.1). owner "" unassigns. pinned is the
+// operator's form ("@name!" in the document), which the model may not
+// change or remove.
+func (s *Store) SetOwner(id, owner string, pinned bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return fmt.Errorf("no node %s", id)
+	}
+	if n.OwnerPinned && !pinned {
+		return fmt.Errorf("%s was assigned by the operator; ask them to change it", id)
+	}
+	if s.tree.dispatched[id] {
+		return fmt.Errorf("%s is being worked by %s; stop it first", id, n.Owner)
+	}
+	if owner != "" {
+		if card, ok := s.cards[owner]; !ok || !card.SubAgent {
+			return fmt.Errorf("%s is not a sub-agent; add \"sub_agent\": true to its coworkers entry", owner)
+		}
+		if above := s.tree.OwnerOf(parentID(id)); above != "" {
+			return fmt.Errorf("%s is inside %s's subtree; assign the top of a subtree", id, above)
+		}
+		for _, c := range n.Children {
+			if c.Owner != "" {
+				return fmt.Errorf("%s has an assigned child (%s); one subtree, one pen", id, c.ID)
+			}
+		}
+	}
+	n.Owner, n.OwnerPinned = owner, owner != "" && pinned
+	s.markDirtyLocked()
+	return nil
+}
+
+// SetScope sets what the node's owner may write (spec §1.1, §1.4).
+func (s *Store) SetScope(id string, scope []string) error {
+	clean, err := subagent.CleanScope(scope)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return fmt.Errorf("no node %s", id)
+	}
+	if n.Owner != "" {
+		if card, ok := s.cards[n.Owner]; ok && !subagent.Within(clean, card.MaxScope) {
+			return fmt.Errorf("%s may only own paths under %s", n.Owner, strings.Join(card.MaxScope, ", "))
+		}
+	}
+	n.Scope = clean
+	s.markDirtyLocked()
+	return nil
+}
+
+// SetDispatched marks a subtree as being worked by its owner.
+func (s *Store) SetDispatched(id string, on bool) {
+	s.mu.Lock()
+	s.tree.SetDispatched(id, on)
+	s.mu.Unlock()
+}
+
+// Dispatched lists the dispatched roots.
+func (s *Store) Dispatched() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tree.Dispatched()
+}
+
+// CloseAs closes a dispatched subtree on the sub-agent's behalf: the root
+// and every open descendant take status (done or blocked), DoneBy is
+// stamped, buffers are distilled, and the dispatched mark is cleared.
+func (s *Store) CloseAs(id, owner, status, reason string) error {
+	st, ok := parseStatus(status)
+	if !ok || !st.terminal() {
+		return fmt.Errorf("status must be done or blocked")
+	}
+	snap := s.rawSnaps()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return fmt.Errorf("no node %s", id)
+	}
+	var close func(x *Node)
+	close = func(x *Node) {
+		for _, c := range x.Children {
+			close(c)
+		}
+		if x.Status.terminal() {
+			return
+		}
+		if x.Text == unfiledText && len(x.Evidence.Raw) == 0 && len(x.Children) == 0 {
+			s.tree.Remove(x)
+			return
+		}
+		s.rec.distillWith(x, snap)
+		s.tree.SetStatus(x.ID, st, reason)
+		x.DoneBy = owner
+	}
+	close(n)
+	s.tree.SetDispatched(id, false)
+	s.markDirtyLocked()
+	return nil
+}
+
+// Interrupt undoes a dispatch without closing anything: the pen's doing
+// node goes back to todo, the note is recorded on the root, and the
+// dispatched mark is cleared (spec §3.5).
+func (s *Store) Interrupt(id, note string) error {
+	snap := s.rawSnaps()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return fmt.Errorf("no node %s", id)
+	}
+	if d := s.tree.DoingUnder(id); d != nil {
+		s.rec.distillWith(d, snap)
+		d.Status = StatusTodo
+	}
+	if note != "" {
+		n.Evidence.Notes = append(n.Evidence.Notes, NoteRef{Text: note})
+	}
+	s.tree.SetDispatched(id, false)
+	s.markDirtyLocked()
+	return nil
+}
+
+// Touched lists the files written under a subtree, from its evidence.
+func (s *Store) Touched(id string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	var walk func(x *Node)
+	walk = func(x *Node) {
+		for _, f := range x.Evidence.Files {
+			if f.Edited && !seen[f.Path] {
+				seen[f.Path] = true
+				out = append(out, f.Path)
+			}
+		}
+		for _, it := range x.Evidence.Raw {
+			if (it.Tool == "write_file" || it.Tool == "edit_file") && it.OK && it.Path != "" && !seen[it.Path] {
+				seen[it.Path] = true
+				out = append(out, it.Path)
+			}
+		}
+		for _, c := range x.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	sort.Strings(out)
+	return out
+}
+
+// InterruptedNote is the prefix Interrupt's note carries (the agent writes
+// it, Steps reads the files back out of it so a re-dispatch can say what
+// was already written).
+const InterruptedNote = "interrupted "
+
+// Steps is the ready rule's view of the tree (spec §2.1).
+func (s *Store) Steps() []subagent.Step {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var conv func(n *Node, inherited string) subagent.Step
+	conv = func(n *Node, inherited string) subagent.Step {
+		owner := n.Owner
+		if owner == "" {
+			owner = inherited
+		}
+		st := subagent.Step{ID: n.ID, Text: n.Text, Status: string(n.Status), Owner: owner,
+			Scope: append([]string(nil), n.Scope...), After: append([]string(nil), n.After...)}
+		for _, note := range n.Evidence.Notes {
+			if strings.HasPrefix(note.Text, InterruptedNote) {
+				st.Interrupted = true
+				if _, files, ok := strings.Cut(note.Text, "files written: "); ok {
+					st.Touched = splitList(files)
+				}
+			}
+		}
+		for _, c := range n.Children {
+			st.Children = append(st.Children, conv(c, owner))
+		}
+		return st
+	}
+	var out []subagent.Step
+	for _, r := range s.tree.Roots {
+		out = append(out, conv(r, ""))
+	}
+	return out
+}
+
+// DispatchContext is what a Dispatch carries: the node's text, its
+// children as "id text" lines, and the bounded context — the root task's
+// status line, the path of ancestors, and the durable notes.
+func (s *Store) DispatchContext(id string) (text string, children []string, ctx string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return "", nil, ""
+	}
+	for _, c := range n.Children {
+		children = append(children, c.ID+" "+c.Text)
+	}
+	var b strings.Builder
+	parts := strings.Split(id, ".")
+	for i := 1; i < len(parts); i++ {
+		if a := s.tree.Find(strings.Join(parts[:i], ".")); a != nil {
+			b.WriteString(statusLine(a) + "\n")
+		}
+	}
+	if s.notes != "" {
+		b.WriteString("\nNotes:\n" + s.notes)
+	}
+	return n.Text, children, strings.TrimSpace(b.String())
 }
 
 // Note records a fact or decision against a node. With file it also becomes
@@ -1452,11 +1747,26 @@ func (s *Store) activeRootLocked() *Node {
 	return nil
 }
 
-// activeNodeLocked is where evidence goes: the node that is doing, or —
-// when nothing is — an "unfiled" node under the active task. Filing
-// evidence under a step the model did not name produces a report that is
-// confidently wrong, which is worse than one that says unfiled.
-func (s *Store) activeNodeLocked() *Node {
+// activeNodeLocked is where the main model's evidence goes.
+func (s *Store) activeNodeLocked() *Node { return s.activeNodeForLocked("") }
+
+// activeNodeForLocked is where evidence goes for one pen: "" is the main
+// model, else the id of a dispatched root. It is the pen's doing node, or —
+// when nothing in the pen is doing — an "unfiled" node opened under the
+// pen's root (or, for the main model, under the active root as before).
+// Filing evidence under a step the model did not name produces a report
+// that is confidently wrong, which is worse than one that says unfiled.
+func (s *Store) activeNodeForLocked(pen string) *Node {
+	if pen != "" {
+		if d := s.tree.DoingUnder(pen); d != nil {
+			return d
+		}
+		host := s.tree.Find(pen)
+		if host == nil {
+			return s.activeNodeForLocked("")
+		}
+		return s.unfiledUnderLocked(host)
+	}
 	if d := s.tree.Doing(); d != nil {
 		return d
 	}
@@ -1470,6 +1780,12 @@ func (s *Store) activeNodeLocked() *Node {
 		s.markDirtyLocked()
 		return n
 	}
+	return s.unfiledUnderLocked(host)
+}
+
+// unfiledUnderLocked returns host's open unfiled child, opening one if
+// none is open.
+func (s *Store) unfiledUnderLocked(host *Node) *Node {
 	for _, c := range host.Children {
 		if c.Text == unfiledText && !c.Status.terminal() {
 			c.Status = StatusDoing
@@ -1503,14 +1819,17 @@ func (s *Store) adoptUnfiledLocked(n *Node) {
 		return
 	}
 	var unfiled []*Node
+	pen := s.tree.penOf(n.ID)
 	s.tree.Walk(func(m *Node, _ int) {
-		if m != n && m.Text == unfiledText && !m.Status.terminal() {
+		if m != n && m.Text == unfiledText && !m.Status.terminal() && s.tree.penOf(m.ID) == pen {
 			unfiled = append(unfiled, m)
 		}
 	})
 	for _, u := range unfiled {
 		mergeEvidence(&n.Evidence, u.Evidence)
+		n.Calls += u.Calls
 		u.Evidence = Evidence{}
+		u.Calls = 0
 		// Two nodes must be emptied and dropped rather than removed:
 		//
 		//   a root, because s.files and s.extra are index-parallel to
@@ -1767,10 +2086,15 @@ func (s *Store) ApplyFileNotes(block string) {
 
 // --------------------------------------------------------- the recorder seam
 
-// Observe records what a tool result revealed and returns a footer for the
-// model when the read was redundant. Never errors; the file I/O it needs is
-// done before the lock is taken, the way 0.10.0 did it.
-func (s *Store) Observe(ev Event) string {
+// Observe files a tool event under the main model's pen. It never errors;
+// the file I/O it needs is done before the lock is taken, the way 0.10.0
+// did it.
+func (s *Store) Observe(ev Event) string { return s.ObserveFor("", ev) }
+
+// ObserveFor records what a tool result revealed under one pen — "" is the
+// main model, else the id of a dispatched root (spec §1.5) — and returns a
+// footer for the model when the read was redundant.
+func (s *Store) ObserveFor(pen string, ev Event) string {
 	if ev.Tool == "" {
 		return ""
 	}
@@ -1795,7 +2119,7 @@ func (s *Store) Observe(ev Event) string {
 	if !recorded(ev.Tool) {
 		return ""
 	}
-	n := s.activeNodeLocked()
+	n := s.activeNodeForLocked(pen)
 	if n == nil {
 		return ""
 	}
