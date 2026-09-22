@@ -67,14 +67,26 @@ func DefaultAttachOptions() AttachOptions {
 			return func() { term.Restore(uintptr(fd), st) }, nil
 		},
 		Size: func() (int, int) {
-			c, r, err := term.GetSize(uintptr(fd))
-			if err != nil || c == 0 || r == 0 {
-				return 80, 24
-			}
-			return c, r
+			return terminalSize(func(fd uintptr) (int, int, error) { return term.GetSize(fd) },
+				os.Stdout.Fd(), os.Stderr.Fd(), os.Stdin.Fd())
 		},
 		UTF8: strings.Contains(strings.ToLower(os.Getenv("LANG")+os.Getenv("LC_ALL")+os.Getenv("LC_CTYPE")), "utf"),
 	}
+}
+
+// terminalSize asks each descriptor in turn and returns the first real
+// answer, else 80x24. The order matters on Windows, where only a console
+// *output* handle can report a size — stdin, which this used to ask alone,
+// always fails there, so every Windows client was drawn at 80x24 in the corner
+// of its window and never followed a resize. stderr stands in when stdout is
+// redirected; stdin stays last for a terminal reachable no other way.
+func terminalSize(getSize func(fd uintptr) (int, int, error), fds ...uintptr) (int, int) {
+	for _, fd := range fds {
+		if c, r, err := getSize(fd); err == nil && c > 0 && r > 0 {
+			return c, r
+		}
+	}
+	return 80, 24
 }
 
 const clearScreen = "\x1b[2J\x1b[H"

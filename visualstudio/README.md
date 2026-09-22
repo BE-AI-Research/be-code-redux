@@ -25,7 +25,7 @@ It has no window of its own. Install it, open a solution or a folder, and run `b
 
 ```powershell
 cd visualstudio
-.\build.ps1
+.\build.cmd        # runs build.ps1 with -ExecutionPolicy Bypass for that one process
 ```
 
 It finds MSBuild with `vswhere`, restores, builds Release, and puts `be-code-visualstudio-<version>.vsix` in the repository's `dist\` folder, beside the VS Code extension's `be-code-vscode-<version>.vsix`. Both are `.vsix` files; the name is how to tell them apart, and each keeps its own version number — this extension's is independent of BE-Code's and of the VS Code extension's. Double-click the file, or for a particular instance:

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/procattr"
 	"github.com/brown-enterprises/be-code/internal/repomap"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -441,6 +442,7 @@ func gitState(root string) GitState {
 	run := func(args ...string) string {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
+		procattr.Hide(cmd)
 		out, err := cmd.Output()
 		if err != nil {
 			return ""

@@ -54,6 +54,9 @@ func Replay(msgs []provider.Message, turns int) []ReplayLine {
 	}
 	var out []ReplayLine
 	for _, m := range msgs {
+		// The harness state attached to a message is for the model; a replay
+		// shows what the person and the tools said.
+		m.Content = agent.StripHarnessState(m.Content)
 		switch m.Role {
 		case provider.RoleUser:
 			switch {

@@ -1,9 +1,11 @@
 # BE-Code uninstaller — Windows (PowerShell).
 #
-#   .\uninstall.ps1            remove the binary and PATH entry;
+#   .\uninstall.cmd            remove the binary and PATH entry;
 #                              KEEPS %USERPROFILE%\.be-code (config, sessions)
-#   .\uninstall.ps1 -Purge     also delete %USERPROFILE%\.be-code (asks first)
-#   .\uninstall.ps1 -Yes       don't ask for confirmation
+#   .\uninstall.cmd -Purge     also delete %USERPROFILE%\.be-code (asks first)
+#   .\uninstall.cmd -Yes       don't ask for confirmation
+#
+# uninstall.cmd is a launcher for this script (see install.ps1 for why).
 param(
     [switch]$Purge,
     [switch]$Yes

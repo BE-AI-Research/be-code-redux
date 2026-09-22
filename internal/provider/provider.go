@@ -63,12 +63,22 @@ type ChatRequest struct {
 	// "low", "medium" or "high" ("" leaves the backend's default). Sent as
 	// OpenAI's reasoning_effort; backends that do not know it ignore it.
 	ReasoningEffort string
+	// PrefillOnly asks the server to read the prompt and generate nothing
+	// (Prefiller). Set by Prefill, never by a caller.
+	PrefillOnly bool `json:"-"`
 }
 
 // Usage reports token accounting when the backend supplies it.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+	// PromptDuration is how long the server spent reading the prompt and
+	// LoadDuration how long loading the model, where it says (native
+	// Ollama). PromptTokens is the whole prompt whether or not the server's
+	// prompt cache covered it, so the duration is the only evidence of a
+	// cache miss: 19k tokens read in 0.3s was cached, in 43s was not.
+	PromptDuration time.Duration `json:"-"`
+	LoadDuration   time.Duration `json:"-"`
 }
 
 // ChatResponse is the final assembled result of a (streamed) completion.
@@ -118,10 +128,22 @@ type KeepAliver interface {
 	KeepAlive(ctx context.Context, model string, d time.Duration) error
 }
 
+// Prefiller is implemented by providers whose server keeps a prompt cache
+// that a request can warm without generating anything (native Ollama). The
+// agent sends the request the next turn will send, ahead of time, after
+// anything that emptied the cache — a model load, a reload, a resume — so the
+// real request pays only for what is new. The request must be the real one in
+// every part the server renders into the prompt: messages, tools, window.
+type Prefiller interface {
+	Prefill(ctx context.Context, req ChatRequest) (*ChatResponse, error)
+}
+
 // WindowClearer is implemented by providers that carry a context window on
 // the wire (Ollama's num_ctx). Clearing it means "send no window", which is
-// not the same as sending zero: the server keeps whatever the model is
-// already loaded with, and nothing reloads.
+// not the same as sending zero — and not safe either: a real Ollama runs a
+// request that names no window at its own default, reloading a model held at
+// another size. So a cleared wire is a state to wait out, never to send in
+// (Agent.awaitWindow).
 //
 // The agent uses it for the gap between a model switch and the loader's
 // answer for the new model. Options belong to the endpoint, so in that gap

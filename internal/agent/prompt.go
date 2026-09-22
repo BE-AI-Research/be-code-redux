@@ -45,6 +45,13 @@ When you are completely finished, reply with your summary and no tool_call block
 // do noticeably more work, so it is not to be reworded casually.
 const taskGuidance = "Context is limited and does not survive compaction; your notes do. Working memory below lists what you have already read: do not read those files again unless they are marked changed. Read only the lines you need (read_file with offset and limit) instead of whole files. Before a change that takes several steps, record a plan with the task tool, mark each step as you finish it, and record decisions and facts as you learn them. When a file matters for later, note what matters in it (task note with file) so you need not read it again. If a git tool answers not a git repository, do not retry it: work from read_file ranges and keep your task notes and durable notes (task note with keep) up to date instead, because they are then your only memory across compaction."
 
+// pacingGuidance follows taskGuidance. Observed on the owner's VM: a small
+// model takes on a whole milestone in one step, loops on a failing approach,
+// and the user ends up typing "remember the small work loads" by hand at the
+// start of every request. It is its own paragraph so that taskGuidance, whose
+// wording is measured, stays verbatim.
+const pacingGuidance = "Work in small steps. Before anything that takes more than a few tool calls, plan it with the task tool as steps small enough to finish in about ten tool calls each. Do one step at a time and mark it done before you start the next. Small steps are also what keeps your context free: only the current step's tool output is kept in full, and it is condensed to a few lines the moment you mark the step done. If a step turns out bigger than you planned, split it (task add with parent set to its id) rather than pushing on. When a step that changed files is done, run the narrowest check that proves it (one test file, one build) before moving on. If the same approach has failed twice, stop: record what you learned as a task note and re-plan the step instead of trying a third variation."
+
 // gitGuidance keys each sentence to the git tool it advertises (Task 6),
 // appended to the task guidance paragraph when that tool is registered.
 var gitGuidance = map[string]string{
@@ -90,7 +97,7 @@ func guidanceFor(specs []provider.ToolSpec, withTask bool) string {
 	}
 	var parts []string
 	if withTask && present["task"] {
-		parts = append(parts, taskGuidance)
+		parts = append(parts, taskGuidance, pacingGuidance)
 	}
 	for _, name := range []string{"lookup", "history", "show", "changes"} {
 		if present[name] {
@@ -121,6 +128,13 @@ type embeddedCall struct {
 // variants, because local models are loose about formats. Returns the text
 // with call blocks removed, and the calls found.
 func ParseEmbeddedCalls(content string, known map[string]bool) (string, []provider.ToolCall) {
+	return ParseEmbeddedCallsTyped(content, known, nil)
+}
+
+// ParseEmbeddedCallsTyped is ParseEmbeddedCalls with the tools' parameter
+// types at hand, which the Qwen XML layout needs: its values are text, and
+// only the schema can say that "244" is a number (see xmlcalls.go).
+func ParseEmbeddedCallsTyped(content string, known map[string]bool, typeOf ParamTypeFunc) (string, []provider.ToolCall) {
 	var calls []provider.ToolCall
 	clean := content
 
@@ -158,6 +172,9 @@ func ParseEmbeddedCalls(content string, known map[string]bool) (string, []provid
 	try(tagCallRe)
 	if len(calls) == 0 {
 		try(fenceCallRe)
+	}
+	if len(calls) == 0 {
+		return parseXMLCalls(clean, known, typeOf, 0)
 	}
 	return strings.TrimSpace(clean), calls
 }

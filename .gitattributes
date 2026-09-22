@@ -1,0 +1,2 @@
+# Windows launchers must keep CRLF line endings whatever the checkout settings.
+*.cmd text eol=crlf

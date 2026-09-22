@@ -34,6 +34,9 @@ const (
 	defaultNotesCap = 4096
 	defaultItemCap  = 4 * 1024
 	defaultNodeCap  = 32 * 1024
+	// defaultStepNudge matches the prompt's "about ten tool calls" a step
+	// with room to spare: twice that is a step that was not small.
+	defaultStepNudge = 20
 	// maxFileMemos caps the per-file hashes and outlines state.json keeps.
 	maxFileMemos = 200
 
@@ -123,6 +126,18 @@ type state struct {
 	// refuses to answer without a hash to compare) and every resume loses
 	// its outlines — ruling T3-b.
 	Files map[string]fileMemo `json:"files,omitempty"`
+	// Times is when each node was started and closed and how many tool calls
+	// it took — facts a Markdown document has no place for. Keyed by id and
+	// checked against the node's text on the way back, because ids are
+	// positional and the user may have edited the document in between.
+	Times map[string]nodeTimes `json:"times,omitempty"`
+}
+
+type nodeTimes struct {
+	Text    string    `json:"text"`
+	Started time.Time `json:"started,omitempty"`
+	Closed  time.Time `json:"closed,omitempty"`
+	Calls   int       `json:"calls,omitempty"`
 }
 
 type fileMemo struct {
@@ -231,6 +246,9 @@ func (l Limits) withDefaults() Limits {
 	if l.NodeCap <= 0 {
 		l.NodeCap = defaultNodeCap
 	}
+	if l.StepNudge == 0 {
+		l.StepNudge = defaultStepNudge
+	}
 	return l
 }
 
@@ -274,6 +292,7 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	s.checkWorkspace()
 	s.loadDocs()
 	s.restoreFileMemos(st.Files)
+	s.restoreTimes(st.Times)
 	if resumed || st.Session == sessionID {
 		s.restoreRaw(st.Raw)
 	} else {
@@ -1074,7 +1093,46 @@ func (s *Store) stateLocked(docs map[string]string) state {
 	if len(raw) > 0 {
 		st.Raw = raw
 	}
+	times := map[string]nodeTimes{}
+	s.tree.Walk(func(n *Node, _ int) {
+		if !n.Started.IsZero() {
+			times[n.ID] = nodeTimes{Text: n.Text, Started: n.Started, Closed: n.Closed, Calls: n.Calls}
+		}
+	})
+	if len(times) > 0 {
+		st.Times = times
+	}
 	return st
+}
+
+// restoreTimes puts the recorded times back on the nodes they describe. The
+// documents are the truth about the tree, so a record whose node is gone, or
+// whose text no longer matches (the user renumbered or rewrote it), is
+// dropped rather than attached to the wrong step. A node the document shows
+// as still open keeps no closing time.
+func (s *Store) restoreTimes(times map[string]nodeTimes) {
+	for id, nt := range times {
+		n := s.tree.Find(id)
+		if n == nil || n.Text != nt.Text {
+			continue
+		}
+		n.Started, n.Calls = nt.Started, nt.Calls
+		if n.Status.terminal() && !nt.Closed.IsZero() {
+			n.Closed = nt.Closed
+		}
+	}
+}
+
+// DoingClock is the current step and when work on it began, for the agent's
+// time footer. ok is false when nothing is doing.
+func (s *Store) DoingClock() (id string, started time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.tree.Doing()
+	if d == nil || d.Started.IsZero() {
+		return "", time.Time{}, false
+	}
+	return d.ID, d.Started, true
 }
 
 // slug turns a task line into a file-name fragment.

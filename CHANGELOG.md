@@ -1,5 +1,190 @@
 # BE-Code Changelog
 
+## v0.14.4 — Windows: a timed-out command takes its children with it
+
+- On Linux a command that times out, is cancelled, or is stopped through the `process` tool
+  is killed together with everything it started, through its process group. Windows has no
+  such group, and the fallback there killed the direct child only: a timed-out `powershell`
+  left the `python`, test runner or dev server it had started running — holding files and
+  ports, with nothing left that knew about it. The teardown now runs `taskkill /T /F /PID`
+  (hidden, bounded to five seconds) and falls back to killing the direct child when that
+  cannot be run. The Windows test for it was written on Linux and has not been run.
+
+## v0.14.3 — Windows: commands run without opening a window
+
+- **Every command the agent ran opened a console window.** A hosted session runs in a
+  detached process with no console, so that closing its terminal cannot take it down — and
+  when a process with no console starts a console program (`powershell`, `git`, `go`,
+  `python`), Windows gives that program a new, visible window of its own. The shell and
+  `process` tools did it, and so did every verification check, MCP server, clipboard helper
+  and the git summary taken before each request. Every child process is now started with
+  `CREATE_NO_WINDOW` (`internal/procattr.Hide`): it still has a console to write to, it is
+  simply never shown, and the harness reads its output through pipes as before. A test
+  reads the source and fails if a file starts a child process without it. Nothing changes
+  on Linux or macOS.
+
+## v0.14.2 — Windows: the real terminal size, and an installer that runs
+
+First run on Windows by the owner. It worked — including the approved reload to a 49,152
+window, confirmed on screen — with two defects.
+
+- **The session was drawn at 80×24 in the corner of the window.** A shared session's client
+  asked for the terminal size on its *input* handle. Unix answers on any of a terminal's
+  descriptors; on Windows only a console *output* handle can report a size, so the call
+  failed, the 80×24 fallback went to the host on every poll, and resizes were never seen.
+  The client now asks stdout, then stderr, then stdin (`live.terminalSize`).
+- **`.\install.ps1` is refused on a default Windows** ("running scripts is disabled on this
+  system"; a script unpacked from a downloaded zip is blocked even where local ones are
+  allowed). `install.cmd`, `uninstall.cmd` and `visualstudio\build.cmd` are one-line
+  launchers that run the script as `powershell -NoProfile -ExecutionPolicy Bypass -File
+  "<script>"`, passing arguments through. That bypasses the execution policy for the one
+  process and changes nothing about the machine; it is not an elevation — the installer
+  needs no administrator rights. `.gitattributes` pins `*.cmd` to CRLF.
+
+## v0.14.1 — a tool call in Qwen's own layout is a tool call
+
+The owner's first long run on 0.14.0 stopped mid-task with nothing wrong in any log. The
+saved conversation showed why: at a full context the model wrote its `write_file` call in
+the layout its own chat template teaches —
+`<tool_call><function=write_file><parameter=path>…</parameter>…</function></tool_call>` —
+Ollama passed it through as plain content, and the harness, which only knew the JSON form
+(`<tool_call>{"name":…}</tool_call>`), took a tool call for the model's final answer. The
+run ended; the file was never written.
+
+- `ParseEmbeddedCalls` now accepts that layout, with or without the `<tool_call>` wrapper,
+  any number of calls to a reply (`internal/agent/xmlcalls.go`). Values are text by nature
+  and stay text — a file whose content is valid JSON reaches `write_file` exactly as written
+  — unless the tool's own schema declares the parameter a number, boolean, array or object
+  (`SchemaParamTypes`), which matters for the editor's `ide_*` tools. Exactly one framing
+  newline is taken off each end of a value, no more. Unknown tool names are left as text,
+  as before, and `compat_tool_calls: "never"` still turns every text form off.
+
+## v0.14.0 — the server's prompt cache, used
+
+The owner asked for faster recovery after a model reload. Measuring it found something
+larger. On a real five-read task against Ollama 0.34 the server's prompt cache missed on
+**nine requests out of nine**, and 225 of the run's 296 seconds went on re-reading a prompt
+that had barely changed. After this release the same task spends 52 seconds reading prompts
+and finishes in about half the time; every request but one reads only its own new text,
+about six seconds, however long the conversation has grown.
+
+What the measurements showed, each one on the owner's server:
+
+- The cache is only reusable when a request **strictly extends** the previous one. Working
+  memory in the middle of the system prompt (every version until now) changes after nearly
+  every tool call, so everything behind it was re-read every turn. Moving the block to the
+  end of the last message and *removing it again* next turn was no better — 11 s, 18 s,
+  25 s, 41 s, 39 s over five reads — because taking anything back sends the server to an
+  older checkpoint of the model's state, and every checkpoint it had also ended in a block
+  that was no longer there. (Qwen3.8 is a hybrid model; the server cannot rewind it to an
+  arbitrary token.) The same five reads sent strictly append-only: about 6 s each, flat.
+- The **reasoning level is part of the prompt**: a 13k-token conversation read in 0.3 s at
+  the level it was cached with, 19 s at another, and 29 s with no level at all.
+- A request with generation off is accepted and costs one token; a cancelled one keeps
+  what it had read; the keep-alive touch does not disturb the cache.
+
+What changed:
+
+- **A prompt that is never taken back** (`prompt_layout`, `cached` by default). The system
+  prompt holds only what is stable for the length of a request. The git summary and the
+  Working memory block are attached to your message when a request begins — as part of the
+  stored history, under a `Harness state at this point` header — and stay there. In between,
+  the conversation is its own record, and what the harness has to say mid-run (the time
+  footer, a repeated call, a step open too long) goes on the end of the tool result it is
+  about. A fresh snapshot is attached only when the history has just been rewritten — a
+  compaction, a collapse, a trim — which is both when the cache is cold regardless and
+  when Working memory holds what the conversation no longer does. The rewrite is noticed by
+  comparing what was last sent, so nothing that edits history has to announce itself.
+  Replays, compaction, the handoff and consultations read messages without the block
+  (`agent.StripHarnessState`). `prompt_layout: "classic"` restores the old arrangement.
+- **The reasoning level holds steady.** It still steps down a level once the prompt passes
+  its compaction target, but it no longer steps back up until the history is rewritten: one
+  change, and one full read, per compaction cycle instead of one every time the prompt
+  hovered at the line. `reasoning_effort: low` avoids even that one.
+- **Background prompt processing** (`prompt_prefill`, on). After anything that empties the
+  cache — start, resume, `/model`, an approved reload, `/compact` — the request the next
+  turn will send goes to the server ahead of time with generation off, at the real
+  reasoning level, while you are still typing. It is cancelled the moment you press Enter.
+  Native Ollama only, through a new optional `provider.Prefiller`.
+- **Save, then tidy, before a cold read.** When a model is about to load or reload with no
+  request in flight, the task record is flushed and the session saved first; then, above
+  the compaction target, old tool results are stubbed so the loading model has less to
+  read. The newest two results stay whole, and the current step's verbatim record lives in
+  Working memory, which this never touches.
+- **The cost is visible.** `/stats` and `run --json` report what the server spent reading
+  prompts and loading the model, and how many prompt reads its cache did not cover; a read
+  of eight seconds or more is said as a status line while it happens.
+
+## v0.13.0 — pacing and a clock
+
+Watching a 27B model work overnight: it took whole milestones on as one step, went round
+the same failing approach, and had no way to know that a step had run for forty minutes.
+The owner was typing "remember the small work loads" by hand at the start of each request.
+
+- **Pacing guidance.** A paragraph beside the task guidance (which stays verbatim — its
+  wording is measured): plan steps small enough for about ten tool calls, one at a time,
+  the narrowest check after a step that changed files, re-plan after two failures of the
+  same approach. It also says *why* small steps pay: only the current step's tool output
+  is kept in full, and it is condensed the moment the step is marked done.
+- **A step open too long is nudged.** Past `engine.step_nudge` tool calls (20) Working
+  memory says `! step 3.2 has been open for 27 tool calls: finish it, split it into smaller
+  steps (task add, parent 3.2), or note why`. It is part of the active-branch header, so it
+  survives compaction and is never a rung of the budget ladder.
+- **The same call with the same answer is called out.** `toolFailStreak` only saw
+  failures; a loop of successful reads and greps is just as stuck. The third identical
+  result to an identical call says so. A call whose result changed — tests re-run after an
+  edit — starts the count over; `task`, `consult` and `process` are exempt.
+- **Time awareness** (`time_awareness`, on by default). Every tool result ends
+  `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each user message with when
+  it was sent. Appended text only — a line in the system prompt that changes every turn
+  makes the server re-process the whole conversation behind it. Steps record when they
+  started and how many tool calls they took (`state.json`, matched on the step's text; the
+  Markdown documents stay the user's), and a finished step reads `— done (18m, 31 tool calls)`.
+- **Compaction no longer calls the model to save a few dozen tokens.** Once every old tool
+  result is a stub, a history within a tenth of the compressible room above its target
+  counts as compacted: the summary cannot shrink the floor or the newest exchange either.
+
+## v0.12.1 — an approved reload that never happened
+
+A shared session on the validation VM died on 2026-09-20 with `HTTP 400 … exceeds the
+available context size (8192 tokens)` on every request, and stayed dead across restarts
+until the model server was rebooted. Three defects in a row, each making the next one fatal.
+
+- **A request in the gap after `/model` named no context window.** The switch takes the old
+  model's `num_ctx` off the wire at once and resolves the new one behind it; a request in
+  between carried none. On a real Ollama that is not "leave the model alone" — the server's
+  default applies (8192 on the owner's box) and the model is loaded, or reloaded, there.
+  Requests, the handoff summary, `/commit` and `/init` now wait for the resolution
+  (`Agent.awaitWindow`; bounded by the resolution's own two minutes and by the caller).
+- **An approved reload was undone before it reached the server.** Saying yes to
+  `model_reload` puts the configured window on the wire; the model itself reloads when the
+  next request carries it. The backend check that runs before every request saw the old
+  window against ours, read it as *another client's* change, adapted back down and told the
+  loader — so the reload the user approved never happened, with only a status line that
+  vanishes to say so. A window the loader has just resolved is now *unconfirmed* until one
+  request succeeds with it (`Agent.ApplyResolvedWindow`), and a window that grows is
+  announced in the transcript like one that shrinks. Adapting to a genuine change by
+  another client — never fighting it — is unchanged.
+- **A prompt larger than the window failed for ever, in escaped JSON.** Ollama 0.34 refuses
+  such a prompt (older servers truncated it silently). The run now asks the loader once
+  more — a larger answer goes on the wire and the retry reloads the model — else compacts
+  and retries, else stops with an error that says what does not fit (how much of it is
+  system prompt and tool schemas, which no compaction removes) and what fixes it:
+  `ollama stop <model>`, `reload_on_mismatch: "always"`, or `/clear`.
+- **A compaction summary that was only its `files:` list.** The same VM log showed it
+  twice in one night: the model answered the summary request with the trailing file list
+  and no summary — the long-unexplained "empty summary" of 0.10.0. With a full task tree in
+  front of it, "do not restate Working memory … end with `files:`" reads as "only the list
+  is wanted". The prompt now asks for the summary first and says it is never empty, and a
+  files-only reply is asked once more for the summary in the same exchange (its file notes
+  are kept either way). Two failures still continue from the task record, as before.
+- **An API key pasted into `web_search.api_key_env` was printed at every start** — to
+  stderr, into the session host's log on disk, and from the tool's own error into the
+  model's context and the saved session. That setting holds the *name* of a variable;
+  a value that does not look like one is now described, never repeated
+  (`tools.EnvNameForDisplay`). If a key was ever there, rotate it and delete
+  `~/.be-code/live/*.log`.
+
 ## v0.12.0 — Visual Studio, and an editor review that can be cancelled
 
 BE-Code's editor bridge existed only for VS Code. This release adds the same bridge for

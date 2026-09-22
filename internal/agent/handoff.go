@@ -119,6 +119,7 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 		tr = "[earlier transcript omitted]\n" + cut
 	}
 	b.WriteString(tr)
+	a.awaitWindow(ctx) // never send with no window on the wire
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
 		Model: a.Model,
 		Messages: []provider.Message{
@@ -148,6 +149,7 @@ func (a *Agent) heuristicHandoff() string {
 	seen := map[string]bool{}
 	var files []string
 	for _, m := range a.History.Messages {
+		m.Content = StripHarnessState(m.Content)
 		switch {
 		case m.Role == provider.RoleUser && !isToolResult(m) && !strings.HasPrefix(m.Content, summaryPrefix):
 			if task == "" {
@@ -253,6 +255,18 @@ func (a *Agent) ApplyWindow(window int) bool {
 	a.History.mu.Unlock()
 	a.capToolOutput(limit)
 	return clamped
+}
+
+// ApplyResolvedWindow is ApplyWindow for a window the loader has just
+// resolved — at startup, after a model switch, after a consent answer. The
+// server does not hold it yet: a model is reloaded by the first request that
+// carries the new num_ctx, so until one succeeds checkBackend must not read
+// the old window as another client's change and adapt back down to it.
+func (a *Agent) ApplyResolvedWindow(window int) bool {
+	if window > 0 {
+		a.windowUnconfirmed.Store(true)
+	}
+	return a.ApplyWindow(window)
 }
 
 // reserveFor is the generation headroom kept free below the window.

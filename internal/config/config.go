@@ -57,6 +57,10 @@ type EngineConfig struct {
 	// Tools is "full" (task, lookup, history, show, changes) or "minimal"
 	// (task and lookup only) for tight compat-mode prompts.
 	Tools string `json:"tools"`
+	// StepNudge is how many tool calls the current step may take before
+	// Working memory tells the model it has been open too long. 0 means
+	// the default (20); negative turns the line off.
+	StepNudge int `json:"step_nudge,omitempty"`
 }
 
 // ProviderConfig describes one inference endpoint.
@@ -221,8 +225,23 @@ type Config struct {
 	// session is resumed, so the person sees where they left off. On by
 	// default; ResumeReplayTurns caps the replay to the last N user turns
 	// (0 = everything the saved history holds).
-	ResumeReplay      bool `json:"resume_replay"`
-	ResumeReplayTurns int  `json:"resume_replay_turns"`
+	ResumeReplay bool `json:"resume_replay"`
+	// TimeAwareness gives the model a clock: a footer on every tool result
+	// (time, what the call took, how long the current step has been open,
+	// context used) and an arrival time on each user message.
+	TimeAwareness bool `json:"time_awareness"`
+	// PromptPrefill sends the next turn's prompt to the server ahead of
+	// time, with generation off, after anything that emptied its prompt
+	// cache (a model load or reload, a resume), so the real request pays
+	// only for what is new. Native Ollama only.
+	PromptPrefill bool `json:"prompt_prefill"`
+	// PromptLayout is "cached" (default) or "classic". Cached keeps the
+	// system prompt stable for the length of a request and sends Working
+	// memory and the git summary at the end of it, so the server's prompt
+	// cache survives from turn to turn; classic keeps them in the system
+	// prompt, as every version before 0.14 did.
+	PromptLayout      string `json:"prompt_layout,omitempty"`
+	ResumeReplayTurns int    `json:"resume_replay_turns"`
 
 	// WebSearch enables the web_search (and web_fetch) tools via Google
 	// Programmable Search Engine. Off unless CX is set; the API key comes
@@ -333,6 +352,8 @@ func Default() *Config {
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
+		TimeAwareness:    true,
+		PromptPrefill:    true,
 		Engine:           EngineConfig{Enabled: true, Budget: 6144, NotesCap: 4096, ItemCap: 4096, NodeCap: 32768, Tools: "full"},
 	}
 }

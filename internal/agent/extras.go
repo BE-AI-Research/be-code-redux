@@ -76,6 +76,7 @@ func (a *Agent) GenerateCommit(ctx context.Context) (string, error) {
 	if strings.TrimSpace(diff) == "" {
 		return "", fmt.Errorf("no changes to commit (or not a git repository)")
 	}
+	a.awaitWindow(ctx) // never send with no window on the wire
 	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
 		Model: a.Model,
 		Messages: []provider.Message{

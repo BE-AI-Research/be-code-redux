@@ -73,3 +73,30 @@ func TestHistoryOverheadCountsAgainstBudget(t *testing.T) {
 		t.Fatalf("Limit = %d, want 700", h.Limit())
 	}
 }
+
+// A fully collapsed history that lands a hair over Target is compacted: the
+// model's summary cannot shrink the floor or the newest exchange either, so
+// calling it there buys nothing. Well over Target still is not.
+func TestCollapseAcceptsAHairOverTarget(t *testing.T) {
+	build := func(newest int) *History {
+		h := NewHistory("system", 4000)
+		h.Reserve = 0
+		for i := 0; i < 6; i++ {
+			h.Add(provider.Message{Role: provider.RoleAssistant, Content: "calling"})
+			h.Add(provider.Message{Role: provider.RoleTool, Content: strings.Repeat("x", 3000)})
+		}
+		h.Add(provider.Message{Role: provider.RoleTool, Content: strings.Repeat("y", newest)})
+		return h
+	}
+	probe := build(0)
+	probe.CollapseToolResults(1) // everything but the newest, whatever the budget
+	base, target := probe.Tokens(), probe.Target()
+	over := func(tokens int) int { return int(float64(target-base+tokens) * probe.CharsPerToken) }
+
+	if h := build(over(probe.collapseSlack() / 2)); !h.CollapseOldToolResults() {
+		t.Fatalf("a hair over target (%d vs %d) should count as compacted", h.Tokens(), h.Target())
+	}
+	if h := build(over(probe.collapseSlack() * 3)); h.CollapseOldToolResults() {
+		t.Fatalf("well over target (%d vs %d) must still go on to the summary", h.Tokens(), h.Target())
+	}
+}

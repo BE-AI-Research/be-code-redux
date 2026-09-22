@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Ollama talks to an Ollama server over its native /api/chat endpoint, which
@@ -142,6 +143,9 @@ func (p *Ollama) optionsMap(req ChatRequest) map[string]any {
 	for k, v := range o.Extra {
 		m[k] = v
 	}
+	if req.PrefillOnly {
+		m["num_predict"] = 0 // after Extra: nothing configured may turn a prefill into a generation
+	}
 	return m
 }
 
@@ -199,7 +203,10 @@ type nativeChunk struct {
 	DoneReason      string `json:"done_reason"`
 	PromptEvalCount int    `json:"prompt_eval_count"`
 	EvalCount       int    `json:"eval_count"`
-	Error           string `json:"error"`
+	// Nanoseconds, on the final chunk.
+	PromptEvalDuration int64  `json:"prompt_eval_duration"`
+	LoadDuration       int64  `json:"load_duration"`
+	Error              string `json:"error"`
 }
 
 // nativeMessages converts history to Ollama's message shape. Tool call
@@ -353,6 +360,18 @@ func (p *Ollama) Chat(ctx context.Context, req ChatRequest, onDelta StreamFunc) 
 // is running on the OpenAI-compatible endpoint, where num_ctx cannot be set.
 // The agent turns it into one notice: a degraded session must not look
 // exactly like a healthy one.
+// Prefill warms the server's prompt cache with req and generates nothing. It
+// is only meaningful on the native path; a server that has fallen back to the
+// OpenAI route has no num_predict of 0 to ask for.
+func (p *Ollama) Prefill(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	if p.nativeBroken.Load() {
+		return nil, fmt.Errorf("%s: prefill needs the native endpoint", p.ProviderName)
+	}
+	req.PrefillOnly = true
+	req.OnReasoning = nil
+	return p.nativeChat(ctx, req, nil)
+}
+
 func (p *Ollama) NativeFallback() bool { return p.nativeBroken.Load() }
 
 func (p *Ollama) thinkState(model string) (cannotThink, noLevels bool) {
@@ -498,6 +517,12 @@ func (p *Ollama) consumeNative(r io.Reader, onDelta, onReasoning StreamFunc) (*C
 		}
 		if chunk.EvalCount > 0 {
 			out.Usage.CompletionTokens = chunk.EvalCount
+		}
+		if chunk.PromptEvalDuration > 0 {
+			out.Usage.PromptDuration = time.Duration(chunk.PromptEvalDuration)
+		}
+		if chunk.LoadDuration > 0 {
+			out.Usage.LoadDuration = time.Duration(chunk.LoadDuration)
 		}
 		if chunk.Done {
 			out.FinishReason = chunk.DoneReason

@@ -50,7 +50,17 @@ type Stats struct {
 	Requests         int // model round-trips
 	ToolCalls        int
 	Elapsed          time.Duration
+	// PromptTime and LoadTime are the server's own account of reading
+	// prompts and loading the model (native Ollama); SlowReads counts the
+	// requests whose prompt the server's cache plainly did not cover.
+	PromptTime time.Duration
+	LoadTime   time.Duration
+	SlowReads  int
 }
+
+// slowPromptRead is the prompt-processing time past which a request is
+// reported: below it the cache did its job or the prompt was small.
+const slowPromptRead = 8 * time.Second
 
 // add folds another usage record into s.
 func (s *Stats) add(d Stats) {
@@ -59,6 +69,9 @@ func (s *Stats) add(d Stats) {
 	s.Requests += d.Requests
 	s.ToolCalls += d.ToolCalls
 	s.Elapsed += d.Elapsed
+	s.PromptTime += d.PromptTime
+	s.LoadTime += d.LoadTime
+	s.SlowReads += d.SlowReads
 }
 
 // Agent binds a provider, tool registry, and conversation history.
@@ -122,7 +135,18 @@ type Agent struct {
 	// agent goroutine — resolveModel lands a model switch's window from a
 	// goroutine of its own — while a UI reads it to draw the context
 	// wheel.
-	window         atomic.Int64
+	window atomic.Int64
+	// windowUnconfirmed is set when a resolution lands a window and cleared
+	// by the first request that succeeds with it. While it is set, a server
+	// reporting another window is not news: the model is reloaded by the
+	// request that carries ours, not by deciding to (see checkBackend).
+	windowUnconfirmed atomic.Bool
+	// resolving is open while the current model's parameters are being
+	// resolved and closed when that resolution ends, however it ends. Guarded
+	// by modelMu. Requests wait on it (awaitWindow) rather than go out with
+	// no window on the wire.
+	resolving      chan struct{}
+	resolvingGen   int
 	systemOverride string // plan mode: replaces the base coding prompt
 	reqTouched     bool   // a tool that can change files ran during this request
 	repoDirty      bool   // files were written; rebuild the repo map before the next request
@@ -190,7 +214,18 @@ type Agent struct {
 	// results the model was waiting on rather than in the middle of them.
 	autoVerifyUsed bool
 	toolFailStreak toolFailStreak
-	pendingAdvice  string
+	// repeats notices the same call returning the same result again and
+	// again (repeat.go). Agent goroutine only, like toolFailStreak.
+	repeats repeatTracker
+	// prefill is the one background prompt-cache warm-up (prefill.go).
+	prefill prefillState
+	// sentPrint is the conversation as last sent, one hash a message
+	// (markSent): how a rewrite of what the server has cached is noticed.
+	sentPrint []uint64
+	// effortLowered: the reasoning level has stepped down in this
+	// compaction cycle and stays down until a rewrite (steadyEffort).
+	effortLowered bool
+	pendingAdvice string
 
 	// Model parameters (see the ModelLoader block below). modelMu guards
 	// the model identity a switch rewrites — Model, Profile, compat,
@@ -360,6 +395,9 @@ func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 	}
 	a.modelGen++
 	gen, l := a.modelGen, a.loader
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if a.History != nil {
 		// A thinking model needs a different reserve than a plain one.
@@ -381,9 +419,10 @@ func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 	// would still be carrying the *previous* model's num_ctx — and a
 	// request sent in that gap reloads the new model at a window nobody
 	// consented to, which is precisely what the gate exists to prevent.
-	// Sending none at all leaves the server's own choice alone. Only when
-	// there is a loader to put one back: without one, nothing would ever
-	// restore it.
+	// Sending none at all is no better on a real Ollama (the server default
+	// applies, which is itself a reload), so requests wait out the gap:
+	// see awaitWindow. Only when there is a loader to put one back: without
+	// one, nothing would ever restore it.
 	a.clearWireWindow()
 	return l, gen
 }
@@ -445,6 +484,105 @@ func (a *Agent) reapplyCurrent(ctx context.Context) {
 		a.clearWireWindow()
 	}
 	a.clearWireWindow()
+}
+
+// beginResolveLocked opens the wait for generation gen. A resolution it
+// supersedes will never close its own channel (endResolve checks the
+// generation), so that one is closed here; its waiters wake, find this one
+// and wait again. Caller holds modelMu.
+func (a *Agent) beginResolveLocked(gen int) {
+	if a.resolving != nil {
+		close(a.resolving)
+	}
+	a.resolving, a.resolvingGen = make(chan struct{}), gen
+}
+
+// endResolve closes the wait for gen if it is still the current one. It runs
+// last in resolveModel, after the window has landed on the wire and in the
+// budget, and on every way out of it — a declined consent, an unreachable
+// backend, a panic — because a request must never wait on a resolution that
+// is no longer running.
+func (a *Agent) endResolve(gen int) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	if a.resolving != nil && a.resolvingGen == gen {
+		close(a.resolving)
+		a.resolving = nil
+	}
+}
+
+// awaitWindow holds a request until the current model's parameters are
+// resolved. applySwitch takes the previous model's num_ctx off the wire at
+// once, and the comment there used to say a request in that gap "leaves the
+// server's own choice alone". On a real Ollama it does not: a request with no
+// num_ctx runs at the server's default window, loading the new model there or
+// reloading a resident one down to it, with nobody asked. So the request
+// waits. The wait is the resolution's own — bounded by ModelResolveTimeout,
+// consent prompt included, which the user can see and answer while this
+// waits — and it ends with the caller's context.
+func (a *Agent) awaitWindow(ctx context.Context) {
+	said := false
+	for {
+		a.modelMu.Lock()
+		ch, model := a.resolving, a.Model
+		a.modelMu.Unlock()
+		if ch == nil {
+			return
+		}
+		if !said {
+			said = true
+			a.transient("waiting for %s's context window before sending", model)
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// coldKeepResults is how many of the newest tool results survive
+// tidyBeforeColdRead untouched: the work in hand.
+const coldKeepResults = 2
+
+// tidyBeforeColdRead runs when a resolution has landed and no request is in
+// flight (the caller holds turnMu). Whatever resolved — a start, a resume, a
+// model switch, an approved reload — the server is about to read this prompt
+// from nothing, at around two seconds per thousand tokens on the owner's box.
+//
+// Preservation first: the task record is flushed to disk and the session
+// saved, so a load that fails or a host that dies mid-transition loses
+// nothing. Then the cleanup, and only above Target, the same line compaction
+// aims for: old tool output is stubbed, which is what the next compaction
+// would do anyway, while the newest results stay whole and the current
+// step's own record stays verbatim in Working memory, which this never
+// touches.
+func (a *Agent) tidyBeforeColdRead() {
+	a.flushEngine()
+	h := a.History
+	if h != nil && len(h.Messages) > 0 {
+		// Never for an empty conversation: a session has no file until its
+		// first request, and the live registry depends on that.
+		a.autosave(a.lastUserInput)
+	}
+	if h == nil {
+		return
+	}
+	// Measured under modelMu as well: the system prompt is part of the
+	// count, and a switch landing behind this one rewrites it.
+	a.modelMu.Lock()
+	before, target := h.Tokens(), h.Target()
+	a.modelMu.Unlock()
+	if before <= target {
+		return
+	}
+	if n := h.CollapseToolResults(coldKeepResults); n > 0 {
+		a.modelMu.Lock()
+		after := h.Tokens()
+		a.modelMu.Unlock()
+		a.notice("collapsed %d old tool results before the model loads (%d → %d tokens); the newest %d and the current step's record are untouched",
+			n, before, after, coldKeepResults)
+	}
 }
 
 // goResolve starts one resolution on its own goroutine, under
@@ -516,6 +654,9 @@ func (a *Agent) ResolveModel() {
 	l, model := a.loader, a.Model
 	a.modelGen++
 	gen := a.modelGen
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if l == nil {
 		return
@@ -540,6 +681,9 @@ func (a *Agent) ResolveModelNow(ctx context.Context) {
 	l, model := a.loader, a.Model
 	a.modelGen++
 	gen := a.modelGen
+	if l != nil {
+		a.beginResolveLocked(gen)
+	}
 	a.modelMu.Unlock()
 	if l == nil {
 		return
@@ -551,6 +695,7 @@ func (a *Agent) ResolveModelNow(ctx context.Context) {
 // model parameters are advisory, and a session that cannot learn its window
 // still runs — at the budget it already had.
 func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, gen int) {
+	defer a.endResolve(gen)
 	defer func() {
 		if r := recover(); r != nil {
 			a.notice("model parameters for %s could not be resolved: %v", model, r)
@@ -589,8 +734,15 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		// explained in its own words; repeating it here would say it twice.
 		return
 	}
+	// Registered before the turn lock's own deferred release below, so it
+	// runs after it: the prefill snapshots the prompt under that lock, once
+	// the tidy-up and any compaction here have finished with it.
+	defer a.StartPrefill()
 	prev := a.Window()
-	if a.ApplyWindow(w) {
+	// Said whenever the window moved, not only when it shrank the budget: a
+	// reload the user has just approved is exactly the change they are
+	// waiting to see confirmed.
+	if clamped := a.ApplyResolvedWindow(w); clamped || (prev > 0 && prev != w) {
 		budget, _, _ := a.History.Scalars()
 		a.notice("%s runs with a %d-token window; budget now %d tokens", model, w, budget)
 	}
@@ -611,6 +763,7 @@ func (a *Agent) resolveModel(ctx context.Context, l ModelLoader, model string, g
 		return
 	}
 	defer a.turnMu.Unlock()
+	a.tidyBeforeColdRead()
 	a.modelMu.Lock()
 	tokens := a.History.Tokens() // the system prompt and the transcript
 	a.modelMu.Unlock()
@@ -649,6 +802,11 @@ func (a *Agent) ClearHistory() {
 // CompactNow is Compact under the turn lock, for a UI asking for it
 // directly. The tool loop's own compaction is already inside run().
 func (a *Agent) CompactNow(ctx context.Context) error {
+	a.stopPrefill()
+	// A compaction rewrites the conversation, so the server's cache of it is
+	// gone; the user asked for this one by hand and is idle afterwards.
+	// Deferred first so it runs after the turn lock is released.
+	defer a.StartPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	return a.Compact(ctx)
@@ -747,7 +905,10 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
 	}
-	if a.systemOverride == "" {
+	// Working memory and the git summary change from turn to turn. In the
+	// cached layout they ride at the end of the request (volatileTail), so
+	// that nothing in front of the conversation ever changes mid-run.
+	if a.systemOverride == "" && !a.cachedLayout() {
 		if wm := a.workingMemory(); wm != "" {
 			sys += "\n\nWorking memory:\n" + wm
 		}
@@ -758,7 +919,10 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance
 	}
-	if gitInfo != "" {
+	// A scratch agent (plan mode, a consultation) keeps the summary here: it
+	// is fixed for the few turns such an agent lives, so it costs the cache
+	// nothing, and its prompt stays in one piece.
+	if gitInfo != "" && (!a.cachedLayout() || a.systemOverride != "") {
 		sys += "\n\n" + gitInfo
 	}
 	return sys
@@ -864,6 +1028,8 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	// Held for the whole request: the only other writer of the transcript
 	// is resolveModel's post-switch compaction, which runs on a goroutine
 	// of its own and steps aside rather than interleave with this.
+	// A speculative prefill never shares the server with a real request.
+	a.stopPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	start := time.Now()
@@ -899,18 +1065,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		})
 		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
 	}
-	if a.repoDirty {
-		a.repoDirty = false
-		a.RefreshRepoMap()
-		a.History.System.Content = a.composeSystem("")
-	}
-	// The window may have been resolved, or changed, since the map was built.
-	a.fitRepoMap()
-	a.warnHeavyPrompt()
-	if gi := gitctx.Summary(ctx, a.Tools.Root); gi != "" {
-		a.lastGitInfo = gi
-		a.History.System.Content = a.composeSystem(gi)
-	}
+	a.refreshSystemForRequest(ctx)
 	expanded := ExpandMentions(a.Tools.Root, userInput)
 	if newTurn && a.ContextProvider != nil {
 		if note := a.ContextProvider(ctx); note != "" {
@@ -918,10 +1073,19 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			expanded = note + "\n\n" + expanded
 		}
 	}
+	if newTurn {
+		expanded = a.stampUser(expanded)
+	}
 	a.History.Add(provider.Message{Role: provider.RoleUser, Content: expanded})
+	if newTurn && a.cachedLayout() {
+		// The state rides on the request's own message, which nothing has
+		// seen yet, and stays there: see the layout note in prefill.go.
+		a.attachState()
+	}
 
 	emptyRetries, lengthRetries := 0, 0
 	effort := a.Cfg.ReasoningEffort
+	overflowTried := false // one recovery from a context-window refusal per run
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
 		a.engineDo("turn", func(st *engine.Store) { st.NextTurn() })
 		// Anything the user typed while tools were running goes in now,
@@ -934,6 +1098,8 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			a.History.Add(provider.Message{Role: provider.RoleUser, Content: a.pendingAdvice})
 			a.pendingAdvice = ""
 		}
+		// A model switch still being resolved has no window on the wire.
+		a.awaitWindow(ctx)
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
@@ -941,22 +1107,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// working-memory block has to reflect the reads made earlier in
 		// this same turn, and compaction has to measure the prompt it is
 		// actually about to send.
-		a.History.System.Content = a.composeSystem(a.lastGitInfo)
+		a.recomposeSystem(a.lastGitInfo)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
-		req := provider.ChatRequest{
-			Model:           a.Model,
-			Messages:        a.History.Prompt(),
-			Temperature:     a.temperature(),
-			MaxTokens:       a.Cfg.MaxTokens,
-			ReasoningEffort: a.effortFor(effort),
-		}
-		a.History.Extra = 0
-		if !a.compat {
-			req.Tools = a.Tools.Specs()
-			a.History.Extra = a.specsTokens()
-		}
+		req := a.requestFor(effort, true)
 
 		resp, err := a.chatWithRetry(ctx, req)
 		if err != nil {
@@ -967,6 +1122,19 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 				a.notice("backend rejected native tool calls; switching to embedded format")
 				continue
 			}
+			// A prompt larger than the model's loaded window: one attempt to
+			// fix it per run, and an explanation rather than the server's
+			// JSON when it cannot be (see overflow.go).
+			if pt, sw, over := contextOverflow(err); over {
+				if !overflowTried {
+					overflowTried = true
+					if a.recoverFromOverflow(ctx, pt, sw) {
+						continue
+					}
+				}
+				a.autosave(userInput)
+				return "", a.overflowError(pt, sw)
+			}
 			a.autosave(userInput) // keep the progress made before the failure
 			return "", err
 		}
@@ -974,7 +1142,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		calls := resp.ToolCalls
 		content := resp.Content
 		if len(calls) == 0 && a.Cfg.CompatToolCalls != "never" {
-			content, calls = ParseEmbeddedCalls(content, a.knownTools)
+			content, calls = ParseEmbeddedCallsTyped(content, a.knownTools, SchemaParamTypes(a.Tools.Specs()))
 		}
 
 		if len(calls) == 0 {
@@ -1237,9 +1405,11 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			})
 		}
 	}
+	began := timeNow()
 	if !served {
 		res = a.Tools.Dispatch(ctx, call)
 	}
+	took := timeNow().Sub(began)
 	if a.engine() != nil && !served {
 		// The same tolerant parse Dispatch used, so a double-encoded call
 		// is observed exactly as it ran; arguments no tool could run are
@@ -1249,6 +1419,20 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 			}
 		}
+	}
+	// A step open too long is said here, on the result, because in the
+	// cached layout Working memory is not re-sent between requests.
+	if a.cachedLayout() {
+		a.engineDo("nudge", func(st *engine.Store) {
+			if line := st.StepNudge(); line != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + line
+			}
+		})
+	}
+	// Measured before the footer below is added, so the footer itself never
+	// makes two results differ. A cached answer counts: it is the same call.
+	if footer := a.repeats.note(call, res); footer != "" {
+		res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 	}
 	// The automatic tool-failure consultation's question, decided here but
 	// asked below, after OnToolEnd has put the failure on screen.
@@ -1287,6 +1471,12 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			a.pendingAdvice = fmt.Sprintf("A co-worker (%s) looked at the repeated %s failure and advises:\n\n%s",
 				name, call.Name, advice)
 		}
+	}
+	// Last of all, and on the model's copy only: after the engine has
+	// recorded the result and the repeat check has compared it (a clock in
+	// either would make every result unique), and after the UI has shown it.
+	if footer := a.timeFooter(took); footer != "" {
+		res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 	}
 	return res
 }
@@ -1343,10 +1533,19 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if err != nil {
 		return nil, err
 	}
+	// A request that succeeded carried our window, so the server now holds
+	// it: from here on a differing window is somebody else's doing.
+	a.windowUnconfirmed.Store(false)
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
-	used := Stats{Requests: 1}
+	used := Stats{Requests: 1, PromptTime: resp.Usage.PromptDuration, LoadTime: resp.Usage.LoadDuration}
+	if d := resp.Usage.PromptDuration; d >= slowPromptRead {
+		// A status line, not a transcript entry: it is a fact about the
+		// server's cache, worth seeing while it happens and in /stats after.
+		used.SlowReads = 1
+		a.transient("the server read %d prompt tokens in %s: its prompt cache did not cover this request", resp.Usage.PromptTokens, d.Round(time.Second))
+	}
 	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
 		used.PromptTokens = resp.Usage.PromptTokens
 		used.CompletionTokens = resp.Usage.CompletionTokens
@@ -1423,6 +1622,7 @@ func (a *Agent) Compact(ctx context.Context) error {
 	// unrelated result as a digested read.
 	pending := map[string]string{}
 	for i, m := range head {
+		m.Content = StripHarnessState(m.Content) // the request carries the block once, below
 		if i == 0 && strings.HasPrefix(m.Content, summaryPrefix) {
 			prior = strings.TrimPrefix(m.Content, summaryPrefix)
 			continue
@@ -1521,19 +1721,47 @@ func (a *Agent) Compact(ctx context.Context) error {
 		}
 		return err
 	}
-	summary := resp.Content
-	if stripThink {
-		summary = StripThink(summary)
-	}
-	filesOnly := false
-	if a.engine() != nil {
-		body, files := engine.SplitFilesBlock(summary)
-		if files != "" {
-			a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
-			filesOnly = strings.TrimSpace(body) == ""
+	// split takes the trailing files: block off a reply and applies it; what
+	// is left is the summary, and filesOnly says the list was all there was.
+	split := func(r *provider.ChatResponse) (summary string, filesOnly bool) {
+		summary = r.Content
+		if stripThink {
+			summary = StripThink(summary)
 		}
-		summary = body
-		a.flushEngine()
+		if a.engine() != nil {
+			body, files := engine.SplitFilesBlock(summary)
+			if files != "" {
+				a.engineDo("file notes", func(st *engine.Store) { st.ApplyFileNotes(files) })
+				filesOnly = strings.TrimSpace(body) == ""
+			}
+			summary = body
+			a.flushEngine()
+		}
+		return summary, filesOnly
+	}
+	summary, filesOnly := split(resp)
+	if filesOnly && ctx.Err() == nil {
+		// The list without the summary: a small model with a full task tree
+		// in front of it reads "do not restate Working memory" as "only the
+		// list is wanted". Its notes are already applied. Ask once more, in
+		// the same exchange so it can see what it wrote — a second request
+		// from scratch gets the same answer.
+		again, rerr := a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: compactSystemPrompt},
+				{Role: provider.RoleUser, Content: u.String()},
+				{Role: provider.RoleAssistant, Content: resp.Content},
+				{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
+			},
+			Temperature: 0.1,
+			NoThink:     true,
+		}, nil)
+		if rerr == nil {
+			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
+				summary, resp = s2, again
+			}
+		}
 	}
 	if strings.TrimSpace(summary) == "" {
 		// A cancellation is not a backend failure: it reaches here as an
@@ -1617,7 +1845,7 @@ const SummaryPrefix = "[Conversation summary — earlier turns compacted]\n"
 
 const summaryPrefix = SummaryPrefix
 
-const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Preserve, in this order: the original task; every requirement, constraint or convention the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Under 400 words. Plain text. Do not restate anything already in Working memory. End with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
+const compactSystemPrompt = "Summarize this coding-agent conversation for context compression. Write the summary first, as plain prose under 400 words, and it is never empty. Preserve, in this order: the original task; every requirement, constraint, convention or standing instruction the user stated; key decisions and why; files created or modified and how; current state; outstanding work. Working memory is kept separately, so do not copy its task list or file outlines — but when it already covers the work, still state the task, the user's standing instructions and the current state in a few lines. After the summary, end with a line `files:` followed by one line per file that mattered, as `- path — what matters in it`."
 
 func looksLikeToolsUnsupported(err error) bool {
 	s := strings.ToLower(err.Error())

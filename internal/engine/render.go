@@ -66,7 +66,7 @@ func (s *Store) Render(budget int, inMap func(string) bool) string {
 		budget = DefaultBudget
 	}
 	s.mu.Lock()
-	t := Tree{Roots: copyNodes(s.tree.Roots)}
+	t := Tree{Roots: copyNodes(s.tree.Roots), nudge: s.lim.StepNudge}
 	notes := strings.TrimRight(s.notes, "\n")
 	root := s.root
 	s.mu.Unlock()
@@ -301,6 +301,11 @@ func newActiveParts(t *Tree, inMap func(string) bool, changed func(FileRef) bool
 		}
 	}
 	doing := path[len(path)-1]
+	// Part of the header, so it is never a rung of the budget ladder: the
+	// step it is about is the one thing the block always keeps.
+	if calls := len(doing.Evidence.Raw) + doing.Evidence.Dropped; t.nudge > 0 && calls > t.nudge {
+		b.WriteString(nudgeLine(doing.ID, calls) + "\n")
+	}
 	p := &activeParts{
 		id:      doing.ID,
 		header:  strings.TrimRight(b.String(), "\n"),
@@ -334,6 +339,33 @@ func newActiveParts(t *Tree, inMap func(string) bool, changed func(FileRef) bool
 		}
 	}
 	return p
+}
+
+// nudgeEvery is how often the mid-run nudge repeats once a step is past its
+// threshold: often enough to be seen, not on every call.
+const nudgeEvery = 10
+
+// StepNudge is the long-open-step line for the end of a tool result, or "".
+// The Working memory block carries the same line in its header, but the block
+// is only attached when a request begins or the history is rewritten; a step
+// that runs long does so in between, and this is how the model hears of it.
+// It fires on the first call past the threshold and every nudgeEvery after.
+func (s *Store) StepNudge() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.tree.Doing()
+	if d == nil || s.lim.StepNudge <= 0 {
+		return ""
+	}
+	calls := len(d.Evidence.Raw) + d.Evidence.Dropped
+	if over := calls - s.lim.StepNudge; over < 1 || (over-1)%nudgeEvery != 0 {
+		return ""
+	}
+	return nudgeLine(d.ID, calls)
+}
+
+func nudgeLine(id string, calls int) string {
+	return fmt.Sprintf("! step %s has been open for %d tool calls: finish it, split it into smaller steps (task add, parent %s), or note why it is taking this long", id, calls, id)
 }
 
 // distilledWidth bounds the argument half of a distilled line.
