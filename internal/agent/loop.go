@@ -264,6 +264,11 @@ type Agent struct {
 	// saveMu guards the session's *fields* while they are written and
 	// marshalled: autosave on the agent goroutine, UpdateSession from a UI.
 	// sessionMu guards only the pointer (above); this is the other half.
+	//
+	// Nothing under saveMu may call an Events callback. A UI's callback takes
+	// the UI's own lock, and that lock is held by whatever calls UpdateSession
+	// — which waits here. A notice raised under saveMu is a lock-order
+	// inversion that deadlocks the UI and the agent goroutine together.
 	saveMu sync.Mutex
 	// turnMu is held for the whole of run(). It exists for exactly one
 	// caller outside the loop: the compaction resolveModel does when a
@@ -1374,14 +1379,19 @@ func (a *Agent) autosave(userInput string) {
 		return
 	}
 	a.saveMu.Lock()
-	defer a.saveMu.Unlock()
 	a.Session.HostPID = os.Getpid()
 	if a.Session.Title == "" {
 		a.Session.Title = store.TitleFrom(userInput)
 	}
 	a.Session.Model = a.Model
 	a.Session.Messages = a.History.Messages
-	if err := a.Session.Save(); err != nil {
+	err := a.Session.Save()
+	a.saveMu.Unlock()
+	// Off the lock, deliberately: OnNotice is the UI's, and the TUI's takes
+	// the session lock that every room post holds while calling UpdateSession
+	// — which waits for saveMu. Noticing under saveMu inverted that order and
+	// deadlocked every attached terminal against the agent goroutine.
+	if err != nil {
 		a.notice("session save failed: %v", err)
 	}
 }
