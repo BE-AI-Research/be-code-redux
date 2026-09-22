@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/subagent"
 )
@@ -62,6 +63,104 @@ func TestOwnerAndScopeRules(t *testing.T) {
 	}
 	if s.tree.Find(root+".2").Owner != "big" || s.tree.OwnerOf(root+".2.1") != "big" {
 		t.Fatal("owner lost")
+	}
+}
+
+// TestSetOwnerRefusesANestedPen: the direct-children check alone lets a pen
+// nest inside another pen two or more levels down — assign the grandchild
+// first, so the parent's own check (only its immediate children) would
+// otherwise miss it entirely when the grandparent is assigned second.
+func TestSetOwnerRefusesANestedPen(t *testing.T) {
+	s := testStore(t)
+	s.SetCards(cardsForTest())
+	root := s.Plan("port the scanner", []string{"top step"})
+	level2, err := s.Add(root+".1", "level two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchild, err := s.Add(level2, "level three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOwner(grandchild, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOwner(root+".1", "claude", false); err == nil || !strings.Contains(err.Error(), "one subtree, one pen") {
+		t.Fatalf("a pen nested two levels down was accepted: %v", err)
+	}
+}
+
+// TestSetOwnerUnassignAndDispatchedRefusal covers two brief-stated
+// behaviours that had no assertion: owner "" unassigns (clearing the pin
+// only through the operator's own form of the call), and a dispatched node
+// refuses reassignment until it is stopped.
+func TestSetOwnerUnassignAndDispatchedRefusal(t *testing.T) {
+	s, root := planOwned(t)
+	// An unpinned unassign needs no special authority.
+	if err := s.SetOwner(root+".2", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.tree.Find(root + ".2"); n.Owner != "" || n.OwnerPinned {
+		t.Fatalf("unassign left an owner behind: %+v", n)
+	}
+	if s.tree.OwnerOf(root+".2.1") != "" {
+		t.Fatal("a child still inherited the cleared owner")
+	}
+	// Re-assign and pin it, the operator's own form.
+	if err := s.SetOwner(root+".2", "big", true); err != nil {
+		t.Fatal(err)
+	}
+	// The model may not unassign a pinned owner...
+	if err := s.SetOwner(root+".2", "", false); err == nil || !strings.Contains(err.Error(), "assigned by the operator") {
+		t.Fatalf("a pinned owner was removed without operator authority: %v", err)
+	}
+	// ...but the operator's own unassign clears the owner and the pin together.
+	if err := s.SetOwner(root+".2", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.tree.Find(root + ".2"); n.Owner != "" || n.OwnerPinned {
+		t.Fatalf("the operator's unassign left the pin set: %+v", n)
+	}
+	// A dispatched node cannot be reassigned until it is stopped.
+	if err := s.SetOwner(root+".2", "big", false); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDispatched(root+".2", true)
+	if err := s.SetOwner(root+".2", "claude", false); err == nil || !strings.Contains(err.Error(), "stop it first") {
+		t.Fatalf("owner changed on a dispatched node: %v", err)
+	}
+}
+
+// TestSetScopeSucceedsWhenTheOwnerHasNoCard: a node can carry an owner the
+// store has no card for — a document hand-edited with "@ghost" before
+// SetCards ever ran, or a coworker later removed from config. There is no
+// max_scope to violate for an owner the store does not recognise, so
+// SetScope must not refuse on that account alone (it is warnOwners' job to
+// flag the unknown owner, not SetScope's to block the scope).
+func TestSetScopeSucceedsWhenTheOwnerHasNoCard(t *testing.T) {
+	s := testStore(t)
+	root := s.Plan("port the scanner", []string{"step"})
+	s.tree.Find(root + ".1").Owner = "ghost"
+	if err := s.SetScope(root+".1", []string{"anything/at/all"}); err != nil {
+		t.Fatalf("SetScope refused an owner with no card: %v", err)
+	}
+}
+
+// TestObserveForRecordsNothingWhenThePenRootIsGone: activeNodeForLocked
+// used to fall back to the main model's own pen when a dispatched root
+// could not be found (a hand-edited document, or a stale pen id after the
+// node was removed some other way) — exactly the "confidently wrong"
+// misfiling its own comment warns against. It must record nothing instead.
+func TestObserveForRecordsNothingWhenThePenRootIsGone(t *testing.T) {
+	s, root := planOwned(t)
+	s.SetDispatched(root+".2", true)
+	s.tree.Remove(s.tree.Find(root + ".2"))
+	footer := s.ObserveFor(root+".2", Event{Tool: "shell", Args: map[string]any{"command": "go test ./..."}, Content: "ok"})
+	if footer != "" {
+		t.Fatalf("unexpected footer: %q", footer)
+	}
+	if n := s.tree.Find(root + ".1"); len(n.Evidence.Raw) != 0 {
+		t.Fatalf("evidence was misfiled onto the main model's pen: %+v", n.Evidence)
 	}
 }
 
@@ -134,7 +233,8 @@ func TestCloseAsAndInterrupt(t *testing.T) {
 	if got := s.Touched(root + ".2"); len(got) != 1 || got[0] != "internal/scan/a.go" {
 		t.Fatalf("Touched: %q", got)
 	}
-	if err := s.Interrupt(root+".2", "interrupted 10:00 after 1 tool calls; files written: internal/scan/a.go"); err != nil {
+	at := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	if err := s.Interrupt(root+".2", at, 1, []string{"internal/scan/a.go"}); err != nil {
 		t.Fatal(err)
 	}
 	if s.tree.Find(root+".2.1").Status != StatusTodo || s.tree.DoingUnder(root+".2") != nil {
@@ -217,6 +317,43 @@ func TestCloseAsMustNotSkipASiblingWhenRemovingASpentUnfiledChild(t *testing.T) 
 		if c.Text == unfiledText {
 			t.Fatalf("the spent unfiled node must be gone: %+v", c)
 		}
+	}
+}
+
+// TestCloseAsMustNotRemoveARoot: adoptUnfiledLocked refuses to remove a
+// root-level "unfiled" node even when it is spent, because s.files and
+// s.extra are index-parallel to Roots — taking one out shifts every later
+// task onto the previous one's document. CloseAs's own removal guard did
+// not carry that same check, so an unfiled root that gets assigned and
+// dispatched (activeNodeForLocked opens one at the root when no task is
+// open yet) and then closed while still empty would corrupt that parity on
+// the next load. It must be closed like any other node instead.
+func TestCloseAsMustNotRemoveARoot(t *testing.T) {
+	s := testStore(t)
+	s.SetCards(cardsForTest())
+	// Nothing planned yet: Observe opens a root-level unfiled node the way
+	// a session with no task open does.
+	s.Observe(Event{Tool: "read_file", Args: map[string]any{"path": "x.go"}, Content: "..."})
+	if len(s.tree.Roots) != 1 || s.tree.Roots[0].Text != unfiledText {
+		t.Fatalf("expected a root-level unfiled node: %+v", s.tree.Roots)
+	}
+	root := s.tree.Roots[0].ID
+	if err := s.SetOwner(root, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDispatched(root, true)
+	// Empty it back out, so CloseAs sees no raw evidence and no children —
+	// the same "spent" shape adoptUnfiledLocked already refuses to remove
+	// at the root.
+	s.tree.Find(root).Evidence = Evidence{}
+	if err := s.CloseAs(root, "big", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.tree.Roots) != 1 || s.tree.Roots[0].ID != root {
+		t.Fatalf("CloseAs removed the root instead of closing it: %+v", s.tree.Roots)
+	}
+	if n := s.tree.Roots[0]; n.Status != StatusDone || n.DoneBy != "big" {
+		t.Fatalf("root after CloseAs: %+v", n)
 	}
 }
 

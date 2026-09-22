@@ -91,14 +91,19 @@ func (t *Tree) Dispatched() []string {
 }
 
 // penOf is the dispatched root that contains id, or "" for the main
-// model's pen. Ids are positional, so containment is a prefix test.
+// model's pen. Ids are positional, so containment is a prefix test. Nested
+// pens should never exist (SetOwner refuses one subtree inside another),
+// but a hand-edited document can still produce one; the longest matching
+// prefix — the innermost pen — wins, so resolution stays deterministic
+// instead of depending on map iteration order.
 func (t *Tree) penOf(id string) string {
+	best := ""
 	for r := range t.dispatched {
-		if id == r || strings.HasPrefix(id, r+".") {
-			return r
+		if (id == r || strings.HasPrefix(id, r+".")) && len(r) > len(best) {
+			best = r
 		}
 	}
-	return ""
+	return best
 }
 
 // DoingUnder is the doing node inside one dispatched subtree.

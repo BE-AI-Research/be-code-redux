@@ -296,6 +296,14 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	s.turn, s.baseline = st.Turn, st.Baseline
 	s.checkWorkspace()
 	s.loadDocs()
+	// warnOwners takes s.mu itself, so it runs here rather than inside
+	// loadDocs (which callers may one day run under the lock) — after
+	// loadDocs' work is done, with nothing else holding it. Cards are not
+	// known yet at this point (SetCards is always the caller's next move,
+	// which warns again once they are), so this call only ever fires for a
+	// document that already names an owner before this session has told
+	// the store who its sub-agents are.
+	s.warnOwners()
 	s.restoreFileMemos(st.Files)
 	s.restoreTimes(st.Times)
 	if resumed || st.Session == sessionID {
@@ -479,14 +487,6 @@ func (s *Store) loadDocs() {
 	s.dropSplitDuplicates()
 	s.repairRootIDs()
 	s.warnMultipleDoing()
-	// warnOwners takes s.mu itself; loadDocs runs before the store is
-	// shared with anything else (OpenAt, single-threaded), so nothing else
-	// holds the lock here. Cards normally arrive after Open via SetCards,
-	// which warns itself; this call only matters for a reload with cards
-	// already set.
-	if s.cards != nil {
-		s.warnOwners()
-	}
 }
 
 // dropSplitDuplicates undoes the one thing a failure inside Flush's split can
@@ -594,7 +594,7 @@ func (s *Store) warnMultipleDoing() {
 		if total[pen] < 2 {
 			continue
 		}
-		s.warnf("%d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads last", total[pen], strings.Join(docsByPen[pen], ", "))
+		s.warnf("%d steps are marked doing in %s; keep exactly one — a hand-edited status is left exactly as written, so the engine will not fix this, it simply uses whichever it reads first", total[pen], strings.Join(docsByPen[pen], ", "))
 	}
 }
 
@@ -1378,6 +1378,21 @@ func parentID(id string) string {
 	return ""
 }
 
+// ownedDescendant is the first node under (not including) n, in document
+// order, that already has an owner — at any depth, not just a direct
+// child, so a pen cannot nest inside another pen.
+func ownedDescendant(n *Node) *Node {
+	for _, c := range n.Children {
+		if c.Owner != "" {
+			return c
+		}
+		if d := ownedDescendant(c); d != nil {
+			return d
+		}
+	}
+	return nil
+}
+
 // SetCards tells the store which owners exist and what each may be given;
 // SetOwner and SetScope validate against it, and warnOwners' warnings use
 // it.
@@ -1432,10 +1447,12 @@ func (s *Store) SetOwner(id, owner string, pinned bool) error {
 		if above := s.tree.OwnerOf(parentID(id)); above != "" {
 			return fmt.Errorf("%s is inside %s's subtree; assign the top of a subtree", id, above)
 		}
-		for _, c := range n.Children {
-			if c.Owner != "" {
-				return fmt.Errorf("%s has an assigned child (%s); one subtree, one pen", id, c.ID)
-			}
+		// The whole subtree, not just the direct children: a nested pen
+		// two or more levels down is just as much "two owners, one
+		// subtree" as an immediate child, and penOf's prefix match cannot
+		// tell them apart once both exist.
+		if below := ownedDescendant(n); below != nil {
+			return fmt.Errorf("%s has an assigned child (%s); one subtree, one pen", id, below.ID)
 		}
 	}
 	n.Owner, n.OwnerPinned = owner, owner != "" && pinned
@@ -1507,7 +1524,7 @@ func (s *Store) CloseAs(id, owner, status, reason string) error {
 		if x.Status.terminal() {
 			return
 		}
-		if x.Text == unfiledText && len(x.Evidence.Raw) == 0 && len(x.Children) == 0 {
+		if x.Text == unfiledText && len(x.Evidence.Raw) == 0 && len(x.Children) == 0 && !s.isRootLocked(x) {
 			s.tree.Remove(x)
 			return
 		}
@@ -1524,7 +1541,11 @@ func (s *Store) CloseAs(id, owner, status, reason string) error {
 // Interrupt undoes a dispatch without closing anything: the pen's doing
 // node goes back to todo, the note is recorded on the root, and the
 // dispatched mark is cleared (spec §3.5).
-func (s *Store) Interrupt(id, note string) error {
+func (s *Store) Interrupt(id string, at time.Time, calls int, files []string) error {
+	note := InterruptedNote + at.Format("15:04") + fmt.Sprintf(" after %d tool calls", calls)
+	if len(files) > 0 {
+		note += "; files written: " + strings.Join(files, ", ")
+	}
 	snap := s.rawSnaps()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1536,9 +1557,7 @@ func (s *Store) Interrupt(id, note string) error {
 		s.rec.distillWith(d, snap)
 		d.Status = StatusTodo
 	}
-	if note != "" {
-		n.Evidence.Notes = append(n.Evidence.Notes, NoteRef{Text: note})
-	}
+	n.Evidence.Notes = append(n.Evidence.Notes, NoteRef{Text: note})
 	s.tree.SetDispatched(id, false)
 	s.markDirtyLocked()
 	return nil
@@ -1760,7 +1779,11 @@ func (s *Store) activeNodeLocked() *Node { return s.activeNodeForLocked("") }
 // when nothing in the pen is doing — an "unfiled" node opened under the
 // pen's root (or, for the main model, under the active root as before).
 // Filing evidence under a step the model did not name produces a report
-// that is confidently wrong, which is worse than one that says unfiled.
+// that is confidently wrong, which is worse than one that says unfiled — and
+// that includes filing a sub-agent's evidence on the main model's own pen
+// when its root has gone (renamed by hand, or a stale pen after Interrupt):
+// nil, never the "" fallback, is what tells the caller there is nowhere
+// honest to put it.
 func (s *Store) activeNodeForLocked(pen string) *Node {
 	if pen != "" {
 		if d := s.tree.DoingUnder(pen); d != nil {
@@ -1768,7 +1791,7 @@ func (s *Store) activeNodeForLocked(pen string) *Node {
 		}
 		host := s.tree.Find(pen)
 		if host == nil {
-			return s.activeNodeForLocked("")
+			return nil
 		}
 		return s.unfiledUnderLocked(host)
 	}

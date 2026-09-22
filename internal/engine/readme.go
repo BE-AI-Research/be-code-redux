@@ -134,7 +134,7 @@ on its own whenever it moves a step to doing.
 It does not, however, choose for you: a hand-edited status is your own
 intent, so the engine never overrides one, even a second ` + "`[>]`" + `
 where only one belongs. If you end up with more than one, it simply uses
-whichever it reads last and ignores the rest. Unlike a repaired id or a
+whichever it reads first and ignores the rest. Unlike a repaired id or a
 quarantined document, there is no note to leave on either step for this —
 nothing is wrong with either one alone, only with having two — so instead
 the engine prints a line to the terminal every time it loads the record
