@@ -52,3 +52,37 @@ func TestWatchStopsWithItsContext(t *testing.T) {
 		t.Fatal("Watch did not return")
 	}
 }
+
+// A poll that runs between a message's temp-file write and its rename sees
+// the directory's mtime move; the rename then lands in the same coarse
+// kernel timestamp tick and the directory looks unchanged for ever. The
+// mtime shortcut must never skip a directory modified within the last
+// second, so a message written on the poll's own tick is still found.
+func TestWatchFindsAMessageWrittenOnThePollsOwnTick(t *testing.T) {
+	dir := t.TempDir()
+	Send(dir, "x", "bob", "history")
+	var mu sync.Mutex
+	got := 0
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Watch(ctx, dir, time.Millisecond, func(Message) { mu.Lock(); got++; mu.Unlock() })
+	time.Sleep(20 * time.Millisecond)
+	const n = 200
+	for i := 0; i < n; i++ {
+		Send(dir, "alice", "bob", "m")
+		time.Sleep(time.Duration(i%3) * time.Millisecond) // land on every phase of the poll
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		done := got == n
+		mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("delivered %d of %d", got, n)
+}

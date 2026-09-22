@@ -21,6 +21,7 @@ func Watch(ctx context.Context, dir string, every time.Duration, onNew func(m Me
 		every = time.Second
 	}
 	seen := map[string]bool{} // "<user>/<file>"
+	const quietAfter = time.Second
 	mtimes := map[string]time.Time{}
 	scan := func(deliver bool) {
 		users, err := os.ReadDir(dir)
@@ -37,7 +38,14 @@ func Watch(ctx context.Context, dir string, every time.Duration, onNew func(m Me
 			if err != nil {
 				continue
 			}
-			if deliver && info.ModTime().Equal(mtimes[u.Name()]) {
+			// The shortcut is safe only for a directory that has been quiet
+			// for a while. Kernel file timestamps are coarse (a few ms), and
+			// a message is a temp file plus a rename: a poll between the two
+			// records the mtime the temp file gave the directory, and the
+			// rename lands in the same tick — so the directory looks
+			// unchanged for ever and the message is never delivered. A
+			// directory modified in the last second is always read.
+			if deliver && info.ModTime().Equal(mtimes[u.Name()]) && time.Since(info.ModTime()) > quietAfter {
 				continue // nothing written here since the last poll
 			}
 			mtimes[u.Name()] = info.ModTime()
