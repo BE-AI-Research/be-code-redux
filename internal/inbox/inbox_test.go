@@ -56,13 +56,24 @@ func TestSendThreadAndThreads(t *testing.T) {
 	if ts[0].Latest.Text != "lunch?" {
 		t.Fatalf("latest: %+v", ts[0].Latest)
 	}
-	// Reading up to carol's message clears both (bob's is older).
-	if err := MarkRead(dir, "alice", ts[0].Latest.TS); err != nil {
+	// Reading carol's thread clears carol's only: bob's older message is in
+	// a thread nobody has opened.
+	if err := MarkRead(dir, "alice", "carol", ts[0].Latest.TS); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ = Threads(dir, "alice")
+	if ts[0].Unread != 0 || ts[1].Unread != 1 {
+		t.Fatalf("read mark is not per thread: %+v", ts)
+	}
+	if err := MarkRead(dir, "alice", "bob", ts[1].Latest.TS); err != nil {
 		t.Fatal(err)
 	}
 	ts, _ = Threads(dir, "alice")
 	if ts[0].Unread != 0 || ts[1].Unread != 0 {
 		t.Fatalf("still unread after MarkRead: %+v", ts)
+	}
+	if LastRead(dir, "alice", "nobody").IsZero() == false {
+		t.Fatal("a mark for an unknown correspondent")
 	}
 	// Only received messages count as unread, never one's own.
 	Send(dir, "alice", "bob", "one more from me")

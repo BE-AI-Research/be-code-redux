@@ -128,36 +128,21 @@ func (m *View) enterDM(with string) (tea.Model, tea.Cmd) {
 	})
 }
 
-// openThread loads a thread and marks it read up to its newest line. It
-// patches only this thread's own row in the already-loaded m.dm.threads
-// (adding one if this is a fresh conversation with no row yet) rather than
-// calling reloadThreads: the mailbox's read mark is one global watermark per
-// user, so marking this thread read advances it past every older message
-// too — including ones from a different, still-unopened thread — and a
-// fresh inbox.Threads() call right afterward would report that older
-// thread's badge cleared as well, when nobody has looked at it yet.
+// openThread loads a thread and marks it read up to its newest line. The
+// read mark is per correspondent, so the other threads' badges are exactly
+// what the disk says after a reload.
 func (m *View) openThread(with string) {
 	m.dm.with = with
 	m.dm.msgs, _ = inbox.Thread(m.inboxDir, m.userID(), with)
-	n := len(m.dm.msgs)
-	if n > 0 {
-		_ = inbox.MarkRead(m.inboxDir, m.userID(), m.dm.msgs[n-1].TS)
+	if n := len(m.dm.msgs); n > 0 {
+		_ = inbox.MarkRead(m.inboxDir, m.userID(), with, m.dm.msgs[n-1].TS)
 	}
-	found := false
-	for i := range m.dm.threads {
-		if m.dm.threads[i].With == with {
-			m.dm.threads[i].Unread = 0
-			if n > 0 {
-				m.dm.threads[i].Latest = m.dm.msgs[n-1]
-			}
+	m.reloadThreads()
+	m.dm.sel = 0
+	for i, t := range m.dm.threads {
+		if t.With == with {
 			m.dm.sel = i
-			found = true
-			break
 		}
-	}
-	if !found && n > 0 {
-		m.dm.threads = append(m.dm.threads, inbox.ThreadSummary{With: with, Latest: m.dm.msgs[n-1]})
-		m.dm.sel = len(m.dm.threads) - 1
 	}
 	m.layoutDM()
 	m.dm.vp.GotoBottom()
@@ -203,8 +188,8 @@ func (m *View) handleInboxKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "d":
 			if m.dm.sel < len(m.dm.threads) {
 				t := m.dm.threads[m.dm.sel]
-				_ = inbox.MarkRead(m.inboxDir, m.userID(), t.Latest.TS)
-				m.dm.threads[m.dm.sel].Unread = 0
+				_ = inbox.MarkRead(m.inboxDir, m.userID(), t.With, t.Latest.TS)
+				m.reloadThreads()
 			}
 		case "/":
 			m.input.SetValue("/")

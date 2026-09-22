@@ -166,7 +166,7 @@ func Threads(dir, me string) ([]ThreadSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	last := LastRead(dir, me)
+	marks := readMarks(dir, me)
 	byWith := map[string]*ThreadSummary{}
 	note := func(with string, m Message, unread bool) {
 		s := byWith[with]
@@ -182,7 +182,7 @@ func Threads(dir, me string) ([]ThreadSummary, error) {
 		}
 	}
 	for _, m := range in {
-		note(m.From, m, m.TS.After(last))
+		note(m.From, m, m.TS.After(marks[m.From]))
 	}
 	// What I sent: my messages live in the recipients' directories.
 	entries, _ := os.ReadDir(dir)
@@ -203,35 +203,45 @@ func Threads(dir, me string) ([]ThreadSummary, error) {
 	return out, nil
 }
 
+// readState is read.json: one mark per correspondent. One mark for the
+// whole inbox would let opening the newest thread mark an older, unopened
+// thread's messages read too.
 type readState struct {
-	LastReadTS time.Time `json:"last_read_ts"`
+	LastRead map[string]time.Time `json:"last_read"`
 }
 
-// MarkRead records that me has read everything at or before upTo. Never
-// moves backwards.
-func MarkRead(dir, me string, upTo time.Time) error {
-	if !upTo.After(LastRead(dir, me)) {
+// MarkRead records that me has read everything from other at or before
+// upTo. Never moves backwards.
+func MarkRead(dir, me, other string, upTo time.Time) error {
+	marks := readMarks(dir, me)
+	if !upTo.After(marks[other]) {
 		return nil
 	}
+	marks[other] = upTo
 	udir := filepath.Join(dir, me)
 	if err := os.MkdirAll(udir, 0o700); err != nil {
 		return err
 	}
-	b, _ := json.Marshal(readState{LastReadTS: upTo})
+	b, _ := json.Marshal(readState{LastRead: marks})
 	return writeAtomic(filepath.Join(udir, "read.json"), b, 0o600)
 }
 
-// LastRead is the read mark, zero when none.
-func LastRead(dir, me string) time.Time {
+// LastRead is me's read mark for other, zero when none.
+func LastRead(dir, me, other string) time.Time {
+	return readMarks(dir, me)[other]
+}
+
+func readMarks(dir, me string) map[string]time.Time {
+	out := map[string]time.Time{}
 	b, err := os.ReadFile(filepath.Join(dir, me, "read.json"))
 	if err != nil {
-		return time.Time{}
+		return out
 	}
 	var st readState
-	if json.Unmarshal(b, &st) != nil {
-		return time.Time{}
+	if json.Unmarshal(b, &st) == nil && st.LastRead != nil {
+		out = st.LastRead
 	}
-	return st.LastReadTS
+	return out
 }
 
 // writeAtomic writes data to a temp file beside path and renames it over.

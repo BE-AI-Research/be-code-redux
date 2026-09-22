@@ -112,12 +112,12 @@ type ChatLine struct {
 ~/.be-code/inbox/
   alice/
     1758473520123456789-bob.json     {"from":"bob","to":"alice","ts":"…","text":"…"}
-    read.json                        {"last_read_ts":"…"}
+    read.json                        {"last_read":{"bob":"…"}}
   bob/
     …
 ```
 
-One file per message, named `<unix-nanos>-<from>.json`; written to `<dir>/.tmp-<rand>` then renamed; directories 0700, files 0600. A thread with `bob` from `alice`'s point of view is `alice/*-bob.json` ∪ `bob/*-alice.json`, sorted by name. `read.json` is per user, one timestamp: everything at or before it is read. Sending marks nothing; opening a thread in `/dm` sets it to the newest line shown.
+One file per message, named `<unix-nanos>-<from>.json`; written to `<dir>/.tmp-<rand>` then renamed; directories 0700, files 0600. A thread with `bob` from `alice`'s point of view is `alice/*-bob.json` ∪ `bob/*-alice.json`, sorted by name. `read.json` holds one timestamp **per correspondent** (`{"last_read": {"bob": ts}}`): a thread's messages at or before its mark are read. *(Amended during implementation: one mark for the whole inbox let opening the newest thread mark an older, unopened thread read too.)* Sending marks nothing; opening a thread in `/dm` sets that thread's mark to the newest line shown.
 
 ### 5.2 `internal/inbox`
 
