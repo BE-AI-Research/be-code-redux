@@ -270,6 +270,9 @@ type Config struct {
 	// lock file when running inside the editor's terminal, and whether a
 	// note about the active file/selection is added to each prompt.
 	IDE IDEConfig `json:"ide"`
+
+	// Chat controls /chat, /inbox and /dm (spec §8).
+	Chat ChatConfig `json:"chat"`
 }
 
 // IDEConfig controls the editor bridge (see internal/ide).
@@ -281,6 +284,17 @@ type IDEConfig struct {
 	// write — the editor alone while VS Code's terminal is the only one
 	// attached, both places once another terminal joins.
 	Review string `json:"review"`
+}
+
+// ChatConfig controls /chat, /inbox and /dm (spec §8).
+type ChatConfig struct {
+	Enabled bool `json:"enabled"`
+	// MentionContext is how many recent room lines go to the model with an
+	// @agent mention; 0 sends the mention alone.
+	MentionContext int `json:"mention_context"`
+	// Name is this device's user ID. Empty means the host offers the IDs
+	// seen from this IP, or asks once.
+	Name string `json:"name,omitempty"`
 }
 
 // Default returns the out-of-the-box configuration: Ollama on localhost,
@@ -348,6 +362,7 @@ func Default() *Config {
 		RepoMap:          true,
 		RepoMapBudget:    6144,
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
+		Chat:             ChatConfig{Enabled: true, MentionContext: 10},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",

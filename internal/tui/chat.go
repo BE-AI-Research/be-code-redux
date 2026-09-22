@@ -1,0 +1,277 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/store"
+)
+
+// The room: one per session, every attached terminal sees it, routed by the
+// host through the same mailbox the transcript uses. It is not the
+// transcript — the model sees it only through an @agent mention
+// (mention.go) — and it is saved in the session file beside the transcript.
+
+// roomCap bounds the room; the oldest lines go, once, with a marker.
+const roomCap = 2000
+
+// chatMsg is one new room line, broadcast to every view.
+type chatMsg struct{ line store.ChatLine }
+
+// roomResetMsg tells every view the room was replaced wholesale — currently
+// only /clear, which starts a fresh session with an empty one. A view that
+// applied every chatMsg since it attached would already agree with the
+// session, but a broadcast makes that explicit and lets a terminal sitting
+// in modeChat re-render immediately instead of showing stale lines until its
+// next post or resize.
+type roomResetMsg struct{}
+
+// Post appends a line to the room and tells every terminal.
+func (s *Session) Post(user, text, kind string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PostLocked(user, text, kind)
+}
+
+// PostLocked is Post for a caller holding mu.
+func (s *Session) PostLocked(user, text, kind string) {
+	line := store.ChatLine{TS: s.now(), User: user, Text: strings.TrimRight(text, "\n"), Kind: kind}
+	s.room = append(s.room, line)
+	// A person's own line naming the model (mention.go) becomes a request —
+	// tagged here, before the cap and the broadcast, so the saved room, what
+	// every terminal sees and the request built from it all agree on what
+	// happened. "agent" itself and any system line (join/leave, kind != "")
+	// are exempt: an @agent inside the model's own reply is not a request.
+	if kind == "" && user != "" && user != "agent" && IsMention(line.Text) {
+		line.Kind = "mention"
+		s.room[len(s.room)-1].Kind = "mention"
+	}
+	if len(s.room) > roomCap {
+		s.room = append([]store.ChatLine{{TS: line.TS, Text: "(older chat trimmed)"}}, s.room[len(s.room)-roomCap+1:]...)
+	}
+	room := s.room
+	s.ag.UpdateSession(func(ss *store.Session) { ss.Chat = append([]store.ChatLine(nil), room...) })
+	s.broadcast(chatMsg{line: line})
+	if line.Kind == "mention" {
+		// The request must include the mention itself, so this runs after
+		// the line has already been appended to the room above.
+		s.noteMentionLocked(line)
+	}
+}
+
+// Room is a snapshot of the room.
+func (s *Session) Room() []store.ChatLine {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]store.ChatLine(nil), s.room...)
+}
+
+// restoreRoom puts a saved room back (resume).
+func (s *Session) restoreRoom(lines []store.ChatLine) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.room = append([]store.ChatLine(nil), lines...)
+}
+
+// chatNameOf is how a roster entry signs a room line: its declared chat
+// identity if the terminal sent one, else its device label. Used for the
+// join/leave lines SetClients posts, where there is a ClientInfo but no View.
+func (s *Session) chatNameOf(c live.ClientInfo) string {
+	if id := s.ids[c.ID].ID; id != "" {
+		return id // the resolved name, which may have been asked for after attach
+	}
+	if c.User != "" {
+		return c.User
+	}
+	return live.LabelKey(c.Label)
+}
+
+// chatName is how this terminal signs a room line: its resolved chat
+// identity. The fallback to the device label only matters before that
+// identity exists, which cannot happen once needName has run — enterChat
+// asks for one before the room ever opens.
+func (m *View) chatName() string {
+	if id := m.userID(); id != "" {
+		return id
+	}
+	return live.LabelKey(m.label)
+}
+
+// chatOff reports whether chat is switched off in config, saying so once on
+// this terminal when it is. Every entry point asks before anything else —
+// above all before the naming prompt, since a terminal must not be asked who
+// it is for a feature it cannot use.
+func (m *View) chatOff() bool {
+	if !m.cfg.Chat.Enabled {
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "chat is disabled in config"})
+		return true
+	}
+	return false
+}
+
+// enterChat opens the room on this terminal, asking for a name first if this
+// terminal does not have one yet. Nothing shared changes: the run keeps
+// running, the other terminals keep whatever they were doing.
+func (m *View) enterChat() (tea.Model, tea.Cmd) {
+	if m.chatOff() {
+		return m, nil
+	}
+	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
+		if !m.joinedChat {
+			m.joinedChat = true
+			if m.joined == nil {
+				m.joined = map[int]bool{}
+			}
+			m.joined[m.id] = true
+			m.PostLocked("", m.chatName()+" joined", "join")
+		}
+		m.mode = modeChat
+		m.chatUnseen = 0
+		// A selection belongs to the transcript this mode covers: left alive
+		// it would keep highlighting lines nobody can see, and Ctrl+C in the
+		// room would copy them instead of clearing the draft.
+		m.clearSelection()
+		m.input.Reset()
+		m.input.Placeholder = "message the room… (/back to return)"
+		m.layoutChat()
+		m.chatVP.GotoBottom()
+		return m, nil
+	})
+}
+
+// modeViewport is the viewport the mode this terminal is in scrolls, or nil
+// when that is the transcript's own (every other mode). It is what keeps a
+// wheel event in the room off the hidden transcript — see handleMouse.
+func (m *View) modeViewport() *viewport.Model {
+	switch m.mode {
+	case modeChat:
+		return &m.chatVP
+	case modeInbox:
+		return &m.dm.listVP
+	case modeDM:
+		return &m.dm.vp
+	}
+	return nil
+}
+
+// leaveMode returns this terminal from chat, inbox or dm to the transcript.
+func (m *View) leaveMode() (tea.Model, tea.Cmd) {
+	m.mode = m.idleMode()
+	m.input.Reset()
+	m.input.Placeholder = inputPlaceholder
+	return m, nil
+}
+
+func (m *View) handleChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.Type {
+	case tea.KeyEsc:
+		if m.input.Value() == "" {
+			return m.leaveMode()
+		}
+		m.input.Reset()
+		return m, nil
+	case tea.KeyEnter:
+		text := strings.TrimSpace(m.input.Value())
+		m.input.Reset()
+		if text == "" {
+			return m, nil
+		}
+		if strings.HasPrefix(text, "/") {
+			return m.slashCommand(text)
+		}
+		m.PostLocked(m.chatName(), text, "")
+		return m, nil
+	case tea.KeyPgUp:
+		m.chatVP.HalfViewUp()
+		return m, nil
+	case tea.KeyPgDown:
+		m.chatVP.HalfViewDown()
+		return m, nil
+	case tea.KeyRunes:
+		if m.input.Value() == "" && string(k.Runes) == "/" {
+			return m.openPalette("")
+		}
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(k)
+	return m, cmd
+}
+
+// layoutChat sizes the room viewport: everything above the input rows and
+// the footer.
+func (m *View) layoutChat() {
+	h := m.height - m.inputRows() - 2
+	if h < 3 {
+		h = 3
+	}
+	m.chatVP.Width, m.chatVP.Height = m.width, h
+	m.chatVP.SetContent(m.renderRoom())
+}
+
+func (m *View) renderRoom() string {
+	var b strings.Builder
+	for _, l := range m.room {
+		b.WriteString(m.renderChatLine(l))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *View) renderChatLine(l store.ChatLine) string {
+	ts := m.st.Dim.Render(l.TS.Format("15:04"))
+	switch {
+	case l.User == "":
+		return ts + " " + m.st.ChatSystem.Render(l.Text)
+	case l.User == "agent":
+		return ts + " " + m.st.Cowork.Render("agent: ") + wrapTo(l.Text, m.width-15)
+	default:
+		return ts + " " + m.st.ChatUser.Render(l.User+": ") + wrapTo(l.Text, m.width-8-lipgloss.Width(l.User))
+	}
+}
+
+func (m *View) viewChat() string {
+	here := len(m.clients)
+	if here == 0 {
+		here = 1
+	}
+	footer := " chat · Esc"
+	if !m.compact() {
+		footer = fmt.Sprintf(" chat · %d here · Esc back", here)
+		if m.mentionBusy != "" {
+			footer += " · agent is working on " + m.mentionBusy + "'s question"
+		}
+	}
+	return m.chatVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
+}
+
+// footerLine is the last row of the room, the inbox and a DM thread: cut to
+// this terminal's width with an ellipsis and padded out to it. Both halves
+// matter — a footer one cell too wide wraps the row and scrolls the whole
+// frame up on a phone-sized terminal, and one short of the width leaves
+// whatever the previous frame drew in those cells on screen.
+func (m *View) footerLine(text string) string {
+	if m.width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(text) > m.width {
+		text = ansi.Truncate(text, m.width, "…")
+	}
+	return m.st.Dim.Render(padToWidth(text, m.width))
+}
+
+// wrapTo wraps text to width columns, the same way the transcript itself is
+// wrapped (refreshTranscript): lipgloss's own ANSI-aware algorithm, not a
+// hand-rolled one, so a room line with the same content wraps identically to
+// everything else on screen.
+func wrapTo(text string, width int) string {
+	if width < 1 {
+		width = 1
+	}
+	return lipgloss.NewStyle().Width(width).Render(text)
+}

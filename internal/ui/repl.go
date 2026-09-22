@@ -874,6 +874,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/clients", "/detach":
 		fmt.Println("only available in the full-screen TUI")
+	case "/chat", "/inbox", "/dm", "/back", "/whoami":
+		fmt.Println("chat and DMs need the TUI")
 	default:
 		if c, ok := r.Custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))

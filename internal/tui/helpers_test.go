@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,6 +31,13 @@ func newTestSession(t *testing.T, prep ...func(*agent.Agent)) *Session {
 	}
 	s := NewSession(cfg, ag, nullProvider{})
 	s.rootCtx = context.Background()
+	// NewSession points usersPath and inboxDir at the real ~/.be-code/users.json
+	// and ~/.be-code/inbox (under TestMain's throwaway HOME, so this never
+	// reaches the developer's own dotdir either way); a test session gets
+	// neither, so identity resolution and the mailbox never touch disk
+	// unless a test wires resolveFn/bindFn or sets its own temp inboxDir.
+	s.usersPath = ""
+	s.inboxDir = ""
 	return s
 }
 
@@ -60,6 +68,41 @@ func newTestView(t *testing.T, s *Session) *View {
 // so far, exactly as its terminal would show it.
 func (m *View) transcriptText() string { return m.rendered.String() }
 
+// isRunning reports the shared run state, locked, for a test goroutine that
+// does not hold mu (unlike idle, cowork_test's own version, which assumes the
+// caller already does).
+func (s *Session) isRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
+// transcriptText is the session-wide transcript (every entry's label and
+// text, one per line) before any view renders it — the source a two-terminal
+// test checks against, as opposed to (*View).transcriptText's per-view
+// rendered copy.
+func transcriptText(s *Session) string {
+	var b strings.Builder
+	for _, e := range s.Entries() {
+		b.WriteString(e.Label)
+		b.WriteString(e.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// lastEntryText is the newest transcript entry's text (label plus body), for
+// a test that ran a command through the session directly (not through
+// Update) and wants to check what it told the terminal.
+func lastEntryText(s *Session) string {
+	e := s.Entries()
+	if len(e) == 0 {
+		return ""
+	}
+	last := e[len(e)-1]
+	return last.Label + last.Text
+}
+
 // flush delivers every queued broadcast to the given views, in order.
 // Nothing runs a view's mailbox goroutine in a test, so a broadcast raised
 // outside Update (which drains its own mailbox) waits here until asked for.
@@ -67,6 +110,25 @@ func flush(views ...*View) {
 	for _, v := range views {
 		if mb := v.mailboxForTest(); mb != nil {
 			mb.drainInto(v)
+		}
+	}
+}
+
+// drainAll delivers every broadcast queued for the given views the way
+// Bubble Tea itself would: through Update, not straight into drainInto (which
+// flush uses to skip the mutex a real program always holds). A chat test
+// wants that: PostLocked can be called while a view's own Update still holds
+// the lock, so the broadcast it raises must be picked up the same way any
+// other terminal's mailbox poke is — a drainMsg through Update — not by
+// reaching past it.
+func drainAll(t *testing.T, views ...*View) {
+	t.Helper()
+	for _, v := range views {
+		for {
+			v.Update(drainMsg{})
+			if len(v.mb.ch) == 0 {
+				break
+			}
 		}
 	}
 }
@@ -138,4 +200,34 @@ func pump(prs ...*program) {
 		}
 		flush(pr.v)
 	}
+}
+
+// bindEnter presses Enter in the naming prompt and delivers the bind's own
+// message back, the way Bubble Tea delivers a command's result: the bind
+// itself runs off the session lock, so the prompt is resolved only once that
+// message arrives.
+func bindEnter(t *testing.T, v *View) {
+	t.Helper()
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if sub := c(); sub != nil {
+				if _, ok := sub.(nameBoundMsg); ok {
+					msg = sub
+					break
+				}
+			}
+		}
+	}
+	if _, ok := msg.(nameBoundMsg); !ok {
+		return
+	}
+	v.Update(msg)
 }

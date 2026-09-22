@@ -1,8 +1,10 @@
 package store
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -131,6 +133,26 @@ func TestSessionHandoffRoundTrip(t *testing.T) {
 	got, err := Load(s.ID)
 	if err != nil || got.Handoff != s.Handoff {
 		t.Fatalf("handoff lost: %v %q", err, got.Handoff)
+	}
+}
+
+// The chat room round-trips with the session, and a session that never used
+// chat serialises with no "chat" key at all (older sessions, and every
+// session that never opened the room, stay exactly as small as before).
+func TestChatRoundTripsAndIsAbsentWhenEmpty(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir())
+	s := &Session{ID: "20260921-000000-001", Title: "t", Chat: []ChatLine{{TS: time.Unix(1, 0), User: "alice", Text: "hi", Kind: ""}}}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(s.ID)
+	if err != nil || len(got.Chat) != 1 || got.Chat[0].User != "alice" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	b, _ := json.Marshal(&Session{ID: "x"})
+	if strings.Contains(string(b), `"chat"`) {
+		t.Fatalf("empty chat serialised: %s", b)
 	}
 }
 

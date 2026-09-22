@@ -143,7 +143,7 @@ func runSessionHost(code string) error {
 		}
 	}()
 
-	err = s.RunServed(context.Background(), h)
+	err = s.RunServed(context.Background(), h, rec, dir)
 	// Order matters: the resume line goes to every attached terminal, so it
 	// has to be written before Close says goodbye to them. Two details make
 	// it actually readable there: every client is in raw mode with its own
@@ -177,7 +177,7 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	// for the one case where they do want a second session.
 	if rec, msg := decideStart(dir, workspace, flagResume, flagNew); rec != nil {
 		fmt.Println(msg)
-		joined, err := joinLive(ctx, rec)
+		joined, err := joinLive(ctx, rec, cfg)
 		if err != nil {
 			return err
 		}
@@ -246,7 +246,7 @@ func launchServed(ctx context.Context, cfg *config.Config, flags *pflag.FlagSet)
 	if err != nil {
 		return fmt.Errorf("%w (see %s; use --no-host to run in-process)", err, logPath)
 	}
-	return attachLive(ctx, &rec, false)
+	return attachLive(ctx, &rec, false, cfg)
 }
 
 // decideStart picks a live session to join, or nil to start a fresh host,
@@ -419,8 +419,8 @@ var attachOptions = live.DefaultAttachOptions
 // or the session ends. A "switch:CODE" bye reason hands the terminal to
 // another live session instead of ending the attach: the loop reattaches to
 // the named record and only returns once there is nowhere left to go.
-func attachLive(ctx context.Context, rec *live.Record, view bool) error {
-	_, err := attachOrJoin(ctx, rec, view, false)
+func attachLive(ctx context.Context, rec *live.Record, view bool, cfg *config.Config) error {
+	_, err := attachOrJoin(ctx, rec, view, false, cfg)
 	return err
 }
 
@@ -429,8 +429,8 @@ func attachLive(ctx context.Context, rec *live.Record, view bool) error {
 // it reports whether this terminal actually joined rec's session (see
 // joinMissed). Only the first attach can miss — once the session has
 // rendered here, a later switch is an ordinary attach.
-func joinLive(ctx context.Context, rec *live.Record) (bool, error) {
-	return attachOrJoin(ctx, rec, false, true)
+func joinLive(ctx context.Context, rec *live.Record, cfg *config.Config) (bool, error) {
+	return attachOrJoin(ctx, rec, false, true, cfg)
 }
 
 // joinMissed reports whether an attach on a join path never joined at all:
@@ -445,7 +445,7 @@ func joinMissed(reason string, joined bool, err error) bool {
 	return !joined && reason == live.ReasonEnded
 }
 
-func attachOrJoin(ctx context.Context, rec *live.Record, view, join bool) (bool, error) {
+func attachOrJoin(ctx context.Context, rec *live.Record, view, join bool, cfg *config.Config) (bool, error) {
 	dir, err := live.Dir()
 	if err != nil {
 		return false, err
@@ -453,6 +453,10 @@ func attachOrJoin(ctx context.Context, rec *live.Record, view, join bool) (bool,
 	for {
 		opt := attachOptions()
 		opt.View = view
+		// This device's declared chat identity (chat.name), so the host's
+		// roster — and so the room's join/leave lines — can name it without
+		// falling back to the device label.
+		opt.User = cfg.Chat.Name
 		var joined atomic.Bool
 		opt.Joined = &joined
 		reason, err := live.Attach(ctx, rec, opt)
@@ -524,7 +528,11 @@ var attachCmd = &cobra.Command{
 		}
 		code := args[0]
 		if rec := findLive(dir, code); rec != nil {
-			return attachLive(cmd.Context(), rec, flagView)
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			return attachLive(cmd.Context(), rec, flagView, cfg)
 		}
 		// Nothing live under that code: the obvious intent is to pick the
 		// saved session back up, which is what --resume does.

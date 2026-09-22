@@ -72,6 +72,14 @@ func (a *Agent) DrainItems() []InboxItem {
 }
 
 // Peek returns a copy of the queued messages in delivery order.
+// PeekItems is the queue as it stands, with each message's sender, left in
+// place: for a UI that must echo what is queued without taking it.
+func (a *Agent) PeekItems() []InboxItem {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	return append([]InboxItem(nil), a.inbox.items...)
+}
+
 func (a *Agent) Peek() []string {
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()
@@ -98,6 +106,30 @@ func (a *Agent) Remove(i int) (string, bool) {
 	text := a.inbox.items[i].Text
 	a.inbox.items = append(a.inbox.items[:i], a.inbox.items[i+1:]...)
 	return text, true
+}
+
+// RemoveWhere takes every queued message match reports out of the queue and
+// returns how many went. It exists for a request the UI enqueued and then
+// had to take back — an @agent mention whose run was cancelled before the
+// model ever saw it, which left in the queue would be delivered later as
+// ordinary text and answered where nobody who asked is looking.
+func (a *Agent) RemoveWhere(match func(InboxItem) bool) int {
+	if match == nil {
+		return 0
+	}
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	kept := a.inbox.items[:0]
+	removed := 0
+	for _, it := range a.inbox.items {
+		if match(it) {
+			removed++
+			continue
+		}
+		kept = append(kept, it)
+	}
+	a.inbox.items = kept
+	return removed
 }
 
 // Hold pauses (true) or resumes (false) delivery, so a queue the user is

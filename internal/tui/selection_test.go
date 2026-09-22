@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -162,5 +163,50 @@ func TestRepaintAtTheSameSizeKeepsTheSelection(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
 	if m.sel != nil {
 		t.Fatal("a real resize must drop the selection: the columns have moved")
+	}
+}
+
+// I6(a): the transcript is hidden in the room, the inbox and a DM, so a
+// mouse event there must not act on it. The wheel scrolls the mode's own
+// viewport; a drag selects nothing; whatever was selected before is gone.
+func TestMouseInTheNewModesLeavesTheTranscriptAlone(t *testing.T) {
+	s := newTestSession(t)
+	v := s.NewView(1, "local")
+	v.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	s.mu.Lock()
+	s.ids[1] = identity{ID: "you"}
+	s.mu.Unlock()
+	for i := 0; i < 80; i++ {
+		s.appendEntry(entry{Kind: entryPlain, Text: fmt.Sprintf("transcript %d", i)})
+		s.Post("alice", fmt.Sprintf("room line %d", i), "")
+	}
+	drainAll(t, v)
+
+	// A selection in the transcript, then into the room.
+	r := screenRow(t, v, "transcript 79")
+	v.Update(mouse(2, r, tea.MouseButtonLeft, tea.MouseActionPress))
+	v.Update(mouse(8, r, tea.MouseButtonLeft, tea.MouseActionMotion))
+	v.Update(mouse(8, r, tea.MouseButtonLeft, tea.MouseActionRelease))
+	if v.sel == nil {
+		t.Fatal("setup: no selection in the transcript")
+	}
+	v.slashCommand("/chat")
+	if v.sel != nil {
+		t.Fatal("entering the room kept a transcript selection alive")
+	}
+
+	vpBefore, chatBefore := v.vp.YOffset, v.chatVP.YOffset
+	v.Update(mouse(4, 4, tea.MouseButtonWheelUp, tea.MouseActionPress))
+	if v.chatVP.YOffset == chatBefore {
+		t.Fatal("the wheel did not scroll the room")
+	}
+	if v.vp.YOffset != vpBefore {
+		t.Fatalf("the wheel scrolled the hidden transcript: %d → %d", vpBefore, v.vp.YOffset)
+	}
+	v.Update(mouse(2, 3, tea.MouseButtonLeft, tea.MouseActionPress))
+	v.Update(mouse(9, 4, tea.MouseButtonLeft, tea.MouseActionMotion))
+	v.Update(mouse(9, 4, tea.MouseButtonLeft, tea.MouseActionRelease))
+	if v.sel != nil {
+		t.Fatalf("a drag in the room selected the transcript: %+v", v.sel)
 	}
 }

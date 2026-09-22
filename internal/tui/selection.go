@@ -49,6 +49,20 @@ func (m *View) transcriptCoords(x, y int) (line, col int, ok bool) {
 // terminal's own: the selection it makes, and the popup it opens, belong to
 // this view alone.
 func (m *View) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// The room, the inbox and a DM thread hide the transcript, so a mouse
+	// event there cannot mean anything about it: a drag would select lines
+	// nobody can see and the wheel would scroll a viewport that is not on
+	// screen. Selection and copy inside these modes are a recorded limit for
+	// now; the wheel moves the mode's own viewport and nothing else acts.
+	if vp := m.modeViewport(); vp != nil {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+			var cmd tea.Cmd
+			*vp, cmd = vp.Update(msg)
+			return m, cmd
+		}
+		return m, nil
+	}
 	switch {
 	case msg.Button == tea.MouseButtonRight && msg.Action == tea.MouseActionPress:
 		if m.mode == modeInput || m.mode == modeBusy {
@@ -249,6 +263,24 @@ func (m *View) idleMode() mode {
 		return modeBusy
 	}
 	return modeInput
+}
+
+// returnMode is where an ask, /menu or another popup that interrupted this
+// terminal closes back to. A terminal reading the room — chat, the inbox or
+// a DM — was not knocked out of it "back to idle": prevMode (set by whatever
+// raised the interruption, e.g. showAsk, openMenu) says what it was actually
+// doing, and that takes it back there instead. Anything else (prevMode still
+// its zero value, or a popup opened from the ordinary transcript) falls
+// through to idleMode(), unchanged. Consumed on read so a later, unrelated
+// close cannot replay a stale room mode.
+func (m *View) returnMode() mode {
+	switch m.prevMode {
+	case modeChat, modeInbox, modeDM:
+		pm := m.prevMode
+		m.prevMode = modeInput
+		return pm
+	}
+	return m.idleMode()
 }
 
 func (m *View) contextMenuBox() string {

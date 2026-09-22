@@ -14,6 +14,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
@@ -55,6 +56,15 @@ type Session struct {
 	lastReply string          // last assistant answer, plain text
 	lastTool  string          // last tool output, full
 
+	// room is the session's chat room (chat.go): every attached terminal's
+	// view of it, mirrored into the session file beside the transcript.
+	room []store.ChatLine
+	// mentionQueue and mentionActive (mention.go) track @agent requests
+	// raised from the room: mentionActive is the one in flight (nil when
+	// none), mentionQueue is who else is waiting, in the order they asked.
+	mentionQueue  []mentionItem
+	mentionActive *mentionItem
+
 	running    bool // a run is in progress (a view's mode may be a popup)
 	statusNote string
 	// reasoningChars is the reasoning received for the reply in progress
@@ -94,6 +104,31 @@ type Session struct {
 	// terminals may have the popup open at once, and a terminal that goes
 	// away with it open must not leave delivery held for good.
 	holders map[int]bool
+	// joined is the set of terminals (by client id) that have posted their
+	// own "X joined" line to the room. SetClients uses it to know which
+	// departing terminals owe the room a "left" line — a terminal that never
+	// opened /chat has nothing to say goodbye from.
+	joined map[int]bool
+	// ids is who each attached terminal is (identity.go): filled by
+	// resolveClientLocked as terminals attach, keyed by client id. usersPath
+	// is ~/.be-code/users.json ("" in a test session that wants no file on
+	// disk at all — resolution then happens in memory only, through
+	// resolveFn/bindFn). resolveFn/bindFn are test seams for inbox.Resolve/
+	// inbox.Bind; nil means the real thing.
+	// usedFromFn is the seam for usedFrom, the spec §9 duplicate-name check
+	// (nil means reading usersPath).
+	ids        map[int]identity
+	usersPath  string
+	resolveFn  func(inbox.Terminal) (inbox.Resolution, error)
+	bindFn     func(id string, tm inbox.Terminal) error
+	usedFromFn func(id string) string
+	// inboxDir is ~/.be-code/inbox (dm.go): "" disables /inbox and /dm outright
+	// (a test session that wants no mailbox on disk at all — newTestSession
+	// clears it the same way it clears usersPath, and a DM test sets its own
+	// temp dir). onlineFn is the test seam for online (nil means the real
+	// live-registry scan).
+	inboxDir string
+	onlineFn func(id string) bool
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -159,11 +194,29 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		views:   map[int]*View{},
 		quitCh:  make(chan struct{}),
 		holders: map[int]bool{},
+		joined:  map[int]bool{},
+		ids:     map[int]identity{},
+	}
+	if p, err := inbox.UsersPath(); err == nil {
+		s.usersPath = p
+	}
+	// Only when chat is on: inbox.Dir creates ~/.be-code/inbox, and a session
+	// that has the feature switched off should leave no trace of it on disk.
+	if cfg.Chat.Enabled {
+		if d, err := inbox.Dir(); err == nil {
+			s.inboxDir = d
+		}
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
-	if ag.Session != nil && len(ag.Session.Messages) > 0 {
-		s.seedResumeLocked(ag.Session) // no views yet: single-threaded
+	if ag.Session != nil {
+		// The room comes back whether or not the transcript does — a session
+		// resumed the day after a long chat should not lose it — and ahead of
+		// seedResumeLocked, whose divider marks where the transcript picks up.
+		s.restoreRoom(ag.Session.Chat)
+		if len(ag.Session.Messages) > 0 {
+			s.seedResumeLocked(ag.Session) // no views yet: single-threaded
+		}
 	}
 	return s
 }
@@ -288,11 +341,31 @@ func (s *Session) NewView(id int, label string) *View {
 		clipboardWrite: writeClipboard, clipboardRead: readClipboard, termWrite: writeTerminal,
 		mb: newMailbox()}
 	v.input = v.newInputArea() // this terminal's one input line; sized by the first layout()
+	// A terminal that attaches mid-session starts with the room as it already
+	// is, the same reason v.streaming is seeded below: a chatMsg broadcast
+	// only carries what changes from here.
+	v.room = append([]store.ChatLine(nil), s.room...)
+	// A terminal that already knows who it is starts with its DM unread
+	// count populated too, so the bottom-line badge is accurate from the
+	// first frame it draws rather than only after /inbox has been opened
+	// once. Production always resolves identity in SetClients before this
+	// runs (see runner.onClients); a test that sets s.ids directly gets the
+	// same treatment.
+	if s.inboxDir != "" && s.ids[id].ID != "" {
+		v.reloadThreads()
+	}
 	// A terminal that attaches in the middle of a reply starts from what has
 	// streamed so far, not from the next delta — and is attached before mu
 	// is released, or a delta broadcast in that gap would reach neither the
 	// seed nor the view.
 	v.streaming = s.streaming.String()
+	// A terminal that attaches while a mention is in flight starts with the
+	// chat footer already showing who it's answering, the same reason
+	// streaming and the room are seeded above: a mentionBusyMsg broadcast
+	// only reaches terminals already attached when it goes out.
+	if s.mentionActive != nil {
+		v.mentionBusy = s.mentionActive.from
+	}
 	// A terminal that attaches in the middle of a run starts busy, exactly
 	// where runStateMsg{running:true} would have left it. mode's zero value
 	// is modeInput, and a view that started there would take Enter to
@@ -471,6 +544,11 @@ func (s *Session) clientLabels(room int) string {
 // clientsMsg, which is each view's cue to redraw its bottom line (the
 // programs themselves are the runner's: see runner.onClients).
 func (s *Session) SetClients(infos []live.ClientInfo) {
+	// Identity first, off the lock: resolving a new terminal can read a file
+	// and, on Windows and macOS, run `arp -a` with a 3 s timeout. Under mu
+	// that would hold every terminal's Update and the agent's own events for
+	// the duration.
+	resolved := s.resolveNew(infos)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev := s.clients
@@ -486,6 +564,9 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 		if !hasClient(prev, c.ID) {
 			s.appendEntryLocked(entry{Kind: entryDim, Text: "attached: " + c.Label})
 		}
+		if r, ok := resolved[c.ID]; ok {
+			s.recordIdentityLocked(c.ID, r)
+		}
 	}
 	for _, c := range prev {
 		if hasClient(infos, c.ID) {
@@ -497,6 +578,12 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 		s.histFile.drop(c.ID)
 		if s.dropKeyClient != nil {
 			s.dropKeyClient(c.ID)
+		}
+		// Only a terminal that actually opened the room owes it a goodbye —
+		// one that never typed /chat never said hello either.
+		if s.joined[c.ID] {
+			s.PostLocked("", s.chatNameOf(c)+" left", "leave")
+			delete(s.joined, c.ID)
 		}
 	}
 	s.broadcast(clientsMsg(infos))
@@ -636,6 +723,12 @@ func (s *Session) notice(text string) {
 func (s *Session) transient(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.toastLocked(text)
+}
+
+// toastLocked is transient for a caller that already holds mu (a key
+// handler inside Update, such as a DM that could not be sent).
+func (s *Session) toastLocked(text string) {
 	s.toast, s.toastUntil = text, s.now().Add(toastFor)
 	s.broadcast(transientMsg(text))
 }
@@ -825,9 +918,32 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 	}
 	s.appendEntryLocked(entry{Kind: entryPlain})
 	s.setRunStateLocked(false, "")
+	// A turn @agent started ends here: its answer — or, on error, a system
+	// line saying why there is none, and the withdrawal of the request it
+	// enqueued — is posted to the room once, only for a turn a mention
+	// actually started (finishMentionLocked is a no-op otherwise). This runs
+	// after the run state above, not right after flushLocked: a queued
+	// mention dequeued here must see s.running == false so it starts its own
+	// turn directly instead of being mistaken for one arriving mid another
+	// run and only enqueued for later delivery. And it runs before the
+	// leftover-queue drain below, which would otherwise pick up the failed
+	// mention's own request and run it as ordinary text.
+	mentionStarted := s.finishMentionLocked(s.lastReply, err)
 	// Anything queued during the run that the model never got to see becomes
 	// the next turn — as one request, but echoed line by line under the
-	// terminal each message came from.
+	// terminal each message came from. Skipped when a queued mention above
+	// already started the next turn: starting a second one here would
+	// clobber cancelFn out from under the first, and any ordinary queued
+	// text is delivered into that turn anyway, at its first model call.
+	if mentionStarted {
+		// The mention's turn delivers whatever is still queued at its first
+		// model call; the typist still sees their line land, as they would
+		// have on any other path.
+		for _, it := range s.ag.PeekItems() {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		}
+		return
+	}
 	if left := s.ag.DrainItems(); len(left) > 0 {
 		texts := make([]string, 0, len(left))
 		for _, it := range left {

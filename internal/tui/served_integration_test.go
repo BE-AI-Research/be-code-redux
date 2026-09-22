@@ -26,7 +26,7 @@ func TestServedSessionRendersEachClientAtItsOwnSize(t *testing.T) {
 	s := newTestSession(t)
 	h, sock, token := newTestHostFor(t)
 	done := make(chan error, 1)
-	go func() { done <- s.RunServed(context.Background(), h) }()
+	go func() { done <- s.RunServed(context.Background(), h, nil, "") }()
 
 	// The desk first, and alone, so that what the phone's arrival costs it
 	// can be measured.
@@ -128,7 +128,7 @@ func TestPanickingViewIsDroppedAndTheSessionContinues(t *testing.T) {
 	s := newTestSession(t)
 	h, sock, token := newTestHostFor(t)
 	done := make(chan error, 1)
-	go func() { done <- s.RunServed(context.Background(), h) }()
+	go func() { done <- s.RunServed(context.Background(), h, nil, "") }()
 
 	a := dialFake(t, sock, token, "a (pid 1)", 80, 24)
 	b := dialFake(t, sock, token, "b (pid 2)", 80, 24)

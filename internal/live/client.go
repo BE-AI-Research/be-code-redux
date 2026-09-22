@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/user"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,12 @@ type AttachOptions struct {
 	// the session; cmd's join paths read this to tell that apart from an
 	// ordinary end and start a fresh host instead (see cmd.joinMissed).
 	Joined *atomic.Bool
+	// IP, Login and PID identify this terminal for chat and DMs (spec §3.1);
+	// User is this device's chat.name (Task 7 sets it from config).
+	IP    string
+	Login string
+	User  string
+	PID   int
 }
 
 // ClientLabel describes this terminal for the clients list.
@@ -59,6 +66,9 @@ func DefaultAttachOptions() AttachOptions {
 		Label:  ClientLabel(),
 		Stdin:  stdinPump,
 		Stdout: os.Stdout,
+		IP:     ClientIP(),
+		Login:  LoginName(),
+		PID:    os.Getpid(),
 		Raw: func() (func(), error) {
 			st, err := term.MakeRaw(uintptr(fd))
 			if err != nil {
@@ -72,6 +82,28 @@ func DefaultAttachOptions() AttachOptions {
 		},
 		UTF8: strings.Contains(strings.ToLower(os.Getenv("LANG")+os.Getenv("LC_ALL")+os.Getenv("LC_CTYPE")), "utf"),
 	}
+}
+
+// ClientIP is where this terminal's connection comes from, as the session
+// host will record it: the client end of SSH_CONNECTION, else loopback.
+func ClientIP() string {
+	if sc := os.Getenv("SSH_CONNECTION"); sc != "" {
+		if f := strings.Fields(sc); len(f) > 0 {
+			return f[0]
+		}
+	}
+	return "127.0.0.1"
+}
+
+// LoginName is the OS user running this terminal.
+func LoginName() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if u, err := user.Current(); err == nil {
+		return u.Username
+	}
+	return ""
 }
 
 // terminalSize asks each descriptor in turn and returns the first real
@@ -267,7 +299,7 @@ func Attach(ctx context.Context, rec *Record, opt AttachOptions) (string, error)
 	}
 
 	cols, rows := opt.Size()
-	if err := writeJSON(FHello, Hello{Token: rec.Token, Cols: cols, Rows: rows, Label: opt.Label, UTF8: opt.UTF8}); err != nil {
+	if err := writeJSON(FHello, Hello{Token: rec.Token, Cols: cols, Rows: rows, Label: opt.Label, UTF8: opt.UTF8, IP: opt.IP, Login: opt.Login, PID: opt.PID, User: opt.User}); err != nil {
 		return "", err
 	}
 	restore, err := opt.Raw()

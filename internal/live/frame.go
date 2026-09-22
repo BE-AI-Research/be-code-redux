@@ -37,6 +37,12 @@ type Hello struct {
 	// `be-code sessions kill`) and is never a terminal: the host does not
 	// register it, so it never shows up as attached or detached.
 	Control bool `json:"control,omitempty"`
+	// Who this terminal is, for chat and DMs (spec §3.1). All optional: an
+	// older client sends none, and the host treats it as local/unknown.
+	IP    string `json:"ip,omitempty"`
+	Login string `json:"login,omitempty"`
+	PID   int    `json:"pid,omitempty"`
+	User  string `json:"user,omitempty"` // chat.name from the client's config
 }
 
 type Size struct {
@@ -50,6 +56,10 @@ type ClientInfo struct {
 	Cols  int    `json:"cols"`
 	Rows  int    `json:"rows"`
 	UTF8  bool   `json:"utf8"`
+	IP    string `json:"ip,omitempty"`
+	Login string `json:"login,omitempty"`
+	PID   int    `json:"pid,omitempty"`
+	User  string `json:"user,omitempty"`
 }
 
 type Bye struct {

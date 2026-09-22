@@ -44,6 +44,10 @@ type client struct {
 	rows  int
 	utf8  bool
 	conn  net.Conn
+	// ip, login and pid identify the terminal (spec §3.1); userID is its
+	// chat.name, sanitized the same as the label since it is displayed.
+	ip, login, userID string
+	pid               int
 
 	// pendingIn buffers this client's FInput bytes, in arrival order, from
 	// before OnInput was registered (guarded by Host.mu). Replayed and
@@ -133,9 +137,19 @@ func sanitizeLabel(s string) string {
 	return label
 }
 
+// userIDOf keeps an empty config name empty — "" means "not set, offer or
+// ask" to the chat layer — and sanitizes one that is set, as it is shown.
+func userIDOf(u string) string {
+	if strings.TrimSpace(u) == "" {
+		return ""
+	}
+	return sanitizeLabel(u)
+}
+
 func newClient(hello Hello, conn net.Conn) *client {
 	return &client{
 		label: sanitizeLabel(hello.Label), cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
+		ip: hello.IP, login: hello.Login, pid: hello.PID, userID: userIDOf(hello.User),
 		wake:       make(chan struct{}, 1),
 		writerDone: make(chan struct{}),
 	}
@@ -557,7 +571,7 @@ func (h *Host) recomputeAttach(attached *client) {
 func (h *Host) infosLocked() []ClientInfo {
 	out := make([]ClientInfo, 0, len(h.clients))
 	for _, c := range h.clients {
-		out = append(out, ClientInfo{ID: c.id, Label: c.label, Cols: c.cols, Rows: c.rows, UTF8: c.utf8})
+		out = append(out, ClientInfo{ID: c.id, Label: c.label, Cols: c.cols, Rows: c.rows, UTF8: c.utf8, IP: c.ip, Login: c.login, PID: c.pid, User: c.userID})
 	}
 	return out
 }

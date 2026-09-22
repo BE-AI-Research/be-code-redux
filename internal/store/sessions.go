@@ -37,6 +37,18 @@ type Session struct {
 	// user-stated requirements, decisions, files changed, outstanding work.
 	// It is injected into the system prompt on resume.
 	Handoff string `json:"handoff,omitempty"`
+	// Chat is the session's chat room (/chat), newest last, capped by the
+	// TUI at 2000 lines. Absent for a session that never used it.
+	Chat []ChatLine `json:"chat,omitempty"`
+}
+
+// ChatLine is one line of the room. User is an ID, "agent", or "" for a
+// system line; Kind is "", "join", "leave", "mention" or "reply".
+type ChatLine struct {
+	TS   time.Time `json:"ts"`
+	User string    `json:"user"`
+	Text string    `json:"text"`
+	Kind string    `json:"kind,omitempty"`
 }
 
 // Meta is the listing view of a session (messages not loaded).

@@ -20,6 +20,15 @@ type Record struct {
 	Model     string    `json:"model"`
 	StartedAt time.Time `json:"startedAt"`
 	Token     string    `json:"token"`
+	// Users are the chat IDs attached to this host right now, so another
+	// host can tell whether a DM's recipient is online anywhere (spec §5.2).
+	Users []string `json:"users,omitempty"`
+}
+
+// WithUsers is r with its attached user IDs replaced.
+func (r Record) WithUsers(ids []string) Record {
+	r.Users = append([]string(nil), ids...)
+	return r
 }
 
 // Dir is ~/.be-code/live, created on demand.

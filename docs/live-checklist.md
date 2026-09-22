@@ -76,6 +76,20 @@ model). Walk this once per release, or after touching `internal/live`,
     (unchanged)`. `/task` on either terminal lists the seeded task line. `/notes add x`
     on one terminal, then `/notes` on the other: `x` is there too — same store.
 
+## Chat and DMs
+
+The room, the mailbox watcher and identity resolution over a real network (the VM,
+a second machine, a tablet's own IP) are exactly the kind of thing unit tests fake —
+walk this once per release too, or after touching `internal/inbox`, `internal/tui/
+chat.go`, `internal/tui/dm.go` or `internal/tui/mention.go`.
+
+17. The VM's VS Code terminal and the tablet post in the room.
+18. A DM from the tablet to a second session on the VM arrives with the `DM from`
+    transient.
+19. `@agent` mid-run lands after the tool results.
+20. The naming prompt on a fresh IP.
+21. `/whoami` after an IP change with the ARP fallback.
+
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own
 stdout/stderr from startup; `~/.be-code/live/<code>.json` is its record (code, pid,
 socket, workspace, model, auth token).

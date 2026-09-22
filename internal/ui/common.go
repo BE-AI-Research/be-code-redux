@@ -87,6 +87,11 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
 	{"/detach", "detach this terminal (the session keeps running)", false},
+	{"/chat", "the session's chat room (@agent to ask the model)", false},
+	{"/inbox", "your DMs from every session on this machine", false},
+	{"/dm", "message a person directly: /dm [name]", true},
+	{"/back", "return to the transcript", false},
+	{"/whoami", "your chat name and how it was decided", false},
 	{"/clear", "start a fresh session", false},
 	{"/quit", "exit (writes the resume briefing)", false},
 }
@@ -115,6 +120,14 @@ var busySafe = map[string]bool{
 	"/coworkers": true, "/consult": true,
 	// Listings and edits of the store; the agent reads it under its own lock.
 	"/task": true, "/notes": true,
+	// The room is never the model's own history: entering it, posting to it
+	// or leaving it never touches the turn in progress.
+	"/chat": true, "/back": true,
+	// Same reasoning for the mailbox: it is machine-wide, not the running
+	// turn's, and a DM never reaches the model either way.
+	"/inbox": true, "/dm": true,
+	// /whoami only reads this terminal's resolved chat identity.
+	"/whoami": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

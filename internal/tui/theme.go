@@ -62,6 +62,7 @@ func lookupTheme(name string) (Palette, bool) {
 type styles struct {
 	Accent, Dim, Tool, Err, OK, Warn, User, Status, ModalTi, Border lipgloss.Style
 	Cowork                                                          lipgloss.Style // the co-working model's voice
+	ChatUser, ChatSystem                                            lipgloss.Style // the room: another person's name, and a system/join/leave line
 	Text                                                            lipgloss.Style // body text; mono leaves it uncoloured
 	name                                                            string
 }
@@ -85,6 +86,7 @@ func newStyles(name string) (styles, bool) {
 		// person's own prefix does: both are voices, and mono has one way of
 		// saying so.
 		st.Cowork = lipgloss.NewStyle().Bold(true)
+		st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 		st.Status = lipgloss.NewStyle().Reverse(true).Padding(0, 1)
 		st.ModalTi = lipgloss.NewStyle().Bold(true)
 		st.Border = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1)
@@ -96,6 +98,7 @@ func newStyles(name string) (styles, bool) {
 	st.Err, st.OK, st.Warn = fg(p.Err), fg(p.OK), fg(p.Warn)
 	st.User = fg(p.User).Bold(true)
 	st.Cowork = fg(p.Cowork).Bold(true)
+	st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 	st.Status = lipgloss.NewStyle().Background(lipgloss.Color(p.StatusBG)).Foreground(lipgloss.Color(p.StatusFG)).Padding(0, 1)
 	st.ModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.ModalTitle))
 	border := lipgloss.RoundedBorder()

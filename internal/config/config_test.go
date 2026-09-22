@@ -325,3 +325,10 @@ func TestContextTokensZeroIsNotACap(t *testing.T) {
 		t.Fatalf("a derived budget was written back as an explicit key:\n%s", b)
 	}
 }
+
+func TestChatConfigDefaults(t *testing.T) {
+	c := Default()
+	if !c.Chat.Enabled || c.Chat.MentionContext != 10 || c.Chat.Name != "" {
+		t.Fatalf("%+v", c.Chat)
+	}
+}

@@ -57,6 +57,12 @@ func (m *View) openPalette(initial string) (tea.Model, tea.Cmd) {
 			}
 			return m.slashCommand(it.id)
 		}}
+	// Remember what this terminal was doing before the palette took over —
+	// chat, the inbox or a DM in particular — so closing it (handlePaletteKey's
+	// returnMode()) puts it back there instead of dropping it to the transcript.
+	if m.mode != modePalette {
+		m.prevMode = m.mode
+	}
 	m.mode = modePalette
 	m.input.SetValue("")
 	return m, nil
@@ -65,7 +71,7 @@ func (m *View) openPalette(initial string) (tea.Model, tea.Cmd) {
 func (m *View) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		return m, nil
 	}
 	in := &m.input
@@ -75,7 +81,7 @@ func (m *View) handlePaletteKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		in.SetValue(text)
 		in.CursorEnd()
 		m.picker = nil
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		return m, nil
 	}
 	switch k.Type {
@@ -274,6 +280,13 @@ func (m *View) openMenu() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}}
+	// Remember what this terminal was doing before /menu took the screen —
+	// chat, the inbox or a DM in particular — so leaving the menu (Esc or a
+	// pick, both through handlePickerKey's returnMode()) puts it back there
+	// instead of dropping it out to the ordinary transcript.
+	if m.mode != modeMenu {
+		m.prevMode = m.mode
+	}
 	m.mode = modeMenu
 	return m, nil
 }

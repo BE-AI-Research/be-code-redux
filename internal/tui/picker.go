@@ -45,6 +45,13 @@ type pickerItemsMsg struct {
 func (m *View) openPicker(title string, load func() ([]pickItem, error),
 	onPick func(*View, pickItem) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
 	m.picker = &picker{title: title, onPick: onPick, loading: true}
+	// /theme is reachable straight from the room (chat, the inbox or a DM),
+	// not only through /menu: remember where this terminal was so closing
+	// the picker (handlePickerKey/pickerUpdate's returnMode()) can put it
+	// back, the same as openMenu does.
+	if m.mode != modePicker {
+		m.prevMode = m.mode
+	}
 	m.mode = modePicker
 	return m, func() tea.Msg {
 		items, err := load()
@@ -274,13 +281,13 @@ func pickerNav(p *picker, k tea.KeyMsg) bool {
 func (m *View) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	p := m.picker
 	if p == nil {
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		return m, nil
 	}
 	switch k.Type {
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.picker = nil
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		m.input.Focus()
 		return m, nil
 	case tea.KeyEnter:
@@ -290,7 +297,7 @@ func (m *View) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		it := items[p.cursor]
 		m.picker = nil
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		return p.onPick(m, it)
 	}
 	pickerNav(p, k)
@@ -308,7 +315,7 @@ func (m *View) pickerUpdate(msg pickerItemsMsg) {
 	if msg.err != nil {
 		m.appendEntryLocked(entry{Kind: entryErr, Text: msg.err.Error()})
 		m.picker = nil
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		return
 	}
 	m.picker.items = msg.items

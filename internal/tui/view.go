@@ -113,6 +113,13 @@ const (
 	modeMenu        // full-screen grouped menu (/menu)
 	modeContextMenu // right-click copy/paste popup
 	modeQueue       // queued-messages popup (edit/drop while a run is in progress)
+	modeChat        // the session's chat room (/chat)
+	modeInbox       // the mention inbox (/inbox)
+	modeDM          // a direct message thread (/dm)
+	// modeName is the naming prompt (identity.go): a terminal with no
+	// resolved chat identity is asked for one the first time it opens /chat,
+	// /inbox or /dm, never before. needName is what puts a view here.
+	modeName
 )
 
 // View is one terminal's view of a Session: the bubbletea model a single
@@ -197,6 +204,45 @@ type View struct {
 
 	mb *mailbox // broadcasts from the session, waiting to be rendered here
 
+	// The room (chat.go): room is this view's own copy of the session's chat
+	// lines (kept in step by chatMsg, seeded from the session in NewView),
+	// chatVP its viewport, chatUnseen how many lines arrived since this
+	// terminal last had modeChat open, joinedChat whether it has posted its
+	// own join line yet (once per view, not once per session). mentionBusy is
+	// set by Task 10: the name of whoever's @agent question is in flight, if
+	// any, shown in the chat footer.
+	room       []store.ChatLine
+	chatVP     viewport.Model
+	chatUnseen int
+	// ownToast is a notice for this terminal alone (a DM for its identity);
+	// the session's toast is shared by every view. Same expiry.
+	ownToast      string
+	ownToastUntil time.Time
+	joinedChat    bool
+	mentionBusy   string
+
+	// dm (dm.go, modeInbox/modeDM) is this terminal's own view of its DM
+	// threads: which ones exist, which is open, and that thread's own
+	// viewport. Unlike room it is never seeded from the session — the
+	// mailbox is machine-wide, not session-wide, so there is nothing shared
+	// to seed from — it is loaded from disk the first time this terminal
+	// opens /inbox or /dm (see reloadThreads).
+	dm dmState
+
+	// The naming prompt (identity.go, modeName): afterName is what needName
+	// resumes once a name is bound (entering the room, the inbox or a DM
+	// thread); nameChoices are the IDs already bound to this address, offered
+	// above "type a name below"; nameSel is the highlighted row (a choice, or
+	// len(nameChoices) for "type a name"); nameErr is the reason the last
+	// attempt was rejected, shown until the next one; nameShared is the name
+	// this terminal has already been warned is in use from another address
+	// (spec §9), so a second Enter on that same name shares it deliberately.
+	afterName   func(*View) (tea.Model, tea.Cmd)
+	nameChoices []string
+	nameSel     int
+	nameErr     string
+	nameShared  string
+
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
 	quitSeen bool
@@ -274,6 +320,12 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if resized {
 			m.sel = nil // columns no longer line up after a rewrap
 			m.layout()
+			if m.mode == modeChat {
+				m.layoutChat()
+			}
+			if m.mode == modeDM {
+				m.layoutDM()
+			}
 		}
 		m.ready = true
 		// Announce the editor bridge here, not on stderr: the alt screen
@@ -345,6 +397,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.toast != "" && !m.now().Before(m.toastUntil) {
 			m.toast = ""
 		}
+		if m.ownToast != "" && !m.now().Before(m.ownToastUntil) {
+			m.ownToast = ""
+		}
 		return m, nil
 	case noticeMsg:
 		// This terminal's own note (its backend ping): rendered here, not
@@ -372,20 +427,87 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runStateMsg:
 		// A popup or a shared question this terminal has open keeps the
 		// frame; the mode underneath it changes instead, so closing the
-		// popup lands in whatever the session is doing by then.
+		// popup lands in whatever the session is doing by then. A terminal
+		// in the room (chat, the inbox or a DM) keeps its own placeholder
+		// throughout: a run starting or ending is not its business while it
+		// is looking at the room, and is not restored to the ordinary one
+		// either — there is nothing "ordinary" to go back to until it
+		// actually leaves.
+		inRoom := m.mode == modeChat || m.mode == modeInbox || m.mode == modeDM
 		if msg.running {
-			m.input.Placeholder = busyPlaceholder
+			if !inRoom {
+				m.input.Placeholder = busyPlaceholder
+			}
 			m.setIdleMode(modeBusy)
 			cmds = append(cmds, m.wheelTick())
 		} else {
 			if m.mode == modeQueue {
 				m.closeQueue()
 			}
+			if !inRoom {
+				m.input.Placeholder = inputPlaceholder
+			}
 			m.setIdleMode(modeInput)
 			m.input.Focus()
 		}
 	case usageMsg:
 		m.usage = msg
+	case chatEditMsg:
+		if msg.index >= 0 && msg.index < len(m.room) && m.room[msg.index].TS.Equal(msg.line.TS) {
+			m.room[msg.index] = msg.line
+			if m.mode == modeChat {
+				m.layoutChat()
+			}
+		}
+		return m, nil
+	case chatMsg:
+		// The session already recorded it (Session.PostLocked); this is this
+		// view's own copy, kept the same way the transcript's rendered buffer
+		// is: appended here, then capped by the identical rule PostLocked
+		// applies to its own room (marker line included) — not a plain
+		// slice-off — so this view's copy never drifts a line ahead of what
+		// was actually saved. Dropped into the unseen counter when this
+		// terminal is not looking.
+		m.room = append(m.room, msg.line)
+		if len(m.room) > roomCap {
+			m.room = append([]store.ChatLine{{TS: msg.line.TS, Text: "(older chat trimmed)"}}, m.room[len(m.room)-roomCap+1:]...)
+		}
+		if m.mode == modeChat {
+			m.layoutChat()
+			m.chatVP.GotoBottom()
+		} else if msg.line.Kind != "join" && msg.line.Kind != "leave" {
+			m.chatUnseen++
+		}
+	case roomResetMsg:
+		// /clear starts a fresh session with an empty room; every attached
+		// view's own copy follows, the same as the session's (see
+		// slashCommand's "/clear" case).
+		m.room = nil
+		m.chatUnseen = 0
+		if m.mode == modeChat {
+			m.layoutChat()
+		}
+	case mentionBusyMsg:
+		// Every attached terminal's chat footer names who the model is
+		// answering (viewChat), whether or not this one is looking at the
+		// room right now.
+		m.mentionBusy = string(msg)
+	case inboxMsg:
+		// deliverDM broadcasts to every attached view once any of them owns
+		// the recipient; each view still has to check for itself, since a
+		// served session may have several terminals attached under
+		// different chat identities at once (see TestAnArrivingDMPingsTheOwnerOnly).
+		if msg.m.To == m.userID() {
+			m.ownToast, m.ownToastUntil = "DM from "+msg.m.From, m.now().Add(toastFor)
+			m.reloadThreads()
+			if m.mode == modeDM && m.dm.with == msg.m.From {
+				m.openThread(m.dm.with)
+			}
+			return m, tea.Tick(toastFor+100*time.Millisecond, func(t time.Time) tea.Msg { return toastTickMsg(t) })
+		}
+	case nameBoundMsg:
+		// The answer to a bind that ran off the session lock (identity.go).
+		return m.nameBound(msg)
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
 		// and the programs are the runner's; all this view has to do is draw
@@ -436,6 +558,14 @@ func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(k)
 	case modeQueue:
 		return m.handleQueueKey(k)
+	case modeChat:
+		return m.handleChatKey(k)
+	case modeInbox:
+		return m.handleInboxKey(k)
+	case modeDM:
+		return m.handleDMKey(k)
+	case modeName:
+		return m.handleNameKey(k)
 	case modeBusy:
 		return m.handleBusyKey(k)
 	}
@@ -555,6 +685,14 @@ func noticeEntry(text string) entry {
 // detail and the item list are shared; the viewport scroll and the picker
 // cursor built here are this terminal's own.
 func (m *View) showAsk(a *ask) {
+	// Remember what this terminal was doing before the question knocked it
+	// off screen — chat, the inbox or a DM in particular — so closeAsk can
+	// put it back there (see returnMode). A picker ask displaced by a real
+	// one arrives here while m.mode is already modeAsk; that must not
+	// overwrite the mode recorded for the interruption that is still open.
+	if m.mode != modeAsk {
+		m.prevMode = m.mode
+	}
 	m.shownAsk = a
 	m.askShown = a.Gen
 	m.mode = modeAsk
@@ -581,7 +719,7 @@ func (m *View) showAsk(a *ask) {
 func (m *View) closeAsk() {
 	m.shownAsk = nil
 	m.picker = nil
-	m.mode = m.idleMode()
+	m.mode = m.returnMode()
 	m.input.Focus()
 }
 
@@ -621,7 +759,7 @@ func (m *View) renderLocalLines(lines []string) {
 func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	a := m.shownAsk
 	if a == nil {
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		m.picker = nil
 		return m, nil
 	}
@@ -800,7 +938,14 @@ func (m *View) renderEntryLocal(e entry) {
 }
 
 // rebuild re-renders every entry — after a theme change or a resize, since
-// tool-argument truncation and Markdown colouring depend on both.
+// tool-argument truncation and Markdown colouring depend on both — and
+// reseeds this view's copy of the room from the session's.
+//
+// The room is reseeded because rebuild is also the repair for a view whose
+// mailbox overflowed (mailbox.drainInto): a dropped chatMsg would otherwise
+// leave a hole in this terminal's room for good, since nothing ever
+// re-broadcasts a line. The session's room is the truth, and this runs under
+// mu like everything else in Update.
 func (m *View) rebuild() {
 	m.rendered.Reset()
 	for _, e := range m.entries {
@@ -808,6 +953,14 @@ func (m *View) rebuild() {
 		m.rendered.WriteString("\n")
 	}
 	m.renderedN = len(m.entries)
+	m.room = append([]store.ChatLine(nil), m.Session.room...)
+	if m.mode == modeChat {
+		atBottom := m.chatVP.AtBottom()
+		m.layoutChat()
+		if atBottom {
+			m.chatVP.GotoBottom()
+		}
+	}
 	m.refreshTranscript()
 }
 
@@ -898,6 +1051,14 @@ func (m *View) View() string {
 		return m.viewPicker()
 	case modeMenu:
 		return m.viewMenu()
+	case modeChat:
+		return m.viewChat()
+	case modeInbox:
+		return m.viewInbox()
+	case modeDM:
+		return m.viewDM()
+	case modeName:
+		return m.viewName()
 	}
 
 	var b strings.Builder
@@ -927,18 +1088,18 @@ func (m *View) View() string {
 		}
 		transcript = strings.Join(lines, "\n") + "\n" + box
 	}
-	if m.toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
+	if toast := m.shownToast(); toast != "" && m.mode != modePalette && m.mode != modeContextMenu && m.mode != modeQueue {
 		// The notice row borrows the last transcript row so the input rows
 		// never move.
 		lines := strings.Split(transcript, "\n")
 		if len(lines) > 0 {
-			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+m.toast, m.width))
+			lines[len(lines)-1] = m.st.Warn.Render(padToWidth(" "+toast, m.width))
 			transcript = strings.Join(lines, "\n")
 		}
 	}
 	b.WriteString(transcript)
 	b.WriteString("\n")
-	b.WriteString(m.inputRow())
+	b.WriteString(m.inputView())
 	b.WriteString("\n")
 	// Padded, never written raw: the compact line in particular is built
 	// from whatever the model is called and how many terminals are
@@ -994,6 +1155,12 @@ func (m *View) bottomLine() string {
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
 			line += m.st.Dim.Render(" · " + labels)
 		}
+	}
+	if m.chatUnseen > 0 && m.mode != modeChat {
+		line += m.st.Accent.Render(fmt.Sprintf(" · chat (%d new)", m.chatUnseen))
+	}
+	if n := m.unreadDMs(); n > 0 {
+		line += m.st.Accent.Render(fmt.Sprintf(" · inbox (%d)", n))
 	}
 	if m.sel != nil {
 		line += m.st.Dim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -1074,11 +1241,16 @@ func (m *View) viewAsk() string {
 // One textarea per terminal, because a draft belongs to whoever is typing
 // it. The in-process TUI is simply the one view of a session with no host.
 
+// inputPlaceholder is the ordinary-transcript input hint: what every
+// terminal's textarea shows outside a run and outside any of the other
+// modes (chat, inbox, dm) that give it their own.
+const inputPlaceholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
+
 // newInputArea builds this terminal's textarea with the prompt, height and
 // key bindings every input line shares.
 func (m *View) newInputArea() textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
+	ta.Placeholder = inputPlaceholder
 	ta.SetHeight(m.inputRows())
 	setInputPrompt(&ta, m.compact())
 	ta.CharLimit = 0
@@ -1177,8 +1349,10 @@ func (m *View) inputWidth() int {
 	return w
 }
 
-// inputRow is the input area plus the context wheel at its right.
-func (m *View) inputRow() string {
+// inputView is the input area plus the context wheel at its right: the
+// transcript layout's own input row, and what viewChat (chat.go) reuses so
+// the room's own input line matches it exactly.
+func (m *View) inputView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView())
 }
 
@@ -1236,6 +1410,20 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/menu":
 		return m.openMenu()
+	case "/chat":
+		return m.enterChat()
+	case "/inbox":
+		return m.enterInbox()
+	case "/dm":
+		return m.enterDM(strings.TrimSpace(strings.TrimPrefix(text, fields[0])))
+	case "/back":
+		if m.mode == modeChat || m.mode == modeInbox || m.mode == modeDM {
+			return m.leaveMode()
+		}
+		return m, nil
+	case "/whoami":
+		m.whoami()
+		return m, nil
 	case "/theme":
 		// This terminal's own theme, never a shared one: bare opens the
 		// picker (its title says which theme is in use and where it came
@@ -1280,6 +1468,15 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			// than beside a repaint.
 			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			// The room is the session's too: a fresh session starts with an
+			// empty one, not the last session's chat carried over — and
+			// every attached terminal's own copy follows, or a terminal
+			// sitting in modeChat would keep showing the old room forever
+			// (nothing else ever tells it the room changed out from under
+			// it).
+			sess.room = nil
+			sess.ag.UpdateSession(func(ss *store.Session) { ss.Chat = nil })
+			sess.broadcast(roomResetMsg{})
 			sess.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
 			sess.finishTurnLocked(nil, nil)
 			sess.mu.Unlock()
@@ -1585,17 +1782,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		return m, nil
 	case "/clients":
-		if !m.served {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
-			return m, nil
-		}
 		if len(m.clients) == 0 {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: "no terminals attached"})
+			if m.served {
+				m.appendEntryLocked(entry{Kind: entryDim, Text: "no terminals attached"})
+			} else {
+				m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
+			}
 			return m, nil
 		}
+		rows := make([]string, 0, len(m.clients))
 		for _, c := range m.clients {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)})
+			row := fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)
+			if id := m.identityOf(c.ID).ID; id != "" {
+				row += " · " + id
+			}
+			rows = append(rows, row)
 		}
+		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(rows, "\n")})
 		return m, nil
 	case "/detach":
 		if m.detachClient == nil {
@@ -1693,4 +1896,13 @@ func (m *View) joinLive(code string, from int) (tea.Model, tea.Cmd) {
 	}
 	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s is live elsewhere; join it with: be-code attach %s", code, code)})
 	return m, nil
+}
+
+// shownToast is the notice row's text: this terminal's own notice first,
+// else the session's.
+func (m *View) shownToast() string {
+	if m.ownToast != "" {
+		return m.ownToast
+	}
+	return m.toast
 }
