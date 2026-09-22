@@ -87,6 +87,8 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
 	{"/detach", "detach this terminal (the session keeps running)", false},
+	{"/chat", "the session's chat room (@agent to ask the model)", true},
+	{"/back", "return to the transcript", true},
 	{"/clear", "start a fresh session", false},
 	{"/quit", "exit (writes the resume briefing)", false},
 }
@@ -115,6 +117,9 @@ var busySafe = map[string]bool{
 	"/coworkers": true, "/consult": true,
 	// Listings and edits of the store; the agent reads it under its own lock.
 	"/task": true, "/notes": true,
+	// The room is never the model's own history: entering it, posting to it
+	// or leaving it never touches the turn in progress.
+	"/chat": true, "/back": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

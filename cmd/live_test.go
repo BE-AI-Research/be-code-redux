@@ -602,7 +602,7 @@ func TestJoinLiveFallsThroughWhenTheHostIsShuttingDown(t *testing.T) {
 	restore := stubAttachOptions(t, &out)
 	defer restore()
 
-	joined, err := joinLive(context.Background(), rec)
+	joined, err := joinLive(context.Background(), rec, config.Default())
 	if err != nil {
 		t.Fatalf("joinLive: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestJoinLiveFallsThroughWhenTheSocketIsGone(t *testing.T) {
 	var out strings.Builder
 	restore := stubAttachOptions(t, &out)
 	defer restore()
-	joined, err := joinLive(context.Background(), rec)
+	joined, err := joinLive(context.Background(), rec, config.Default())
 	if err != nil {
 		t.Fatalf("joinLive: %v", err)
 	}

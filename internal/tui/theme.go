@@ -16,7 +16,12 @@ type Palette struct {
 	// Cowork is the co-working model's voice — its question and its answer
 	// (see entry.go). It has to read as neither the person nor a tool, so
 	// every theme gives it a hue of its own.
-	Cowork                                 string
+	Cowork string
+	// ChatUser and ChatSystem are the room's two voices (chat.go): another
+	// person's name, and a system/join/leave line. Every row sets them to
+	// that row's own Accent and Dim — the room is not a hue of its own, it
+	// borrows the terminal's existing accent and dim.
+	ChatUser, ChatSystem                   string
 	StatusBG, StatusFG, ModalTitle, Border string
 	BG, FG                                 string // terminal window colours (OSC 11/10); "" leaves the terminal alone
 	Light                                  bool   // for readers; dark is the default
@@ -38,6 +43,16 @@ var themes = map[string]Palette{
 	"tokyo-night":     {Name: "tokyo-night", Desc: "deep blue night with neon accents", Text: "#c0caf5", Accent: "#7aa2f7", Dim: "#565f89", Tool: "#7dcfff", Err: "#f7768e", OK: "#9ece6a", Warn: "#e0af68", User: "#bb9af7", Cowork: "#ff9e64", StatusBG: "#292e42", StatusFG: "#c0caf5", ModalTitle: "#ff9e64", Border: "#565f89", BG: "#1a1b26"},
 	"catppuccin":      {Name: "catppuccin", Desc: "Catppuccin Mocha pastels", Text: "#cdd6f4", Accent: "#89b4fa", Dim: "#6c7086", Tool: "#94e2d5", Err: "#f38ba8", OK: "#a6e3a1", Warn: "#f9e2af", User: "#cba6f7", Cowork: "#fab387", StatusBG: "#313244", StatusFG: "#cdd6f4", ModalTitle: "#fab387", Border: "#585b70", BG: "#1e1e2e"},
 	"github-light":    {Name: "github-light", Desc: "GitHub's light palette", Text: "#24292f", Light: true, Accent: "#0969da", Dim: "#6e7781", Tool: "#0550ae", Err: "#cf222e", OK: "#1a7f37", Warn: "#9a6700", User: "#8250df", Cowork: "#bc4c00", StatusBG: "#eaeef2", StatusFG: "#24292f", ModalTitle: "#bc4c00", Border: "#d0d7de", BG: "#ffffff", FG: "#24292f"},
+}
+
+func init() {
+	// ChatUser/ChatSystem are derived rather than hand-duplicated per row:
+	// every theme's room voice is that theme's own Accent and Dim, so a new
+	// theme added above never has to remember the two extra fields.
+	for name, p := range themes {
+		p.ChatUser, p.ChatSystem = p.Accent, p.Dim
+		themes[name] = p
+	}
 }
 
 // ThemeNames lists every theme, default first, then alphabetical.
@@ -62,6 +77,7 @@ func lookupTheme(name string) (Palette, bool) {
 type styles struct {
 	Accent, Dim, Tool, Err, OK, Warn, User, Status, ModalTi, Border lipgloss.Style
 	Cowork                                                          lipgloss.Style // the co-working model's voice
+	ChatUser, ChatSystem                                            lipgloss.Style // the room: another person's name, and a system/join/leave line
 	Text                                                            lipgloss.Style // body text; mono leaves it uncoloured
 	name                                                            string
 }
@@ -85,6 +101,7 @@ func newStyles(name string) (styles, bool) {
 		// person's own prefix does: both are voices, and mono has one way of
 		// saying so.
 		st.Cowork = lipgloss.NewStyle().Bold(true)
+		st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 		st.Status = lipgloss.NewStyle().Reverse(true).Padding(0, 1)
 		st.ModalTi = lipgloss.NewStyle().Bold(true)
 		st.Border = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).Padding(0, 1)
@@ -96,6 +113,7 @@ func newStyles(name string) (styles, bool) {
 	st.Err, st.OK, st.Warn = fg(p.Err), fg(p.OK), fg(p.Warn)
 	st.User = fg(p.User).Bold(true)
 	st.Cowork = fg(p.Cowork).Bold(true)
+	st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 	st.Status = lipgloss.NewStyle().Background(lipgloss.Color(p.StatusBG)).Foreground(lipgloss.Color(p.StatusFG)).Padding(0, 1)
 	st.ModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.ModalTitle))
 	border := lipgloss.RoundedBorder()

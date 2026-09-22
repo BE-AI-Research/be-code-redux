@@ -55,6 +55,10 @@ type Session struct {
 	lastReply string          // last assistant answer, plain text
 	lastTool  string          // last tool output, full
 
+	// room is the session's chat room (chat.go): every attached terminal's
+	// view of it, mirrored into the session file beside the transcript.
+	room []store.ChatLine
+
 	running    bool // a run is in progress (a view's mode may be a popup)
 	statusNote string
 	// reasoningChars is the reasoning received for the reply in progress
@@ -94,6 +98,11 @@ type Session struct {
 	// terminals may have the popup open at once, and a terminal that goes
 	// away with it open must not leave delivery held for good.
 	holders map[int]bool
+	// joined is the set of terminals (by client id) that have posted their
+	// own "X joined" line to the room. SetClients uses it to know which
+	// departing terminals owe the room a "left" line — a terminal that never
+	// opened /chat has nothing to say goodbye from.
+	joined map[int]bool
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -159,11 +168,18 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		views:   map[int]*View{},
 		quitCh:  make(chan struct{}),
 		holders: map[int]bool{},
+		joined:  map[int]bool{},
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
-	if ag.Session != nil && len(ag.Session.Messages) > 0 {
-		s.seedResumeLocked(ag.Session) // no views yet: single-threaded
+	if ag.Session != nil {
+		// The room comes back whether or not the transcript does — a session
+		// resumed the day after a long chat should not lose it — and ahead of
+		// seedResumeLocked, whose divider marks where the transcript picks up.
+		s.restoreRoom(ag.Session.Chat)
+		if len(ag.Session.Messages) > 0 {
+			s.seedResumeLocked(ag.Session) // no views yet: single-threaded
+		}
 	}
 	return s
 }
@@ -288,6 +304,10 @@ func (s *Session) NewView(id int, label string) *View {
 		clipboardWrite: writeClipboard, clipboardRead: readClipboard, termWrite: writeTerminal,
 		mb: newMailbox()}
 	v.input = v.newInputArea() // this terminal's one input line; sized by the first layout()
+	// A terminal that attaches mid-session starts with the room as it already
+	// is, the same reason v.streaming is seeded below: a chatMsg broadcast
+	// only carries what changes from here.
+	v.room = append([]store.ChatLine(nil), s.room...)
 	// A terminal that attaches in the middle of a reply starts from what has
 	// streamed so far, not from the next delta — and is attached before mu
 	// is released, or a delta broadcast in that gap would reach neither the
@@ -497,6 +517,12 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 		s.histFile.drop(c.ID)
 		if s.dropKeyClient != nil {
 			s.dropKeyClient(c.ID)
+		}
+		// Only a terminal that actually opened the room owes it a goodbye —
+		// one that never typed /chat never said hello either.
+		if s.joined[c.ID] {
+			s.PostLocked("", s.chatNameOf(c)+" left", "leave")
+			delete(s.joined, c.ID)
 		}
 	}
 	s.broadcast(clientsMsg(infos))

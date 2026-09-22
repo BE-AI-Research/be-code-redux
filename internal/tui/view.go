@@ -113,6 +113,9 @@ const (
 	modeMenu        // full-screen grouped menu (/menu)
 	modeContextMenu // right-click copy/paste popup
 	modeQueue       // queued-messages popup (edit/drop while a run is in progress)
+	modeChat        // the session's chat room (/chat)
+	modeInbox       // the mention inbox (/inbox)
+	modeDM          // a direct message thread (/dm)
 )
 
 // View is one terminal's view of a Session: the bubbletea model a single
@@ -197,6 +200,19 @@ type View struct {
 
 	mb *mailbox // broadcasts from the session, waiting to be rendered here
 
+	// The room (chat.go): room is this view's own copy of the session's chat
+	// lines (kept in step by chatMsg, seeded from the session in NewView),
+	// chatVP its viewport, chatUnseen how many lines arrived since this
+	// terminal last had modeChat open, joinedChat whether it has posted its
+	// own join line yet (once per view, not once per session). mentionBusy is
+	// set by Task 10: the name of whoever's @agent question is in flight, if
+	// any, shown in the chat footer.
+	room        []store.ChatLine
+	chatVP      viewport.Model
+	chatUnseen  int
+	joinedChat  bool
+	mentionBusy string
+
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
 	quitSeen bool
@@ -274,6 +290,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if resized {
 			m.sel = nil // columns no longer line up after a rewrap
 			m.layout()
+			if m.mode == modeChat {
+				m.layoutChat()
+			}
 		}
 		m.ready = true
 		// Announce the editor bridge here, not on stderr: the alt screen
@@ -386,6 +405,21 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case usageMsg:
 		m.usage = msg
+	case chatMsg:
+		// The session already recorded it (Session.PostLocked); this is this
+		// view's own copy, kept the same way the transcript's rendered buffer
+		// is: appended here, capped the same as the session's room, and
+		// dropped into the unseen counter when this terminal is not looking.
+		m.room = append(m.room, msg.line)
+		if len(m.room) > roomCap {
+			m.room = m.room[len(m.room)-roomCap:]
+		}
+		if m.mode == modeChat {
+			m.layoutChat()
+			m.chatVP.GotoBottom()
+		} else if msg.line.Kind != "join" && msg.line.Kind != "leave" {
+			m.chatUnseen++
+		}
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
 		// and the programs are the runner's; all this view has to do is draw
@@ -436,6 +470,8 @@ func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(k)
 	case modeQueue:
 		return m.handleQueueKey(k)
+	case modeChat:
+		return m.handleChatKey(k)
 	case modeBusy:
 		return m.handleBusyKey(k)
 	}
@@ -898,6 +934,8 @@ func (m *View) View() string {
 		return m.viewPicker()
 	case modeMenu:
 		return m.viewMenu()
+	case modeChat:
+		return m.viewChat()
 	}
 
 	var b strings.Builder
@@ -938,7 +976,7 @@ func (m *View) View() string {
 	}
 	b.WriteString(transcript)
 	b.WriteString("\n")
-	b.WriteString(m.inputRow())
+	b.WriteString(m.inputView())
 	b.WriteString("\n")
 	// Padded, never written raw: the compact line in particular is built
 	// from whatever the model is called and how many terminals are
@@ -994,6 +1032,9 @@ func (m *View) bottomLine() string {
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
 			line += m.st.Dim.Render(" · " + labels)
 		}
+	}
+	if m.chatUnseen > 0 && m.mode != modeChat {
+		line += m.st.Accent.Render(fmt.Sprintf(" · chat (%d new)", m.chatUnseen))
 	}
 	if m.sel != nil {
 		line += m.st.Dim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -1074,11 +1115,16 @@ func (m *View) viewAsk() string {
 // One textarea per terminal, because a draft belongs to whoever is typing
 // it. The in-process TUI is simply the one view of a session with no host.
 
+// inputPlaceholder is the ordinary-transcript input hint: what every
+// terminal's textarea shows outside a run and outside any of the other
+// modes (chat, inbox, dm) that give it their own.
+const inputPlaceholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
+
 // newInputArea builds this terminal's textarea with the prompt, height and
 // key bindings every input line shares.
 func (m *View) newInputArea() textarea.Model {
 	ta := textarea.New()
-	ta.Placeholder = "describe a task…  (Enter sends · Ctrl+J newline · / for commands)"
+	ta.Placeholder = inputPlaceholder
 	ta.SetHeight(m.inputRows())
 	setInputPrompt(&ta, m.compact())
 	ta.CharLimit = 0
@@ -1177,8 +1223,10 @@ func (m *View) inputWidth() int {
 	return w
 }
 
-// inputRow is the input area plus the context wheel at its right.
-func (m *View) inputRow() string {
+// inputView is the input area plus the context wheel at its right: the
+// transcript layout's own input row, and what viewChat (chat.go) reuses so
+// the room's own input line matches it exactly.
+func (m *View) inputView() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView())
 }
 
@@ -1236,6 +1284,13 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/menu":
 		return m.openMenu()
+	case "/chat":
+		return m.enterChat()
+	case "/back":
+		if m.mode == modeChat || m.mode == modeInbox || m.mode == modeDM {
+			return m.leaveMode()
+		}
+		return m, nil
 	case "/theme":
 		// This terminal's own theme, never a shared one: bare opens the
 		// picker (its title says which theme is in use and where it came
@@ -1280,6 +1335,10 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			// than beside a repaint.
 			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			// The room is the session's too: a fresh session starts with an
+			// empty one, not the last session's chat carried over.
+			sess.room = nil
+			sess.ag.UpdateSession(func(ss *store.Session) { ss.Chat = nil })
 			sess.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
 			sess.finishTurnLocked(nil, nil)
 			sess.mu.Unlock()

@@ -71,6 +71,25 @@ func flush(views ...*View) {
 	}
 }
 
+// drainAll delivers every broadcast queued for the given views the way
+// Bubble Tea itself would: through Update, not straight into drainInto (which
+// flush uses to skip the mutex a real program always holds). A chat test
+// wants that: PostLocked can be called while a view's own Update still holds
+// the lock, so the broadcast it raises must be picked up the same way any
+// other terminal's mailbox poke is — a drainMsg through Update — not by
+// reaching past it.
+func drainAll(t *testing.T, views ...*View) {
+	t.Helper()
+	for _, v := range views {
+		for {
+			v.Update(drainMsg{})
+			if len(v.mb.ch) == 0 {
+				break
+			}
+		}
+	}
+}
+
 // hasQuit reports whether cmd is tea.Quit, or a batch containing it —
 // Update batches whatever its own mailbox drain produced onto its result, so
 // a quit decided by a drained message can arrive either way.
