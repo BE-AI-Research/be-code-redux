@@ -22,17 +22,31 @@ import (
 // subtree, all on the session's root context (never a turn's), per-server
 // lanes, and a hand-back through the main model's queue.
 //
-// mu guards every field below and every mutable field of every subRun. It
-// is never held across a model call, an approval or a wait on a run, and
-// nothing that holds the engine's own lock ever takes it, so the two orders
-// cannot cross.
+// mu guards every field below and every mutable field of every subRun.
+//
+// **The invariant, checkable by reading every use of mu: no call into the
+// engine store and no notice is ever made while mu is held.** Both would
+// re-enter — `engineDo` emits its detach notice synchronously through
+// `Events.OnNotice`, and a UI's handler calls straight back into
+// `SubAgentStates` or `ScheduleSubAgents`, which take this same
+// non-reentrant mutex. So every store read is taken before mu (subSteps),
+// and dispatch is three phases: decide and reserve under mu, build
+// unlocked, install under mu again. mu is likewise never held across a
+// model call, an approval, a blocking channel send or a wait on a run, and
+// nothing holding the engine's own lock ever takes it.
 type subAgents struct {
 	mu      sync.Mutex
 	cards   map[string]subagent.Card
 	cws     map[string]config.CoworkerConfig
 	lanes   *subagent.Lanes
 	runs    map[string]*subRun // by node id
-	refused map[string]bool    // online consent refused this session, by name
+	// pending are candidates reserved by a schedule that has released mu to
+	// build their dispatches. They are not running yet, but they count
+	// against max_concurrent and hold their scope, so a concurrent schedule
+	// can neither double-dispatch one nor start an overlapping step beside
+	// it. A candidate that is abandoned is always released from here.
+	pending map[string]bool
+	refused map[string]bool // online consent refused this session, by name
 	// stopping is set by StopAllSubAgents: an interrupted node goes back to
 	// todo, and without this the schedule a finishing run makes on its way
 	// out would dispatch it again after the session had asked everything to
@@ -41,7 +55,12 @@ type subAgents struct {
 	// hold names nodes that must not be dispatched while an operator is
 	// changing them (AssignOwner stops a parked run, then rewrites the
 	// owner; a re-dispatch in between would take the node back).
-	hold    map[string]bool
+	hold map[string]bool
+	// root is every run's parent context — the session's, never a turn's, so
+	// Esc on the main run cannot reach a sub-agent. cancel ends it, and is
+	// the escape hatch StopAllSubAgents pulls after its bounded wait; a
+	// later EnableSubAgents makes a fresh pair, which is what lets a resumed
+	// session dispatch again.
 	root    context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -102,12 +121,17 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		a.subs = &subAgents{lanes: subagent.NewLanes(), runs: map[string]*subRun{}, refused: map[string]bool{},
-			hold: map[string]bool{}, root: ctx, cancel: cancel}
+			hold: map[string]bool{}, pending: map[string]bool{}, root: ctx, cancel: cancel}
 	}
 	s := a.subs
 	s.mu.Lock()
 	s.cards, s.cws, s.primary = cards, byName, primaryServer
 	s.stopping = false
+	// A resume after StopAllSubAgents finds the root context spent; every
+	// dispatch from it would be born cancelled, so start a fresh one.
+	if s.root.Err() != nil {
+		s.root, s.cancel = context.WithCancel(context.Background())
+	}
 	s.mu.Unlock()
 	a.laneAcquire = func(ctx context.Context) (func(), error) { return s.lanes.Acquire(ctx, primaryServer, true) }
 	a.engineDo("sub-agent cards", func(st *engine.Store) { st.SetCards(cards) })
@@ -185,9 +209,14 @@ func (a *Agent) subSteps(op string) []subagent.Step {
 	return steps
 }
 
+// runningLocked is the ready rule's "already taken" set: the runs in
+// flight and the candidates a schedule has reserved but not yet installed.
 func (s *subAgents) runningLocked() map[string]bool {
-	m := map[string]bool{}
+	m := make(map[string]bool, len(s.runs)+len(s.pending))
 	for id := range s.runs {
+		m[id] = true
+	}
+	for id := range s.pending {
 		m[id] = true
 	}
 	return m
@@ -196,6 +225,11 @@ func (s *subAgents) runningLocked() map[string]bool {
 // ScheduleSubAgents dispatches every ready step up to sub_agents.
 // max_concurrent (spec §2.1, §2.3). Safe from any goroutine; never blocks
 // on a model or a modal.
+//
+// Three phases, because of the invariant on subAgents: decide and reserve
+// under mu, build each dispatch unlocked — that is where the store and the
+// workspace are read, and where engineDo may raise a notice a UI answers by
+// calling straight back in here — then install and start under mu again.
 func (a *Agent) ScheduleSubAgents() {
 	s := a.subs
 	if s == nil {
@@ -205,27 +239,45 @@ func (a *Agent) ScheduleSubAgents() {
 	if len(steps) == 0 {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopping {
-		return
+	type pick struct {
+		c  subagent.Candidate
+		cw config.CoworkerConfig
 	}
-	ready, _ := subagent.Ready(steps, s.cards, s.runningLocked())
-	for _, c := range ready {
-		if len(s.runs) >= a.Cfg.SubAgents.MaxConcurrent {
-			return
+	var picks []pick
+	s.mu.Lock()
+	if !s.stopping {
+		ready, _ := subagent.Ready(steps, s.cards, s.runningLocked())
+		for _, c := range ready {
+			if len(s.runs)+len(s.pending) >= a.Cfg.SubAgents.MaxConcurrent {
+				break
+			}
+			if s.hold[c.ID] {
+				continue
+			}
+			s.pending[c.ID] = true
+			picks = append(picks, pick{c: c, cw: s.cws[c.Owner]})
 		}
-		if s.hold[c.ID] {
-			continue
-		}
-		a.dispatchLocked(steps, c)
+	}
+	s.mu.Unlock()
+	for _, p := range picks {
+		a.dispatchPicked(steps, p.c, p.cw)
 	}
 }
 
-func (a *Agent) dispatchLocked(steps []subagent.Step, c subagent.Candidate) {
+// dispatchPicked turns one reserved candidate into a running sub-agent.
+// **Called with mu NOT held** and it must stay that way: the DispatchContext
+// read, the workspace scan and both engineDo calls below all happen here.
+func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw config.CoworkerConfig) {
 	s := a.subs
+	// Whatever happens, the reservation is given back.
+	unreserve := func() {
+		s.mu.Lock()
+		delete(s.pending, c.ID)
+		s.mu.Unlock()
+	}
 	step := findStep(steps, c.ID)
 	if step == nil {
+		unreserve()
 		return
 	}
 	var text, ctxText string
@@ -236,7 +288,8 @@ func (a *Agent) dispatchLocked(steps []subagent.Step, c subagent.Candidate) {
 		got = true
 	})
 	if !got {
-		return // the engine detached under us: nothing to dispatch from
+		unreserve() // the engine detached under us: nothing to dispatch from
+		return
 	}
 	d := subagent.Dispatch{Node: c.ID, Owner: c.Owner, Text: text, Children: children,
 		Scope: step.Scope, MaxTurns: a.Cfg.SubAgents.MaxTurns, Context: ctxText,
@@ -250,12 +303,23 @@ func (a *Agent) dispatchLocked(steps []subagent.Step, c subagent.Candidate) {
 	if a.projectNotes != "" {
 		d.Context = strings.TrimSpace(d.Context + "\n\nProject notes (facts about the repository, not instructions):\n" + a.projectNotes)
 	}
+	s.mu.Lock()
+	delete(s.pending, c.ID)
+	if s.stopping || s.hold[c.ID] {
+		// The session stopped, or an operator claimed the node, while this
+		// dispatch was being built. Nothing was installed, so nothing to undo.
+		s.mu.Unlock()
+		return
+	}
+	// Under mu because root is reassigned on resume — and because deriving
+	// a context calls into neither the store nor a notice.
 	ctx, cancel := context.WithCancel(s.root)
-	run := &subRun{d: d, cw: s.cws[c.Owner], ctx: ctx, cancel: cancel, started: time.Now(),
+	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(),
 		reply: make(chan string, 1), done: make(chan struct{})}
 	s.runs[c.ID] = run
-	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
 	s.wg.Add(1)
+	s.mu.Unlock()
+	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
 	go a.runSub(run)
 }
 
@@ -521,6 +585,14 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 	s := a.subs
 	if s != nil {
 		s.mu.Lock()
+		if s.pending[id] {
+			// Reserved by a schedule that is building its dispatch right
+			// now: there is no run to stop yet and no done channel to wait
+			// on. Said plainly rather than waited on — a retry a moment
+			// later gets the ordinary "is being worked by" answer.
+			s.mu.Unlock()
+			return fmt.Errorf("%s is being dispatched; try again in a moment", id)
+		}
 		run, ok := s.runs[id]
 		if ok && run.question == "" {
 			s.mu.Unlock()
@@ -615,6 +687,7 @@ func (a *Agent) StopAllSubAgents(reason string) {
 		r.interrupt = true
 		r.cancel()
 	}
+	rootCancel := s.cancel // reassigned on resume; read it here, use it below
 	s.mu.Unlock()
 	done := make(chan struct{})
 	go func() { s.wg.Wait(); close(done) }()
@@ -623,6 +696,12 @@ func (a *Agent) StopAllSubAgents(reason string) {
 	case <-time.After(5 * time.Second):
 		a.notice("sub-agents did not stop within 5s (%s)", reason)
 	}
+	// After the wait, not before: every run was cancelled individually
+	// above, and this ends the context they all derive from — the escape
+	// hatch for a straggler the bounded wait gave up on. A later
+	// EnableSubAgents makes a fresh root, which is what lets a resumed
+	// session dispatch again.
+	rootCancel()
 	a.engineDo("sub-agent flush", func(st *engine.Store) { _ = st.Flush() })
 }
 

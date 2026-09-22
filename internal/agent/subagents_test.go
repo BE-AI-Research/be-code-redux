@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -438,6 +437,57 @@ func TestSchedulingSurvivesAPanickingStore(t *testing.T) {
 	}
 }
 
+// engineDo raises its detach notice synchronously, and Task 8's UI answers
+// a notice by redrawing — which reads /agents and the bottom line. If the
+// runner's mutex were held across the store call that panicked, that read
+// would self-deadlock on a non-reentrant mutex. This is that exact shape:
+// the panic comes from DispatchContext, inside the dispatch path.
+func TestANoticeHandlerMayCallBackIntoTheRunner(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	f.assign(t)
+	var mu sync.Mutex
+	var seen []string
+	f.ag.Events.OnNotice = func(m string) {
+		// What a UI does: read the rows it draws, from the notice itself.
+		f.ag.SubAgentStates()
+		f.ag.RunningSubAgents()
+		mu.Lock()
+		seen = append(seen, m)
+		mu.Unlock()
+	}
+	f.ag.engineFault = func(op string) {
+		if op == "sub-agent dispatch" {
+			panic("the store exploded in " + op)
+		}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); f.ag.ScheduleSubAgents() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ScheduleSubAgents deadlocked against a notice handler that called back in")
+	}
+	if len(f.ag.RunningSubAgents()) != 0 {
+		t.Fatal("a dispatch whose store call panicked must leave no run")
+	}
+	// Nothing reserved was left behind, so a later schedule is not wedged.
+	f.ag.subs.mu.Lock()
+	pending := len(f.ag.subs.pending)
+	f.ag.subs.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("abandoned candidate still reserved: %d pending", pending)
+	}
+	mu.Lock()
+	n := len(seen)
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected one detach notice, got %d: %q", n, seen)
+	}
+	if _, err := f.ag.Run(context.Background(), "still alive?"); err != nil {
+		t.Fatalf("the primary must survive it: %v", err)
+	}
+}
+
 func TestSubAgentStatesAndGuidance(t *testing.T) {
 	f := newSubFixture(t, &scriptedProvider{}, nil)
 	states := f.ag.SubAgentStates()
@@ -457,5 +507,4 @@ func TestSubAgentStatesAndGuidance(t *testing.T) {
 	if strings.Contains(plain.History.System.Content, "Sub-agents:") {
 		t.Fatal("guidance present without sub-agents")
 	}
-	_ = json.Marshal // keep the import honest if the file loses its other use
 }
