@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -66,6 +67,29 @@ func newTestView(t *testing.T, s *Session) *View {
 // transcriptText is everything this view has rendered into its own buffer
 // so far, exactly as its terminal would show it.
 func (m *View) transcriptText() string { return m.rendered.String() }
+
+// isRunning reports the shared run state, locked, for a test goroutine that
+// does not hold mu (unlike idle, cowork_test's own version, which assumes the
+// caller already does).
+func (s *Session) isRunning() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running
+}
+
+// transcriptText is the session-wide transcript (every entry's label and
+// text, one per line) before any view renders it — the source a two-terminal
+// test checks against, as opposed to (*View).transcriptText's per-view
+// rendered copy.
+func transcriptText(s *Session) string {
+	var b strings.Builder
+	for _, e := range s.Entries() {
+		b.WriteString(e.Label)
+		b.WriteString(e.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
 
 // lastEntryText is the newest transcript entry's text (label plus body), for
 // a test that ran a command through the session directly (not through

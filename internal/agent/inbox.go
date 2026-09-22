@@ -72,6 +72,14 @@ func (a *Agent) DrainItems() []InboxItem {
 }
 
 // Peek returns a copy of the queued messages in delivery order.
+// PeekItems is the queue as it stands, with each message's sender, left in
+// place: for a UI that must echo what is queued without taking it.
+func (a *Agent) PeekItems() []InboxItem {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	return append([]InboxItem(nil), a.inbox.items...)
+}
+
 func (a *Agent) Peek() []string {
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()

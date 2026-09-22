@@ -449,6 +449,14 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case usageMsg:
 		m.usage = msg
+	case chatEditMsg:
+		if msg.index >= 0 && msg.index < len(m.room) && m.room[msg.index].TS.Equal(msg.line.TS) {
+			m.room[msg.index] = msg.line
+			if m.mode == modeChat {
+				m.layoutChat()
+			}
+		}
+		return m, nil
 	case chatMsg:
 		// The session already recorded it (Session.PostLocked); this is this
 		// view's own copy, kept the same way the transcript's rendered buffer

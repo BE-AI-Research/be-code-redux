@@ -28,7 +28,7 @@ type mentionItem struct {
 func (s *Session) mentionRequest(from string, at store.ChatLine) string {
 	n := s.cfg.Chat.MentionContext
 	var ctx []store.ChatLine
-	for i := len(s.room) - 1; i >= 0 && len(ctx) < n+1; i-- {
+	for i := len(s.room) - 1; i >= 0 && len(ctx) < n; i-- {
 		l := s.room[i]
 		if l.User == "" {
 			continue
@@ -53,11 +53,49 @@ func (s *Session) noteMentionLocked(line store.ChatLine) {
 	item := mentionItem{from: line.User, line: line}
 	if s.mentionActive != nil {
 		s.mentionQueue = append(s.mentionQueue, item)
-		last := &s.room[len(s.room)-1]
-		last.Text += " (queued)"
+		s.markQueuedLocked(len(s.room)-1, true)
 		return
 	}
 	s.startMentionLocked(item)
+}
+
+// queuedSuffix is what a mention waiting its turn shows in the room.
+const queuedSuffix = " (queued)"
+
+// chatEditMsg replaces one line of the room in every view: the "(queued)"
+// marker coming and going. Views hold a copy of the room, kept by the same
+// rule as the session's, so an index means the same line in each — and the
+// TS is checked before the swap, in case a cap trim has moved things.
+type chatEditMsg struct {
+	index int
+	line  store.ChatLine
+}
+
+// markQueuedLocked adds or removes the marker on the room line at i, in the
+// saved room and in every view.
+func (s *Session) markQueuedLocked(i int, queued bool) {
+	if i < 0 || i >= len(s.room) {
+		return
+	}
+	l := &s.room[i]
+	l.Text = strings.TrimSuffix(l.Text, queuedSuffix)
+	if queued {
+		l.Text += queuedSuffix
+	}
+	room := s.room
+	s.ag.UpdateSession(func(ss *store.Session) { ss.Chat = append([]store.ChatLine(nil), room...) })
+	s.broadcast(chatEditMsg{index: i, line: *l})
+}
+
+// unmarkQueuedLocked finds item's line in the room and clears its marker.
+func (s *Session) unmarkQueuedLocked(item mentionItem) {
+	for i := len(s.room) - 1; i >= 0; i-- {
+		l := s.room[i]
+		if l.TS.Equal(item.line.TS) && l.User == item.line.User && l.Kind == "mention" {
+			s.markQueuedLocked(i, false)
+			return
+		}
+	}
 }
 
 // startMentionLocked makes item the active mention: builds its request and
@@ -109,6 +147,7 @@ func (s *Session) finishMentionLocked(answer string) bool {
 	if len(s.mentionQueue) > 0 {
 		next := s.mentionQueue[0]
 		s.mentionQueue = s.mentionQueue[1:]
+		s.unmarkQueuedLocked(next)
 		return s.startMentionLocked(next)
 	}
 	return false

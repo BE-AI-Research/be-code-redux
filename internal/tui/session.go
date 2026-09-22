@@ -719,9 +719,8 @@ func (s *Session) transient(text string) {
 	s.toastLocked(text)
 }
 
-// toastLocked is transient for a caller that already holds mu (deliverDM,
-// raised from the inbox watcher's own goroutine while mu is held for the
-// whole callback).
+// toastLocked is transient for a caller that already holds mu (a key
+// handler inside Update, such as a DM that could not be sent).
 func (s *Session) toastLocked(text string) {
 	s.toast, s.toastUntil = text, s.now().Add(toastFor)
 	s.broadcast(transientMsg(text))
@@ -931,15 +930,22 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 	// already started the next turn: starting a second one here would
 	// clobber cancelFn out from under the first, and any ordinary queued
 	// text is delivered into that turn anyway, at its first model call.
-	if !mentionStarted {
-		if left := s.ag.DrainItems(); len(left) > 0 {
-			texts := make([]string, 0, len(left))
-			for _, it := range left {
-				s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
-				texts = append(texts, it.Text)
-			}
-			s.startTurnLocked(strings.Join(texts, "\n"))
+	if mentionStarted {
+		// The mention's turn delivers whatever is still queued at its first
+		// model call; the typist still sees their line land, as they would
+		// have on any other path.
+		for _, it := range s.ag.PeekItems() {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
 		}
+		return
+	}
+	if left := s.ag.DrainItems(); len(left) > 0 {
+		texts := make([]string, 0, len(left))
+		for _, it := range left {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+			texts = append(texts, it.Text)
+		}
+		s.startTurnLocked(strings.Join(texts, "\n"))
 	}
 }
 
