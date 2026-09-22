@@ -338,6 +338,19 @@ next to the host's own socket and its startup log `<code>.log` — the place to 
 if a session never comes up. Attaching is local-only by design: the socket is a
 unix socket in your own dotdir, so remote access means SSH, not a network port.
 
+### Chat and DMs
+
+Every terminal attached to a session shares a chat room: `/chat` opens it on your terminal
+(the session keeps running underneath; `Esc` or `/back` returns), Enter posts, and `@agent`
+in a line hands it — with the last `chat.mention_context` lines of the room — to the
+session's model, whose answer appears in the transcript and in the room. DMs span every
+session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
+(`●` unread), and a message to someone not attached anywhere waits for them. Your name
+comes from `chat.name` in your own config, else the names already seen from your address,
+else you are asked once (`/whoami` says which). Messages live under `~/.be-code/inbox/`;
+identity is advisory, not security — anyone with a shell on the host can read them. Plain
+mode and headless runs have neither.
+
 ## Checkpoints & undo
 
 Every agent turn snapshots files before they're touched. `/undo` rolls back the last
@@ -825,7 +838,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
+v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
 after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
 for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or

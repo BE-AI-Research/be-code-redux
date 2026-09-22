@@ -1,5 +1,47 @@
 # BE-Code Changelog
 
+## v0.15.0 — chat and messaging
+
+- **A per-session chat room.** `/chat` opens a room every terminal attached to that live
+  session can see and post to, routed through the session's host the same way the
+  transcript and every other shared broadcast are; it is saved with the session (`store.
+  Session.Chat`) and restored on resume, and `/clear` starts a fresh, empty one. `@agent`
+  in a room line hands it — with the last `chat.mention_context` (10) room lines as
+  context — to the session's model through the existing queue, one mention at a time
+  (later ones wait their turn and are marked `(queued)`); the reply lands in the
+  transcript and is copied back to the room, cut at 40 lines with a "(full reply in the
+  transcript)" marker. A DM containing `@agent` is plain text: the model never sees a DM.
+- **DMs and an inbox, machine-wide.** `/dm <name>` opens a thread with anyone on the
+  machine, whether or not they are attached anywhere right now; `/inbox` lists every
+  thread newest first with an unread marker. Messages are a shared mailbox on disk under
+  `~/.be-code/inbox/` (one file per message, atomic write-then-rename, 0600/0700) —
+  no daemon, no router election: every session host watches the same directory and pings
+  whichever of its own attached terminals owns the recipient. The read mark is **per
+  correspondent** (`read.json`'s `last_read` keyed by the other party), not one watermark
+  for the whole inbox — an early design had a single mark, which meant opening the
+  newest thread silently marked an older, still-unread thread read too.
+- **Identity**: a device's own `chat.name` wins; otherwise the terminal is offered a name
+  already bound to its IP, or asked once and the answer bound to it (`~/.be-code/
+  users.json`, under a file lock — two hosts can bind an ID at the same moment). A MAC
+  lookup (best effort, ARP) is consulted only when a terminal arrives from an IP the
+  mailbox has never seen, to recognise a device whose address changed. `/whoami` says
+  which of these decided a terminal's name. Identity is advisory, not security: anyone
+  with a shell on the host can read `~/.be-code/inbox/`.
+- **Three new TUI modes** (`/chat`, `/inbox`, `/dm`) are per-terminal views over the same
+  session — the run keeps going underneath, and every other attached terminal is
+  unaffected; `Esc` or `/back` returns to the transcript. The bottom line and `/clients`
+  show unread counts and DM toasts; the naming prompt appears at most once per terminal,
+  the first time one of the three commands runs without an ID yet.
+- **Two limits, ruled on rather than missed:** the mailbox watcher is a 1 s poll of
+  directory mtimes, not fsnotify — no dependency an offline install might lack, and one
+  `ReadDir` a second is cheap enough that a real watcher wasn't worth the portability
+  cost. Mouse selection and copy are not available inside the three new modes: each has
+  its own viewport, and `selection.go` is wired to the transcript's; carried over as a
+  gap for this version rather than blocking it.
+- Plain mode and headless `run` do not support any of this; the five commands print
+  `chat and DMs need the TUI`.
+- Design: `docs/superpowers/specs/2026-09-21-chat-and-messaging-design.md`.
+
 ## v0.14.5 — /init reads other agents' files; a real /stats screen; two small fixes
 
 - **`/init` reads `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`** at the workspace root, when
