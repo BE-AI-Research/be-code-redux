@@ -1,5 +1,30 @@
 # BE-Code Changelog
 
+## v1.0.1 — co-working: the edges of the consent gate
+
+A deep review of the co-working subsystem at 1.0.0 found its centre sound — the co-worker
+cannot write, run or reach the primary's tools; consent precedes every byte; cancellation,
+the caps and the two automatic triggers are each enforced and tested — and four edges that
+were not. All four are fixed here, with tests, plus two Ollama sharp edges.
+
+- **`online` is corroborated.** The consent gate rested on a hand-set flag. A co-worker
+  whose provider address is off this machine *and this network* (not loopback, link-local,
+  RFC 1918, a bare host name or `.local`/`.lan`) is now treated as online whatever the entry
+  says, with a warning at startup (`config.LocalEndpoint`). Your LAN Ollama stays local.
+- **The advice sanitizer strips Qwen's XML tool-call form** (`<function=…>` /
+  `<parameter=…>`, with or without the `<tool_call>` wrapper) — the layout 0.14.1 taught
+  the parser. A co-worker's answer containing a bare `<function=shell>` could otherwise be
+  echoed by the primary and, under `-y`, run.
+- **A panic in a co-worker's provider is that consultation's error**, not the session's end.
+- **The co-worker budgets against its own window** (spec §2.3): the window `secondaryLoad`
+  resolves, else the model's `context_window` in `models`, else — as before — the primary's
+  budget. A frontier model no longer runs on a local model's 8k budget.
+- **Ollama, shared server.** The co-worker's residency probe now runs on the consultation's
+  context, so Esc reaches it (it was a fixed 10 s on `context.Background()`, and on timeout
+  put no window on the wire — a reload to the server default). After every consultation the
+  primary's keep-alive is refreshed, and a co-worker that runs another model on the primary's
+  own server is announced once: on one GPU each consultation may evict the primary's model.
+
 ## v1.0.0 — release
 
 The operator harness is complete: 0.15.0's chat and DMs were the last piece the owner

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -326,7 +327,7 @@ func TestASecondaryProviderSendsTheWindowTheServerHolds(t *testing.T) {
 	cfg.Models = map[string]config.ModelConfig{"rev": {ContextWindow: 32768}}
 	p := provider.NewOllama("lan", stub.srv.URL, "")
 
-	secondaryLoad(cfg, p, "rev", nil)
+	secondaryLoad(context.Background(), cfg, p, "rev", nil)
 
 	if got := p.Options().NumCtx; got != 8192 {
 		t.Fatalf("num_ctx %d on the wire; a secondary model must keep the server's 8192, never reload to 32768 and never send nothing", got)

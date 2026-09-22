@@ -90,8 +90,8 @@ func TestConsultConsentModalAndSessionAllow(t *testing.T) {
 	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "claude", Provider: "ollama", Model: "opus", Online: true}}
 	s.ag = agent.New(s.cfg, nullProvider{}, "m", s.ag.Tools, "")
 	s.ag.Tools.Approve = s.approveFromAgent
-	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), nil
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil })
 	done := make(chan error, 1)
@@ -126,8 +126,8 @@ func TestConsultCommandRunsAsATurn(t *testing.T) {
 	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"}}
 	s.ag = agent.New(s.cfg, nullProvider{}, "m", s.ag.Tools, "")
 	wireEvents(s) // the helper NewSession uses to install Events on an agent
-	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), nil
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil })
 	a.slashCommand("/coworkers")
@@ -194,8 +194,8 @@ func TestConsultMidRunRunsBesideTheTurnAndEscCancelsBoth(t *testing.T) {
 	s.prov = primary
 	wireEvents(s)
 	coworker := newBlockingChat()
-	agent.CoworkerFactory = func(*config.Config, config.CoworkerConfig) (provider.Provider, error) {
-		return coworker, nil
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return coworker, 0, nil
 	}
 	t.Cleanup(func() {
 		agent.CoworkerFactory = nil

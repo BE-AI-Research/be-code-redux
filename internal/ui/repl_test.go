@@ -312,8 +312,8 @@ func TestPlainCoworkersAndConsult(t *testing.T) {
 	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"}}
 	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
 	r.Agent.Events = Events()
-	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), nil
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil })
 	out = capture(t, func() { r.command(context.Background(), "/coworkers") })
@@ -341,8 +341,8 @@ func TestPlainAlwaysAllowsTheCoworkerForTheSession(t *testing.T) {
 	}
 	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
 	r.Agent.Tools.Approve = r.approve
-	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
-		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), nil
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil })
 
