@@ -838,7 +838,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
+v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
 after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
 for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or

@@ -1,5 +1,12 @@
 # BE-Code Changelog
 
+## v1.0.0 — release
+
+The operator harness is complete: 0.15.0's chat and DMs were the last piece the owner
+wanted before calling it a release. No code change from 0.15.0 — this is the same build,
+renumbered. Everything from 0.12.1 to 0.15.0 was merged, verified and, for the Linux and
+Windows halves, run by the owner.
+
 ## v0.15.0 — chat and messaging
 
 - **A per-session chat room.** `/chat` opens a room every terminal attached to that live
