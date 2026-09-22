@@ -296,14 +296,11 @@ func OpenAt(dir, root, sessionID string, resumed bool, lim Limits) (*Store, erro
 	s.turn, s.baseline = st.Turn, st.Baseline
 	s.checkWorkspace()
 	s.loadDocs()
-	// warnOwners takes s.mu itself, so it runs here rather than inside
-	// loadDocs (which callers may one day run under the lock) — after
-	// loadDocs' work is done, with nothing else holding it. Cards are not
-	// known yet at this point (SetCards is always the caller's next move,
-	// which warns again once they are), so this call only ever fires for a
-	// document that already names an owner before this session has told
-	// the store who its sub-agents are.
-	s.warnOwners()
+	// warnOwners is not called here: SetCards is the only moment the store
+	// knows what a valid owner is, so it is the only thing that triggers
+	// this warning — calling it before SetCards has ever run would warn
+	// about a perfectly valid, already-assigned owner just because cards
+	// are still nil at Open time.
 	s.restoreFileMemos(st.Files)
 	s.restoreTimes(st.Times)
 	if resumed || st.Session == sessionID {
