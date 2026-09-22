@@ -41,12 +41,26 @@ func (s *Session) Post(user, text, kind string) {
 func (s *Session) PostLocked(user, text, kind string) {
 	line := store.ChatLine{TS: s.now(), User: user, Text: strings.TrimRight(text, "\n"), Kind: kind}
 	s.room = append(s.room, line)
+	// A person's own line naming the model (mention.go) becomes a request —
+	// tagged here, before the cap and the broadcast, so the saved room, what
+	// every terminal sees and the request built from it all agree on what
+	// happened. "agent" itself and any system line (join/leave, kind != "")
+	// are exempt: an @agent inside the model's own reply is not a request.
+	if kind == "" && user != "" && user != "agent" && IsMention(line.Text) {
+		line.Kind = "mention"
+		s.room[len(s.room)-1].Kind = "mention"
+	}
 	if len(s.room) > roomCap {
 		s.room = append([]store.ChatLine{{TS: line.TS, Text: "(older chat trimmed)"}}, s.room[len(s.room)-roomCap+1:]...)
 	}
 	room := s.room
 	s.ag.UpdateSession(func(ss *store.Session) { ss.Chat = append([]store.ChatLine(nil), room...) })
 	s.broadcast(chatMsg{line: line})
+	if line.Kind == "mention" {
+		// The request must include the mention itself, so this runs after
+		// the line has already been appended to the room above.
+		s.noteMentionLocked(line)
+	}
 }
 
 // Room is a snapshot of the room.

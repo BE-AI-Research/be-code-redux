@@ -469,6 +469,11 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			m.layoutChat()
 		}
+	case mentionBusyMsg:
+		// Every attached terminal's chat footer names who the model is
+		// answering (viewChat), whether or not this one is looking at the
+		// room right now.
+		m.mentionBusy = string(msg)
 	case inboxMsg:
 		// deliverDM broadcasts to every attached view once any of them owns
 		// the recipient; each view still has to check for itself, since a

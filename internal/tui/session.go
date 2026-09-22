@@ -59,6 +59,11 @@ type Session struct {
 	// room is the session's chat room (chat.go): every attached terminal's
 	// view of it, mirrored into the session file beside the transcript.
 	room []store.ChatLine
+	// mentionQueue and mentionActive (mention.go) track @agent requests
+	// raised from the room: mentionActive is the one in flight (nil when
+	// none), mentionQueue is who else is waiting, in the order they asked.
+	mentionQueue  []mentionItem
+	mentionActive *mentionItem
 
 	running    bool // a run is in progress (a view's mode may be a popup)
 	statusNote string
@@ -347,6 +352,13 @@ func (s *Session) NewView(id int, label string) *View {
 	// is released, or a delta broadcast in that gap would reach neither the
 	// seed nor the view.
 	v.streaming = s.streaming.String()
+	// A terminal that attaches while a mention is in flight starts with the
+	// chat footer already showing who it's answering, the same reason
+	// streaming and the room are seeded above: a mentionBusyMsg broadcast
+	// only reaches terminals already attached when it goes out.
+	if s.mentionActive != nil {
+		v.mentionBusy = s.mentionActive.from
+	}
 	// A terminal that attaches in the middle of a run starts busy, exactly
 	// where runStateMsg{running:true} would have left it. mode's zero value
 	// is modeInput, and a view that started there would take Enter to
@@ -900,16 +912,34 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 	}
 	s.appendEntryLocked(entry{Kind: entryPlain})
 	s.setRunStateLocked(false, "")
+	// A turn @agent started ends here: its answer (or, on error, nothing —
+	// the queue still moves on) is posted to the room once, only for a turn
+	// a mention actually started (finishMentionLocked is a no-op otherwise).
+	// This runs after the run state above, not right after flushLocked: a
+	// queued mention dequeued here must see s.running == false so it starts
+	// its own turn directly instead of being mistaken for one arriving mid
+	// another run and only enqueued for later delivery.
+	mentionStarted := false
+	if err == nil {
+		mentionStarted = s.finishMentionLocked(s.lastReply)
+	} else {
+		mentionStarted = s.finishMentionLocked("")
+	}
 	// Anything queued during the run that the model never got to see becomes
 	// the next turn — as one request, but echoed line by line under the
-	// terminal each message came from.
-	if left := s.ag.DrainItems(); len(left) > 0 {
-		texts := make([]string, 0, len(left))
-		for _, it := range left {
-			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
-			texts = append(texts, it.Text)
+	// terminal each message came from. Skipped when a queued mention above
+	// already started the next turn: starting a second one here would
+	// clobber cancelFn out from under the first, and any ordinary queued
+	// text is delivered into that turn anyway, at its first model call.
+	if !mentionStarted {
+		if left := s.ag.DrainItems(); len(left) > 0 {
+			texts := make([]string, 0, len(left))
+			for _, it := range left {
+				s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+				texts = append(texts, it.Text)
+			}
+			s.startTurnLocked(strings.Join(texts, "\n"))
 		}
-		s.startTurnLocked(strings.Join(texts, "\n"))
 	}
 }
 
