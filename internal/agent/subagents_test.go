@@ -508,3 +508,70 @@ func TestSubAgentStatesAndGuidance(t *testing.T) {
 		t.Fatal("guidance present without sub-agents")
 	}
 }
+
+// SubAgentStates is reached from RunningSubAgents, which
+// bottomLine/compactBottomLine call on effectively every frame — so the
+// DoingUnderID refinement it does after releasing subAgents.mu must go
+// through the same engineDo fence as every other store call in this
+// package: a panic walking a corrupted tree must detach the engine with
+// one notice, not take the render goroutine down with it.
+func TestSubAgentStatesSurvivesAPanickingDoingUnderID(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"which tokenizer?"}`),
+	}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.asks, "ask") // parked on ask_main: a stable "working" row to read
+
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	f.ag.engineFault = func(op string) {
+		if op == "sub-agent at" {
+			panic("the store exploded in " + op)
+		}
+	}
+
+	states := f.ag.SubAgentStates()
+	var row *SubAgentState
+	for i := range states {
+		if states[i].Node == id {
+			row = &states[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("the running row is still expected back from a panicking refinement: %+v", states)
+	}
+	// The refinement panicked before it could run at all (engineFault fires
+	// ahead of fn in engineDo), so At is left at its fallback: the
+	// dispatched root id, set before the fenced call.
+	if row.At != id {
+		t.Fatalf("At must still fall back to the root id when the refinement panics: %q", row.At)
+	}
+
+	n := 0
+	for _, m := range notices {
+		if strings.Contains(m, "continuing without working memory") {
+			n++
+			if !strings.Contains(m, "engine: sub-agent at failed") {
+				t.Fatalf("the wrong op is named in the detach notice: %q", m)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected exactly one detach notice, got %d: %q", n, notices)
+	}
+
+	// The engine is detached for the rest of the session: a second read
+	// must not panic again (no second notice) and must still return the
+	// row, unrefined.
+	states2 := f.ag.SubAgentStates()
+	if len(states2) != len(states) {
+		t.Fatalf("a detached engine must not change how many rows come back: %+v", states2)
+	}
+	if err := f.ag.ReplyAsk(id, "use the old one"); err != nil {
+		t.Fatalf("the caller (and the run behind the row) must be unharmed: %v", err)
+	}
+	wait(t, f.ends, "hand-back")
+}

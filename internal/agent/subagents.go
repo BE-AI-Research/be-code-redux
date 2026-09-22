@@ -93,9 +93,11 @@ type SubAgentState struct {
 	Node, State           string
 	Calls                 int
 	Since                 time.Time
-	// At is what the bottom line shows: the doing node inside Node's
-	// dispatched subtree when the store can name one, else Node itself
-	// (the coarser root id); "" only when Node is ("" — no run).
+	// At is what the bottom line shows for a running row: the doing node
+	// inside Node's dispatched subtree when the store can name one, else
+	// Node itself (the coarser root id). Set only for a running row — ""
+	// for an idle card and for a waiting row (Node is set there too, but
+	// nothing is dispatched yet for DoingUnderID to refine).
 	At string
 }
 
@@ -717,11 +719,6 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		return nil
 	}
 	steps := a.subSteps("sub-agent states")
-	// The store handle is read before mu, like steps above: the invariant
-	// this package documents at the top is that no call into the engine
-	// store is ever made while mu is held, so DoingUnderID (below) runs
-	// after mu is released, from a second pass over the built rows.
-	st := a.engine()
 	s.mu.Lock()
 	var out []SubAgentState
 	names := make([]string, 0, len(s.cws))
@@ -761,16 +758,25 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 		}
 	}
 	s.mu.Unlock()
-	if st != nil {
+	// DoingUnderID refines a running row's At from the dispatched root id
+	// to the doing node inside its subtree. Behind the fence like every
+	// other store call in this package, and only after subAgents.mu is
+	// released — the invariant this file documents at the top, no call
+	// into the engine store is ever made while mu is held. This is not
+	// belt-and-braces: SubAgentStates is reached from RunningSubAgents,
+	// which bottomLine/compactBottomLine call on effectively every frame,
+	// so a panic walking a corrupted tree must detach the engine with a
+	// notice rather than take the render goroutine down with it.
+	a.engineDo("sub-agent at", func(st *engine.Store) {
 		for i := range out {
-			if out[i].Node == "" {
-				continue
+			if out[i].At == "" {
+				continue // idle or waiting: nothing running to refine
 			}
 			if at := st.DoingUnderID(out[i].Node); at != "" {
 				out[i].At = at
 			}
 		}
-	}
+	})
 	return out
 }
 
