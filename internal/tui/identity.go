@@ -145,27 +145,6 @@ func (s *Session) usedFrom(client int, id string) string {
 	return other
 }
 
-// freeID returns id itself when no other terminal claims it, else the next
-// free numeric variant id01, id02, ... (spec: a name is exclusive, one active
-// client owns it; a second claimant gets its own ID and thus its own inbox
-// thread). The first client to name themselves owns the bare name; everyone
-// after gets the suffix.
-func (s *Session) freeID(client int, id string) string {
-	if s.usedFrom(client, id) == "" {
-		return id
-	}
-	for n := 1; ; n++ {
-		cand := fmt.Sprintf("%s%02d", id, n)
-		if _, err := inbox.ValidID(cand); err != nil {
-			break
-		}
-		if s.usedFrom(client, cand) == "" {
-			return cand
-		}
-	}
-	return id // every variant taken; fall back to the bare name
-}
-
 func (s *Session) identityOf(client int) identity { return s.ids[client] }
 
 // userID is this terminal's resolved ID, "" when it has none yet.
@@ -179,7 +158,7 @@ func (m *View) needName(then func(*View) (tea.Model, tea.Cmd)) (tea.Model, tea.C
 	}
 	m.afterName = then
 	m.nameChoices = m.identityOf(m.id).Choices
-	m.nameSel, m.nameErr = 0, ""
+	m.nameSel, m.nameErr, m.nameShared = 0, "", ""
 	m.clearSelection() // the transcript this prompt covers is not selectable from here
 	m.mode = modeName
 	m.input.Reset()
@@ -212,16 +191,15 @@ func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.nameErr = err.Error()
 			return m, nil
 		}
-		// A name is exclusive: only one active client may own it. The first
-		// to claim it is that user; this terminal claiming it gets its own
-		// suffixed ID and a new inbox thread under it. No share prompt — the
-		// suffixed name is distinct, so the inbox starts a thread for free.
-		if from := m.usedFrom(m.id, id); from != "" {
-			id = m.freeID(m.id, id)
-			// The notice lands in the shared room, not the transcript: the
-			// claimant is standing in the room (or about to be), and a session
-			// entry would only show in the mode that reads it.
-			m.PostLocked("", fmt.Sprintf("%s is already in use; you are %s (a separate thread)", name, id), "")
+		// Spec §9: a name already used from another address is shared only
+		// deliberately. The warning is shown once for that name; the same
+		// name entered again goes through, a different one is checked afresh.
+		if m.nameShared != id {
+			if from := m.usedFrom(m.id, id); from != "" {
+				m.nameErr = fmt.Sprintf("%s is already used from %s; pick another or press Enter to share it", id, from)
+				m.nameShared = id
+				return m, nil
+			}
 		}
 		cmd, err := m.bindCmdLocked(m.id, id)
 		if err != nil {
@@ -258,7 +236,7 @@ func (m *View) nameBound(msg nameBoundMsg) (tea.Model, tea.Cmd) {
 	m.recordBoundLocked(msg.client, msg.id)
 	m.input.Reset()
 	m.input.Placeholder = inputPlaceholder
-	m.nameErr = ""
+	m.nameErr, m.nameShared = "", ""
 	then := m.afterName
 	m.afterName = nil
 	m.mode = m.idleMode()

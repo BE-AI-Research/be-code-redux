@@ -231,10 +231,9 @@ func TestFailedBindStaysInThePrompt(t *testing.T) {
 	}
 }
 
-// I6(b), spec §9: a name is exclusive. A second client claiming it is never
-// handed the bare name; it gets the next free suffix and its own inbox thread,
-// on the same Enter — no share prompt.
-func TestDuplicateNameGetsItsOwnSuffixedID(t *testing.T) {
+// I6(b), spec §9: a name already bound to another address is shared only on
+// purpose. The first Enter warns; the second one goes through.
+func TestDuplicateNameWarnsBeforeItIsShared(t *testing.T) {
 	s := newTestSession(t)
 	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
 	s.usedFromFn = func(id string) string {
@@ -251,25 +250,29 @@ func TestDuplicateNameGetsItsOwnSuffixedID(t *testing.T) {
 	v.slashCommand("/chat")
 	v.input.SetValue("alice")
 	bindEnter(t, v)
-	if bound != "alice01" || v.userID() != "alice01" {
-		t.Fatalf("second claimant should take the free suffix: bound %q id %q", bound, v.userID())
+	if bound != "" || v.mode != modeName {
+		t.Fatalf("bound %q mode %v before the warning was acknowledged", bound, v.mode)
 	}
-	if v.mode != modeChat {
-		t.Fatalf("a suffixed bind goes straight through, mode %v", v.mode)
+	if !strings.Contains(v.View(), "alice is already used from 192.168.1.40; pick another or press Enter to share it") {
+		t.Fatalf("warning:\n%s", v.View())
 	}
-	if !strings.Contains(v.View(), "alice is already in use; you are alice01 (a separate thread)") {
-		t.Fatalf("notice:\n%s", v.View())
+	// A different name warns afresh rather than inheriting the acknowledgement.
+	v.input.SetValue("bob")
+	bindEnter(t, v)
+	if bound != "bob" {
+		t.Fatalf("a free name should bind at once: %q", bound)
 	}
-	// A different, free name still binds at once, unsuffixed.
+	// And the same name entered twice is shared.
 	s.mu.Lock()
 	delete(s.ids, 1)
 	s.mu.Unlock()
 	v2 := s.NewView(1, "l")
 	v2.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	v2.slashCommand("/chat")
-	v2.input.SetValue("bob")
+	v2.input.SetValue("alice")
 	bindEnter(t, v2)
-	if bound != "bob" || v2.userID() != "bob" {
-		t.Fatalf("a free name should bind at once: bound %q id %q", bound, v2.userID())
+	bindEnter(t, v2)
+	if bound != "alice" || v2.userID() != "alice" {
+		t.Fatalf("second Enter did not share the name: bound %q id %q", bound, v2.userID())
 	}
 }

@@ -234,13 +234,14 @@ type View struct {
 	// thread); nameChoices are the IDs already bound to this address, offered
 	// above "type a name below"; nameSel is the highlighted row (a choice, or
 	// len(nameChoices) for "type a name"); nameErr is the reason the last
-	// attempt was rejected, shown until the next one. A name in use from
-	// another address is not shared: the new terminal gets a suffixed ID
-	// (see Session.freeID) and its own inbox thread.
+	// attempt was rejected, shown until the next one; nameShared is the name
+	// this terminal has already been warned is in use from another address
+	// (spec §9), so a second Enter on that same name shares it deliberately.
 	afterName   func(*View) (tea.Model, tea.Cmd)
 	nameChoices []string
 	nameSel     int
 	nameErr     string
+	nameShared  string
 
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
