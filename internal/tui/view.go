@@ -234,11 +234,14 @@ type View struct {
 	// thread); nameChoices are the IDs already bound to this address, offered
 	// above "type a name below"; nameSel is the highlighted row (a choice, or
 	// len(nameChoices) for "type a name"); nameErr is the reason the last
-	// attempt was rejected, shown until the next one.
+	// attempt was rejected, shown until the next one; nameShared is the name
+	// this terminal has already been warned is in use from another address
+	// (spec §9), so a second Enter on that same name shares it deliberately.
 	afterName   func(*View) (tea.Model, tea.Cmd)
 	nameChoices []string
 	nameSel     int
 	nameErr     string
+	nameShared  string
 
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
@@ -502,6 +505,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Tick(toastFor+100*time.Millisecond, func(t time.Time) tea.Msg { return toastTickMsg(t) })
 		}
+	case nameBoundMsg:
+		// The answer to a bind that ran off the session lock (identity.go).
+		return m.nameBound(msg)
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
 		// and the programs are the runner's; all this view has to do is draw
@@ -932,7 +938,14 @@ func (m *View) renderEntryLocal(e entry) {
 }
 
 // rebuild re-renders every entry — after a theme change or a resize, since
-// tool-argument truncation and Markdown colouring depend on both.
+// tool-argument truncation and Markdown colouring depend on both — and
+// reseeds this view's copy of the room from the session's.
+//
+// The room is reseeded because rebuild is also the repair for a view whose
+// mailbox overflowed (mailbox.drainInto): a dropped chatMsg would otherwise
+// leave a hole in this terminal's room for good, since nothing ever
+// re-broadcasts a line. The session's room is the truth, and this runs under
+// mu like everything else in Update.
 func (m *View) rebuild() {
 	m.rendered.Reset()
 	for _, e := range m.entries {
@@ -940,6 +953,14 @@ func (m *View) rebuild() {
 		m.rendered.WriteString("\n")
 	}
 	m.renderedN = len(m.entries)
+	m.room = append([]store.ChatLine(nil), m.Session.room...)
+	if m.mode == modeChat {
+		atBottom := m.chatVP.AtBottom()
+		m.layoutChat()
+		if atBottom {
+			m.chatVP.GotoBottom()
+		}
+	}
 	m.refreshTranscript()
 }
 

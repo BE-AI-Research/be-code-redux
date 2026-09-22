@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/store"
@@ -101,15 +103,26 @@ func (m *View) chatName() string {
 	return live.LabelKey(m.label)
 }
 
+// chatOff reports whether chat is switched off in config, saying so once on
+// this terminal when it is. Every entry point asks before anything else —
+// above all before the naming prompt, since a terminal must not be asked who
+// it is for a feature it cannot use.
+func (m *View) chatOff() bool {
+	if !m.cfg.Chat.Enabled {
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "chat is disabled in config"})
+		return true
+	}
+	return false
+}
+
 // enterChat opens the room on this terminal, asking for a name first if this
 // terminal does not have one yet. Nothing shared changes: the run keeps
 // running, the other terminals keep whatever they were doing.
 func (m *View) enterChat() (tea.Model, tea.Cmd) {
+	if m.chatOff() {
+		return m, nil
+	}
 	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
-		if !m.cfg.Chat.Enabled {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: "chat is disabled in config (chat.enabled)"})
-			return m, nil
-		}
 		if !m.joinedChat {
 			m.joinedChat = true
 			if m.joined == nil {
@@ -120,12 +133,31 @@ func (m *View) enterChat() (tea.Model, tea.Cmd) {
 		}
 		m.mode = modeChat
 		m.chatUnseen = 0
+		// A selection belongs to the transcript this mode covers: left alive
+		// it would keep highlighting lines nobody can see, and Ctrl+C in the
+		// room would copy them instead of clearing the draft.
+		m.clearSelection()
 		m.input.Reset()
 		m.input.Placeholder = "message the room… (/back to return)"
 		m.layoutChat()
 		m.chatVP.GotoBottom()
 		return m, nil
 	})
+}
+
+// modeViewport is the viewport the mode this terminal is in scrolls, or nil
+// when that is the transcript's own (every other mode). It is what keeps a
+// wheel event in the room off the hidden transcript — see handleMouse.
+func (m *View) modeViewport() *viewport.Model {
+	switch m.mode {
+	case modeChat:
+		return &m.chatVP
+	case modeInbox:
+		return &m.dm.listVP
+	case modeDM:
+		return &m.dm.vp
+	}
+	return nil
 }
 
 // leaveMode returns this terminal from chat, inbox or dm to the transcript.
@@ -204,14 +236,29 @@ func (m *View) viewChat() string {
 	if here == 0 {
 		here = 1
 	}
-	footer := fmt.Sprintf(" chat · %d here · Esc back", here)
-	if m.compact() {
-		footer = " chat · Esc"
+	footer := " chat · Esc"
+	if !m.compact() {
+		footer = fmt.Sprintf(" chat · %d here · Esc back", here)
+		if m.mentionBusy != "" {
+			footer += " · agent is working on " + m.mentionBusy + "'s question"
+		}
 	}
-	if m.mentionBusy != "" {
-		footer += m.st.Dim.Render(" · agent is working on " + m.mentionBusy + "'s question")
+	return m.chatVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
+}
+
+// footerLine is the last row of the room, the inbox and a DM thread: cut to
+// this terminal's width with an ellipsis and padded out to it. Both halves
+// matter — a footer one cell too wide wraps the row and scrolls the whole
+// frame up on a phone-sized terminal, and one short of the width leaves
+// whatever the previous frame drew in those cells on screen.
+func (m *View) footerLine(text string) string {
+	if m.width <= 0 {
+		return ""
 	}
-	return m.chatVP.View() + "\n" + m.inputView() + "\n" + m.st.Dim.Render(footer)
+	if lipgloss.Width(text) > m.width {
+		text = ansi.Truncate(text, m.width, "…")
+	}
+	return m.st.Dim.Render(padToWidth(text, m.width))
 }
 
 // wrapTo wraps text to width columns, the same way the transcript itself is

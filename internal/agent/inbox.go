@@ -108,6 +108,30 @@ func (a *Agent) Remove(i int) (string, bool) {
 	return text, true
 }
 
+// RemoveWhere takes every queued message match reports out of the queue and
+// returns how many went. It exists for a request the UI enqueued and then
+// had to take back — an @agent mention whose run was cancelled before the
+// model ever saw it, which left in the queue would be delivered later as
+// ordinary text and answered where nobody who asked is looking.
+func (a *Agent) RemoveWhere(match func(InboxItem) bool) int {
+	if match == nil {
+		return 0
+	}
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	kept := a.inbox.items[:0]
+	removed := 0
+	for _, it := range a.inbox.items {
+		if match(it) {
+			removed++
+			continue
+		}
+		kept = append(kept, it)
+	}
+	a.inbox.items = kept
+	return removed
+}
+
 // Hold pauses (true) or resumes (false) delivery, so a queue the user is
 // editing does not shift under them.
 func (a *Agent) Hold(on bool) {

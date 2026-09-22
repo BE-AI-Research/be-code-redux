@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -72,27 +73,76 @@ func (s *Session) recordIdentityLocked(client int, r resolvedID) {
 	s.ids[client] = r.id
 }
 
-// bindLocked records a chosen or typed name for a client.
-func (s *Session) bindLocked(client int, name string) error {
-	id, err := inbox.ValidID(name)
-	if err != nil {
-		return err
-	}
-	var tm inbox.Terminal
+// terminalFor is what the roster knows about one client. ok is false when
+// the roster has no such terminal — which means there is no address to bind
+// a name to, and binding one anyway would write an empty device row: an ID
+// usable from nowhere.
+func (s *Session) terminalFor(client int) (inbox.Terminal, bool) {
 	for _, c := range s.clients {
 		if c.ID == client {
-			tm = terminalOf(c)
+			return terminalOf(c), true
 		}
 	}
-	bind := s.bindFn
+	return inbox.Terminal{}, false
+}
+
+// bindCmdLocked validates a chosen or typed name for a client and returns
+// the command that records it in users.json. The caller holds mu.
+//
+// Everything decidable here is decided here — the ID's validity, the
+// terminal it belongs to, which bind seam applies — because inbox.Bind takes
+// a cross-process file lock and may wait on another session host. That wait
+// must not happen under mu, which every terminal's Update holds for its
+// whole body, so it goes out as a tea.Cmd and comes back as a nameBoundMsg.
+func (s *Session) bindCmdLocked(client int, name string) (tea.Cmd, error) {
+	id, err := inbox.ValidID(name)
+	if err != nil {
+		return nil, err
+	}
+	tm, ok := s.terminalFor(client)
+	if !ok {
+		return nil, errors.New("no terminal to bind")
+	}
+	bind, path := s.bindFn, s.usersPath
 	if bind == nil {
-		bind = func(id string, tm inbox.Terminal) error { return inbox.Bind(s.usersPath, id, tm, "") }
+		bind = func(id string, tm inbox.Terminal) error { return inbox.Bind(path, id, tm, "") }
 	}
-	if err := bind(id, tm); err != nil {
-		return err
-	}
+	return func() tea.Msg {
+		return nameBoundMsg{client: client, id: id, err: bind(id, tm)}
+	}, nil
+}
+
+// recordBoundLocked records a name a bind has just written. Caller holds mu.
+func (s *Session) recordBoundLocked(client int, id string) {
 	s.ids[client] = identity{ID: id, How: "asked"}
-	return nil
+}
+
+// usedFrom is the address a name is already bound to when that address is
+// not this terminal's own (spec §9): two people, or one person on two
+// machines, choosing the same ID. "" means the name is free here, and a
+// mailbox this session cannot read is not evidence of anything.
+func (s *Session) usedFrom(client int, id string) string {
+	if s.usedFromFn != nil {
+		return s.usedFromFn(id)
+	}
+	if s.usersPath == "" {
+		return ""
+	}
+	u, err := inbox.Load(s.usersPath)
+	if err != nil || u.Users[id] == nil {
+		return ""
+	}
+	tm, _ := s.terminalFor(client)
+	other := ""
+	for _, d := range u.Users[id].Devices {
+		if d.IP == tm.IP {
+			return "" // already this terminal's own name
+		}
+		if other == "" {
+			other = d.IP
+		}
+	}
+	return other
 }
 
 func (s *Session) identityOf(client int) identity { return s.ids[client] }
@@ -108,7 +158,8 @@ func (m *View) needName(then func(*View) (tea.Model, tea.Cmd)) (tea.Model, tea.C
 	}
 	m.afterName = then
 	m.nameChoices = m.identityOf(m.id).Choices
-	m.nameSel, m.nameErr = 0, ""
+	m.nameSel, m.nameErr, m.nameShared = 0, "", ""
+	m.clearSelection() // the transcript this prompt covers is not selectable from here
 	m.mode = modeName
 	m.input.Reset()
 	m.input.Placeholder = "your name for chat and DMs"
@@ -135,23 +186,64 @@ func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if name == "" && m.nameSel < len(m.nameChoices) {
 			name = m.nameChoices[m.nameSel]
 		}
-		if err := m.bindLocked(m.id, name); err != nil {
+		id, err := inbox.ValidID(name)
+		if err != nil {
 			m.nameErr = err.Error()
 			return m, nil
 		}
-		m.input.Reset()
-		m.input.Placeholder = inputPlaceholder
-		then := m.afterName
-		m.afterName = nil
-		m.mode = m.idleMode()
-		if then != nil {
-			return then(m)
+		// Spec §9: a name already used from another address is shared only
+		// deliberately. The warning is shown once for that name; the same
+		// name entered again goes through, a different one is checked afresh.
+		if m.nameShared != id {
+			if from := m.usedFrom(m.id, id); from != "" {
+				m.nameErr = fmt.Sprintf("%s is already used from %s; pick another or press Enter to share it", id, from)
+				m.nameShared = id
+				return m, nil
+			}
 		}
-		return m, nil
+		cmd, err := m.bindCmdLocked(m.id, id)
+		if err != nil {
+			m.nameErr = err.Error()
+			return m, nil
+		}
+		m.nameErr = ""
+		return m, cmd
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(k)
 	return m, cmd
+}
+
+// nameBoundMsg is the answer to a bind that ran off the session lock (see
+// bindCmdLocked): the terminal it was for, the name, and whether the mailbox
+// took it.
+type nameBoundMsg struct {
+	client int
+	id     string
+	err    error
+}
+
+// nameBound finishes the naming prompt once the bind has returned. Like
+// every other update it runs under mu.
+func (m *View) nameBound(msg nameBoundMsg) (tea.Model, tea.Cmd) {
+	if msg.client != m.id || m.mode != modeName {
+		return m, nil // this terminal has moved on, or the message is another's
+	}
+	if msg.err != nil {
+		m.nameErr = msg.err.Error()
+		return m, nil
+	}
+	m.recordBoundLocked(msg.client, msg.id)
+	m.input.Reset()
+	m.input.Placeholder = inputPlaceholder
+	m.nameErr, m.nameShared = "", ""
+	then := m.afterName
+	m.afterName = nil
+	m.mode = m.idleMode()
+	if then != nil {
+		return then(m)
+	}
+	return m, nil
 }
 
 func (m *View) viewName() string {
@@ -178,6 +270,9 @@ func (m *View) viewName() string {
 
 // whoami is /whoami.
 func (m *View) whoami() {
+	if m.chatOff() {
+		return
+	}
 	id := m.identityOf(m.id)
 	if id.ID == "" {
 		m.appendEntryLocked(entry{Kind: entryDim, Text: "no name yet; /chat, /inbox or /dm will ask"})

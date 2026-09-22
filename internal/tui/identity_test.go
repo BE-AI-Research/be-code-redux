@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -47,7 +50,7 @@ func TestUnknownTerminalIsAskedOnceThenBound(t *testing.T) {
 		t.Fatalf("expected the naming prompt, mode %v", v.mode)
 	}
 	v.input.SetValue("Bob")
-	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	bindEnter(t, v)
 	if bound != "bob" || v.userID() != "bob" || v.mode != modeChat {
 		t.Fatalf("bound %q id %q mode %v", bound, v.userID(), v.mode)
 	}
@@ -59,7 +62,7 @@ func TestUnknownTerminalIsAskedOnceThenBound(t *testing.T) {
 	v2.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	v2.slashCommand("/chat")
 	v2.input.SetValue("agent")
-	v2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	bindEnter(t, v2)
 	if v2.mode != modeName || !strings.Contains(v2.View(), "reserved") {
 		t.Fatalf("mode %v view %q", v2.mode, v2.View())
 	}
@@ -80,7 +83,7 @@ func TestChoicesAreOfferedForASharedIP(t *testing.T) {
 		t.Fatalf("mode %v:\n%s", v.mode, out)
 	}
 	v.Update(tea.KeyMsg{Type: tea.KeyDown}) // bob
-	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	bindEnter(t, v)
 	if v.userID() != "bob" {
 		t.Fatalf("id %q", v.userID())
 	}
@@ -126,11 +129,150 @@ func TestLeaveLineUsesTheResolvedName(t *testing.T) {
 	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	v.slashCommand("/chat")
 	v.input.SetValue("bob")
-	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	bindEnter(t, v)
 	s.SetClients(nil)
 	r := s.Room()
 	last := r[len(r)-1]
 	if last.Kind != "leave" || last.Text != "bob left" {
 		t.Fatalf("leave line %+v", last)
+	}
+}
+
+// I4: an unhosted session (RunLocal) is wired like a served one — a roster
+// of one terminal, so identity resolves and a name can be bound at all.
+func TestLocalSessionWiresItsOwnTerminal(t *testing.T) {
+	s := newTestSession(t)
+	s.cfg.Chat.Name = "alice"
+	var seen inbox.Terminal
+	s.resolveFn = func(tm inbox.Terminal) (inbox.Resolution, error) {
+		seen = tm
+		return inbox.Resolution{ID: tm.User, How: "config"}, nil
+	}
+	s.wireLocalClient(context.Background())
+	v := s.NewView(0, "local")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	if v.userID() != "alice" {
+		t.Fatalf("id %q", v.userID())
+	}
+	if seen.IP != "127.0.0.1" || seen.PID != os.Getpid() || seen.User != "alice" || seen.Login == "" {
+		t.Fatalf("terminal %+v", seen)
+	}
+	v.slashCommand("/whoami")
+	if !strings.Contains(lastEntryText(s), "you are alice (from config)") {
+		t.Fatalf("%q", lastEntryText(s))
+	}
+}
+
+// I4: a client the roster does not know has no address to bind a name to.
+// Binding one anyway wrote an empty Terminal — an ID usable from nowhere.
+func TestBindRefusesAClientWithNoTerminal(t *testing.T) {
+	s := newTestSession(t)
+	bound := false
+	s.bindFn = func(string, inbox.Terminal) error { bound = true; return nil }
+	s.mu.Lock()
+	cmd, err := s.bindCmdLocked(7, "alice")
+	s.mu.Unlock()
+	if err == nil || !strings.Contains(err.Error(), "no terminal to bind") {
+		t.Fatalf("err %v", err)
+	}
+	if cmd != nil || bound {
+		t.Fatalf("bound anyway: cmd %v bound %v", cmd != nil, bound)
+	}
+	if s.identityOf(7).ID != "" {
+		t.Fatalf("identity written: %+v", s.identityOf(7))
+	}
+}
+
+// I5: inbox.Bind takes a cross-process file lock and may wait on another
+// host. It must not run under the session lock, which every terminal's
+// Update holds for its whole body.
+func TestBindRunsOffTheSessionLock(t *testing.T) {
+	s := newTestSession(t)
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
+	lockedDuring := false
+	s.bindFn = func(string, inbox.Terminal) error {
+		if !s.mu.TryLock() {
+			lockedDuring = true
+		} else {
+			s.mu.Unlock()
+		}
+		return nil
+	}
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.5"}})
+	v := s.NewView(1, "l")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	v.slashCommand("/chat")
+	v.input.SetValue("bob")
+	bindEnter(t, v)
+	if lockedDuring {
+		t.Fatal("bindFn ran with mu held")
+	}
+	if v.userID() != "bob" || v.mode != modeChat {
+		t.Fatalf("id %q mode %v", v.userID(), v.mode)
+	}
+}
+
+// I5: a bind that fails leaves the terminal in the prompt with the reason.
+func TestFailedBindStaysInThePrompt(t *testing.T) {
+	s := newTestSession(t)
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
+	s.bindFn = func(string, inbox.Terminal) error { return errors.New("users.json is read-only") }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.5"}})
+	v := s.NewView(1, "l")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	v.slashCommand("/chat")
+	v.input.SetValue("bob")
+	bindEnter(t, v)
+	if v.mode != modeName || v.userID() != "" {
+		t.Fatalf("mode %v id %q", v.mode, v.userID())
+	}
+	if !strings.Contains(v.View(), "read-only") {
+		t.Fatalf("the reason was not shown:\n%s", v.View())
+	}
+}
+
+// I6(b), spec §9: a name already bound to another address is shared only on
+// purpose. The first Enter warns; the second one goes through.
+func TestDuplicateNameWarnsBeforeItIsShared(t *testing.T) {
+	s := newTestSession(t)
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
+	s.usedFromFn = func(id string) string {
+		if id == "alice" {
+			return "192.168.1.40"
+		}
+		return ""
+	}
+	bound := ""
+	s.bindFn = func(id string, tm inbox.Terminal) error { bound = id; return nil }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.5"}})
+	v := s.NewView(1, "l")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	v.slashCommand("/chat")
+	v.input.SetValue("alice")
+	bindEnter(t, v)
+	if bound != "" || v.mode != modeName {
+		t.Fatalf("bound %q mode %v before the warning was acknowledged", bound, v.mode)
+	}
+	if !strings.Contains(v.View(), "alice is already used from 192.168.1.40; pick another or press Enter to share it") {
+		t.Fatalf("warning:\n%s", v.View())
+	}
+	// A different name warns afresh rather than inheriting the acknowledgement.
+	v.input.SetValue("bob")
+	bindEnter(t, v)
+	if bound != "bob" {
+		t.Fatalf("a free name should bind at once: %q", bound)
+	}
+	// And the same name entered twice is shared.
+	s.mu.Lock()
+	delete(s.ids, 1)
+	s.mu.Unlock()
+	v2 := s.NewView(1, "l")
+	v2.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	v2.slashCommand("/chat")
+	v2.input.SetValue("alice")
+	bindEnter(t, v2)
+	bindEnter(t, v2)
+	if bound != "alice" || v2.userID() != "alice" {
+		t.Fatalf("second Enter did not share the name: bound %q id %q", bound, v2.userID())
 	}
 }

@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
@@ -125,5 +127,56 @@ func TestOnlineCheckIsCachedAcrossRenders(t *testing.T) {
 	v.View()
 	if calls != 2 {
 		t.Fatalf("a new thread did not re-check: %d", calls)
+	}
+}
+
+// I3: the three new views' frames fit the terminal they are drawn for. A
+// footer wider than the row wraps and scrolls the whole frame; one shorter
+// than the row leaves whatever was underneath it half-painted.
+func TestNewViewsFitTheirFrameAt40x12(t *testing.T) {
+	s, v := dmSession(t, "alice")
+	inbox.Send(s.inboxDir, "bob", "alice", strings.Repeat("a long first line ", 10))
+	inbox.Send(s.inboxDir, "carol", "alice", "hi")
+	v.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	v.mentionBusy = "somebody-with-a-very-long-name"
+	for _, c := range []struct{ name, cmd string }{{"chat", "/chat"}, {"inbox", "/inbox"}, {"dm", "/dm bob"}} {
+		v.slashCommand(c.cmd)
+		out := v.View()
+		lines := strings.Split(out, "\n")
+		if len(lines) > 12 {
+			t.Fatalf("%s: %d lines on a 12-row terminal:\n%s", c.name, len(lines), out)
+		}
+		for i, l := range lines {
+			if w := lipgloss.Width(l); w > 40 {
+				t.Fatalf("%s: line %d is %d columns wide: %q", c.name, i, w, l)
+			}
+		}
+		if w := lipgloss.Width(lines[len(lines)-1]); w != 40 {
+			t.Fatalf("%s: footer is %d columns, not padded to the width: %q", c.name, w, lines[len(lines)-1])
+		}
+	}
+}
+
+// I3: the inbox is a viewport like the room's, so a long thread list cannot
+// push the input row and the footer off the bottom of the frame.
+func TestInboxWithManyThreadsKeepsTheInputRow(t *testing.T) {
+	s, v := dmSession(t, "alice")
+	for i := 0; i < 60; i++ {
+		if _, err := inbox.Send(s.inboxDir, fmt.Sprintf("user%02d", i), "alice", "hello"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	v.slashCommand("/inbox")
+	out := v.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) > 20 {
+		t.Fatalf("%d lines on a 20-row terminal", len(lines))
+	}
+	if !strings.Contains(out, "(>):") {
+		t.Fatalf("the input row is off the frame:\n%s", out)
+	}
+	if !strings.Contains(lines[len(lines)-1], "inbox ·") {
+		t.Fatalf("the footer is off the frame: %q", lines[len(lines)-1])
 	}
 }

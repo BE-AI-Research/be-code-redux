@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"io"
+	"os"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -172,6 +173,11 @@ func (s *Session) RunLocal(ctx context.Context) error {
 	s.mu.Lock()
 	s.rootCtx = ctx
 	s.mu.Unlock()
+	// The same identity and mailbox wiring a served session gets, before the
+	// view exists: without a roster this terminal has no address, so nothing
+	// could resolve a name for it and nothing could bind one — /chat, /inbox
+	// and /dm were unusable in an unhosted session.
+	s.wireLocalClient(ctx)
 	v := s.NewView(0, "local")
 	if s.cfg.ThemeTerminalColors {
 		v.termWrite(terminalColorSeq(v.st.Name()))
@@ -183,6 +189,21 @@ func (s *Session) RunLocal(ctx context.Context) error {
 	_, err := p.Run()
 	s.histFile.save()
 	return err
+}
+
+// wireLocalClient gives the in-process TUI the roster and the mailbox
+// watcher a served session gets from its host: a roster of exactly one
+// terminal — this process, on the loopback address, under whatever name its
+// own config gives it — and one inbox.Watch, so a DM sent from another
+// session on this machine reaches this one too.
+func (s *Session) wireLocalClient(ctx context.Context) {
+	s.SetClients([]live.ClientInfo{{
+		ID: 0, Label: "local", IP: "127.0.0.1",
+		Login: live.LoginName(), PID: os.Getpid(), User: s.cfg.Chat.Name,
+	}})
+	if s.cfg.Chat.Enabled && s.inboxDir != "" {
+		go inbox.Watch(ctx, s.inboxDir, 0, s.deliverDM)
+	}
 }
 
 // onClients is the single source of attach and detach: every program is

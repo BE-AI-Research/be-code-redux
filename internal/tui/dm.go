@@ -69,6 +69,11 @@ type dmState struct {
 	with    string
 	msgs    []inbox.Message
 	vp      viewport.Model
+	// listVP is the /inbox thread list. It is a viewport for the same reason
+	// the room and a thread are: a hundred correspondents rendered straight
+	// into the frame push the input row and the footer off the bottom of the
+	// terminal.
+	listVP viewport.Model
 	// online is the last answer to "is `with` attached anywhere", and when
 	// it was taken: View renders on the cursor blink, and reading every
 	// live record each frame is a disk scan for nothing.
@@ -87,14 +92,29 @@ func (m *View) withOnline() bool {
 	return m.dm.online
 }
 
-// reloadThreads is a genuine refresh from disk: called when this terminal
-// explicitly opens /inbox or /dm, or when a new message arrives for it. It
-// is deliberately not called by openThread (see below): the mailbox has one
-// global read watermark per user (spec §5.1), so re-deriving every thread's
-// unread count right after marking one of them read would silently clear an
-// older, still-unopened thread's badge along with it.
+// reloadThreads re-derives this terminal's thread list from the mailbox:
+// when it opens /inbox or /dm, when it opens or marks a thread read, when a
+// new message arrives for it, and once in NewView so the bottom-line badge
+// is right from the first frame. The read mark is per correspondent (spec
+// §5.1, amended), so a reload right after marking one thread read leaves
+// every other thread's badge exactly as the disk has it.
+//
+// This runs under the session lock, and may: it is a bounded read of local
+// files with no cross-process lock taken — unlike inbox.Bind, whose flock
+// waits on other hosts and is therefore driven from a tea.Cmd instead (see
+// handleNameKey).
 func (m *View) reloadThreads() {
 	m.dm.threads, _ = inbox.Threads(m.inboxDir, m.userID())
+}
+
+// noMailbox reports whether this session has no inbox directory — chat is on
+// but ~/.be-code/inbox could not be opened — saying so once when it has not.
+func (m *View) noMailbox() bool {
+	if m.inboxDir == "" {
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "DMs are unavailable: no inbox directory"})
+		return true
+	}
+	return false
 }
 
 // unreadDMs is the count on the bottom line.
@@ -107,22 +127,22 @@ func (m *View) unreadDMs() int {
 }
 
 func (m *View) enterInbox() (tea.Model, tea.Cmd) {
-	if !m.cfg.Chat.Enabled || m.inboxDir == "" {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "DMs are disabled (chat.enabled, or no inbox directory)"})
+	if m.chatOff() || m.noMailbox() {
 		return m, nil
 	}
 	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
 		m.reloadThreads()
 		m.dm.sel = 0
 		m.mode = modeInbox
+		m.clearSelection() // the transcript this mode covers is not selectable from here
 		m.input.Reset()
+		m.layoutInbox()
 		return m, nil
 	})
 }
 
 func (m *View) enterDM(with string) (tea.Model, tea.Cmd) {
-	if !m.cfg.Chat.Enabled || m.inboxDir == "" {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "DMs are disabled (chat.enabled, or no inbox directory)"})
+	if m.chatOff() || m.noMailbox() {
 		return m, nil
 	}
 	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
@@ -139,8 +159,9 @@ func (m *View) enterDM(with string) (tea.Model, tea.Cmd) {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "/dm: " + err.Error()})
 			return m, nil
 		}
-		m.openThread(id)
 		m.mode = modeDM
+		m.openThread(id)
+		m.clearSelection() // the transcript this mode covers is not selectable from here
 		m.input.Reset()
 		m.input.Placeholder = "message " + id + "… (/back to return)"
 		return m, nil
@@ -286,7 +307,31 @@ func (m *View) layoutDM() {
 	m.dm.vp.SetContent(strings.TrimRight(b.String(), "\n"))
 }
 
-func (m *View) viewInbox() string {
+// inboxHeaderRows is how many rows renderInbox puts above the first thread
+// (the title and the blank line under it), so a selected row can be found in
+// the viewport's own coordinates.
+const inboxHeaderRows = 2
+
+// layoutInbox sizes the thread list the same way layoutChat sizes the room —
+// everything above the input rows and the footer — and keeps the selected
+// row on screen.
+func (m *View) layoutInbox() {
+	h := m.height - m.inputRows() - 2
+	if h < 3 {
+		h = 3
+	}
+	m.dm.listVP.Width, m.dm.listVP.Height = m.width, h
+	m.dm.listVP.SetContent(m.renderInbox())
+	row := inboxHeaderRows + m.dm.sel
+	switch {
+	case row < m.dm.listVP.YOffset:
+		m.dm.listVP.SetYOffset(row)
+	case row >= m.dm.listVP.YOffset+h:
+		m.dm.listVP.SetYOffset(row - h + 1)
+	}
+}
+
+func (m *View) renderInbox() string {
 	var b strings.Builder
 	b.WriteString(m.st.ModalTi.Render("Inbox — "+m.userID()) + "\n\n")
 	if len(m.dm.threads) == 0 {
@@ -300,19 +345,36 @@ func (m *View) viewInbox() string {
 		if t.Unread > 0 {
 			dot = "●"
 		}
-		snippet := strings.SplitN(t.Latest.Text, "\n", 2)[0]
+		// Runes, not bytes: a snippet cut mid-rune renders as a replacement
+		// character, and one cut by byte count is the wrong length in any
+		// language that needs more than one byte a letter.
+		snippet := []rune(strings.SplitN(t.Latest.Text, "\n", 2)[0])
 		room := m.width - 30
-		if room > 0 && len(snippet) > room {
-			snippet = snippet[:room-1] + "…"
+		if room > 80 {
+			room = 80
 		}
-		b.WriteString(fmt.Sprintf("%s%s %-16s %s  %s\n", cur, dot, t.With, m.st.Dim.Render(t.Latest.TS.Format("15:04")), snippet))
+		if room < 0 {
+			room = 0
+		}
+		if len(snippet) > room {
+			if room == 0 {
+				snippet = nil
+			} else {
+				snippet = append(snippet[:room-1:room-1], '…')
+			}
+		}
+		b.WriteString(fmt.Sprintf("%s%s %-16s %s  %s\n", cur, dot, t.With, m.st.Dim.Render(t.Latest.TS.Format("15:04")), string(snippet)))
 	}
-	body := b.String()
-	footer := " inbox · Enter open · d mark read · Esc back"
-	if m.compact() {
-		footer = " inbox · Esc"
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *View) viewInbox() string {
+	m.layoutInbox()
+	footer := " inbox · Esc"
+	if !m.compact() {
+		footer = " inbox · Enter open · d mark read · Esc back"
 	}
-	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(footer)
+	return m.dm.listVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
 }
 
 func (m *View) viewDM() string {
@@ -342,8 +404,16 @@ func (m *View) viewDM() string {
 		name += " (not online)"
 	}
 	footer := " dm " + name + " · Esc back"
-	if !m.showContacts() {
-		footer += " · Tab next thread"
+	if m.compact() {
+		footer = " dm " + name + " · Esc"
 	}
-	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(footer)
+	if !m.showContacts() {
+		// The hint stays in compact layout: with the contact column hidden,
+		// Tab is the only way to reach another thread.
+		footer += " · Tab"
+		if !m.compact() {
+			footer += " next thread"
+		}
+	}
+	return body + "\n" + m.inputView() + "\n" + m.footerLine(footer)
 }

@@ -1,12 +1,21 @@
 package tui
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/inbox"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/tools"
+	"github.com/brown-enterprises/be-code/internal/ui"
 )
 
 // Task 7 review findings, fixed here. Each test names the finding it covers.
@@ -158,5 +167,101 @@ func TestMenuInterruptingChatReturnsToChat(t *testing.T) {
 	}
 	if v.input.Placeholder != want {
 		t.Fatalf("placeholder = %q, want %q", v.input.Placeholder, want)
+	}
+}
+
+// I2: a view that fell behind and had broadcasts dropped repairs its
+// transcript from the session's entries. Its copy of the room has to be
+// repaired the same way — nothing else ever tells it a chatMsg went missing,
+// so the hole would be permanent.
+func TestRebuildResyncsTheViewsRoomAfterADroppedBroadcast(t *testing.T) {
+	s := newTestSession(t)
+	v := s.NewView(1, "x")
+	v.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	s.mu.Lock()
+	s.ids[1] = identity{ID: "you"}
+	s.mu.Unlock()
+	v.slashCommand("/chat")
+	drainAll(t, v)
+	for i := 0; i < mailboxDepth+50; i++ {
+		s.Post("alice", fmt.Sprintf("line %d", i), "")
+	}
+	v.mb.mu.Lock()
+	lost := v.mb.lost
+	v.mb.mu.Unlock()
+	if !lost {
+		t.Fatal("the test never actually overflowed the mailbox")
+	}
+	flush(v)
+	want := s.Room()
+	if len(v.room) != len(want) {
+		t.Fatalf("view room has %d lines, the session's has %d", len(v.room), len(want))
+	}
+	for i := range want {
+		if v.room[i] != want[i] {
+			t.Fatalf("room[%d]: view %+v != session %+v", i, v.room[i], want[i])
+		}
+	}
+	if out := v.viewChat(); !strings.Contains(out, fmt.Sprintf("line %d", mailboxDepth+49)) {
+		t.Fatalf("the room on screen was not re-laid out:\n%s", out)
+	}
+}
+
+// M2: with chat switched off, all four commands say so in the same words —
+// and none of them asks an unnamed terminal who it is first.
+func TestChatDisabledSaysSoBeforeAskingForAName(t *testing.T) {
+	s := newTestSession(t)
+	s.cfg.Chat.Enabled = false
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.5"}})
+	v := s.NewView(1, "l")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	for _, cmd := range []string{"/chat", "/inbox", "/dm bob", "/whoami"} {
+		v.slashCommand(cmd)
+		if got := lastEntryText(s); got != "chat is disabled in config" {
+			t.Fatalf("%s said %q", cmd, got)
+		}
+		if v.mode == modeName {
+			t.Fatalf("%s asked for a name with chat disabled", cmd)
+		}
+	}
+}
+
+// M1: the four commands that take no argument run straight from the palette
+// rather than filling the input line; only /dm takes one.
+func TestChatSlashCommandArgs(t *testing.T) {
+	want := map[string]bool{"/chat": false, "/inbox": false, "/back": false, "/whoami": false, "/dm": true}
+	seen := 0
+	for _, c := range ui.SlashCommandTable {
+		if args, ok := want[c.Name]; ok {
+			seen++
+			if c.Args != args {
+				t.Errorf("%s: Args = %v, want %v", c.Name, c.Args, args)
+			}
+		}
+	}
+	if seen != len(want) {
+		t.Fatalf("found %d of %d commands in the table", seen, len(want))
+	}
+}
+
+// M8: a session with chat switched off creates no mailbox directory.
+func TestChatDisabledCreatesNoInboxDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cfg := config.Default()
+	cfg.RepoMap = false
+	cfg.Chat.Enabled = false
+	reg, err := tools.NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewSession(cfg, agent.New(cfg, nullProvider{}, "m", reg, ""), nullProvider{})
+	if s.inboxDir != "" {
+		t.Fatalf("inboxDir = %q with chat disabled", s.inboxDir)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".be-code", "inbox")); !os.IsNotExist(err) {
+		t.Fatalf("the mailbox directory was created anyway: %v", err)
 	}
 }

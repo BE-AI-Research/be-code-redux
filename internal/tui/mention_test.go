@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -165,4 +167,76 @@ func TestTypedQueueIsEchoedWhenAMentionStartsTheNextTurn(t *testing.T) {
 	if s.ag.Pending() != 1 {
 		t.Fatalf("the typed text should still be queued for the mention's turn: pending %d", s.ag.Pending())
 	}
+}
+
+// I1: a mention whose turn fails is answered in the room all the same, and
+// the request it enqueued into that run is taken back out of the queue —
+// left there it would be drained as ordinary text and answered in the
+// transcript alone, with nobody in the room any the wiser.
+func TestFailedMentionTurnSaysSoInTheRoomAndStartsTheNext(t *testing.T) {
+	s := newTestSession(t)
+	var starts []string
+	s.startTurnHook = func(text string) { starts = append(starts, text) }
+	s.Post("alice", "@agent one", "")
+	s.Post("bob", "@agent two", "")
+	s.mu.Lock()
+	s.finishTurnLocked(nil, errors.New("backend unreachable"))
+	s.mu.Unlock()
+	if !strings.Contains(roomText(s), "agent could not answer alice: backend unreachable") {
+		t.Fatalf("the room was never told:\n%s", roomText(s))
+	}
+	if len(starts) != 2 || !strings.Contains(starts[1], "@agent two") {
+		t.Fatalf("the queued mention did not start: %+v", starts)
+	}
+	// And the last one in the queue leaves nothing active behind.
+	s.mu.Lock()
+	s.finishTurnLocked(nil, errors.New("backend unreachable"))
+	active := s.mentionActive
+	s.mu.Unlock()
+	if active != nil {
+		t.Fatalf("mentionActive left set: %+v", active)
+	}
+}
+
+// I1, the mid-run case: the request went into the agent's queue and the run
+// was cancelled before it was delivered. It must not survive to be answered
+// as ordinary text later.
+func TestCancelledMidRunMentionDropsItsQueuedRequest(t *testing.T) {
+	s := newTestSession(t)
+	var starts []string
+	s.startTurnHook = func(text string) { starts = append(starts, text) }
+	s.mu.Lock()
+	s.setRunStateLocked(true, "thinking")
+	s.mu.Unlock()
+	s.Post("alice", "@agent status?", "")
+	if s.ag.Pending() != 1 {
+		t.Fatalf("setup: pending %d", s.ag.Pending())
+	}
+	s.mu.Lock()
+	s.finishTurnLocked(nil, context.Canceled)
+	s.mu.Unlock()
+	if s.ag.Pending() != 0 {
+		t.Fatalf("the mention's request is still queued: %+v", s.ag.PeekItems())
+	}
+	for _, text := range starts {
+		if strings.Contains(text, "Chat mention from alice") {
+			t.Fatalf("the cancelled request was run as ordinary text: %q", text)
+		}
+	}
+	if !strings.Contains(roomText(s), "agent could not answer alice: cancelled") {
+		t.Fatalf("the room was never told:\n%s", roomText(s))
+	}
+}
+
+// roomText is the session's room as a terminal would read it, one line per
+// room line, for a test that cares what was said rather than by whom.
+func roomText(s *Session) string {
+	var b strings.Builder
+	for _, l := range s.Room() {
+		b.WriteString(l.User)
+		b.WriteString(" ")
+		b.WriteString(l.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
 }

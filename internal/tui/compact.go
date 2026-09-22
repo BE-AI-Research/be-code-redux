@@ -123,6 +123,12 @@ func (m *View) compactBottomLine() string {
 	if len(m.clients) > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients)))
 	}
+	// The room's own cue, in the short form: a terminal small enough for this
+	// layout is the one most likely to be the second screen somebody is
+	// chatting from, and without it nothing on the frame says the room moved.
+	if m.chatUnseen > 0 && m.mode != modeChat {
+		line += m.st.Accent.Render(fmt.Sprintf(" · chat %d", m.chatUnseen))
+	}
 	return line
 }
 

@@ -201,3 +201,33 @@ func pump(prs ...*program) {
 		flush(pr.v)
 	}
 }
+
+// bindEnter presses Enter in the naming prompt and delivers the bind's own
+// message back, the way Bubble Tea delivers a command's result: the bind
+// itself runs off the session lock, so the prompt is resolved only once that
+// message arrives.
+func bindEnter(t *testing.T, v *View) {
+	t.Helper()
+	_, cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			if sub := c(); sub != nil {
+				if _, ok := sub.(nameBoundMsg); ok {
+					msg = sub
+					break
+				}
+			}
+		}
+	}
+	if _, ok := msg.(nameBoundMsg); !ok {
+		return
+	}
+	v.Update(msg)
+}

@@ -8,3 +8,4 @@
 
 # SSH credentials for the validation VM (never commit)
 .passfile
+.be-code/

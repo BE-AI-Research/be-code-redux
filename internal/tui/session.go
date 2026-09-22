@@ -115,10 +115,13 @@ type Session struct {
 	// disk at all — resolution then happens in memory only, through
 	// resolveFn/bindFn). resolveFn/bindFn are test seams for inbox.Resolve/
 	// inbox.Bind; nil means the real thing.
-	ids       map[int]identity
-	usersPath string
-	resolveFn func(inbox.Terminal) (inbox.Resolution, error)
-	bindFn    func(id string, tm inbox.Terminal) error
+	// usedFromFn is the seam for usedFrom, the spec §9 duplicate-name check
+	// (nil means reading usersPath).
+	ids        map[int]identity
+	usersPath  string
+	resolveFn  func(inbox.Terminal) (inbox.Resolution, error)
+	bindFn     func(id string, tm inbox.Terminal) error
+	usedFromFn func(id string) string
 	// inboxDir is ~/.be-code/inbox (dm.go): "" disables /inbox and /dm outright
 	// (a test session that wants no mailbox on disk at all — newTestSession
 	// clears it the same way it clears usersPath, and a DM test sets its own
@@ -197,8 +200,12 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 	if p, err := inbox.UsersPath(); err == nil {
 		s.usersPath = p
 	}
-	if d, err := inbox.Dir(); err == nil {
-		s.inboxDir = d
+	// Only when chat is on: inbox.Dir creates ~/.be-code/inbox, and a session
+	// that has the feature switched off should leave no trace of it on disk.
+	if cfg.Chat.Enabled {
+		if d, err := inbox.Dir(); err == nil {
+			s.inboxDir = d
+		}
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
@@ -911,19 +918,17 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 	}
 	s.appendEntryLocked(entry{Kind: entryPlain})
 	s.setRunStateLocked(false, "")
-	// A turn @agent started ends here: its answer (or, on error, nothing —
-	// the queue still moves on) is posted to the room once, only for a turn
-	// a mention actually started (finishMentionLocked is a no-op otherwise).
-	// This runs after the run state above, not right after flushLocked: a
-	// queued mention dequeued here must see s.running == false so it starts
-	// its own turn directly instead of being mistaken for one arriving mid
-	// another run and only enqueued for later delivery.
-	mentionStarted := false
-	if err == nil {
-		mentionStarted = s.finishMentionLocked(s.lastReply)
-	} else {
-		mentionStarted = s.finishMentionLocked("")
-	}
+	// A turn @agent started ends here: its answer — or, on error, a system
+	// line saying why there is none, and the withdrawal of the request it
+	// enqueued — is posted to the room once, only for a turn a mention
+	// actually started (finishMentionLocked is a no-op otherwise). This runs
+	// after the run state above, not right after flushLocked: a queued
+	// mention dequeued here must see s.running == false so it starts its own
+	// turn directly instead of being mistaken for one arriving mid another
+	// run and only enqueued for later delivery. And it runs before the
+	// leftover-queue drain below, which would otherwise pick up the failed
+	// mention's own request and run it as ordinary text.
+	mentionStarted := s.finishMentionLocked(s.lastReply, err)
 	// Anything queued during the run that the model never got to see becomes
 	// the next turn — as one request, but echoed line by line under the
 	// terminal each message came from. Skipped when a queued mention above

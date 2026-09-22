@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
@@ -21,6 +24,12 @@ func IsMention(text string) bool { return mentionRe.MatchString(text) }
 type mentionItem struct {
 	from string
 	line store.ChatLine
+	// req is the request text startMentionLocked built from this mention. It
+	// is kept because a mention delivered into a run in progress goes into the
+	// agent's queue, and a run that fails or is cancelled before delivery has
+	// to be able to find that entry again and take it back out (see
+	// finishMentionLocked).
+	req string
 }
 
 // mentionRequest is the text sent to the model for a mention by from, built
@@ -105,8 +114,9 @@ func (s *Session) unmarkQueuedLocked(item mentionItem) {
 // already sees. Reports whether it started a turn here and now, so a caller
 // chaining several mentions knows not to also start one of its own.
 func (s *Session) startMentionLocked(item mentionItem) bool {
-	s.mentionActive = &item
 	req := s.mentionRequest(item.from, item.line)
+	item.req = req
+	s.mentionActive = &item
 	s.broadcast(mentionBusyMsg(item.from))
 	if s.running {
 		s.ag.EnqueueFrom(req, 0) // lands after the current tool results
@@ -120,17 +130,31 @@ func (s *Session) startMentionLocked(item mentionItem) bool {
 // mentionBusyMsg names whose question the model is on ("" when none).
 type mentionBusyMsg string
 
-// finishMentionLocked runs from finishTurnLocked with the turn's answer:
-// posts it to the room (once, only for a turn a mention actually started —
-// mentionActive is nil otherwise, so a plain typed request posts nothing)
-// and starts the next queued mention, if any. It reports whether that
-// dequeue started a new turn, so finishTurnLocked's own leftover-queue
-// restart does not also start one on top of it.
-func (s *Session) finishMentionLocked(answer string) bool {
+// finishMentionLocked runs from finishTurnLocked with the turn's answer and
+// its error: posts the answer to the room (once, only for a turn a mention
+// actually started — mentionActive is nil otherwise, so a plain typed
+// request posts nothing) and starts the next queued mention, if any. It
+// reports whether that dequeue started a new turn, so finishTurnLocked's own
+// leftover-queue restart does not also start one on top of it.
+//
+// A turn that failed or was cancelled is still answered, with a system line
+// saying why: the room asked, and silence there is indistinguishable from a
+// model that is still thinking. Its request is taken back out of the agent's
+// queue too — a mention raised mid-run is enqueued for delivery inside that
+// run, and one still sitting there when the run ends would be drained as
+// ordinary text and answered in the transcript alone, with mentionActive
+// already cleared and nobody in the room told anything.
+func (s *Session) finishMentionLocked(answer string, err error) bool {
 	if s.mentionActive == nil {
 		return false
 	}
-	if answer != "" {
+	if err != nil {
+		active := *s.mentionActive
+		if active.req != "" {
+			s.ag.RemoveWhere(func(it agent.InboxItem) bool { return it.Text == active.req })
+		}
+		s.PostLocked("", "agent could not answer "+active.from+": "+mentionFailure(err), "")
+	} else if answer != "" {
 		// The room is a chat, not the transcript: a long reply is cut, with
 		// what follows the first line indented so it reads as one message.
 		lines := strings.Split(strings.TrimRight(answer, "\n"), "\n")
@@ -151,4 +175,22 @@ func (s *Session) finishMentionLocked(answer string) bool {
 		return s.startMentionLocked(next)
 	}
 	return false
+}
+
+// mentionFailure is the short reason a room line gives for a turn that
+// produced no answer. A cancellation is the user's own doing and says so;
+// anything else is the first line of the error, bounded so one backend's
+// JSON body cannot fill the room.
+func mentionFailure(err error) string {
+	if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+		return "cancelled"
+	}
+	msg := strings.TrimSpace(strings.SplitN(err.Error(), "\n", 2)[0])
+	if r := []rune(msg); len(r) > 120 {
+		msg = string(r[:119]) + "…"
+	}
+	if msg == "" {
+		return "no answer"
+	}
+	return msg
 }
