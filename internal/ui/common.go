@@ -74,7 +74,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/compact", "summarize older conversation now", false},
 	{"/handoff", "show the briefing carried over from a resumed session", false},
 	{"/map", "show the repo map", false},
-	{"/stats", "requests, tool calls, tokens", false},
+	{"/stats", "session metrics: context, model cost, tools, tasks", false},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},

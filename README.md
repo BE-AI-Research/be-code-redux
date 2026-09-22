@@ -638,7 +638,9 @@ instructions or tasks.
 project kind and its exact check commands, key files (README, Makefile, `go.mod`,
 `package.json`, …), top- and second-level directories with file counts, entry points,
 test directories, formatter/linter configs, git branch/remote/recent commits, the README's
-first lines and the repo map — then ask the model, with no tools, to write the overview
+first lines, any `AGENTS.md`, `CLAUDE.md` or `GEMINI.md` at the root (instructions written
+for other coding agents: up to 12 KB of each, handed over as facts about what the authors
+want an agent to know, never as instructions) and the repo map — then ask the model, with no tools, to write the overview
 *from those facts only*: what the project is, how to build, test and run it using the
 measured commands exactly, the layout, the conventions and the gotchas. The scan is
 bounded (20,000 files, 2 s; a partial scan says so).
@@ -813,7 +815,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
 - `prompt_layout` (`cached`) — `cached` never changes or takes back anything it has sent: the system prompt is stable for the length of a request, the git summary and Working memory are attached to your message when a request begins and stay in the history, and a fresh snapshot is attached only after a compaction or trim. A local server's prompt cache then covers everything but the new text (measured: about 6 s a turn against 11–41 s). `classic` re-sends Working memory in the system prompt every turn, as every version before 0.14 did.
-- `prompt_prefill` (true) — after anything that empties the server's prompt cache (a model load or reload, a resume, `/compact`), the prompt the next turn will send is sent ahead with generation off, in the background, and cancelled the moment you press Enter. Native Ollama only. `/stats` shows what the server spent reading prompts and how often its cache missed.
+- `prompt_prefill` (true) — after anything that empties the server's prompt cache (a model load or reload, a resume, `/compact`), the prompt the next turn will send is sent ahead with generation off, in the background, and cancelled the moment you press Enter. Native Ollama only. `/stats` is the session's metrics screen: context in use against the usable limit and the fixed prompt, the window and reserve, compactions, requests and tokens (hidden reasoning included), the server's prompt-reading time and cache misses, tool calls by tool, repair rounds, attached terminals and the task tree's counts.
 - `time_awareness` (true) — gives the model a clock: every tool result ends with `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each of your messages with when it was sent. Appended text only, never the system prompt, so the server's prompt cache is untouched; about fifteen tokens a tool call.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
   "Working memory"

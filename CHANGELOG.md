@@ -1,5 +1,26 @@
 # BE-Code Changelog
 
+## v0.14.5 — /init reads other agents' files; a real /stats screen; two small fixes
+
+- **`/init` reads `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`** at the workspace root, when
+  present, into the fact sheet (up to 12 KB of each, cut at a line) under "Instructions for
+  other agents" — framed as data about what the authors want an agent to know, never as
+  instructions, the same defence the notes themselves carry. They also count as key files the
+  overview may cite. `BECODE.md` is never read this way: it is what `/init` replaces.
+- **`/stats` is a metrics screen** rather than one line: context in use against the usable
+  limit and the fixed prompt, window and reply reserve, compactions; requests, tokens and
+  hidden reasoning, per-request averages, time in requests, the server's prompt-reading and
+  loading time and cache misses; tool calls by tool and verification repair rounds; how long
+  the session has run, the attached terminals, and the task tree's done/open/blocked counts
+  with the current step. Same block in both UIs.
+- **The "thinking (Nk chars of reasoning)" status counts this reply only.** Its counter was
+  made once at wiring and never reset, so it showed the session's total: 40k on a reply that
+  had thought for 4k. A new `Events.OnModelStart` fires before each model call.
+- **Approval hints say what `a` does:** `a auto-approve all shell commands this session` and
+  `a auto-approve all file changes this session` (it was `always-approve shell` / `stop asking
+  for writes`). `a` still applies to that one kind of request — a shell approval never turns
+  off file-write review, and the reverse.
+
 ## v0.14.4 — Windows: a timed-out command takes its children with it
 
 - On Linux a command that times out, is cancelled, or is stopped through the `process` tool

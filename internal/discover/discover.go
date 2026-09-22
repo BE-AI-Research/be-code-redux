@@ -58,13 +58,32 @@ type Facts struct {
 	// FilePaths are the discovered files, in walk order, bounded to
 	// maxNamedFiles: the spec's "every discovered file" for validation,
 	// without letting a huge repo blow up the names list.
-	FilePaths    []string
-	Git          GitState
-	ReadmeHead   string
+	FilePaths  []string
+	Git        GitState
+	ReadmeHead string
+	// AgentFiles are the instruction files other coding agents read
+	// (AGENTS.md, CLAUDE.md, GEMINI.md at the root): what the authors want
+	// an agent to know, so /init reads them as facts. Never BECODE.md,
+	// which is what /init is about to replace.
+	AgentFiles   []AgentFile
 	RepoMap      string
 	Files, Lines int
 	Truncated    bool
 }
+
+// AgentFile is one other agent's instruction file, capped at agentFileCap.
+type AgentFile struct {
+	Name      string
+	Content   string
+	Truncated bool
+}
+
+// agentFileNames are read in this order; the comparison ignores case.
+var agentFileNames = []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
+
+// agentFileCap bounds each one: a fact sheet is a prompt, and one project's
+// CLAUDE.md can be a small book.
+const agentFileCap = 12 * 1024
 
 var (
 	maxFiles  = 20000
@@ -188,6 +207,13 @@ func Scan(root string) (Facts, error) {
 	f.Tooling = append(f.Tooling, tomlTooling(root)...)
 	f.Git = gitState(root)
 	f.ReadmeHead = readmeHead(root)
+	f.AgentFiles = agentFiles(root)
+	for _, af := range f.AgentFiles {
+		if !containsStr(f.KeyFiles, af.Name) {
+			f.KeyFiles = append(f.KeyFiles, af.Name)
+		}
+	}
+	sort.Strings(f.KeyFiles)
 	f.RepoMap = repomap.Build(root, 8000)
 	return f, nil
 }
@@ -478,6 +504,38 @@ func readmeHead(root string) string {
 		}
 	}
 	return ""
+}
+
+// agentFiles reads the root's AGENTS.md, CLAUDE.md and GEMINI.md, whichever
+// exist, each cut at agentFileCap on a line boundary.
+func agentFiles(root string) []AgentFile {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []AgentFile
+	for _, want := range agentFileNames {
+		for _, e := range entries {
+			if e.IsDir() || !strings.EqualFold(e.Name(), want) {
+				continue
+			}
+			b, err := readCapped(filepath.Join(root, e.Name()))
+			if err != nil {
+				break
+			}
+			af := AgentFile{Name: e.Name(), Content: strings.TrimSpace(string(b))}
+			if len(af.Content) > agentFileCap {
+				cut := af.Content[:agentFileCap]
+				if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+					cut = cut[:i]
+				}
+				af.Content, af.Truncated = cut, true
+			}
+			out = append(out, af)
+			break
+		}
+	}
+	return out
 }
 
 func containsStr(list []string, s string) bool {

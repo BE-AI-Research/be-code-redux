@@ -375,3 +375,40 @@ func TestNotesFallbackFitsTheLimit(t *testing.T) {
 		t.Fatalf("untrimmed fallback:\n%s", whole)
 	}
 }
+
+// Other agents' instruction files are facts about the project too: a
+// CLAUDE.md, AGENTS.md or GEMINI.md written for another tool says what the
+// authors want an agent to know, so /init reads them into the fact sheet
+// (bounded, and never as instructions — the frame says so).
+func TestScanReadsOtherAgentsInstructionFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Agents\nRun `make check` before committing.\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude\nThe parser lives in internal/parse.\n"), 0o644)
+	big := "# Gemini\n" + strings.Repeat("line of guidance\n", 2000)
+	os.WriteFile(filepath.Join(dir, "GEMINI.md"), []byte(big), 0o644)
+	f, _ := Scan(dir)
+	if len(f.AgentFiles) != 3 || f.AgentFiles[0].Name != "AGENTS.md" || f.AgentFiles[1].Name != "CLAUDE.md" || f.AgentFiles[2].Name != "GEMINI.md" {
+		t.Fatalf("agent files: %+v", f.AgentFiles)
+	}
+	if !strings.Contains(f.AgentFiles[0].Content, "make check") {
+		t.Fatalf("AGENTS.md content lost: %q", f.AgentFiles[0].Content)
+	}
+	if g := f.AgentFiles[2]; len(g.Content) > agentFileCap+64 || !g.Truncated {
+		t.Fatalf("GEMINI.md should be capped at ~%d bytes and marked truncated: %d bytes, truncated=%v", agentFileCap, len(g.Content), g.Truncated)
+	}
+	md := f.Markdown()
+	for _, want := range []string{"## Instructions for other agents", "### AGENTS.md", "make check", "### CLAUDE.md", "internal/parse", "### GEMINI.md", "(truncated"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("fact sheet lacks %q:\n%s", want, md)
+		}
+	}
+	if !contains(f.KeyFiles, "AGENTS.md") || !contains(f.KeyFiles, "CLAUDE.md") {
+		t.Fatalf("agent files should be key files the model may cite: %v", f.KeyFiles)
+	}
+	// A project's own BECODE.md is what /init is about to replace, not a source.
+	os.WriteFile(filepath.Join(dir, "BECODE.md"), []byte("# old notes\n"), 0o644)
+	if f, _ := Scan(dir); len(f.AgentFiles) != 3 {
+		t.Fatalf("BECODE.md must not be read as another agent's file: %+v", f.AgentFiles)
+	}
+}
