@@ -43,7 +43,7 @@ type Terminal struct {
 // new.
 type Resolution struct {
 	ID      string
-	How     string // "config" | "ip" | "mac" | "asked" | ""
+	How     string // "config" | "ip" | "mac" | "" (Ask); "asked" is set by the caller after a prompt
 	Choices []string
 	Ask     bool
 }
@@ -159,6 +159,11 @@ func Bind(path, id string, t Terminal, mac string) error {
 // one ID bound to its IP, or a choice among several; else — and only then —
 // a MAC lookup for a device whose IP changed; else a prompt. lookupMAC may
 // be nil. A config name or a MAC match binds the IP on the way.
+//
+// The one case that returns both a Resolution and an error is a config name
+// that is not a valid ID: the error says why, for the person to read, and
+// Ask is true so the terminal is prompted as if it had no name. Every other
+// error comes with a zero Resolution.
 func Resolve(path string, t Terminal, lookupMAC func(ip string) string) (Resolution, error) {
 	if t.User != "" {
 		id, err := ValidID(t.User)
@@ -176,7 +181,11 @@ func Resolve(path string, t Terminal, lookupMAC func(ip string) string) (Resolut
 	}
 	switch ids := u.idsForIP(t.IP); len(ids) {
 	case 1:
-		_ = Bind(path, ids[0], t, "") // last_seen
+		// Only last_seen moves here; the ID is known whatever the disk
+		// says, so a failed touch is not worth refusing a name over. The
+		// MAC branch below is different: its Bind is what makes the new IP
+		// known next time, so its failure is returned.
+		_ = Bind(path, ids[0], t, "")
 		return Resolution{ID: ids[0], How: "ip"}, nil
 	case 0:
 	default:

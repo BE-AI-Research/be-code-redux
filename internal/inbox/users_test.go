@@ -95,3 +95,16 @@ func TestConcurrentBindsDoNotLoseEachOther(t *testing.T) {
 		t.Fatalf("%d users, %v", len(u.Users), err)
 	}
 }
+
+// A chat.name that is not a valid ID is reported *and* the terminal is asked:
+// the error is for the transcript, the Ask is what the caller acts on.
+func TestResolveInvalidConfigNameReportsAndAsks(t *testing.T) {
+	p := usersFile(t)
+	r, err := Resolve(p, Terminal{IP: "10.0.0.1", User: "agent"}, nil)
+	if err == nil || !r.Ask || r.ID != "" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if u, _ := Load(p); len(u.Users) != 0 {
+		t.Fatalf("a bad name was bound: %+v", u.Users)
+	}
+}
