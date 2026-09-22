@@ -149,7 +149,9 @@ of how many files it read and how long it took; the status line shows
 `consulting <name> · N files read` while one is in flight. Plain mode prints
 the same lines.
 
-A co-worker marked `"online": true` asks for consent once per session before
+A co-worker marked `"online": true` — or whose provider's address is off this machine and
+this network, which is treated as online with a startup warning whatever the entry says —
+asks for consent once per session before
 any code is sent to it — the TUI's `Co-working model — approval required`
 modal (`a` allows it for the rest of the session), or the same prompt in
 plain mode; `-y` allows it, and a headless run without `-y` declines with
@@ -838,7 +840,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
+v1.0.1 — co-working hardened: `online` corroborated against the provider's address, the advice sanitizer covers Qwen's XML tool calls, a co-worker panic is contained, and a co-worker budgets against its own window. v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
 after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
 for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or

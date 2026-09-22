@@ -5,6 +5,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -507,9 +509,17 @@ func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
 		case seen[cw.Name]:
 			warns = append(warns, fmt.Sprintf("coworker %q: duplicate name", cw.Name))
 		default:
-			if _, found := c.Providers[cw.Provider]; !found {
+			pc, found := c.Providers[cw.Provider]
+			if !found {
 				warns = append(warns, fmt.Sprintf("coworker %q: provider %q is not configured", cw.Name, cw.Provider))
 				continue
+			}
+			// The consent gate rests on Online, and a hand-set flag nothing
+			// checks is not a gate: a provider whose address is off this
+			// machine and this network is online whatever the entry says.
+			if !cw.Online && !LocalEndpoint(pc.BaseURL) {
+				warns = append(warns, fmt.Sprintf("coworker %q: provider %q is at %s, not local; treating it as online (set \"online\": true)", cw.Name, cw.Provider, pc.BaseURL))
+				cw.Online = true
 			}
 			seen[cw.Name] = true
 			ok = append(ok, cw)
@@ -541,4 +551,25 @@ func (pc ProviderConfig) APIKey() string {
 		return ""
 	}
 	return os.Getenv(pc.APIKeyEnv)
+}
+
+// LocalEndpoint reports whether a provider's base URL stays on this machine
+// or this network: loopback, link-local, RFC 1918, a bare host name, or a
+// unix socket. Anything else means a request carries the workspace off the
+// premises, which is what a co-worker's Online flag exists to gate.
+func LocalEndpoint(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || u.Host == "" {
+		return true // a unix socket, or nothing parseable: nothing leaves
+	}
+	host := strings.ToLower(u.Hostname())
+	switch {
+	case host == "localhost", strings.HasSuffix(host, ".local"), strings.HasSuffix(host, ".lan"), !strings.Contains(host, "."):
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false // a real DNS name
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
 }

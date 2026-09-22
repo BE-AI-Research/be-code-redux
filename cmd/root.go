@@ -237,18 +237,17 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		if err != nil {
 			return nil, "", err
 		}
-		secondaryLoad(c, rp, c.Reviewer.Model, ag)
+		secondaryLoad(context.Background(), c, rp, c.Reviewer.Model, ag)
 		return rp, c.Reviewer.Model, nil
 	}
 
 	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
-	agent.CoworkerFactory = func(c *config.Config, cw config.CoworkerConfig) (provider.Provider, error) {
+	agent.CoworkerFactory = func(ctx context.Context, c *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
 		cp, err := provider.FromConfig(c, cw.Provider)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		secondaryLoad(c, cp, cw.Model, ag)
-		return cp, nil
+		return cp, secondaryLoad(ctx, c, cp, cw.Model, ag), nil
 	}
 
 	if flagResume != "" {
@@ -712,16 +711,18 @@ func startupWarn(ag *agent.Agent, msg string) {
 // nobody asked. The loader has no approver here, which it reads as a refusal:
 // a secondary model is never worth reloading someone else's. It keeps the
 // window the server already holds and puts that on the wire.
-func secondaryLoad(c *config.Config, prov provider.Provider, model string, ag *agent.Agent) {
+func secondaryLoad(ctx context.Context, c *config.Config, prov provider.Provider, model string, ag *agent.Agent) int {
 	if _, ok := prov.(*provider.Ollama); !ok || model == "" {
-		return
+		return 0
 	}
 	l := loader.New(prov, c, nil, func(msg string) {
 		if ag == nil || !ag.Notice(msg) {
 			fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
 		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Bounded, but on the caller's context too, so Esc reaches the wait.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, _ = l.Apply(ctx, model)
+	n, _ := l.Apply(ctx, model)
+	return n
 }

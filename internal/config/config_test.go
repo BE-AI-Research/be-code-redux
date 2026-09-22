@@ -332,3 +332,37 @@ func TestChatConfigDefaults(t *testing.T) {
 		t.Fatalf("%+v", c.Chat)
 	}
 }
+
+// The consent gate is only as good as the Online flag, so the flag is
+// corroborated: a provider off this machine and network is online whatever
+// the entry says, with a warning; local and LAN addresses are left alone.
+func TestValidCoworkersForcesOnlineForARemoteProvider(t *testing.T) {
+	c := Default()
+	c.Providers["cloud"] = ProviderConfig{Type: "openai", BaseURL: "https://api.example.com/v1"}
+	c.Providers["lan"] = ProviderConfig{Type: "ollama", BaseURL: "http://192.168.1.150:11434/v1"}
+	c.Coworkers = []CoworkerConfig{
+		{Name: "far", Provider: "cloud", Model: "m"},
+		{Name: "near", Provider: "lan", Model: "m"},
+		{Name: "here", Provider: "ollama", Model: "m"},
+	}
+	ok, warns := c.ValidCoworkers()
+	if len(ok) != 3 || !ok[0].Online || ok[1].Online || ok[2].Online {
+		t.Fatalf("valid = %+v", ok)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], `coworker "far": provider "cloud" is at https://api.example.com/v1, not local`) {
+		t.Fatalf("warns = %q", warns)
+	}
+}
+
+func TestLocalEndpoint(t *testing.T) {
+	for _, local := range []string{"http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:1234/v1", "http://192.168.1.150:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.4:1/v1", "http://ollama-box:11434", "http://nas.local/v1", "unix:///tmp/x.sock", ""} {
+		if !LocalEndpoint(local) {
+			t.Errorf("%q should be local", local)
+		}
+	}
+	for _, remote := range []string{"https://api.anthropic.com/v1", "https://api.openai.com", "http://8.8.8.8/v1", "https://example.org:443/v1"} {
+		if LocalEndpoint(remote) {
+			t.Errorf("%q should be remote", remote)
+		}
+	}
+}

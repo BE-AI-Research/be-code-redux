@@ -221,7 +221,10 @@ type Agent struct {
 	consultCount  map[string]int
 	coworkAllowed map[string]bool
 	consultMu     sync.Mutex
-	coworkMu      sync.Mutex
+	// sharedServerNoted is the co-workers already warned about sharing the
+	// primary's server (noteSharedServer). Under coworkMu.
+	sharedServerNoted map[string]bool
+	coworkMu          sync.Mutex
 
 	// The harness's own consultation triggers (see autoConsult). These
 	// three are touched only on the agent goroutine — inside run,

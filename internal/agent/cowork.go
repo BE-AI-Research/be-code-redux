@@ -48,7 +48,7 @@ type ConsultResult struct {
 
 // CoworkerFactory builds a co-worker's provider. Injected by cmd, like
 // ReviewerFactory, so this package never imports the provider registry.
-var CoworkerFactory func(cfg *config.Config, cw config.CoworkerConfig) (provider.Provider, error)
+var CoworkerFactory func(ctx context.Context, cfg *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error)
 
 // ConsultFrame is the co-worker's system prompt. The project notes are
 // appended after it.
@@ -243,10 +243,19 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 	// A consultation that was attempted has been paid for, however it
 	// ends: a failing co-worker must not be retried without limit.
 	a.bumpConsult(cw.Name, counts)
-	cp, err := CoworkerFactory(a.Cfg, cw)
+	// On the caller's context: the factory may probe a backend's residency,
+	// and Esc must reach that wait. The window it resolves is the
+	// co-worker's own budget.
+	cp, window, err := CoworkerFactory(ctx, a.Cfg, cw)
 	if err != nil {
 		return res, fmt.Errorf("co-worker %s unavailable: %w", cw.Name, err)
 	}
+	if window <= 0 {
+		if mc, ok := a.Cfg.Models[cw.Model]; ok && mc.ContextWindow > 0 {
+			window = mc.ContextWindow
+		}
+	}
+	a.noteSharedServer(cw)
 
 	if a.Events.OnConsultStart != nil {
 		a.Events.OnConsultStart(cw.Name, req.Question, req.Origin)
@@ -259,6 +268,18 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 			a.Events.OnConsultEnd(res, err)
 		}
 	}()
+	// Registered after the one above, so it runs first: a panic in a
+	// co-worker's provider — the one wire format this process has never
+	// seen — becomes this consultation's error, never the session's end.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("co-worker %s failed: %v", cw.Name, r)
+		}
+	}()
+	// The co-worker's model may have displaced the primary's on a shared
+	// server; touching the primary's residency afterwards is cheap and
+	// shortens the next request's wait when it did.
+	defer a.refreshKeepAlive()
 
 	// A co-worker whose backend has stopped answering must not park the
 	// primary's run for the rest of the day. The deadline is the derived
@@ -271,7 +292,7 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 		defer cancel()
 	}
 
-	scratch := a.consultAgent(cp, cw, &res)
+	scratch := a.consultAgent(cp, cw, &res, window)
 	seed := a.buildConsultSeed(ctx, scratch.Tools, req)
 	answer, rerr := scratch.Run(ctx, seed)
 	a.addStats(scratch.usageTokens())
@@ -312,6 +333,28 @@ func (a *Agent) Consult(ctx context.Context, req ConsultRequest) (res ConsultRes
 // half-tags (a reply cut off mid-block) go too, so nothing is left to pair
 // with a later tag.
 func sanitizeAdvice(s string) string {
+	// Qwen's XML layout first (xmlcalls.go), whole calls then stray tags:
+	// the wrapper is optional there, so the tag loop below would miss a bare
+	// <function=shell>…</function>, and a primary shown one can echo it.
+	s = xmlCallRe.ReplaceAllString(s, "")
+	s = xmlParamRe.ReplaceAllString(s, "")
+	for _, tag := range []string{"<function=", "</function>", "<parameter=", "</parameter>"} {
+		for {
+			i := strings.Index(s, tag)
+			if i < 0 {
+				break
+			}
+			end := i + len(tag)
+			if strings.HasSuffix(tag, "=") {
+				if j := strings.IndexByte(s[i:], '>'); j >= 0 {
+					end = i + j + 1
+				} else {
+					end = len(s)
+				}
+			}
+			s = s[:i] + s[end:]
+		}
+	}
 	for _, name := range []string{"tool_call", "tool_result"} {
 		// The opener may carry attributes (<tool_result name=… status=…>
 		// is the harness's own wrapper), so match it by prefix.
@@ -429,7 +472,30 @@ func (a *Agent) RecentContext() string {
 // a pinned frame, and a turn cap from config. It shares nothing mutable
 // with the primary — a co-worker cannot touch the user's transcript,
 // session or checkpoints.
-func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res *ConsultResult) *Agent {
+// noteSharedServer says once when a co-worker runs another model on the
+// primary's own server: on a single box the load evicts the primary's model,
+// and the next request pays a reload plus a cold prompt read.
+func (a *Agent) noteSharedServer(cw config.CoworkerConfig) {
+	if a.Provider == nil || cw.Provider != a.Provider.Name() || cw.Model == a.Model {
+		return
+	}
+	a.coworkMu.Lock()
+	noted := a.sharedServerNoted[cw.Name]
+	if !noted {
+		if a.sharedServerNoted == nil {
+			a.sharedServerNoted = map[string]bool{}
+		}
+		a.sharedServerNoted[cw.Name] = true
+	}
+	a.coworkMu.Unlock()
+	if !noted {
+		a.notice("co-worker %s runs %s on the same server as %s; on one GPU each consultation may evict the primary's model and cost a reload", cw.Name, cw.Model, a.Model)
+	}
+}
+
+// consultAgent builds the scratch agent. window is the co-worker's own
+// context window when known (0 = unknown: the primary's budget stands in).
+func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res *ConsultResult, window int) *Agent {
 	readOnly := a.Tools.Subset("read_file", "list_dir", "search")
 	cfg := *a.Cfg
 	cfg.MaxTurns = a.Cfg.Cowork.ConsultTurns
@@ -490,6 +556,14 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 	scratch.History = NewHistory(sys, budget)
 	scratch.History.Reserve = reserve
 	scratch.History.CharsPerToken = charsPerToken
+	if window > 0 {
+		// Its own window, not the primary's (spec §2.3): a frontier model
+		// on the primary's 8k budget compacted after a handful of reads.
+		// The primary's context_tokens cap is the primary's, so the copy
+		// is cleared before ApplyWindow reads it.
+		scratch.Cfg.ContextTokens = 0
+		scratch.ApplyWindow(window)
+	}
 	return scratch
 }
 
