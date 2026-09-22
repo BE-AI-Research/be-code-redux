@@ -251,6 +251,24 @@ func (m *View) idleMode() mode {
 	return modeInput
 }
 
+// returnMode is where an ask, /menu or another popup that interrupted this
+// terminal closes back to. A terminal reading the room — chat, the inbox or
+// a DM — was not knocked out of it "back to idle": prevMode (set by whatever
+// raised the interruption, e.g. showAsk, openMenu) says what it was actually
+// doing, and that takes it back there instead. Anything else (prevMode still
+// its zero value, or a popup opened from the ordinary transcript) falls
+// through to idleMode(), unchanged. Consumed on read so a later, unrelated
+// close cannot replay a stale room mode.
+func (m *View) returnMode() mode {
+	switch m.prevMode {
+	case modeChat, modeInbox, modeDM:
+		pm := m.prevMode
+		m.prevMode = modeInput
+		return pm
+	}
+	return m.idleMode()
+}
+
 func (m *View) contextMenuBox() string {
 	p := m.picker
 	var b strings.Builder

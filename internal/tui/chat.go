@@ -22,6 +22,14 @@ const roomCap = 2000
 // chatMsg is one new room line, broadcast to every view.
 type chatMsg struct{ line store.ChatLine }
 
+// roomResetMsg tells every view the room was replaced wholesale — currently
+// only /clear, which starts a fresh session with an empty one. A view that
+// applied every chatMsg since it attached would already agree with the
+// session, but a broadcast makes that explicit and lets a terminal sitting
+// in modeChat re-render immediately instead of showing stale lines until its
+// next post or resize.
+type roomResetMsg struct{}
+
 // Post appends a line to the room and tells every terminal.
 func (s *Session) Post(user, text, kind string) {
 	s.mu.Lock()

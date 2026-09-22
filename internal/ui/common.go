@@ -121,6 +121,8 @@ var busySafe = map[string]bool{
 	// The room is never the model's own history: entering it, posting to it
 	// or leaving it never touches the turn in progress.
 	"/chat": true, "/back": true,
+	// /whoami only reads this terminal's resolved chat identity.
+	"/whoami": true,
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

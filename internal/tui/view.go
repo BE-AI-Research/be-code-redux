@@ -406,14 +406,25 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runStateMsg:
 		// A popup or a shared question this terminal has open keeps the
 		// frame; the mode underneath it changes instead, so closing the
-		// popup lands in whatever the session is doing by then.
+		// popup lands in whatever the session is doing by then. A terminal
+		// in the room (chat, the inbox or a DM) keeps its own placeholder
+		// throughout: a run starting or ending is not its business while it
+		// is looking at the room, and is not restored to the ordinary one
+		// either — there is nothing "ordinary" to go back to until it
+		// actually leaves.
+		inRoom := m.mode == modeChat || m.mode == modeInbox || m.mode == modeDM
 		if msg.running {
-			m.input.Placeholder = busyPlaceholder
+			if !inRoom {
+				m.input.Placeholder = busyPlaceholder
+			}
 			m.setIdleMode(modeBusy)
 			cmds = append(cmds, m.wheelTick())
 		} else {
 			if m.mode == modeQueue {
 				m.closeQueue()
+			}
+			if !inRoom {
+				m.input.Placeholder = inputPlaceholder
 			}
 			m.setIdleMode(modeInput)
 			m.input.Focus()
@@ -423,17 +434,29 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatMsg:
 		// The session already recorded it (Session.PostLocked); this is this
 		// view's own copy, kept the same way the transcript's rendered buffer
-		// is: appended here, capped the same as the session's room, and
-		// dropped into the unseen counter when this terminal is not looking.
+		// is: appended here, then capped by the identical rule PostLocked
+		// applies to its own room (marker line included) — not a plain
+		// slice-off — so this view's copy never drifts a line ahead of what
+		// was actually saved. Dropped into the unseen counter when this
+		// terminal is not looking.
 		m.room = append(m.room, msg.line)
 		if len(m.room) > roomCap {
-			m.room = m.room[len(m.room)-roomCap:]
+			m.room = append([]store.ChatLine{{TS: msg.line.TS, Text: "(older chat trimmed)"}}, m.room[len(m.room)-roomCap+1:]...)
 		}
 		if m.mode == modeChat {
 			m.layoutChat()
 			m.chatVP.GotoBottom()
 		} else if msg.line.Kind != "join" && msg.line.Kind != "leave" {
 			m.chatUnseen++
+		}
+	case roomResetMsg:
+		// /clear starts a fresh session with an empty room; every attached
+		// view's own copy follows, the same as the session's (see
+		// slashCommand's "/clear" case).
+		m.room = nil
+		m.chatUnseen = 0
+		if m.mode == modeChat {
+			m.layoutChat()
 		}
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
@@ -608,6 +631,14 @@ func noticeEntry(text string) entry {
 // detail and the item list are shared; the viewport scroll and the picker
 // cursor built here are this terminal's own.
 func (m *View) showAsk(a *ask) {
+	// Remember what this terminal was doing before the question knocked it
+	// off screen — chat, the inbox or a DM in particular — so closeAsk can
+	// put it back there (see returnMode). A picker ask displaced by a real
+	// one arrives here while m.mode is already modeAsk; that must not
+	// overwrite the mode recorded for the interruption that is still open.
+	if m.mode != modeAsk {
+		m.prevMode = m.mode
+	}
 	m.shownAsk = a
 	m.askShown = a.Gen
 	m.mode = modeAsk
@@ -634,7 +665,7 @@ func (m *View) showAsk(a *ask) {
 func (m *View) closeAsk() {
 	m.shownAsk = nil
 	m.picker = nil
-	m.mode = m.idleMode()
+	m.mode = m.returnMode()
 	m.input.Focus()
 }
 
@@ -674,7 +705,7 @@ func (m *View) renderLocalLines(lines []string) {
 func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	a := m.shownAsk
 	if a == nil {
-		m.mode = m.idleMode()
+		m.mode = m.returnMode()
 		m.picker = nil
 		return m, nil
 	}
@@ -1358,9 +1389,14 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
 			// The room is the session's too: a fresh session starts with an
-			// empty one, not the last session's chat carried over.
+			// empty one, not the last session's chat carried over — and
+			// every attached terminal's own copy follows, or a terminal
+			// sitting in modeChat would keep showing the old room forever
+			// (nothing else ever tells it the room changed out from under
+			// it).
 			sess.room = nil
 			sess.ag.UpdateSession(func(ss *store.Session) { ss.Chat = nil })
+			sess.broadcast(roomResetMsg{})
 			sess.appendEntryLocked(entry{Kind: entryOK, Text: "history cleared; new session started"})
 			sess.finishTurnLocked(nil, nil)
 			sess.mu.Unlock()

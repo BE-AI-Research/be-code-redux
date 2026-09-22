@@ -274,6 +274,13 @@ func (m *View) openMenu() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}}
+	// Remember what this terminal was doing before /menu took the screen —
+	// chat, the inbox or a DM in particular — so leaving the menu (Esc or a
+	// pick, both through handlePickerKey's returnMode()) puts it back there
+	// instead of dropping it out to the ordinary transcript.
+	if m.mode != modeMenu {
+		m.prevMode = m.mode
+	}
 	m.mode = modeMenu
 	return m, nil
 }
