@@ -261,6 +261,10 @@ type Agent struct {
 	// /clear or /resume swaps it from a goroutine of their own. It guards
 	// the pointer, never what it points at.
 	sessionMu sync.Mutex
+	// saveMu guards the session's *fields* while they are written and
+	// marshalled: autosave on the agent goroutine, UpdateSession from a UI.
+	// sessionMu guards only the pointer (above); this is the other half.
+	saveMu sync.Mutex
 	// turnMu is held for the whole of run(). It exists for exactly one
 	// caller outside the loop: the compaction resolveModel does when a
 	// model switch lands a window smaller than the conversation. That is
@@ -1369,6 +1373,8 @@ func (a *Agent) autosave(userInput string) {
 		}
 		return
 	}
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
 	a.Session.HostPID = os.Getpid()
 	if a.Session.Title == "" {
 		a.Session.Title = store.TitleFrom(userInput)

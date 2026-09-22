@@ -137,10 +137,19 @@ func sanitizeLabel(s string) string {
 	return label
 }
 
+// userIDOf keeps an empty config name empty — "" means "not set, offer or
+// ask" to the chat layer — and sanitizes one that is set, as it is shown.
+func userIDOf(u string) string {
+	if strings.TrimSpace(u) == "" {
+		return ""
+	}
+	return sanitizeLabel(u)
+}
+
 func newClient(hello Hello, conn net.Conn) *client {
 	return &client{
 		label: sanitizeLabel(hello.Label), cols: hello.Cols, rows: hello.Rows, utf8: hello.UTF8, conn: conn,
-		ip: hello.IP, login: hello.Login, pid: hello.PID, userID: sanitizeLabel(hello.User),
+		ip: hello.IP, login: hello.Login, pid: hello.PID, userID: userIDOf(hello.User),
 		wake:       make(chan struct{}, 1),
 		writerDone: make(chan struct{}),
 	}

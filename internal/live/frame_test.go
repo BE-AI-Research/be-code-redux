@@ -75,3 +75,16 @@ func TestClientInfoCarriesIdentity(t *testing.T) {
 		t.Fatalf("%+v", infos)
 	}
 }
+
+// An unset config name stays unset: "" is what tells the chat layer to offer
+// or ask. sanitizeLabel's "client" fallback is for labels, which must never
+// be blank on screen, and would have named every unnamed terminal "client".
+func TestAnUnsetUserStaysEmpty(t *testing.T) {
+	c := newClient(Hello{Label: "x"}, nil)
+	if c.userID != "" {
+		t.Fatalf("userID %q", c.userID)
+	}
+	if c := newClient(Hello{Label: "x", User: "alice"}, nil); c.userID != "alice" {
+		t.Fatalf("userID %q", c.userID)
+	}
+}
