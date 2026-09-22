@@ -88,7 +88,7 @@ func TestStatusLineOwnerSuffixes(t *testing.T) {
 		t.Fatalf("pinned: %q", got)
 	}
 	n.Dispatched, n.DispatchedAt, n.Calls = true, "3.2.1", 9
-	if got := statusLine(n); got != "3.2. port — todo @big running (at 3.2.1, 9 tool calls)" {
+	if got := statusLine(n); got != "3.2. port — todo @big! running (at 3.2.1, 9 tool calls)" {
 		t.Fatalf("running: %q", got)
 	}
 	start := time.Now().Add(-14 * time.Minute)

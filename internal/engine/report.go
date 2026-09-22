@@ -141,10 +141,10 @@ func rungText(n *Node, rung int) string {
 
 // statusLine is "<id>. <text> — <status>", with " by <owner>" when a
 // sub-agent closed the node, ": <reason>" for a blocked or dropped node
-// that gave one, " @owner" (and "!" when the operator pinned it, unless the
-// node is dispatched, when " running (at <id>, N tool calls)" takes its
-// place) on an open assigned node — the same phrasing the task document
-// itself uses, so a report never disagrees with the file it came from.
+// that gave one, " @owner" (and "!" when the operator pinned it) on an open
+// assigned node, and " running (at <id>, N tool calls)" while it is
+// dispatched — the same phrasing the task document itself uses, so a
+// report never disagrees with the file it came from.
 func statusLine(n *Node) string {
 	s := fmt.Sprintf("%s. %s — %s", n.ID, n.Text, n.Status)
 	if n.DoneBy != "" {
@@ -155,14 +155,15 @@ func statusLine(n *Node) string {
 	}
 	if n.Owner != "" && !n.Status.terminal() {
 		s += " @" + n.Owner
+		if n.OwnerPinned {
+			s += "!"
+		}
 		if n.Dispatched {
 			calls := "tool calls"
 			if n.Calls == 1 {
 				calls = "tool call"
 			}
 			s += fmt.Sprintf(" running (at %s, %d %s)", n.DispatchedAt, n.Calls, calls)
-		} else if n.OwnerPinned {
-			s += "!"
 		}
 	}
 	return s + spent(n)
