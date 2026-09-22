@@ -64,14 +64,3 @@ func (a *Agent) stampUser(text string) string {
 	}
 	return text + "\n\n[sent " + timeNow().Format("Mon 2 Jan 2006 15:04") + "]"
 }
-
-// PromptCostLine is the second line of /stats: what the server spent reading
-// prompts and loading the model, and how often its prompt cache missed. Empty
-// for a backend that does not report it.
-func PromptCostLine(s Stats) string {
-	if s.PromptTime == 0 && s.LoadTime == 0 {
-		return ""
-	}
-	return fmt.Sprintf("server: prompt_processing=%s model_loading=%s uncached_prompt_reads=%d of %d",
-		s.PromptTime.Round(100*time.Millisecond), s.LoadTime.Round(100*time.Millisecond), s.SlowReads, s.Requests)
-}

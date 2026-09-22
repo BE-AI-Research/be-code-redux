@@ -22,6 +22,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/ui"
@@ -1042,11 +1043,11 @@ func (m *View) viewAsk() string {
 		return body + "\n" + m.st.Dim.Render(hint)
 	}
 	title := "Shell command"
-	hint := "y approve · n deny · a always-approve shell · ↑↓ scroll"
+	hint := "y approve · n deny · a auto-approve all shell commands this session · ↑↓ scroll"
 	switch a.Action {
 	case "file_write":
 		title = "File change"
-		hint = "y approve · n deny · a stop asking for writes · ↑↓ scroll"
+		hint = "y approve · n deny · a auto-approve all file changes this session · ↑↓ scroll"
 	case "consult":
 		// Sending this workspace's code to an online model is a decision
 		// about a co-worker by name, not a class of action, so "a" says
@@ -1358,15 +1359,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.finishTurn(nil, nil)
 		}()
 	case "/stats":
-		s := m.ag.Usage()
-		budget, _, _ := m.ag.History.Scalars()
-		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf(
-			"requests=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d elapsed=%s ctx=%d/%d",
-			s.Requests, s.ToolCalls, s.PromptTokens, s.CompletionTokens,
-			s.Elapsed.Round(time.Second/10), m.ag.History.Tokens(), budget)})
-		if line := agent.PromptCostLine(s); line != "" {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: line})
+		var labels []string
+		for _, c := range m.clients {
+			labels = append(labels, live.LabelKey(c.Label))
 		}
+		m.appendEntryLocked(entry{Kind: entryPlain, Text: m.ag.StatsReport(labels)})
 	case "/map":
 		if mp := m.ag.RepoMap(); mp == "" {
 			m.appendEntryLocked(entry{Kind: entryDim, Text: "no repo map (unrecognized files or disabled)"})

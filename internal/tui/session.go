@@ -57,7 +57,12 @@ type Session struct {
 
 	running    bool // a run is in progress (a view's mode may be a popup)
 	statusNote string
-	usage      usageMsg // cached usage for the wheel and menu (see usageMsg)
+	// reasoningChars is the reasoning received for the reply in progress
+	// (reset at OnModelStart); reasoningShown is the count last put on the
+	// status line. statusHook sees every status for tests.
+	reasoningChars, reasoningShown int
+	statusHook                     func(string)
+	usage                          usageMsg // cached usage for the wheel and menu (see usageMsg)
 	// toast is the transient notice shown in yellow on the last transcript
 	// row until toastUntil; now is swappable for tests.
 	toast      string
@@ -212,16 +217,17 @@ func wireEvents(s *Session) {
 		OnToolEnd:   s.onToolEnd,
 		OnNotice:    s.notice,
 		OnTransient: s.transient,
-		OnReasoning: func() func(string) {
-			n, last := 0, 0
-			return func(t string) {
-				n += len(t)
-				if n-last >= 200 { // throttle status updates
-					last = n
-					s.setStatus(fmt.Sprintf("thinking (%dk chars of reasoning)", n/1000))
-				}
+		OnReasoning: func(t string) {
+			// This reply's reasoning only: the count starts over at
+			// OnModelStart, or a session that had thought for 40k chars
+			// showed 40k on a reply that had thought for 4k.
+			s.reasoningChars += len(t)
+			if s.reasoningChars-s.reasoningShown >= 200 { // throttle status updates
+				s.reasoningShown = s.reasoningChars
+				s.setStatus(fmt.Sprintf("thinking (%dk chars of reasoning)", s.reasoningChars/1000))
 			}
-		}(),
+		},
+		OnModelStart:      func() { s.reasoningChars, s.reasoningShown = 0, 0 },
 		OnConsultStart:    s.onConsultStart,
 		OnConsultProgress: s.onConsultProgress,
 		OnConsultEnd:      s.onConsultEnd,
@@ -644,6 +650,9 @@ func (s *Session) setStatus(note string) {
 		note = "thinking"
 	}
 	s.statusNote = note
+	if s.statusHook != nil {
+		s.statusHook(note)
+	}
 	s.broadcast(statusMsg(note))
 }
 

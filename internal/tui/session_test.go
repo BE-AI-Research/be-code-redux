@@ -163,3 +163,26 @@ func TestABroadcastIsNotOvertakenByTheUpdateDrain(t *testing.T) {
 		t.Fatalf("five rendered %d times, want once:\n%s", n, got)
 	}
 }
+
+// The "thinking (Nk chars of reasoning)" status counts the reply being
+// generated, not everything the model has ever thought this session: the
+// closure that counted it was made once and never reset, so by the tenth
+// call the status said 40k while the model had thought for 4k.
+func TestReasoningStatusCountsThisReplyOnly(t *testing.T) {
+	s := newTestSession(t)
+	var last string
+	s.statusHook = func(st string) { last = st }
+	// Reasoning arrives in deltas; each one counts, and the total is the reply's.
+	think := func(chars int) {
+		s.ag.Events.OnModelStart()
+		s.ag.Events.OnReasoning(strings.Repeat("x", chars))
+	}
+	think(3000)
+	if !strings.Contains(last, "3k chars") {
+		t.Fatalf("first reply: %q", last)
+	}
+	think(1500)
+	if !strings.Contains(last, "1k chars") {
+		t.Fatalf("second reply should start from zero, got %q", last)
+	}
+}

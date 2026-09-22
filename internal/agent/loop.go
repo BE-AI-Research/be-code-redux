@@ -36,6 +36,9 @@ type Events struct {
 	// keeping in the transcript. When nil they arrive through OnNotice.
 	OnTransient func(msg string)
 	OnReasoning func(text string) // hidden model reasoning deltas (thinking models)
+	// OnModelStart fires before each model call, so a UI can start
+	// per-reply counters (the reasoning status) from zero.
+	OnModelStart func()
 	// Co-working (see cowork.go): a consultation starting, the co-worker
 	// reading files, and its result. All optional.
 	OnConsultStart    func(name, question, origin string)
@@ -56,6 +59,13 @@ type Stats struct {
 	PromptTime time.Duration
 	LoadTime   time.Duration
 	SlowReads  int
+	// ReasoningChars is hidden reasoning received across the session;
+	// Compactions and Repairs count model-written compactions and
+	// verification repair rounds; ToolsByName counts calls per tool.
+	ReasoningChars int
+	Compactions    int
+	Repairs        int
+	ToolsByName    map[string]int
 }
 
 // slowPromptRead is the prompt-processing time past which a request is
@@ -72,6 +82,15 @@ func (s *Stats) add(d Stats) {
 	s.PromptTime += d.PromptTime
 	s.LoadTime += d.LoadTime
 	s.SlowReads += d.SlowReads
+	s.ReasoningChars += d.ReasoningChars
+	s.Compactions += d.Compactions
+	s.Repairs += d.Repairs
+	for k, v := range d.ToolsByName {
+		if s.ToolsByName == nil {
+			s.ToolsByName = map[string]int{}
+		}
+		s.ToolsByName[k] += v
+	}
 }
 
 // Agent binds a provider, tool registry, and conversation history.
@@ -222,6 +241,8 @@ type Agent struct {
 	// sentPrint is the conversation as last sent, one hash a message
 	// (markSent): how a rewrite of what the server has cached is noticed.
 	sentPrint []uint64
+	// started is when this agent was built, for the stats report.
+	started time.Time
 	// effortLowered: the reasoning level has stepped down in this
 	// compaction cycle and stays down until a rewrite (steadyEffort).
 	effortLowered bool
@@ -263,6 +284,7 @@ func New(cfg *config.Config, p provider.Provider, model string, reg *tools.Regis
 		Cfg:          cfg,
 		Provider:     p,
 		Model:        model,
+		started:      time.Now(),
 		Tools:        reg,
 		projectNotes: TrimProjectNotes(projectNotes),
 	}
@@ -809,7 +831,11 @@ func (a *Agent) CompactNow(ctx context.Context) error {
 	defer a.StartPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
-	return a.Compact(ctx)
+	err := a.Compact(ctx)
+	if err == nil {
+		a.addStats(Stats{Compactions: 1})
+	}
+	return err
 }
 
 // modelLoader is the loader as the agent goroutine reads it (checkBackend).
@@ -1384,7 +1410,7 @@ func (a *Agent) runEmbeddedCalls(ctx context.Context, rawContent, _ string, call
 }
 
 func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Result {
-	a.addStats(Stats{ToolCalls: 1})
+	a.addStats(Stats{ToolCalls: 1, ToolsByName: map[string]int{call.Name: 1}})
 	switch call.Name {
 	case "write_file", "edit_file":
 		a.reqTouched, a.repoDirty = true, true
@@ -1526,6 +1552,9 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 			}
 		}()
 	}
+	if a.Events.OnModelStart != nil {
+		a.Events.OnModelStart()
+	}
 	onDelta, onReasoning, stopWatch := a.watchForStall(onDelta, a.Events.OnReasoning)
 	req.OnReasoning = onReasoning
 	resp, err := a.Provider.Chat(ctx, req, onDelta)
@@ -1539,7 +1568,7 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if a.Profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
-	used := Stats{Requests: 1, PromptTime: resp.Usage.PromptDuration, LoadTime: resp.Usage.LoadDuration}
+	used := Stats{Requests: 1, PromptTime: resp.Usage.PromptDuration, LoadTime: resp.Usage.LoadDuration, ReasoningChars: len(resp.Reasoning)}
 	if d := resp.Usage.PromptDuration; d >= slowPromptRead {
 		// A status line, not a transcript entry: it is a fact about the
 		// server's cache, worth seeing while it happens and in /stats after.
@@ -1587,6 +1616,7 @@ func (a *Agent) maybeCompact(ctx context.Context) {
 		a.notice("compaction failed (%v); falling back to trimming", err)
 		return
 	}
+	a.addStats(Stats{Compactions: 1})
 	a.transient("compacted to %d tokens (target %d)", h.Tokens(), h.Target())
 }
 
@@ -1904,6 +1934,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 				repairPrompt := fmt.Sprintf(
 					"Verification failed. Fix ONLY these failures, then stop.\n\n%s\n\nRules: read the failing files before editing; make the smallest fix that makes the checks pass; do not refactor unrelated code.",
 					rep.Verify.ModelSummary())
+				a.addStats(Stats{Repairs: 1})
 				answer, err = a.run(ctx, repairPrompt, false)
 				if err != nil {
 					return "", rep, err
@@ -1976,7 +2007,14 @@ func (a *Agent) addStats(d Stats) {
 func (a *Agent) Usage() Stats {
 	a.statsMu.Lock()
 	defer a.statsMu.Unlock()
-	return a.Stats
+	u := a.Stats
+	if u.ToolsByName != nil {
+		u.ToolsByName = make(map[string]int, len(a.Stats.ToolsByName))
+		for k, v := range a.Stats.ToolsByName {
+			u.ToolsByName[k] = v
+		}
+	}
+	return u
 }
 
 // usageTokens is what a scratch agent (plan, consultation) hands back to
