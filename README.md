@@ -791,6 +791,9 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   terminals as before, and also (without needing `--ide`) to a running Visual Studio whose
   advertised workspace covers the current one — a covering VS Code lock never auto-attaches
   outside its own terminal.
+- `chat.enabled` (true) — `/chat`, `/inbox` and `/dm`; `chat.mention_context` (10) — room lines
+  sent with an `@agent` mention; `chat.name` — this device's user ID for chat and DMs (unset:
+  the host offers the IDs seen from your IP, or asks once).
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for
