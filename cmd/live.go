@@ -143,7 +143,7 @@ func runSessionHost(code string) error {
 		}
 	}()
 
-	err = s.RunServed(context.Background(), h)
+	err = s.RunServed(context.Background(), h, rec, dir)
 	// Order matters: the resume line goes to every attached terminal, so it
 	// has to be written before Close says goodbye to them. Two details make
 	// it actually readable there: every client is in raw mode with its own

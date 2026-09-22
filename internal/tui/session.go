@@ -114,6 +114,13 @@ type Session struct {
 	usersPath string
 	resolveFn func(inbox.Terminal) (inbox.Resolution, error)
 	bindFn    func(id string, tm inbox.Terminal) error
+	// inboxDir is ~/.be-code/inbox (dm.go): "" disables /inbox and /dm outright
+	// (a test session that wants no mailbox on disk at all — newTestSession
+	// clears it the same way it clears usersPath, and a DM test sets its own
+	// temp dir). onlineFn is the test seam for online (nil means the real
+	// live-registry scan).
+	inboxDir string
+	onlineFn func(id string) bool
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -184,6 +191,9 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 	}
 	if p, err := inbox.UsersPath(); err == nil {
 		s.usersPath = p
+	}
+	if d, err := inbox.Dir(); err == nil {
+		s.inboxDir = d
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
@@ -323,6 +333,15 @@ func (s *Session) NewView(id int, label string) *View {
 	// is, the same reason v.streaming is seeded below: a chatMsg broadcast
 	// only carries what changes from here.
 	v.room = append([]store.ChatLine(nil), s.room...)
+	// A terminal that already knows who it is starts with its DM unread
+	// count populated too, so the bottom-line badge is accurate from the
+	// first frame it draws rather than only after /inbox has been opened
+	// once. Production always resolves identity in SetClients before this
+	// runs (see runner.onClients); a test that sets s.ids directly gets the
+	// same treatment.
+	if s.inboxDir != "" && s.ids[id].ID != "" {
+		v.reloadThreads()
+	}
 	// A terminal that attaches in the middle of a reply starts from what has
 	// streamed so far, not from the next delta — and is attached before mu
 	// is released, or a delta broadcast in that gap would reach neither the
@@ -685,6 +704,13 @@ func (s *Session) notice(text string) {
 func (s *Session) transient(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.toastLocked(text)
+}
+
+// toastLocked is transient for a caller that already holds mu (deliverDM,
+// raised from the inbox watcher's own goroutine while mu is held for the
+// whole callback).
+func (s *Session) toastLocked(text string) {
 	s.toast, s.toastUntil = text, s.now().Add(toastFor)
 	s.broadcast(transientMsg(text))
 }

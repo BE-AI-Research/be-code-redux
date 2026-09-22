@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
+	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 )
 
@@ -94,6 +95,13 @@ type runner struct {
 	early    map[int][]tea.Msg // keys that arrived before the program started
 	quit     chan struct{}
 	quitOnce sync.Once
+	// rec/recDir are this host's own live record and the directory it lives
+	// in: nil/"" outside a served run (RunLocal, or a test runner built by
+	// hand), in which case the roster's chat IDs are never advertised. Every
+	// roster change rewrites rec.Users so another host can tell whether a
+	// DM's recipient is attached here (live.Record.WithUsers).
+	rec    *live.Record
+	recDir string
 	// stopping counts the stops running on goroutines of their own (a
 	// detached client's program, which onClients has already taken out of
 	// programs). RunServed waits on it, or it could return — and let the
@@ -113,10 +121,17 @@ type runner struct {
 // them and sizes arriving per client. It returns when the session has quit
 // and no program is left running — the invariant the closing lines in
 // cmd/live.go depend on, since nothing may render over them.
-func (s *Session) RunServed(ctx context.Context, h *live.Host) error {
+//
+// rec and recDir are this host's own live record and the directory it lives
+// in (cmd/live.go's runSessionHost has already loaded and saved rec once
+// before calling this): nil/"" skips advertising attached chat IDs
+// altogether, which every existing caller other than runSessionHost does by
+// passing nil.
+func (s *Session) RunServed(ctx context.Context, h *live.Host, rec *live.Record, recDir string) error {
 	defer pinColorProfile()()
 
-	r := &runner{s: s, h: h, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{})}
+	r := &runner{s: s, h: h, programs: map[int]*program{}, early: map[int][]tea.Msg{}, quit: make(chan struct{}),
+		rec: rec, recDir: recDir}
 	pump := live.NewKeyPump("xterm-256color", r.route)
 	defer pump.Close()
 
@@ -132,6 +147,14 @@ func (s *Session) RunServed(ctx context.Context, h *live.Host) error {
 	h.OnQuit(s.Quit)
 	h.OnInput(pump.Feed)
 	r.onClients(h.Clients()) // clients that attached before this call
+
+	if s.cfg.Chat.Enabled && s.inboxDir != "" {
+		// One watcher for the whole run, on this host's own goroutine: a new
+		// DM for an ID this host has attached is a toast plus an inboxMsg
+		// broadcast (deliverDM); a message for anyone else is silently
+		// ignored (another host owns them, or nobody does yet).
+		go inbox.Watch(ctx, s.inboxDir, 0, s.deliverDM)
+	}
 
 	if s.cfg.LiveIdleLimit > 0 {
 		go r.idleLoop()
@@ -167,6 +190,21 @@ func (s *Session) RunLocal(ctx context.Context) error {
 // never drift from the set of terminals.
 func (r *runner) onClients(infos []live.ClientInfo) {
 	r.s.SetClients(infos)
+	if r.rec != nil {
+		// Off r.mu and on a goroutine of its own: a slow disk write must
+		// never hold up the roster bookkeeping below, and Save touches
+		// nothing SetClients or the agent goroutine reads under s.mu either.
+		// SetClients has already resolved identity for every new client by
+		// the time it returns, so this sees each one's ID if it has one yet.
+		ids := make([]string, 0, len(infos))
+		for _, c := range infos {
+			if id := r.s.identityOf(c.ID).ID; id != "" {
+				ids = append(ids, id)
+			}
+		}
+		rec, dir := r.rec, r.recDir
+		go func() { _ = rec.WithUsers(ids).Save(dir) }()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// A session on its way out starts nothing new: a program born after

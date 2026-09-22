@@ -30,12 +30,13 @@ func newTestSession(t *testing.T, prep ...func(*agent.Agent)) *Session {
 	}
 	s := NewSession(cfg, ag, nullProvider{})
 	s.rootCtx = context.Background()
-	// NewSession points usersPath at the real ~/.be-code/users.json (under
-	// TestMain's throwaway HOME, so this never reaches the developer's own
-	// dotdir either way); a test session gets none at all, so identity
-	// resolution never touches disk unless the test wires resolveFn/bindFn
-	// itself to simulate it.
+	// NewSession points usersPath and inboxDir at the real ~/.be-code/users.json
+	// and ~/.be-code/inbox (under TestMain's throwaway HOME, so this never
+	// reaches the developer's own dotdir either way); a test session gets
+	// neither, so identity resolution and the mailbox never touch disk
+	// unless a test wires resolveFn/bindFn or sets its own temp inboxDir.
 	s.usersPath = ""
+	s.inboxDir = ""
 	return s
 }
 

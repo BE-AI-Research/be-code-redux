@@ -217,6 +217,14 @@ type View struct {
 	joinedChat  bool
 	mentionBusy string
 
+	// dm (dm.go, modeInbox/modeDM) is this terminal's own view of its DM
+	// threads: which ones exist, which is open, and that thread's own
+	// viewport. Unlike room it is never seeded from the session — the
+	// mailbox is machine-wide, not session-wide, so there is nothing shared
+	// to seed from — it is loaded from disk the first time this terminal
+	// opens /inbox or /dm (see reloadThreads).
+	dm dmState
+
 	// The naming prompt (identity.go, modeName): afterName is what needName
 	// resumes once a name is bound (entering the room, the inbox or a DM
 	// thread); nameChoices are the IDs already bound to this address, offered
@@ -307,6 +315,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			if m.mode == modeChat {
 				m.layoutChat()
+			}
+			if m.mode == modeDM {
+				m.layoutDM()
 			}
 		}
 		m.ready = true
@@ -458,6 +469,17 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			m.layoutChat()
 		}
+	case inboxMsg:
+		// deliverDM broadcasts to every attached view once any of them owns
+		// the recipient; each view still has to check for itself, since a
+		// served session may have several terminals attached under
+		// different chat identities at once (see TestAnArrivingDMPingsTheOwnerOnly).
+		if msg.m.To == m.userID() {
+			m.reloadThreads()
+			if m.mode == modeDM && m.dm.with == msg.m.From {
+				m.openThread(m.dm.with)
+			}
+		}
 	case clientsMsg:
 		// The shared half of a roster change is the session's (SetClients)
 		// and the programs are the runner's; all this view has to do is draw
@@ -510,6 +532,10 @@ func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQueueKey(k)
 	case modeChat:
 		return m.handleChatKey(k)
+	case modeInbox:
+		return m.handleInboxKey(k)
+	case modeDM:
+		return m.handleDMKey(k)
 	case modeName:
 		return m.handleNameKey(k)
 	case modeBusy:
@@ -984,6 +1010,10 @@ func (m *View) View() string {
 		return m.viewMenu()
 	case modeChat:
 		return m.viewChat()
+	case modeInbox:
+		return m.viewInbox()
+	case modeDM:
+		return m.viewDM()
 	case modeName:
 		return m.viewName()
 	}
@@ -1085,6 +1115,9 @@ func (m *View) bottomLine() string {
 	}
 	if m.chatUnseen > 0 && m.mode != modeChat {
 		line += m.st.Accent.Render(fmt.Sprintf(" · chat (%d new)", m.chatUnseen))
+	}
+	if n := m.unreadDMs(); n > 0 {
+		line += m.st.Accent.Render(fmt.Sprintf(" · inbox (%d)", n))
 	}
 	if m.sel != nil {
 		line += m.st.Dim.Render(" · selection: Ctrl+C copy · right-click menu · Esc clear")
@@ -1336,6 +1369,10 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 		return m.openMenu()
 	case "/chat":
 		return m.enterChat()
+	case "/inbox":
+		return m.enterInbox()
+	case "/dm":
+		return m.enterDM(strings.TrimSpace(strings.TrimPrefix(text, fields[0])))
 	case "/back":
 		if m.mode == modeChat || m.mode == modeInbox || m.mode == modeDM {
 			return m.leaveMode()

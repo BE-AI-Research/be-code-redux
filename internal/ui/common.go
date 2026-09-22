@@ -88,6 +88,8 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/clients", "list terminals attached to this session", false},
 	{"/detach", "detach this terminal (the session keeps running)", false},
 	{"/chat", "the session's chat room (@agent to ask the model)", true},
+	{"/inbox", "your DMs from every session on this machine", true},
+	{"/dm", "message a person directly: /dm [name]", true},
 	{"/back", "return to the transcript", true},
 	{"/whoami", "your chat name and how it was decided", true},
 	{"/clear", "start a fresh session", false},
@@ -121,6 +123,9 @@ var busySafe = map[string]bool{
 	// The room is never the model's own history: entering it, posting to it
 	// or leaving it never touches the turn in progress.
 	"/chat": true, "/back": true,
+	// Same reasoning for the mailbox: it is machine-wide, not the running
+	// turn's, and a DM never reaches the model either way.
+	"/inbox": true, "/dm": true,
 	// /whoami only reads this terminal's resolved chat identity.
 	"/whoami": true,
 }
