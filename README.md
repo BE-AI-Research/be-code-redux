@@ -822,6 +822,13 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   max_consults_per_run` (3), `cowork.consult_turns` (12) and
   `cowork.consult_timeout` (300, seconds one consultation may take) tune when
   and how much; see "Co-working models"
+- `coworkers[].sub_agent` (false) — the co-worker may own a step of the task tree
+  (see "Sub-agents"); `coworkers[].max_scope` (`[]`, whole workspace) — the widest
+  set of workspace paths it may ever be given as a scope
+- `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
+  `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
+  `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an
+  answer before the step is marked blocked
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;

@@ -354,6 +354,47 @@ func TestValidCoworkersForcesOnlineForARemoteProvider(t *testing.T) {
 	}
 }
 
+func TestSubAgentsDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.SubAgents.MaxConcurrent != 2 || cfg.SubAgents.MaxTurns != 40 || cfg.SubAgents.AskTimeout != 600 {
+		t.Fatalf("defaults: %+v", cfg.SubAgents)
+	}
+	cfg.SubAgents = SubAgentsConfig{}
+	cfg.rescueZeroValues()
+	if cfg.SubAgents.MaxConcurrent != 2 || cfg.SubAgents.MaxTurns != 40 || cfg.SubAgents.AskTimeout != 600 {
+		t.Fatalf("zero values not rescued: %+v", cfg.SubAgents)
+	}
+	cfg.SubAgents.MaxConcurrent = -3
+	cfg.rescueZeroValues()
+	if cfg.SubAgents.MaxConcurrent != 1 {
+		t.Fatalf("max_concurrent below 1 must be 1, got %d", cfg.SubAgents.MaxConcurrent)
+	}
+}
+
+func TestValidCoworkersCleansMaxScope(t *testing.T) {
+	cfg := Default()
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "big", Provider: "ollama", Model: "m", SubAgent: true,
+			MaxScope: []string{"docs/", "./internal/scan", "../secrets", "/etc"}},
+	}
+	cws, warns := cfg.ValidCoworkers()
+	if len(cws) != 1 {
+		t.Fatalf("want one co-worker, got %d (%v)", len(cws), warns)
+	}
+	got := cws[0].MaxScope
+	if len(got) != 2 || got[0] != "docs" || got[1] != "internal/scan" {
+		t.Fatalf("max_scope cleaned wrong: %q", got)
+	}
+	if len(warns) != 2 {
+		t.Fatalf("want two warnings for the escaping entries, got %q", warns)
+	}
+	for _, w := range warns {
+		if !strings.Contains(w, "escapes the workspace") {
+			t.Fatalf("warning text: %q", w)
+		}
+	}
+}
+
 func TestLocalEndpoint(t *testing.T) {
 	for _, local := range []string{"http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:1234/v1", "http://192.168.1.150:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.4:1/v1", "http://ollama-box:11434", "http://nas.local/v1", "unix:///tmp/x.sock", ""} {
 		if !LocalEndpoint(local) {

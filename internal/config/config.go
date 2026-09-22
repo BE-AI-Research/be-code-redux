@@ -32,6 +32,20 @@ type CoworkerConfig struct {
 	Model    string `json:"model"`
 	Skills   string `json:"skills,omitempty"`
 	Online   bool   `json:"online,omitempty"`
+	// SubAgent makes the co-worker assignable to a step of the task tree
+	// (spec 2026-09-22 §1.4). MaxScope is the widest set of workspace paths
+	// it may ever be given; empty means the whole workspace.
+	SubAgent bool     `json:"sub_agent,omitempty"`
+	MaxScope []string `json:"max_scope,omitempty"`
+}
+
+// SubAgentsConfig tunes sub-agent dispatch: how many run at once across
+// every server, how many turns one gets, and how long an ask_main waits.
+type SubAgentsConfig struct {
+	MaxConcurrent int `json:"max_concurrent"`
+	MaxTurns      int `json:"max_turns"`
+	// AskTimeout is in seconds.
+	AskTimeout int `json:"ask_timeout"`
 }
 
 // CoworkConfig tunes co-worker consultations.
@@ -220,6 +234,8 @@ type Config struct {
 	// MaxConsultsPerRun caps consultations per request, ConsultTurns caps
 	// a co-worker's tool loop.
 	Cowork CoworkConfig `json:"cowork"`
+	// SubAgents tunes sub-agents (co-workers with sub_agent: true).
+	SubAgents SubAgentsConfig `json:"sub_agents"`
 
 	// Engine tunes the working-memory engine (internal/engine).
 	Engine EngineConfig `json:"engine"`
@@ -366,6 +382,7 @@ func Default() *Config {
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 		Chat:             ChatConfig{Enabled: true, MentionContext: 10},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
+		SubAgents:        SubAgentsConfig{MaxConcurrent: 2, MaxTurns: 40, AskTimeout: 600},
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,
@@ -456,6 +473,13 @@ func Load() (*Config, error) {
 	if cfg.ClientThemes == nil {
 		cfg.ClientThemes = map[string]string{}
 	}
+	cfg.rescueZeroValues()
+	return cfg, nil
+}
+
+// rescueZeroValues fills fields an older config file leaves at zero with
+// their defaults. Load calls it after decoding.
+func (cfg *Config) rescueZeroValues() {
 	// An older file, or one written by hand without the cowork block, must
 	// not zero the tuning: 0 means "default" for the three counts. Auto
 	// needs no such rescue — Default() sets it true and encoding/json leaves
@@ -490,7 +514,19 @@ func Load() (*Config, error) {
 	if strings.TrimSpace(cfg.ReloadOnMismatch) == "" {
 		cfg.ReloadOnMismatch = "ask"
 	}
-	return cfg, nil
+	if cfg.SubAgents.MaxTurns == 0 {
+		cfg.SubAgents.MaxTurns = 40
+	}
+	if cfg.SubAgents.AskTimeout == 0 {
+		cfg.SubAgents.AskTimeout = 600
+	}
+	if cfg.SubAgents.MaxConcurrent == 0 {
+		cfg.SubAgents.MaxConcurrent = 2
+	}
+	if cfg.SubAgents.MaxConcurrent < 1 {
+		// An assigned step must be able to run: the operator assigned it.
+		cfg.SubAgents.MaxConcurrent = 1
+	}
 }
 
 // ValidCoworkers is the configured co-workers that can actually be used,
@@ -520,6 +556,18 @@ func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
 			if !cw.Online && !LocalEndpoint(pc.BaseURL) {
 				warns = append(warns, fmt.Sprintf("coworker %q: provider %q is at %s, not local; treating it as online (set \"online\": true)", cw.Name, cw.Provider, pc.BaseURL))
 				cw.Online = true
+			}
+			if len(cw.MaxScope) > 0 {
+				var kept []string
+				for _, p := range cw.MaxScope {
+					c := filepath.ToSlash(filepath.Clean(strings.TrimSpace(p)))
+					if c == "." || c == "" || filepath.IsAbs(p) || c == ".." || strings.HasPrefix(c, "../") {
+						warns = append(warns, fmt.Sprintf("coworker %q: max_scope %q escapes the workspace; ignored", cw.Name, p))
+						continue
+					}
+					kept = append(kept, c)
+				}
+				cw.MaxScope = kept
 			}
 			seen[cw.Name] = true
 			ok = append(ok, cw)
