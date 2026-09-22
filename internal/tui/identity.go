@@ -25,23 +25,51 @@ func terminalOf(c live.ClientInfo) inbox.Terminal {
 	return inbox.Terminal{IP: c.IP, Login: c.Login, User: c.User, PID: c.PID}
 }
 
-// resolveClientLocked fills s.ids[c.ID]. Caller holds mu. Errors are a
-// transcript line once; the terminal is then treated as unresolved.
-func (s *Session) resolveClientLocked(c live.ClientInfo) {
-	if _, done := s.ids[c.ID]; done {
-		return
-	}
-	resolve := s.resolveFn
-	if resolve == nil {
-		resolve = func(tm inbox.Terminal) (inbox.Resolution, error) {
-			return inbox.Resolve(s.usersPath, tm, inbox.MACFor)
+// resolvedID is one terminal's resolution, with the error to show if any.
+type resolvedID struct {
+	id  identity
+	err error
+}
+
+// resolveNew resolves every terminal in infos that has no identity yet,
+// without holding mu (see SetClients). A terminal already in s.ids is
+// skipped, so a roster that repeats an id costs nothing.
+func (s *Session) resolveNew(infos []live.ClientInfo) map[int]resolvedID {
+	s.mu.Lock()
+	resolve, path := s.resolveFn, s.usersPath
+	var todo []live.ClientInfo
+	for _, c := range infos {
+		if _, done := s.ids[c.ID]; !done {
+			todo = append(todo, c)
 		}
 	}
-	r, err := resolve(terminalOf(c))
-	if err != nil {
-		s.appendEntryLocked(entry{Kind: entryDim, Text: "chat identity: " + err.Error()})
+	s.mu.Unlock()
+	if len(todo) == 0 {
+		return nil
 	}
-	s.ids[c.ID] = identity{ID: r.ID, How: r.How, Choices: r.Choices}
+	if resolve == nil {
+		resolve = func(tm inbox.Terminal) (inbox.Resolution, error) {
+			return inbox.Resolve(path, tm, inbox.MACFor)
+		}
+	}
+	out := make(map[int]resolvedID, len(todo))
+	for _, c := range todo {
+		r, err := resolve(terminalOf(c))
+		out[c.ID] = resolvedID{id: identity{ID: r.ID, How: r.How, Choices: r.Choices}, err: err}
+	}
+	return out
+}
+
+// recordIdentityLocked stores a resolution. Caller holds mu. An error is a
+// transcript line once; the terminal is then treated as unresolved.
+func (s *Session) recordIdentityLocked(client int, r resolvedID) {
+	if _, done := s.ids[client]; done {
+		return
+	}
+	if r.err != nil {
+		s.appendEntryLocked(entry{Kind: entryDim, Text: "chat identity: " + r.err.Error()})
+	}
+	s.ids[client] = r.id
 }
 
 // bindLocked records a chosen or typed name for a client.

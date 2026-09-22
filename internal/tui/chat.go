@@ -67,6 +67,9 @@ func (s *Session) restoreRoom(lines []store.ChatLine) {
 // identity if the terminal sent one, else its device label. Used for the
 // join/leave lines SetClients posts, where there is a ClientInfo but no View.
 func (s *Session) chatNameOf(c live.ClientInfo) string {
+	if id := s.ids[c.ID].ID; id != "" {
+		return id // the resolved name, which may have been asked for after attach
+	}
 	if c.User != "" {
 		return c.User
 	}

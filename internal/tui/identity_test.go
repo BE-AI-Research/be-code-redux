@@ -85,3 +85,52 @@ func TestChoicesAreOfferedForASharedIP(t *testing.T) {
 		t.Fatalf("id %q", v.userID())
 	}
 }
+
+// Resolution runs off the session lock: it can read a file and, elsewhere,
+// run `arp -a` for up to 3 s, which under mu would freeze every terminal.
+func TestResolutionRunsOffTheSessionLock(t *testing.T) {
+	s := newTestSession(t)
+	lockedDuring := false
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) {
+		if !s.mu.TryLock() {
+			lockedDuring = true
+		} else {
+			s.mu.Unlock()
+		}
+		return inbox.Resolution{ID: "alice", How: "ip"}, nil
+	}
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.1"}})
+	if lockedDuring {
+		t.Fatal("resolveFn ran with mu held")
+	}
+	if s.identityOf(1).ID != "alice" {
+		t.Fatalf("identity %+v", s.identityOf(1))
+	}
+	// Resolved once: a repeated roster does not ask again.
+	calls := 0
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { calls++; return inbox.Resolution{}, nil }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.1"}})
+	if calls != 0 {
+		t.Fatalf("resolved again: %d", calls)
+	}
+}
+
+// The room's leave line uses the name the terminal resolved to, which may
+// have been asked for after it attached — not the device label.
+func TestLeaveLineUsesTheResolvedName(t *testing.T) {
+	s := newTestSession(t)
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{Ask: true}, nil }
+	s.bindFn = func(string, inbox.Terminal) error { return nil }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "ssh from 10.0.0.5 (pid 1)", IP: "10.0.0.5"}})
+	v := s.NewView(1, "ssh from 10.0.0.5 (pid 1)")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	v.slashCommand("/chat")
+	v.input.SetValue("bob")
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	s.SetClients(nil)
+	r := s.Room()
+	last := r[len(r)-1]
+	if last.Kind != "leave" || last.Text != "bob left" {
+		t.Fatalf("leave line %+v", last)
+	}
+}

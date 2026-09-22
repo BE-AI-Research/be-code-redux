@@ -506,6 +506,11 @@ func (s *Session) clientLabels(room int) string {
 // clientsMsg, which is each view's cue to redraw its bottom line (the
 // programs themselves are the runner's: see runner.onClients).
 func (s *Session) SetClients(infos []live.ClientInfo) {
+	// Identity first, off the lock: resolving a new terminal can read a file
+	// and, on Windows and macOS, run `arp -a` with a 3 s timeout. Under mu
+	// that would hold every terminal's Update and the agent's own events for
+	// the duration.
+	resolved := s.resolveNew(infos)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev := s.clients
@@ -521,10 +526,9 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 		if !hasClient(prev, c.ID) {
 			s.appendEntryLocked(entry{Kind: entryDim, Text: "attached: " + c.Label})
 		}
-		// Every attach gets a chance at an identity, not only a fresh one:
-		// resolveClientLocked itself is what makes a client already in s.ids
-		// a no-op, so a roster that repeats an id costs nothing.
-		s.resolveClientLocked(c)
+		if r, ok := resolved[c.ID]; ok {
+			s.recordIdentityLocked(c.ID, r)
+		}
 	}
 	for _, c := range prev {
 		if hasClient(infos, c.ID) {
