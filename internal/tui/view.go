@@ -116,6 +116,10 @@ const (
 	modeChat        // the session's chat room (/chat)
 	modeInbox       // the mention inbox (/inbox)
 	modeDM          // a direct message thread (/dm)
+	// modeName is the naming prompt (identity.go): a terminal with no
+	// resolved chat identity is asked for one the first time it opens /chat,
+	// /inbox or /dm, never before. needName is what puts a view here.
+	modeName
 )
 
 // View is one terminal's view of a Session: the bubbletea model a single
@@ -212,6 +216,17 @@ type View struct {
 	chatUnseen  int
 	joinedChat  bool
 	mentionBusy string
+
+	// The naming prompt (identity.go, modeName): afterName is what needName
+	// resumes once a name is bound (entering the room, the inbox or a DM
+	// thread); nameChoices are the IDs already bound to this address, offered
+	// above "type a name below"; nameSel is the highlighted row (a choice, or
+	// len(nameChoices) for "type a name"); nameErr is the reason the last
+	// attempt was rejected, shown until the next one.
+	afterName   func(*View) (tea.Model, tea.Cmd)
+	nameChoices []string
+	nameSel     int
+	nameErr     string
 
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
@@ -472,6 +487,8 @@ func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleQueueKey(k)
 	case modeChat:
 		return m.handleChatKey(k)
+	case modeName:
+		return m.handleNameKey(k)
 	case modeBusy:
 		return m.handleBusyKey(k)
 	}
@@ -936,6 +953,8 @@ func (m *View) View() string {
 		return m.viewMenu()
 	case modeChat:
 		return m.viewChat()
+	case modeName:
+		return m.viewName()
 	}
 
 	var b strings.Builder
@@ -1291,6 +1310,9 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 			return m.leaveMode()
 		}
 		return m, nil
+	case "/whoami":
+		m.whoami()
+		return m, nil
 	case "/theme":
 		// This terminal's own theme, never a shared one: bare opens the
 		// picker (its title says which theme is in use and where it came
@@ -1644,17 +1666,23 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		return m, nil
 	case "/clients":
-		if !m.served {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
-			return m, nil
-		}
 		if len(m.clients) == 0 {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: "no terminals attached"})
+			if m.served {
+				m.appendEntryLocked(entry{Kind: entryDim, Text: "no terminals attached"})
+			} else {
+				m.appendEntryLocked(entry{Kind: entryDim, Text: "not served: this session is running in-process (start without --no-host to allow attach)"})
+			}
 			return m, nil
 		}
+		rows := make([]string, 0, len(m.clients))
 		for _, c := range m.clients {
-			m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)})
+			row := fmt.Sprintf("  %s  %dx%d", c.Label, c.Cols, c.Rows)
+			if id := m.identityOf(c.ID).ID; id != "" {
+				row += " · " + id
+			}
+			rows = append(rows, row)
 		}
+		m.appendEntryLocked(entry{Kind: entryDim, Text: strings.Join(rows, "\n")})
 		return m, nil
 	case "/detach":
 		if m.detachClient == nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
@@ -103,6 +104,16 @@ type Session struct {
 	// departing terminals owe the room a "left" line — a terminal that never
 	// opened /chat has nothing to say goodbye from.
 	joined map[int]bool
+	// ids is who each attached terminal is (identity.go): filled by
+	// resolveClientLocked as terminals attach, keyed by client id. usersPath
+	// is ~/.be-code/users.json ("" in a test session that wants no file on
+	// disk at all — resolution then happens in memory only, through
+	// resolveFn/bindFn). resolveFn/bindFn are test seams for inbox.Resolve/
+	// inbox.Bind; nil means the real thing.
+	ids       map[int]identity
+	usersPath string
+	resolveFn func(inbox.Terminal) (inbox.Resolution, error)
+	bindFn    func(id string, tm inbox.Terminal) error
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool
@@ -169,6 +180,10 @@ func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Se
 		quitCh:  make(chan struct{}),
 		holders: map[int]bool{},
 		joined:  map[int]bool{},
+		ids:     map[int]identity{},
+	}
+	if p, err := inbox.UsersPath(); err == nil {
+		s.usersPath = p
 	}
 	wireEvents(s)
 	s.usage = s.usageSnapshot() // pre-run, single-threaded: safe
@@ -506,6 +521,10 @@ func (s *Session) SetClients(infos []live.ClientInfo) {
 		if !hasClient(prev, c.ID) {
 			s.appendEntryLocked(entry{Kind: entryDim, Text: "attached: " + c.Label})
 		}
+		// Every attach gets a chance at an identity, not only a fresh one:
+		// resolveClientLocked itself is what makes a client already in s.ids
+		// a no-op, so a roster that repeats an id costs nothing.
+		s.resolveClientLocked(c)
 	}
 	for _, c := range prev {
 		if hasClient(infos, c.ID) {

@@ -89,6 +89,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/detach", "detach this terminal (the session keeps running)", false},
 	{"/chat", "the session's chat room (@agent to ask the model)", true},
 	{"/back", "return to the transcript", true},
+	{"/whoami", "your chat name and how it was decided", true},
 	{"/clear", "start a fresh session", false},
 	{"/quit", "exit (writes the resume briefing)", false},
 }

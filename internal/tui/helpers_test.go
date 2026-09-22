@@ -30,6 +30,12 @@ func newTestSession(t *testing.T, prep ...func(*agent.Agent)) *Session {
 	}
 	s := NewSession(cfg, ag, nullProvider{})
 	s.rootCtx = context.Background()
+	// NewSession points usersPath at the real ~/.be-code/users.json (under
+	// TestMain's throwaway HOME, so this never reaches the developer's own
+	// dotdir either way); a test session gets none at all, so identity
+	// resolution never touches disk unless the test wires resolveFn/bindFn
+	// itself to simulate it.
+	s.usersPath = ""
 	return s
 }
 
@@ -59,6 +65,18 @@ func newTestView(t *testing.T, s *Session) *View {
 // transcriptText is everything this view has rendered into its own buffer
 // so far, exactly as its terminal would show it.
 func (m *View) transcriptText() string { return m.rendered.String() }
+
+// lastEntryText is the newest transcript entry's text (label plus body), for
+// a test that ran a command through the session directly (not through
+// Update) and wants to check what it told the terminal.
+func lastEntryText(s *Session) string {
+	e := s.Entries()
+	if len(e) == 0 {
+		return ""
+	}
+	last := e[len(e)-1]
+	return last.Label + last.Text
+}
 
 // flush delivers every queued broadcast to the given views, in order.
 // Nothing runs a view's mailbox goroutine in a test, so a broadcast raised

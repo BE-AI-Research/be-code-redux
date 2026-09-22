@@ -65,39 +65,42 @@ func (s *Session) chatNameOf(c live.ClientInfo) string {
 	return live.LabelKey(c.Label)
 }
 
-// chatName is how this terminal signs a room line. Task 8 replaces the
-// body with the resolved user ID.
+// chatName is how this terminal signs a room line: its resolved chat
+// identity. The fallback to the device label only matters before that
+// identity exists, which cannot happen once needName has run — enterChat
+// asks for one before the room ever opens.
 func (m *View) chatName() string {
-	for _, c := range m.clients {
-		if c.ID == m.id && c.User != "" {
-			return c.User
-		}
+	if id := m.userID(); id != "" {
+		return id
 	}
 	return live.LabelKey(m.label)
 }
 
-// enterChat opens the room on this terminal. Nothing shared changes: the run
-// keeps running, the other terminals keep whatever they were doing.
+// enterChat opens the room on this terminal, asking for a name first if this
+// terminal does not have one yet. Nothing shared changes: the run keeps
+// running, the other terminals keep whatever they were doing.
 func (m *View) enterChat() (tea.Model, tea.Cmd) {
-	if !m.cfg.Chat.Enabled {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "chat is disabled in config (chat.enabled)"})
-		return m, nil
-	}
-	if !m.joinedChat {
-		m.joinedChat = true
-		if m.joined == nil {
-			m.joined = map[int]bool{}
+	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
+		if !m.cfg.Chat.Enabled {
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "chat is disabled in config (chat.enabled)"})
+			return m, nil
 		}
-		m.joined[m.id] = true
-		m.PostLocked("", m.chatName()+" joined", "join")
-	}
-	m.mode = modeChat
-	m.chatUnseen = 0
-	m.input.Reset()
-	m.input.Placeholder = "message the room… (/back to return)"
-	m.layoutChat()
-	m.chatVP.GotoBottom()
-	return m, nil
+		if !m.joinedChat {
+			m.joinedChat = true
+			if m.joined == nil {
+				m.joined = map[int]bool{}
+			}
+			m.joined[m.id] = true
+			m.PostLocked("", m.chatName()+" joined", "join")
+		}
+		m.mode = modeChat
+		m.chatUnseen = 0
+		m.input.Reset()
+		m.input.Placeholder = "message the room… (/back to return)"
+		m.layoutChat()
+		m.chatVP.GotoBottom()
+		return m, nil
+	})
 }
 
 // leaveMode returns this terminal from chat, inbox or dm to the transcript.

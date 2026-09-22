@@ -36,7 +36,11 @@ func TestChatModeLeavesTheRunStateAloneAndEscReturns(t *testing.T) {
 	s := newTestSession(t)
 	v := s.NewView(1, "local")
 	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Task 8: /chat asks for a name first when this terminal has none; giving
+	// it one up front keeps this test about the room, not the naming prompt
+	// (identity_test.go covers that).
 	s.mu.Lock()
+	s.ids[1] = identity{ID: "you"}
 	s.setRunStateLocked(true, "thinking")
 	s.mu.Unlock()
 	drainAll(t, v)
@@ -64,6 +68,11 @@ func TestSlashCommandsWorkInsideChat(t *testing.T) {
 	s := newTestSession(t)
 	v := s.NewView(1, "local")
 	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	// Task 8: give this terminal a name up front so /chat opens the room
+	// directly rather than the naming prompt (identity_test.go covers that).
+	s.mu.Lock()
+	s.ids[1] = identity{ID: "you"}
+	s.mu.Unlock()
 	v.slashCommand("/chat")
 	v.input.SetValue("/back")
 	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
