@@ -75,6 +75,28 @@ func TestReadyOrderAndRunning(t *testing.T) {
 	}
 }
 
+// A running root LATER in the document still holds its scope against a
+// candidate earlier in the document: 3.6 runs, 3.2 must wait. Before the
+// running scopes were seeded in the whole-tree pre-pass, the walk reached
+// 3.2 before it had seen 3.6 and dispatched a second sub-agent onto the
+// same paths.
+func TestReadyRunningLaterInDocumentStillBlocks(t *testing.T) {
+	ready, waiting := Ready(tree(), cards(), map[string]bool{"3.6": true})
+	if c := find(ready, "3.2"); c != nil {
+		t.Fatalf("3.2 dispatched while 3.6 runs over internal: %+v", c)
+	}
+	if c := find(waiting, "3.2"); c == nil || c.Reason != "scope overlaps 3.6" {
+		t.Fatalf("3.2: %+v", c)
+	}
+	if find(ready, "3.6") != nil {
+		t.Fatal("running node offered again")
+	}
+	// 3.3 is unaffected: docs/scanner.md does not overlap internal.
+	if find(ready, "3.3") == nil {
+		t.Fatalf("3.3 should still be ready: %+v", waiting)
+	}
+}
+
 func TestReadyIgnoresClosedAndMain(t *testing.T) {
 	roots := []Step{{ID: "1", Status: "todo", Children: []Step{
 		{ID: "1.1", Status: "done", Owner: "big", Scope: []string{"a"}},

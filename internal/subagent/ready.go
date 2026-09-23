@@ -12,9 +12,19 @@ import (
 // dispatched, which are skipped but still hold their scope.
 func Ready(roots []Step, cards map[string]Card, running map[string]bool) (ready, waiting []Candidate) {
 	closed := map[string]bool{}
+	// Scopes that are taken: every running root's — seeded here, in the
+	// whole-tree pre-pass, because a running root may sit *later* in
+	// document order than a candidate and the walk below would then reach
+	// the candidate before the running root was known, dispatching two
+	// sub-agents onto the same paths — then every candidate earlier in
+	// document order that is itself ready.
+	taken := map[string][]string{}
 	var index func(s Step)
 	index = func(s Step) {
 		closed[s.ID] = s.Status == "done" || s.Status == "dropped"
+		if running[s.ID] {
+			taken[s.ID] = s.Scope
+		}
 		for _, c := range s.Children {
 			index(c)
 		}
@@ -22,9 +32,6 @@ func Ready(roots []Step, cards map[string]Card, running map[string]bool) (ready,
 	for _, r := range roots {
 		index(r)
 	}
-	// Scopes that are taken: every running root's, then every candidate
-	// earlier in document order that is itself ready or running.
-	taken := map[string][]string{}
 	var walk func(s Step, siblings []Step, i int, inherited string)
 	walk = func(s Step, siblings []Step, i int, inherited string) {
 		if inherited != "" {
@@ -32,7 +39,8 @@ func Ready(roots []Step, cards map[string]Card, running map[string]bool) (ready,
 		}
 		if s.Owner != "" && !closed[s.ID] && s.Status != "blocked" {
 			if running[s.ID] {
-				taken[s.ID] = s.Scope
+				// Its scope is already in taken (seeded above); it is not a
+				// candidate of its own while it runs.
 			} else {
 				c := Candidate{ID: s.ID, Owner: s.Owner}
 				card, known := cards[s.Owner]
