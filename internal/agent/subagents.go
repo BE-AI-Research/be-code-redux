@@ -56,6 +56,21 @@ type subAgents struct {
 	// changing them (AssignOwner stops a parked run, then rewrites the
 	// owner; a re-dispatch in between would take the node back).
 	hold map[string]bool
+	// resumeAsked is set the first time StartSubAgents runs the startup
+	// gate (2026-09-22 §3.6 amendment): only that first schedule ever asks
+	// "resume sub-agent work?" — a step assigned mid-session dispatches at
+	// once, because the operator or the main model just initiated it.
+	resumeAsked bool
+	// declinedResume holds the ids offered in a declined startup ask. Every
+	// later ScheduleSubAgents (a `task` tool call, a `/task` command, a
+	// hand-back's own parting schedule) skips exactly these ids until
+	// AllowSubAgentStart (/agents start) clears the set — a decline must
+	// not be silently undone by the very mechanism that dispatches
+	// everything else. AssignOwner and SetScope clear a single id from it:
+	// an operator or the model re-touching that one step is a fresh
+	// initiation of its own, the same one that lets brand-new mid-session
+	// work dispatch without asking.
+	declinedResume map[string]bool
 	// root is every run's parent context — the session's, never a turn's, so
 	// Esc on the main run cannot reach a sub-agent. cancel ends it, and is
 	// the escape hatch StopAllSubAgents pulls after its bounded wait; a
@@ -228,16 +243,121 @@ func (a *Agent) laneFor(providerName string, primary bool) func(ctx context.Cont
 	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, primary) }
 }
 
-// StartSubAgents runs the resume pass and the first schedule. The UIs
-// call it once approvals and events are wired: a dispatch before that
-// would ask consent of nobody and print to nobody. buildAgent never
-// calls it.
+// StartSubAgents runs the resume pass, the startup resume gate and the
+// first schedule. The UIs call it once approvals and events are wired: a
+// dispatch before that would ask consent of nobody and print to nobody.
+// buildAgent never calls it.
 func (a *Agent) StartSubAgents() {
 	if a.subs == nil {
 		return
 	}
 	a.resumeSubAgents()
+	a.startupResumeGate()
 	a.ScheduleSubAgents()
+}
+
+// startupResumeGate asks the operator once, before the very first schedule,
+// whether sub-agent work assigned in a previous session should start
+// dispatching again (owner's ruling, 2026-09-22 §3.6 amendment — replacing
+// the original "re-dispatch silently"). It runs only through StartSubAgents,
+// so a step assigned or reassigned mid-session — by the operator or by the
+// main model, through AssignOwner/SetScope — still dispatches at once: this
+// gate has already run and never runs again this session.
+//
+// Nothing is asked when there is nothing ready to dispatch: a resumed step
+// that cannot come back (resumeSubAgents, just above in StartSubAgents) is
+// never a candidate here, and a configuration with no sub-agent never
+// reaches this far at all (a.subs is nil).
+func (a *Agent) startupResumeGate() {
+	s := a.subs
+	s.mu.Lock()
+	if s.resumeAsked {
+		s.mu.Unlock()
+		return
+	}
+	s.resumeAsked = true
+	s.mu.Unlock()
+	steps := a.subSteps("sub-agent resume")
+	if len(steps) == 0 {
+		return
+	}
+	s.mu.Lock()
+	cards, running, cws := s.cards, s.runningLocked(), s.cws
+	s.mu.Unlock()
+	ready, _ := subagent.Ready(steps, cards, running)
+	if len(ready) == 0 {
+		return
+	}
+	if a.Cfg.AutoApproveSubAgentResume {
+		return
+	}
+	approved := a.Tools.Approve != nil && a.Tools.Approve("sub_agent_resume", resumeAskDetail(steps, ready, cws))
+	if approved {
+		return
+	}
+	s.mu.Lock()
+	if s.declinedResume == nil {
+		s.declinedResume = map[string]bool{}
+	}
+	for _, c := range ready {
+		s.declinedResume[c.ID] = true
+	}
+	s.mu.Unlock()
+	a.notice("sub-agent work left dormant; /agents start runs it")
+}
+
+// resumeAskDetail is the startup resume ask's body: one line per pending
+// step, naming where it runs so an online co-worker stands out at a glance.
+func resumeAskDetail(steps []subagent.Step, ready []subagent.Candidate, cws map[string]config.CoworkerConfig) string {
+	var b strings.Builder
+	b.WriteString("resume sub-agent work from the previous session?\n")
+	for _, c := range ready {
+		text, scope := c.ID, ""
+		if step := findStep(steps, c.ID); step != nil {
+			text, scope = step.Text, strings.Join(step.Scope, ", ")
+		}
+		where := "(online)"
+		if cw, ok := cws[c.Owner]; ok && !cw.Online {
+			where = fmt.Sprintf("(%s/%s)", cw.Provider, cw.Model)
+		}
+		fmt.Fprintf(&b, "  %s %s — %s %s, scope: %s\n", c.ID, text, c.Owner, where, scope)
+	}
+	b.WriteString("nothing has been sent to any model yet")
+	return b.String()
+}
+
+// AllowSubAgentStart is /agents start: dispatches whatever a declined
+// startup ask left dormant, without asking, and clears the flag so this
+// session never asks it again on its own — without that a decline would be
+// irreversible for the rest of the session. It returns the ids actually
+// started, so the caller can report a count; nil (never asked, or nothing
+// still assigned and ready) reports "no sub-agent work is waiting".
+func (a *Agent) AllowSubAgentStart() []string {
+	s := a.subs
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.declinedResume))
+	for id := range s.declinedResume {
+		ids = append(ids, id)
+	}
+	s.declinedResume = nil
+	s.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	a.ScheduleSubAgents()
+	s.mu.Lock()
+	var started []string
+	for _, id := range ids {
+		if s.runs[id] != nil || s.pending[id] {
+			started = append(started, id)
+		}
+	}
+	s.mu.Unlock()
+	sort.Strings(started)
+	return started
 }
 
 // SubAgentsEnabled reports whether any sub-agent is configured.
@@ -390,7 +510,7 @@ func (a *Agent) ScheduleSubAgents() {
 			if len(s.runs)+len(s.pending) >= a.Cfg.SubAgents.MaxConcurrent {
 				break
 			}
-			if s.hold[c.ID] {
+			if s.hold[c.ID] || s.declinedResume[c.ID] {
 				continue
 			}
 			s.pending[c.ID] = true
@@ -806,10 +926,14 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 		err = errEngineGone
 	}
 	// The hold is released before the schedule, not after: an operator who
-	// reassigned the step to another sub-agent means it to start now.
+	// reassigned the step to another sub-agent means it to start now. The
+	// same id's startup-decline mark is cleared here too: reassigning it is
+	// a fresh initiation of exactly this step, the case StartSubAgents'
+	// doc comment carves out of the startup-only ask.
 	if s != nil {
 		s.mu.Lock()
 		delete(s.hold, id)
+		delete(s.declinedResume, id)
 		s.mu.Unlock()
 		if err == nil {
 			a.ScheduleSubAgents()
@@ -879,6 +1003,10 @@ func (a *Agent) SetScope(id string, paths []string) error {
 	if run != nil {
 		reg = run.reg
 	}
+	// A scope written to this id is the operator's or the model's own fresh
+	// initiation of it, same as AssignOwner: it must not stay dormant behind
+	// a startup decline this call had nothing to do with.
+	delete(s.declinedResume, id)
 	s.mu.Unlock()
 	if reg != nil {
 		reg.SetScope(clean)

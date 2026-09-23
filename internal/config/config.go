@@ -169,6 +169,14 @@ type Config struct {
 	// the workspace off this machine.
 	AutoApproveConsult bool `json:"-"`
 
+	// AutoApproveSubAgentResume skips the startup question asking whether
+	// sub-agent work assigned in a previous session should dispatch again
+	// (2026-09-22 §3.6 amendment). Its own flag, like AutoApproveConsult:
+	// "always run shell commands" is not the same decision as "let
+	// previously assigned work start running again unattended". Set only by
+	// -y; never read from the config file.
+	AutoApproveSubAgentResume bool `json:"-"`
+
 	// ApproveFileWrites shows a diff preview and asks before the agent
 	// writes or edits any file. On by default.
 	ApproveFileWrites bool `json:"approve_file_writes"`

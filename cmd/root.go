@@ -135,6 +135,11 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		// that one too, and choosing to stop being asked about commands is
 		// not consent to send the workspace to an online co-worker.
 		cfg.AutoApproveConsult = true
+		// A third distinct decision from both of the above: resuming a step
+		// assigned in a previous session dispatches work unattended, but it
+		// is neither "run shell commands" nor "ship code off this machine" —
+		// an online sub-agent still asks its own consent question (§3.6).
+		cfg.AutoApproveSubAgentResume = true
 	}
 	p, err := provider.FromConfig(cfg, flagProvider)
 	if err != nil {

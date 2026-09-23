@@ -498,6 +498,151 @@ func TestANoticeHandlerMayCallBackIntoTheRunner(t *testing.T) {
 	}
 }
 
+// --- startup resume prompt (2026-09-22 §3.6 amendment) ----------------
+
+// TestStartupResumeAskDeclineLeavesNothingDispatched: a decline at startup
+// leaves the resumed step assigned and todo, dispatches nothing, and the
+// operator is told how to run it later.
+func TestStartupResumeAskDeclineLeavesNothingDispatched(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	var gotAction, gotDetail string
+	f.ag.Tools.Approve = func(action, detail string) bool {
+		gotAction, gotDetail = action, detail
+		return false
+	}
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	f.ag.StartSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("dispatched despite decline: %+v", d)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if gotAction != "sub_agent_resume" {
+		t.Fatalf("action = %q", gotAction)
+	}
+	if !strings.Contains(gotDetail, id) || !strings.Contains(gotDetail, "big") || !strings.Contains(gotDetail, "internal/scan") {
+		t.Fatalf("detail: %q", gotDetail)
+	}
+	if len(notices) != 1 || notices[0] != "sub-agent work left dormant; /agents start runs it" {
+		t.Fatalf("notices: %v", notices)
+	}
+	if got := f.st.ShowText(id); !strings.Contains(got, "[ ] "+id+".") {
+		t.Fatalf("step not left assigned and todo:\n%s", got)
+	}
+}
+
+// TestStartupResumeAskAcceptDispatches: an approver that accepts dispatches
+// the resumed work normally.
+func TestStartupResumeAskAcceptDispatches(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, nil)
+	f.assign(t)
+	asked := false
+	f.ag.Tools.Approve = func(action, detail string) bool {
+		asked = action == "sub_agent_resume"
+		return true
+	}
+	f.ag.StartSubAgents()
+	if !asked {
+		t.Fatal("the approver was never asked")
+	}
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+}
+
+// TestStartupResumeAutoApproveSkipsTheAsk: -y (AutoApproveSubAgentResume)
+// dispatches without the approver being called at all.
+func TestStartupResumeAutoApproveSkipsTheAsk(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, func(c *config.Config) { c.AutoApproveSubAgentResume = true })
+	f.assign(t)
+	asked := false
+	f.ag.Tools.Approve = func(action, detail string) bool { asked = true; return true }
+	f.ag.StartSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+	if asked {
+		t.Fatal("the approver must not be called when -y set AutoApproveSubAgentResume")
+	}
+}
+
+// TestAllowSubAgentStartDispatchesAfterDecline: /agents start
+// (Agent.AllowSubAgentStart) dispatches what a decline left dormant and
+// clears the flag.
+func TestAllowSubAgentStartDispatchesAfterDecline(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	started := f.ag.AllowSubAgentStart()
+	if len(started) != 1 || started[0] != id {
+		t.Fatalf("AllowSubAgentStart = %v", started)
+	}
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+}
+
+// TestAllowSubAgentStartWithNothingWaiting: nothing was declined, nothing
+// to start.
+func TestAllowSubAgentStartWithNothingWaiting(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	if started := f.ag.AllowSubAgentStart(); len(started) != 0 {
+		t.Fatalf("AllowSubAgentStart = %v", started)
+	}
+}
+
+// TestScheduleAfterDeclineDoesNotDispatch is point 3's invariant: a later
+// ScheduleSubAgents — the same one a `task` tool call or /task command
+// triggers — must not silently dispatch what startup left dormant.
+func TestScheduleAfterDeclineDoesNotDispatch(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a later schedule dispatched declined work: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestNoStartupAskWhenNothingAssigned: nothing assigned, nothing to ask.
+func TestNoStartupAskWhenNothingAssigned(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	asked := false
+	f.ag.Tools.Approve = func(string, string) bool { asked = true; return true }
+	f.ag.StartSubAgents()
+	if asked {
+		t.Fatal("asked with nothing assigned")
+	}
+}
+
+// TestNoStartupAskWithNoSubAgentConfigured: no sub-agent configured, no
+// runner at all — StartSubAgents must not touch the approver.
+func TestNoStartupAskWithNoSubAgentConfigured(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	asked := false
+	ag.Tools.Approve = func(string, string) bool { asked = true; return true }
+	ag.StartSubAgents()
+	if asked {
+		t.Fatal("asked with no sub-agent configured")
+	}
+}
+
 func TestEnableDoesNotDispatchUntilStart(t *testing.T) {
 	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
 	f := newSubFixture(t, sub, nil)
