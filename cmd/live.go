@@ -104,8 +104,15 @@ func runSessionHost(code string) error {
 	}
 	s := tui.NewSession(cfg, ag, p)
 	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
-	// before that would ask consent of nobody and print to nobody here either.
-	ag.StartSubAgents()
+	// before that would ask consent of nobody and print to nobody here
+	// either. But this goroutine still has to reach s.RunServed below, and a
+	// synchronous StartSubAgents blocks on the resume ask's answer — the
+	// attached client would render nothing and the host log would stay
+	// empty until someone answered a question nothing had shown them yet.
+	// StartSubAgentsAsync keeps the resume pass here (it never blocks) and
+	// moves the gate and the first schedule to a goroutine of their own; see
+	// runInteractive's own comment on this same call in cmd/root.go.
+	ag.StartSubAgentsAsync()
 	// Served: auto resolves per write from the roster — the editor alone
 	// while VS Code's own terminal is the only one attached, both places as
 	// soon as anyone else joins. Clients() only takes the host's lock to

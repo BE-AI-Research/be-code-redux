@@ -643,6 +643,139 @@ func TestNoStartupAskWithNoSubAgentConfigured(t *testing.T) {
 	}
 }
 
+// --- design review fixes (2026-09-22): the inverted decline mechanism ------
+
+// TestFailedAssignOwnerDoesNotClearADecline is the regression test for
+// review's CRITICAL #2: a typo'd or refused /task assign — a name that
+// does not exist, a pinned node, one being worked — must not ungate a
+// declined step it never actually touched. The old code deleted the id
+// from declinedResume unconditionally, outside the `err == nil` guard.
+func TestFailedAssignOwnerDoesNotClearADecline(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// A name that is not a sub-agent at all: AssignOwner must fail.
+	if err := f.ag.AssignOwner(id, "not-a-real-coworker", false); err == nil {
+		t.Fatal("expected AssignOwner to fail on an unknown owner")
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a failed AssignOwner cleared the decline: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestDeclineGatesAStepThatBecomesReadyOnlyLater is the regression test for
+// review's Important #3: the original per-id marking covered only the ids
+// that happened to be ready at the moment of the decline. Two sequenced
+// steps owned by the same sub-agent — 3.1 and 3.2, 3.2 waiting on 3.1 by
+// plain sibling order — leaves only 3.1 a candidate at startup; once 3.1
+// closes by some other means, 3.2 becomes ready for the first time only
+// after the decline, and must stay gated too.
+func TestDeclineGatesAStepThatBecomesReadyOnlyLater(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	root := f.st.Plan("port the scanner", []string{"port internal/scan", "port internal/scan2"})
+	id1, id2 := root+".1", root+".2"
+	for _, id := range []string{id1, id2} {
+		if err := f.st.SetOwner(id, "big", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.st.SetScope(id1, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetScope(id2, []string{"internal/scan2"}); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents() // only id1 was a ready candidate; declined
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// id1 closes by a means that is not a dispatch (an operator marking it
+	// done directly), which is exactly what makes id2 ready for the first
+	// time — after the decline, never having been offered in it.
+	if err := f.st.SetStatusText(id1, "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a step that became ready only after the decline still dispatched: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestNoOpReassertionDoesNotClearADecline is half the regression test for
+// review's Important #4: AssignOwner(id, sameOwner) — the main model
+// restating its own plan through the `task` tool, unprompted — must not
+// silently undo the operator's decline.
+func TestNoOpReassertionDoesNotClearADecline(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The same owner it already has: a no-op by value.
+	if err := f.ag.AssignOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case d := <-f.start:
+		t.Fatalf("a same-value re-assertion cleared the decline: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestAGenuineReassignmentClearsOneDeclineAndNotices is the other half of
+// #4: a real change — reassigning to a different sub-agent — is a fresh
+// initiation of exactly that step and must dispatch, with a notice saying
+// so (an undone decline must never be silent).
+func TestAGenuineReassignmentClearsOneDeclineAndNotices(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, func(c *config.Config) {
+		c.Coworkers = append(c.Coworkers, config.CoworkerConfig{Name: "small", Provider: "ollama", Model: "cw-model-small", SubAgent: true})
+	})
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	// A genuine change: reassigned to a different sub-agent.
+	if err := f.ag.AssignOwner(id, "small", false); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.start, "start after reassignment")
+	wait(t, f.ends, "end")
+	found := false
+	for _, m := range notices {
+		if strings.Contains(m, id) && strings.Contains(m, "re-assigned") && strings.Contains(m, "small") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no re-assigned notice among: %q", notices)
+	}
+}
+
 func TestEnableDoesNotDispatchUntilStart(t *testing.T) {
 	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
 	f := newSubFixture(t, sub, nil)
