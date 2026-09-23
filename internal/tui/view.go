@@ -1277,6 +1277,11 @@ func (m *View) viewAsk() string {
 	}
 	title := "Shell command"
 	hint := "y approve · n deny · a auto-approve all shell commands this session · ↑↓ scroll"
+	// compactHint mirrors hint's keys at phone width: derived per action, not
+	// one constant for all of them, because sub_agent_resume — the one modal
+	// a person can meet at startup, possibly at phone width — has no "a" to
+	// offer and a bare "y/n/a" would advertise a key that does nothing.
+	compactHint := "y/n/a · ↑↓"
 	switch a.Action {
 	case "file_write":
 		title = "File change"
@@ -1299,9 +1304,10 @@ func (m *View) viewAsk() string {
 		// runs it later, so the hint says that instead of offering "a".
 		title = "Resume sub-agent work"
 		hint = "y resume · n leave dormant (/agents start runs it later) · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
 	}
 	if m.compact() {
-		hint = "y/n/a · ↑↓"
+		hint = compactHint
 	}
 	body := m.st.Border.Width(m.width - 4).Render(
 		m.st.ModalTi.Render(title+" — approval required") + "\n\n" + m.modalVP.View())

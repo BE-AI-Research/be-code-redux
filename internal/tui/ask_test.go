@@ -171,6 +171,74 @@ func TestSharedPickerCursorIsLocalButTheAnswerIsShared(t *testing.T) {
 	}
 }
 
+// TestShowAskDoesNotColorizeSubAgentResume is item 5's second test gap:
+// showAsk's undiffed branch (consult/model_reload/sub_agent_resume all skip
+// ui.ColorizeDiff) was untested for the new action. A detail line starting
+// with "-" would be recoloured as a diff deletion (wrapped in the ANSI
+// sequence \x1b[31m...\x1b[0m) if it reached the diff-colouring branch
+// instead — this is a synthetic detail built to make that distinction
+// visible; resumeAskDetail's own real format never starts a line with "-",
+// which is exactly why this needs its own test rather than trusting the
+// agent-level detail tests to exercise the branch.
+func TestShowAskDoesNotColorizeSubAgentResume(t *testing.T) {
+	v := newTestModel(t)
+	a := &ask{Kind: askApproval, Action: "sub_agent_resume",
+		Detail: "resume sub-agent work from the previous session?\n- 3.2 port internal/scan\nnothing has been sent to any model yet"}
+	v.showAsk(a)
+	out := v.modalVP.View()
+	if strings.Contains(out, "\x1b[31m") || strings.Contains(out, "\x1b[32m") {
+		t.Fatalf("sub_agent_resume's detail was run through the diff colouriser:\n%q", out)
+	}
+	if !strings.Contains(out, "- 3.2 port internal/scan") {
+		t.Fatalf("modal body missing the detail text unmodified:\n%s", out)
+	}
+}
+
+// TestSubAgentResumeAskPressingAlwaysLeavesTheModalOpen is item 5's first
+// test gap: no test pressed "a" on the new modal. handleAskKey's "a" branch
+// has an explicit guard for sub_agent_resume (decided = false) because this
+// action has no standing grant to offer — falling through to the final
+// else would flip cfg.ApproveFileWrites and Tools.ApproveWrites off for the
+// whole session, disabling every future file-write review because someone
+// pressed "a" on an unrelated startup question.
+func TestSubAgentResumeAskPressingAlwaysLeavesTheModalOpen(t *testing.T) {
+	s, a, _ := twoViews(t)
+	beforeCfg := s.cfg.ApproveFileWrites
+	beforeReg := s.ag.Tools.ApproveWrites
+	decided := make(chan bool, 1)
+	go func() {
+		decided <- s.approveFromAgent("sub_agent_resume",
+			"resume sub-agent work from the previous session?\n  3.2 port internal/scan — big (ollama-lan/qwen3:32b), scope: internal/scan\nnothing has been sent to any model yet")
+	}()
+	waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	flush(a)
+	if a.mode != modeAsk {
+		t.Fatal(`"a" closed the sub_agent_resume modal, but this action has no "always" to grant`)
+	}
+	if s.cfg.ApproveFileWrites != beforeCfg || s.ag.Tools.ApproveWrites != beforeReg {
+		t.Fatal(`"a" on sub_agent_resume fell through to the file-write branch and changed ApproveFileWrites/ApproveWrites`)
+	}
+	select {
+	case <-decided:
+		t.Fatal(`"a" answered the question, but this action has no "always"`)
+	default:
+	}
+
+	// Clean up the still-open ask so the waiting goroutine (and the test)
+	// do not leak: "n" is an ordinary decline.
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	select {
+	case ok := <-decided:
+		if ok {
+			t.Fatal("n must decline")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("n never answered after a's no-op")
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

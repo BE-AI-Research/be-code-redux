@@ -310,6 +310,77 @@ func TestAnInterruptedHandBackStartsNothing(t *testing.T) {
 	}
 }
 
+// TestStartSubAgentsAsyncReturnsImmediately is the regression test for the
+// critical startup hang review found: runInteractive (cmd/root.go) and
+// runSessionHost (cmd/live.go) call the sub-agent startup entry point on
+// the very goroutine that must go on to start the served program
+// (s.RunLocal/RunServed) — and s.rootCtx is not even set, nor is any
+// program running, until that call returns. The old StartSubAgents blocked
+// on the resume ask's answer (Tools.Approve -> Session.Ask, waiting on
+// a.reply/quitCh/ctx.Done()) right there, so any workspace with an
+// assigned, scoped, todo step owned by a sub-agent hung the whole session
+// before any terminal rendered anything — not limited to --resume.
+// StartSubAgentsAsync is the fix: called here exactly as production calls
+// it, on the calling goroutine, with no program running and nobody
+// answering the ask it raises.
+//
+// Why the two modal tests above (TestStartupResumeAskShowsOnTheSharedModal,
+// TestStartupResumeAskDeclineOnTheSharedModal) missed this: both wrap the
+// call in a bare `go s.ag.StartSubAgents()` of their own — which is not
+// exercising the production call site, it is *hand-writing the fix as test
+// scaffolding* and then testing that. Production called the synchronous,
+// blocking method directly. This test calls the real production method
+// (StartSubAgentsAsync) with no `go` around it — because that method must
+// not need one, being the whole point of its existence — and only uses a
+// goroutine to bound how long the test itself waits, exactly the way any
+// test proves a call returns promptly: a call that truly never returns
+// cannot be observed from outside without watching it from another
+// goroutine, but nothing here reproduces the fix inline the way the modal
+// tests' `go` did.
+func TestStartSubAgentsAsyncReturnsImmediately(t *testing.T) {
+	s, _, _ := twoViews(t)
+	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "m", SubAgent: true}}
+	s.cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://sub:11434"}
+	s.ag = agent.New(s.cfg, nullProvider{}, "m", s.ag.Tools, "")
+	wireEvents(s)
+
+	st, err := engine.OpenAt(filepath.Join(t.TempDir(), "e"), s.ag.Tools.Root, "sess", false, engine.Limits{NotesCap: 4096})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ag.SetEngine(st)
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return &scriptedSubProvider{responses: []provider.ChatResponse{{Content: "done"}}}, 0, nil
+	}
+	t.Cleanup(func() { agent.CoworkerFactory = nil; s.ag.StopAllSubAgents("test over") })
+	cws, _ := s.cfg.ValidCoworkers()
+	s.ag.EnableSubAgents(cws, "http://primary:11434")
+
+	root := st.Plan("port", []string{"port internal/scan"})
+	id := root + ".1"
+	if err := st.SetOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetScope(id, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No view has been created and s.rootCtx is unset — exactly the state
+	// runInteractive and runSessionHost are in when they call this, before
+	// tui.NewSession's caller has reached s.RunLocal/RunServed. Nobody will
+	// ever answer the ask this raises.
+	done := make(chan struct{})
+	go func() {
+		s.ag.StartSubAgentsAsync()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartSubAgentsAsync blocked with no program running — the exact startup hang review found: runInteractive/runSessionHost would never reach RunLocal/RunServed, so no terminal ever renders")
+	}
+}
+
 // TestAgentsStartDoesNotDeadlockTheTUI: /agents start reaches
 // ScheduleSubAgents (see IsAgentsBlocking's comment), so it must come back
 // as a tea.Cmd exactly like /task assign|scope, not run inline while Update
