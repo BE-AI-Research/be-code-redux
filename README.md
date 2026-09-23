@@ -195,11 +195,32 @@ a scope or a dependency, working, or asking; `/agents stop <name>` cancels
 whatever it is running and closes the step `blocked` with the reason
 `stopped by operator`, handing it back so the main model knows. It is
 `/task assign <id> main` that takes a step away without closing it, putting
-it back to `todo`. An interrupted step (`/quit`, or a crash) is silently
-re-dispatched on the next session, told which files its earlier attempt had
-already written — from the interruption note on a clean exit, and recovered
-from the step's own evidence after a crash, which never got to write one —
-or handed back blocked and noticed when nothing configured can pick it up.
+it back to `todo`. An interrupted step (`/quit`, or a crash) is picked back
+up on the next session — told which files its earlier attempt had already
+written, from the interruption note on a clean exit, and recovered from the
+step's own evidence after a crash, which never got to write one — or handed
+back blocked and noticed when nothing configured can pick it up, exactly as
+before.
+
+That resume no longer starts working the moment the session opens. Once
+whatever cannot come back has blocked and handed back, if anything else is
+still assigned and ready, BE-Code asks once, through the same modal a tool
+approval uses, naming every pending step, its owner, where it runs and its
+scope:
+
+```
+resume sub-agent work from the previous session?
+  3.2 port internal/scan — big (ollama-lan/qwen3:32b), scope: internal/scan
+  4.1 write the migration note — claude (online), scope: docs
+nothing has been sent to any model yet
+```
+
+Yes dispatches them; no leaves them assigned and `todo` and prints `sub-agent
+work left dormant; /agents start runs it` — that verb dispatches whatever is
+waiting without asking again. A step assigned or reassigned mid-session,
+by you or by the main model, is never held back this way: only the
+one question at startup ever asks. `-y` (headless) skips the question and
+dispatches; a non-interactive run without `-y` declines the same way.
 
 Approvals follow the session's own mode: a write inside a sub-agent's scope
 raises the same modal or diff a primary write does, labelled `sub-agent

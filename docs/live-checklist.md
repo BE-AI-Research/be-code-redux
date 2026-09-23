@@ -113,8 +113,12 @@ unit tests. Walk this once per release, or after touching `internal/subagent`,
     name the step's scope, not just the model; `a` allows it for the rest of the
     session.
 25. Mid-step, `/quit`. Restart with `--resume <code>` (or reattach a live one).
-    Expect the dim line `<name> resumed <id> …` and the step continuing from what
-    was already on disk, not from scratch.
+    Expect the shared approval modal ("Resume sub-agent work") naming the step,
+    its owner and its scope, before anything runs. Answer `y`: expect the dim
+    line `<name> resumed <id> …` and the step continuing from what was already
+    on disk, not from scratch. Repeat and answer `n` instead: expect nothing to
+    start, the notice `sub-agent work left dormant; /agents start runs it`,
+    and `/agents start` to dispatch it afterwards.
 26. With `approve_file_writes` on, assign a step whose scope includes a real file
     and let the sub-agent write it. Expect the same diff/approval modal an
     ordinary write raises, labelled `sub-agent <name> (<id>):`.

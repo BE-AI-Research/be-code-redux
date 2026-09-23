@@ -1,5 +1,37 @@
 # BE-Code Changelog
 
+## v1.1.1 — ask before a sub-agent resumes
+
+1.1.0 re-dispatched a step assigned in a previous session silently, with only
+a failure surfacing. The owner reversed that: a sub-agent must not start
+working behind the operator's back at startup.
+
+- **`StartSubAgents` asks once, before the first schedule.** The resume pass
+  still blocks and hands back whatever cannot come back, unasked, exactly as
+  before; if anything else is ready to dispatch, the operator is asked
+  through the same seam a tool approval uses (`Tools.Approve`, action
+  `sub_agent_resume`), one line per pending step naming its owner, where it
+  runs (`(provider/model)`, or `(online)`), and its scope.
+- **A decline leaves the work dormant, not lost.** The steps stay assigned
+  and `todo`, nothing is dispatched, and the notice names the way back:
+  `sub-agent work left dormant; /agents start runs it`. A later schedule —
+  a `task` tool call, a `/task` command, a hand-back's own parting
+  schedule — will not silently dispatch the same declined ids; only
+  `/agents start`, or the operator/model explicitly re-touching one of them
+  with `/task assign`/`/task scope`, clears its mark.
+- **Only the startup schedule ever asks.** A step assigned or reassigned
+  mid-session, by the operator or by the main model, still dispatches at
+  once — the transcript already says who started it.
+- **`/agents start`** is the new verb beside `/agents stop <name>`, in both
+  UIs: dispatches whatever is waiting and reports how many steps it started,
+  or `no sub-agent work is waiting`.
+- **`-y` proceeds without asking**, through its own config flag
+  (`AutoApproveSubAgentResume`) rather than either of the two `-y` already
+  sets — resuming unattended work is neither "run shell commands" nor "ship
+  code off this machine". A non-interactive run without `-y` declines and
+  prints the same notice. Online consent is unchanged and still asked
+  separately before the first online dispatch.
+
 ## v1.1.0 — sub-agents on the task engine
 
 A co-worker can now own a step of the task tree instead of only being consulted:
