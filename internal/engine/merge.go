@@ -269,6 +269,20 @@ func mergeNode(ours, theirs, base *Node, userDoing **Node) {
 		}
 		ours.Status, ours.Reason = theirs.Status, theirs.Reason
 	}
+	// The assignment is the operator's exactly as the status mark is (spec
+	// §3.1, §4.3): an `@owner`, a `scope:` or an `after:` edited by hand
+	// wins over the tree, and one *removed* by hand is removed here too.
+	// Without this the document's assignment never reaches the tree and the
+	// next Flush writes the engine's render back over the operator's file.
+	if base == nil || theirs.Owner != base.Owner || theirs.OwnerPinned != base.OwnerPinned {
+		ours.Owner, ours.OwnerPinned = theirs.Owner, theirs.OwnerPinned
+	}
+	if base == nil || !sameStrings(theirs.Scope, base.Scope) {
+		ours.Scope = append([]string(nil), theirs.Scope...)
+	}
+	if base == nil || !sameStrings(theirs.After, base.After) {
+		ours.After = append([]string(nil), theirs.After...)
+	}
 	var baseEv Evidence
 	if base != nil {
 		baseEv = base.Evidence
@@ -344,6 +358,10 @@ func unchangedSince(o, b *Node) bool {
 	if o.Text != b.Text || o.Status != b.Status || o.Reason != b.Reason || len(o.Evidence.Raw) > 0 {
 		return false
 	}
+	if o.Owner != b.Owner || o.OwnerPinned != b.OwnerPinned ||
+		!sameStrings(o.Scope, b.Scope) || !sameStrings(o.After, b.After) {
+		return false
+	}
 	have := map[string]int{}
 	for _, l := range evidenceLines(b.Evidence) {
 		have[l]++
@@ -358,6 +376,20 @@ func unchangedSince(o, b *Node) bool {
 	for _, c := range o.Children {
 		bc := pairs[c]
 		if bc == nil || !unchangedSince(c, bc) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameStrings compares two path lists element by element; order is part of
+// the value, since the document prints them in the order it was given.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

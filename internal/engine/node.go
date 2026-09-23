@@ -232,9 +232,20 @@ func (t *Tree) Walk(fn func(n *Node, depth int)) {
 func (t *Tree) Doing() *Node {
 	var found *Node
 	t.Walk(func(n *Node, _ int) {
-		if found == nil && n.Status == StatusDoing && t.penOf(n.ID) == "" {
-			found = n
+		if found != nil || n.Status != StatusDoing || t.penOf(n.ID) != "" {
+			return
 		}
+		// dispatched is transient. A hard kill leaves a [>] inside an
+		// assigned subtree and an empty running set at the next load, so
+		// penOf answers "" for it — but the owner tag survives in the
+		// document, and a doing node under an owner is that owner's, never
+		// the main model's. Without this the main model's evidence files
+		// onto the sub-agent's step until the resume pass re-dispatches the
+		// root.
+		if t.OwnerOf(n.ID) != "" {
+			return
+		}
+		found = n
 	})
 	return found
 }

@@ -139,6 +139,12 @@ type nodeTimes struct {
 	Started time.Time `json:"started,omitempty"`
 	Closed  time.Time `json:"closed,omitempty"`
 	Calls   int       `json:"calls,omitempty"`
+	// DoneBy is who closed the node, when it was not the main model. The
+	// Markdown document does not carry it (it is not the operator's to
+	// edit), so it rides with the times and comes back under the same
+	// text-match rule — otherwise "done by big" vanishes at the next
+	// restart while "(14m, 22 tool calls)" survives.
+	DoneBy string `json:"done_by,omitempty"`
 }
 
 type fileMemo struct {
@@ -1116,8 +1122,8 @@ func (s *Store) stateLocked(docs map[string]string) state {
 	}
 	times := map[string]nodeTimes{}
 	s.tree.Walk(func(n *Node, _ int) {
-		if !n.Started.IsZero() {
-			times[n.ID] = nodeTimes{Text: n.Text, Started: n.Started, Closed: n.Closed, Calls: n.Calls}
+		if !n.Started.IsZero() || n.DoneBy != "" {
+			times[n.ID] = nodeTimes{Text: n.Text, Started: n.Started, Closed: n.Closed, Calls: n.Calls, DoneBy: n.DoneBy}
 		}
 	})
 	if len(times) > 0 {
@@ -1138,8 +1144,11 @@ func (s *Store) restoreTimes(times map[string]nodeTimes) {
 			continue
 		}
 		n.Started, n.Calls = nt.Started, nt.Calls
-		if n.Status.terminal() && !nt.Closed.IsZero() {
-			n.Closed = nt.Closed
+		if n.Status.terminal() {
+			n.DoneBy = nt.DoneBy
+			if !nt.Closed.IsZero() {
+				n.Closed = nt.Closed
+			}
 		}
 	}
 }
@@ -1474,6 +1483,19 @@ func (s *Store) SetScope(id string, scope []string) error {
 			return fmt.Errorf("%s may only own paths under %s", n.Owner, strings.Join(card.MaxScope, ", "))
 		}
 	}
+	// One pen per path (spec §2.1.3, §3.4): a scope that reaches into a
+	// subtree somebody else is already working would put two sub-agents on
+	// the same files, and the ready rule can no longer catch it once the
+	// node is dispatched.
+	for other := range s.tree.dispatched {
+		if other == id {
+			continue
+		}
+		o := s.tree.Find(other)
+		if o != nil && subagent.Overlap(clean, o.Scope) {
+			return fmt.Errorf("scope overlaps %s, which %s is working", other, o.Owner)
+		}
+	}
 	n.Scope = clean
 	s.markDirtyLocked()
 	return nil
@@ -1519,6 +1541,13 @@ func (s *Store) CloseAs(id, owner, status, reason string) error {
 			close(c)
 		}
 		if x.Status.terminal() {
+			// Already closed — by the sub-agent's own task tool, most of the
+			// time, which is exactly the node the report line describes. It
+			// still belongs to the owner, so stamp it; only the status and
+			// the distillation are skipped.
+			if owner != "" {
+				x.DoneBy = owner
+			}
 			return
 		}
 		if x.Text == unfiledText && len(x.Evidence.Raw) == 0 && len(x.Children) == 0 && !s.isRootLocked(x) {
@@ -1568,6 +1597,11 @@ func (s *Store) Touched(id string) []string {
 	if n == nil {
 		return nil
 	}
+	return touchedUnder(n)
+}
+
+// touchedUnder is every file written under n, from its evidence, sorted.
+func touchedUnder(n *Node) []string {
 	seen := map[string]bool{}
 	var out []string
 	var walk func(x *Node)
@@ -1627,6 +1661,18 @@ func (s *Store) Steps() []subagent.Step {
 				if _, files, ok := strings.Cut(note.Text, "files written: "); ok {
 					st.Touched = splitList(files)
 				}
+			}
+		}
+		// A crash writes no interruption note — nothing ran to write one —
+		// so a subtree an earlier session was working comes back looking
+		// untouched, and the re-dispatched sub-agent is not told what it
+		// already wrote. The evidence knows: an assigned root that is open
+		// and already has writes under it was interrupted, whatever the
+		// notes say. Only for the top of a subtree, and only when the walk
+		// finds something, so it costs nothing on an ordinary tree.
+		if !st.Interrupted && inherited == "" && n.Owner != "" && !n.Status.terminal() {
+			if files := touchedUnder(n); len(files) > 0 {
+				st.Interrupted, st.Touched = true, files
 			}
 		}
 		for _, c := range n.Children {

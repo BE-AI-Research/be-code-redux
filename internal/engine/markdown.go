@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 // The task document is Markdown the user reads and edits: one heading, a
@@ -92,6 +94,28 @@ func splitFields(text string) (string, nodeFields) {
 			f.after = splitList(m[5])
 		}
 	}
+}
+
+// cleanScopeField normalises the scope entries a document carries the way
+// Store.SetScope normalises the ones a command gives it, and reports the
+// entries it had to drop. Cleaning here — rather than inside InScope /
+// Within / Overlap — is what keeps "a Node's Scope is clean" an invariant
+// of the tree: every consumer (the ready rule's overlap arithmetic, the
+// scoped registry's confinement check and its error message, the render)
+// then sees one normalised form, and a hand-written `./internal/scan/`
+// cannot refuse every write while quoting the operator's own text back.
+// Entry by entry, so one bad path does not take the rest of the scope with
+// it, and a drop is noted the way an id repair is.
+func cleanScopeField(paths []string) (out, dropped []string) {
+	for _, p := range paths {
+		c, err := subagent.CleanScope([]string{p})
+		if err != nil || len(c) == 0 {
+			dropped = append(dropped, strings.TrimSpace(p))
+			continue
+		}
+		out = append(out, c[0])
+	}
+	return out, dropped
 }
 
 func splitList(s string) []string {
@@ -372,6 +396,14 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			text, fields := splitFields(text)
 			n := &Node{Text: text, Status: st, Reason: reason, Opened: now}
 			n.Owner, n.OwnerPinned, n.Scope, n.After = fields.owner, fields.pinned, fields.scope, fields.after
+			if len(n.Scope) > 0 {
+				clean, dropped := cleanScopeField(n.Scope)
+				n.Scope = clean
+				for _, d := range dropped {
+					n.Evidence.Notes = append(n.Evidence.Notes,
+						NoteRef{Text: fmt.Sprintf("scope entry %q dropped: not a workspace-relative path", d)})
+				}
+			}
 			if st.terminal() {
 				n.Closed = now
 			}

@@ -405,3 +405,219 @@ func TestLoadWarnsOnUnknownOwnerAndScopeOutsideMax(t *testing.T) {
 		t.Fatalf("warnings: %q", warns)
 	}
 }
+
+// TestAHandEditedAssignmentWinsOnReload is spec §3.1/§4.3: the assignment
+// is the operator's exactly as the status mark is. mergeNode used to copy
+// text, status, reason, evidence and children and nothing else, so an
+// `@owner`, a `scope:` or an `after:` typed into the document never reached
+// the tree — and because the merge then recorded the file's hash as known,
+// the next Flush rendered the engine's tag-less tree back over the
+// operator's own file with no `.edited-` copy kept.
+func TestAHandEditedAssignmentWinsOnReload(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	s.SetCards(cardsForTest())
+	id := s.Plan("port the scanner", []string{"list the call sites", "port internal/scan", "write the note"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	name := "001-port-the-scanner.md"
+
+	// The operator, in their editor: assigns one step and orders another.
+	doc := readDoc(t, root, name)
+	doc = strings.Replace(doc, "- [ ] 1.2. port internal/scan",
+		"- [ ] 1.2. port internal/scan  @big  scope: ./internal/scan/, internal/scan_test.go", 1)
+	doc = strings.Replace(doc, "- [ ] 1.3. write the note",
+		"- [ ] 1.3. write the note  @claude!  scope: docs/scanner.md  after: 1.2", 1)
+	writeDocFile(t, root, name, doc)
+
+	s.Reload()
+	n := s.tree.Find(id + ".2")
+	if n.Owner != "big" || n.OwnerPinned {
+		t.Fatalf("the document's owner never reached the tree: %+v", n)
+	}
+	// Cleaned at parse time, so the ready rule and the scoped registry see
+	// one normalised form of the operator's "./internal/scan/".
+	if len(n.Scope) != 2 || n.Scope[0] != "internal/scan" || n.Scope[1] != "internal/scan_test.go" {
+		t.Fatalf("scope: %q", n.Scope)
+	}
+	if s.tree.OwnerOf(id+".2") != "big" {
+		t.Fatal("OwnerOf does not see the hand-edited owner")
+	}
+	p := s.tree.Find(id + ".3")
+	if p.Owner != "claude" || !p.OwnerPinned || len(p.After) != 1 || p.After[0] != "1.2" {
+		t.Fatalf("pinned owner / after: %+v", p)
+	}
+
+	// And the next Flush keeps them: the engine must not write its own
+	// render back over the operator's tags.
+	s.Note(id+".1", "found them all", "", false, false)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := readDoc(t, root, name)
+	for _, want := range []string{
+		"@big  scope: internal/scan, internal/scan_test.go",
+		"@claude!  scope: docs/scanner.md  after: 1.2",
+		"note: found them all",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the flush lost %q:\n%s", want, got)
+		}
+	}
+
+	// Removing an assignment by hand is equally the operator's intent.
+	doc = strings.Replace(got, "  @big  scope: internal/scan, internal/scan_test.go", "", 1)
+	writeDocFile(t, root, name, doc)
+	s.Reload()
+	if n := s.tree.Find(id + ".2"); n.Owner != "" || len(n.Scope) != 0 {
+		t.Fatalf("a hand-removed assignment was put back: %+v", n)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readDoc(t, root, name); strings.Contains(got, "@big") {
+		t.Fatalf("the flush put @big back:\n%s", got)
+	}
+}
+
+// TestScopeEntriesAreCleanedAtParseTime: a hand-written trailing slash or
+// "./" prefix used to reach the scoped registry verbatim, where it matched
+// nothing — every write refused while the refusal quoted the operator's own
+// text back. An entry that escapes the workspace is dropped with a note,
+// the way an id repair leaves one.
+func TestScopeEntriesAreCleanedAtParseTime(t *testing.T) {
+	tr, _, err := ParseDoc("# 001 — port\n\n- [ ] 1. port  @big  scope: ./internal/scan/, ../secrets, docs\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := tr.Roots[0]
+	if len(n.Scope) != 2 || n.Scope[0] != "internal/scan" || n.Scope[1] != "docs" {
+		t.Fatalf("scope: %q", n.Scope)
+	}
+	if !subagent.InScope(n.Scope, "internal/scan/token.go") {
+		t.Fatal("a cleaned entry must match its own files")
+	}
+	var noted bool
+	for _, note := range n.Evidence.Notes {
+		if strings.Contains(note.Text, "../secrets") && strings.Contains(note.Text, "dropped") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the dropped entry was not noted: %+v", n.Evidence.Notes)
+	}
+}
+
+// TestDoneByIsStampedOnAnAlreadyClosedNodeAndSurvivesAReload covers two
+// halves of the same report line. CloseAs skipped a node that was already
+// terminal, so a sub-agent that closed its own root with its task tool
+// never got DoneBy — and DoneBy was persisted nowhere, so "done by big"
+// vanished at the next open while "(14m, 22 tool calls)" came back.
+func TestDoneByIsStampedOnAnAlreadyClosedNodeAndSurvivesAReload(t *testing.T) {
+	s, root := openTest(t, "s1", false)
+	s.SetCards(cardsForTest())
+	id := s.Plan("port the scanner", []string{"port internal/scan"})
+	if err := s.SetOwner(id+".1", "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetScope(id+".1", []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDispatched(id+".1", true)
+	// The sub-agent marks its own root done with its task tool...
+	if err := s.SetStatus(id+".1", StatusDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	// ...and the runner then closes the subtree on its behalf.
+	if err := s.CloseAs(id+".1", "big", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.tree.Find(id + ".1"); n.DoneBy != "big" {
+		t.Fatalf("DoneBy not stamped on an already-closed node: %+v", n)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := OpenAt(s.dir, root, "s1", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := s2.tree.Find(id + ".1")
+	if n == nil || n.DoneBy != "big" {
+		t.Fatalf("DoneBy did not survive the reload: %+v", n)
+	}
+	// docs/task-format.md: "A closed step a sub-agent did reads `done by big
+	// (14m, 22 tool calls)` in its report."
+	if line := statusLine(n); !strings.Contains(line, "done by big") {
+		t.Fatalf("the report line lost it: %q", line)
+	}
+}
+
+// TestDoingIgnoresAnOrphanedSubAgentMark: a hard kill leaves a [>] inside
+// an assigned subtree, and Tree.dispatched is transient — empty at the next
+// load — so penOf answered "" and Doing() handed the sub-agent's step to
+// the main model, which then filed its evidence onto it.
+func TestDoingIgnoresAnOrphanedSubAgentMark(t *testing.T) {
+	s, root := planOwned(t)
+	_ = root
+	sub := s.tree.Find(s.tree.Roots[0].ID + ".2.1")
+	sub.Status = StatusDoing
+	// Nothing is dispatched: this is the state a fresh load sees.
+	if len(s.Dispatched()) != 0 {
+		t.Fatal("the fixture must have nothing dispatched")
+	}
+	if d := s.tree.Doing(); d == nil || d.ID != s.tree.Roots[0].ID+".1" {
+		t.Fatalf("Doing returned the sub-agent's step: %+v", d)
+	}
+	// And with the main model's own step closed, there is simply no doing
+	// node for it rather than somebody else's.
+	_ = s.SetStatus(s.tree.Roots[0].ID+".1", StatusDone, "")
+	if d := s.tree.Doing(); d != nil {
+		t.Fatalf("Doing adopted an orphaned sub-agent mark: %+v", d)
+	}
+}
+
+// TestSetScopeRefusesAnOverlapWithADispatchedNode is spec §3.4: one pen per
+// path. Once a node is dispatched the ready rule can no longer stop a
+// second sub-agent being pointed at the same files, so SetScope must.
+func TestSetScopeRefusesAnOverlapWithADispatchedNode(t *testing.T) {
+	s, root := planOwned(t)
+	s.SetDispatched(root+".2", true) // big owns internal/scan
+	if err := s.SetOwner(root+".3", "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetScope(root+".3", []string{"internal"}); err == nil ||
+		!strings.Contains(err.Error(), "overlaps "+root+".2") {
+		t.Fatalf("an overlapping scope was accepted: %v", err)
+	}
+	if err := s.SetScope(root+".3", []string{"docs"}); err != nil {
+		t.Fatalf("a disjoint scope must still be allowed: %v", err)
+	}
+	// Widening the dispatched node's own scope is not an overlap with itself.
+	if err := s.SetScope(root+".2", []string{"internal/scan", "internal/token"}); err != nil {
+		t.Fatalf("a node may still widen its own scope: %v", err)
+	}
+}
+
+// TestACrashedSubtreeIsSeenAsInterrupted: a crash writes no interruption
+// note — nothing ran to write one — so the README's promise that a
+// re-dispatched sub-agent comes back "with what was already touched still
+// on disk" was only half true: it was not told what it had written. The
+// evidence knows, so Steps recovers it.
+func TestACrashedSubtreeIsSeenAsInterrupted(t *testing.T) {
+	s, root := planOwned(t)
+	s.SetDispatched(root+".2", true)
+	_ = s.SetStatus(root+".2.1", StatusDoing, "")
+	s.ObserveFor(root+".2", Event{Tool: "write_file",
+		Args: map[string]any{"path": "internal/scan/a.go", "content": "x"}, Content: "wrote"})
+	// No Interrupt call, no note: the session was killed.
+	steps := s.Steps()
+	sub := steps[0].Children[1]
+	if !sub.Interrupted || len(sub.Touched) != 1 || sub.Touched[0] != "internal/scan/a.go" {
+		t.Fatalf("a crashed subtree reads as untouched: %+v", sub)
+	}
+	// An assigned step nothing has written under is not "interrupted".
+	if third := steps[0].Children[2]; third.Interrupted {
+		t.Fatalf("an untouched step was called interrupted: %+v", third)
+	}
+}
