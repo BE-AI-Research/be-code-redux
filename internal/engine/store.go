@@ -1541,13 +1541,11 @@ func (s *Store) CloseAs(id, owner, status, reason string) error {
 			close(c)
 		}
 		if x.Status.terminal() {
-			// Already closed — by the sub-agent's own task tool, most of the
-			// time, which is exactly the node the report line describes. It
-			// still belongs to the owner, so stamp it; only the status and
-			// the distillation are skipped.
-			if owner != "" {
-				x.DoneBy = owner
-			}
+			// Already closed, and this close is not what closed it. Its
+			// attribution was decided when it was closed (Tree.SetStatus
+			// stamps DoneBy from the pen the transition happened in), so
+			// leave it alone: a child the MAIN model finished before the
+			// step was delegated must not come back reading "done by big".
 			return
 		}
 		if x.Text == unfiledText && len(x.Evidence.Raw) == 0 && len(x.Children) == 0 && !s.isRootLocked(x) {
@@ -1598,6 +1596,14 @@ func (s *Store) Touched(id string) []string {
 		return nil
 	}
 	return touchedUnder(n)
+}
+
+// doingBelow reports whether a doing node sits strictly below rootID —
+// DoingUnder counts the root itself, which is the one case that must not
+// count here (see Steps).
+func doingBelow(t *Tree, rootID string) bool {
+	d := t.DoingUnder(rootID)
+	return d != nil && d.ID != rootID
 }
 
 // touchedUnder is every file written under n, from its evidence, sorted.
@@ -1666,11 +1672,21 @@ func (s *Store) Steps() []subagent.Step {
 		// A crash writes no interruption note — nothing ran to write one —
 		// so a subtree an earlier session was working comes back looking
 		// untouched, and the re-dispatched sub-agent is not told what it
-		// already wrote. The evidence knows: an assigned root that is open
-		// and already has writes under it was interrupted, whatever the
-		// notes say. Only for the top of a subtree, and only when the walk
-		// finds something, so it costs nothing on an ordinary tree.
-		if !st.Interrupted && inherited == "" && n.Owner != "" && !n.Status.terminal() {
+		// already wrote. The evidence knows.
+		//
+		// But `Interrupted` is what resumeSubAgents reads to decide that a
+		// run really was dispatched and cut short, and it *closes* such a
+		// node `blocked` when it is not ready — so "has a written file
+		// under it" is far too weak a test on its own. The main model
+		// working a step, writing a file and then delegating it leaves
+		// exactly that shape, and the delegation would be destroyed at the
+		// next start. The extra evidence that a dispatch really happened is
+		// a doing node STRICTLY BELOW the root: a dispatched root stays
+		// `todo` while its pen works its children (§1.3), and the store
+		// opens the pen's `unfiled` node under the root before it files any
+		// evidence at all, so a killed dispatch always leaves one. A root
+		// that is itself `doing` is the main model's own mark.
+		if !st.Interrupted && inherited == "" && n.Owner != "" && !n.Status.terminal() && doingBelow(&s.tree, n.ID) {
 			if files := touchedUnder(n); len(files) > 0 {
 				st.Interrupted, st.Touched = true, files
 			}

@@ -621,3 +621,108 @@ func TestACrashedSubtreeIsSeenAsInterrupted(t *testing.T) {
 		t.Fatalf("an untouched step was called interrupted: %+v", third)
 	}
 }
+
+// TestDelegatingAStartedStepIsNotAnInterruption is the regression the
+// crash-recovery rule introduced. `Interrupted` is what resumeSubAgents
+// reads to decide a run really was dispatched and cut short, and it CLOSES
+// such a node `blocked` when it is not ready — and "not ready" is common
+// (`no scope`, `status is doing`, `waiting for 1.1`). The main model
+// working a step, writing a file under it and then delegating it leaves
+// exactly the shape the rule was keying on, so the delegation would be
+// destroyed at the next session start. A dispatch that was cut short
+// leaves a doing node strictly BELOW the root; a root that is itself doing
+// is the main model's own mark.
+func TestDelegatingAStartedStepIsNotAnInterruption(t *testing.T) {
+	s := testStore(t)
+	s.SetCards(cardsForTest())
+	root := s.Plan("port the scanner", []string{"port internal/scan"})
+	id := root + ".1"
+	// The main model works the step and writes a file under it...
+	if err := s.SetStatus(id, StatusDoing, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.Observe(Event{Tool: "write_file",
+		Args: map[string]any{"path": "internal/scan/a.go", "content": "x"}, Content: "wrote"})
+	// ...and only then delegates it. Nothing was ever dispatched.
+	if err := s.SetOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetScope(id, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Touched(id); len(got) == 0 {
+		t.Fatal("the fixture must leave a written file under the step")
+	}
+	step := s.Steps()[0].Children[0]
+	if step.ID != id {
+		t.Fatalf("fixture: %+v", step)
+	}
+	if step.Interrupted {
+		t.Fatalf("a delegated-but-never-dispatched step reads as interrupted, so resume would close it blocked: %+v", step)
+	}
+	// The step must survive a restart still assigned and still open.
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := OpenAt(s.dir, s.root, "s1", true, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2.SetCards(cardsForTest())
+	n := s2.tree.Find(id)
+	if n == nil || n.Owner != "big" || n.Status.terminal() {
+		t.Fatalf("the delegation did not survive: %+v", n)
+	}
+	if again := s2.Steps()[0].Children[0]; again.Interrupted {
+		t.Fatalf("still interrupted after a reload: %+v", again)
+	}
+}
+
+// TestDoneByIsNotStampedOnTheMainModelsOwnFinishedWork: CloseAs recurses
+// into every descendant, so stamping an already-terminal node there put
+// "done by big" on a child the MAIN model had completed before the step was
+// ever delegated — which is precisely the line the operator reads to know
+// who did what. Attribution now happens at the transition, inside the pen
+// that made it.
+func TestDoneByIsNotStampedOnTheMainModelsOwnFinishedWork(t *testing.T) {
+	s := testStore(t)
+	s.SetCards(cardsForTest())
+	root := s.Plan("port the scanner", []string{"port internal/scan"})
+	id := root + ".1"
+	mine, err := s.Add(id, "the main model's own sub-step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := s.Add(id, "the sub-agent's sub-step")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The main model finishes its own sub-step before delegating.
+	if err := s.SetStatus(mine, StatusDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetScope(id, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetDispatched(id, true)
+	// The sub-agent closes its own sub-step with its task tool...
+	if err := s.SetStatus(theirs, StatusDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	// ...and the runner closes the subtree on its behalf.
+	if err := s.CloseAs(id, "big", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.tree.Find(mine); n.DoneBy != "" {
+		t.Fatalf("the main model's own finished sub-step reads %q: %q", "done by "+n.DoneBy, statusLine(n))
+	}
+	// The sub-agent's own work is still attributed, root included.
+	for _, want := range []string{theirs, id} {
+		if n := s.tree.Find(want); n.DoneBy != "big" {
+			t.Fatalf("%s lost its attribution: %+v", want, n)
+		}
+	}
+}

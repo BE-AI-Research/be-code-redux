@@ -276,9 +276,26 @@ func (t *Tree) SetStatus(id string, s Status, reason string) *Node {
 		n.Closed = now()
 	}
 	if !s.terminal() {
-		n.Closed = time.Time{}
+		// Reopened, so nobody has finished it: the attribution goes with the
+		// closing time it described, or the report would read "todo by big".
+		n.Closed, n.DoneBy = time.Time{}, ""
 	}
 	n.Status = s
+	if s.terminal() {
+		// Attribution happens at the transition, not at the close. A node
+		// closed from inside a dispatched pen was closed by the sub-agent
+		// that owns that pen — through its own task tool, or through
+		// CloseAs on the way out — and a node closed before the step was
+		// ever delegated keeps its own (empty) attribution, so the report
+		// never tells the operator that the main model's finished work was
+		// "done by big". A hand-edited `[x]` goes nowhere near here: the
+		// merge writes Status directly, because that one is the operator's.
+		if pen := t.penOf(n.ID); pen != "" {
+			if p := t.Find(pen); p != nil {
+				n.DoneBy = p.Owner
+			}
+		}
+	}
 	if reason != "" {
 		n.Reason = strings.TrimSpace(reason)
 	}
