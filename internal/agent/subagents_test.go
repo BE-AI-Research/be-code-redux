@@ -803,29 +803,69 @@ func TestRunningSubAgentsMakesNoStoreCall(t *testing.T) {
 	}
 }
 
-// TestPrefillTakesTheLane is one third of finding 9: a prefill warms the
-// same server a sub-agent may be using, and interleaving with one makes the
-// warming pointless.
-func TestPrefillTakesTheLane(t *testing.T) {
+// TestPrefillTakesTheLaneAtBackgroundPriority is one third of finding 9,
+// with the priority the re-review asked for: a prefill warms the same
+// server a sub-agent may be using, and interleaving with one makes the
+// warming pointless — but it blocks nobody, so it must NOT go through the
+// primary's own laneAcquire, which takes the lane at primary priority and
+// would put a speculative cache warm ahead of a sub-agent's real request.
+// (The priority semantics themselves are pinned in internal/subagent's
+// lanes_test.go; what is checked here is which lane and which priority
+// this call site asks for.)
+func TestPrefillTakesTheLaneAtBackgroundPriority(t *testing.T) {
 	f := newSubFixture(t, &scriptedProvider{}, nil)
 	pp := &prefillProvider{funcProvider: &funcProvider{}, release: make(chan struct{})}
 	close(pp.release)
 	f.ag.Provider = pp
+
+	// The primary's own (primary-priority) wrapper must not be what a
+	// prefill uses.
 	var mu sync.Mutex
-	taken := 0
+	viaPrimary := 0
 	f.ag.laneAcquire = func(ctx context.Context) (func(), error) {
 		mu.Lock()
-		taken++
+		viaPrimary++
 		mu.Unlock()
 		return func() {}, nil
 	}
+
+	// It is still laned, on the primary's own server: hold that lane and
+	// the prefill cannot start.
+	hold, err := f.ag.subs.lanes.Acquire(context.Background(), "http://primary:11434", false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	f.ag.StartPrefill()
+	time.Sleep(50 * time.Millisecond)
+	if n, _ := pp.seen(); n != 0 {
+		t.Fatal("the prefill ran while another caller held its server's lane")
+	}
+	hold()
+	waitForCond(t, "the prefill", func() bool { n, _ := pp.seen(); return n == 1 })
 	f.ag.stopPrefill()
+
 	mu.Lock()
 	defer mu.Unlock()
-	if taken != 1 {
-		t.Fatalf("the prefill took the lane %d times", taken)
+	if viaPrimary != 0 {
+		t.Fatalf("the prefill took the lane at primary priority (%d times)", viaPrimary)
 	}
+	// And the acquirer it does use is background priority on that server.
+	if f.ag.prefillLane() == nil {
+		t.Fatal("no prefill lane")
+	}
+}
+
+// waitForCond polls until cond holds or the test fails.
+func waitForCond(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // TestConsultationTakesItsOwnServersLane is the second third of finding 9:
@@ -922,4 +962,54 @@ func TestOwnedNoteAcceptsThePathAliases(t *testing.T) {
 			t.Fatalf("%q: %q", key, note)
 		}
 	}
+}
+
+// panickingReviewer is a second model whose Chat blows up — the wire
+// format of a reviewer provider is one this process may never have seen.
+type panickingReviewer struct{ scriptedProvider }
+
+func (p *panickingReviewer) Chat(context.Context, provider.ChatRequest, provider.StreamFunc) (*provider.ChatResponse, error) {
+	panic("the reviewer's provider exploded")
+}
+
+// TestAPanickingReviewerDoesNotStrandItsLane: Review has no panic fence of
+// its own, so releasing the lane on the success path alone left it held for
+// the life of the session — after which every request to that server blocks
+// for ever. Every other laned site releases with defer.
+func TestAPanickingReviewerDoesNotStrandItsLane(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	goProject(t, f.ag, f.dir)
+	// Something for Review to send: a recorded, changed file.
+	f.ag.Checkpoints.BeginTurn("t")
+	p := filepath.Join(f.dir, "main.go")
+	if err := f.ag.Checkpoints.Record(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("package main\n\nfunc main() { println(1) }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.ag.Checkpoints.ChangedLast()) == 0 {
+		t.Fatal("the fixture must leave a changed file for the reviewer")
+	}
+	// The reviewer's provider is the co-worker server here ("ollama").
+	f.ag.Cfg.Reviewer.Provider = "ollama"
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("the reviewer was expected to panic")
+			}
+		}()
+		_, _ = f.ag.Review(context.Background(), &panickingReviewer{}, "reviewer-model")
+	}()
+
+	if f.ag.subs.lanes.Busy("http://sub:11434") {
+		t.Fatal("the reviewer's panic left its server's lane held for ever")
+	}
+	// And the lane really can be taken again.
+	release, err := f.ag.subs.lanes.Acquire(context.Background(), "http://sub:11434", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
 }

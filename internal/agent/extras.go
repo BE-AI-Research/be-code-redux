@@ -156,20 +156,19 @@ func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewer
 	if reviewerProvider == "" {
 		reviewerProvider = a.Cfg.DefaultProvider
 	}
-	lane := a.laneFor(reviewerProvider, true)
-	var resp *provider.ChatResponse
-	var err error
-	call := func() (*provider.ChatResponse, error) { return reviewer.Chat(ctx, req, nil) }
-	if lane != nil {
+	// Released with defer, never on the success path alone: Review has no
+	// panic fence of its own, and the reviewer is a second model on a wire
+	// format this process may never have seen. A panic inside its Chat
+	// would otherwise leave the lane held for the life of the session, and
+	// every later request to that server would block for ever.
+	if lane := a.laneFor(reviewerProvider, true); lane != nil {
 		release, lerr := lane(ctx)
 		if lerr != nil {
 			return "", lerr
 		}
-		resp, err = call()
-		release()
-	} else {
-		resp, err = call()
+		defer release()
 	}
+	resp, err := reviewer.Chat(ctx, req, nil)
 	if err != nil {
 		return "", err
 	}

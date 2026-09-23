@@ -72,8 +72,9 @@ func (a *Agent) StartPrefill() {
 		// and stopPrefill keeps that true — but a *sub-agent* on the same
 		// server is not a real request of ours, and interleaving with one
 		// makes the warming pointless (the cache it warmed is the cache the
-		// sub-agent's own prompt then evicts).
-		resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) { return pf.Prefill(ctx, req) })
+		// sub-agent's own prompt then evicts). At background priority: this
+		// one blocks nobody, so it must not go ahead of real work.
+		resp, err := inLaneWith(ctx, a.prefillLane(), func() (*provider.ChatResponse, error) { return pf.Prefill(ctx, req) })
 		if err != nil || resp == nil {
 			return // cancelled by a real request, or a server that would not: neither is news
 		}

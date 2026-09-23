@@ -64,10 +64,18 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 // message — because a compaction colliding with a sub-agent on one Ollama is
 // exactly the overload the lane exists to prevent.
 func (a *Agent) inLane(ctx context.Context, fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
-	if a.laneAcquire == nil {
+	return inLaneWith(ctx, a.laneAcquire, fn)
+}
+
+// inLaneWith is inLane for a caller with a lane of its own rather than the
+// primary's — a prefill, which takes the primary's server at background
+// priority. A nil acquirer runs fn directly, which is what a session with
+// no sub-agent configured always does.
+func inLaneWith(ctx context.Context, acquire func(context.Context) (func(), error), fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
+	if acquire == nil {
 		return fn()
 	}
-	release, err := a.laneAcquire(ctx)
+	release, err := acquire(ctx)
 	if err != nil {
 		return nil, err
 	}

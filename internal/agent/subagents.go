@@ -189,6 +189,26 @@ func (a *Agent) RebindPrimaryLane() {
 	a.bindPrimaryLane(subagent.LaneKey(pc.BaseURL))
 }
 
+// prefillLane is the primary's own server at BACKGROUND priority. A
+// speculative cache warm blocks nobody and must not outrank a sub-agent's
+// real request on a shared server, which is what going through the
+// primary's own laneAcquire (primary: true) would do. A consultation and
+// the reviewer take primary priority deliberately — they block the request
+// the person is watching; a prefill does not.
+func (a *Agent) prefillLane() func(ctx context.Context) (func(), error) {
+	s := a.subs
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	key, lanes := s.primary, s.lanes
+	s.mu.Unlock()
+	if key == "" {
+		return nil
+	}
+	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, false) }
+}
+
 // laneFor is a lane wrapper for one co-worker's own server (spec §2.2:
 // every co-worker maps to a lane, not only a sub-agent). nil when there is
 // no runner, so nothing changes for a configuration with no sub-agent.
@@ -493,11 +513,15 @@ func (a *Agent) runSub(run *subRun) {
 		run.scratch = scratch
 		run.reg = scratch.Tools
 		// The scope may have been widened between subAgent's read of it and
-		// this install, and SetScope had no registry to push it to then.
-		// Re-applying the current value closes that window; it is idempotent.
-		cur := append([]string(nil), run.d.Scope...)
+		// this install, and SetScope had no registry to push it to then, so
+		// the current value is re-applied here. It happens INSIDE the hold:
+		// applying it after the unlock left a gap in which a SetScope that
+		// had just widened the registry was overwritten with the value from
+		// before the widening — the registry ending up narrower than
+		// run.d.Scope claims, after the sub-agent had been told otherwise.
+		// reg.SetScope takes its own mutex with no path back to subs.mu.
+		scratch.Tools.SetScope(run.d.Scope)
 		s.mu.Unlock()
-		scratch.Tools.SetScope(cur)
 		if a.Events.OnSubAgentStart != nil {
 			a.Events.OnSubAgentStart(run.d)
 		}
