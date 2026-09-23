@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -122,8 +123,13 @@ type Registry struct {
 	// registry (spec §2.4): writes only under scope, shell only for exactly
 	// one of checks.
 	scoped bool
-	scope  []string
-	checks []string
+	// scopeMu guards scope alone. A running sub-agent's scope is widened
+	// from the agent goroutine (Agent.SetScope, answering an ask_main) while
+	// the sub-agent's own goroutine is reading it in checkScope, so the
+	// slice is replaced under this lock and never mutated in place.
+	scopeMu sync.RWMutex
+	scope   []string
+	checks  []string
 
 	tools  []Tool
 	byName map[string]Tool
@@ -185,7 +191,7 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	sub.EditorName = r.EditorName
 	sub.OnStatus = r.OnStatus
 	sub.scoped = true
-	sub.scope, sub.checks = scope, checks
+	sub.scope, sub.checks = append([]string(nil), scope...), checks
 	sub.maxOutput.Store(r.maxOutput.Load())
 	if r.Approve != nil {
 		parent := r.Approve
@@ -233,10 +239,14 @@ func (r *Registry) checkScope(absPath string) error {
 	if !r.scoped {
 		return nil
 	}
-	denied := fmt.Errorf("path is outside your scope (%s); use ask_main if you need it widened", strings.Join(r.scope, ", "))
+	scope := r.Scope()
+	denied := fmt.Errorf("path is outside your scope (%s); use ask_main if you need it widened", strings.Join(scope, ", "))
 	real, err := realExistingPath(absPath)
 	if err != nil {
-		return err
+		// A dangling symlink is still a path outside what this sub-agent may
+		// write; the raw lstat error reads as a harness bug to a model that
+		// only needs to know it may not go there.
+		return denied
 	}
 	root := r.Root
 	if rr, err := filepath.EvalSymlinks(r.Root); err == nil {
@@ -246,10 +256,30 @@ func (r *Registry) checkScope(absPath string) error {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return denied
 	}
-	if !subagent.InScope(r.scope, filepath.ToSlash(rel)) {
+	if !subagent.InScope(scope, filepath.ToSlash(rel)) {
 		return denied
 	}
 	return nil
+}
+
+// Scope is a scoped registry's current write scope, copied out under the
+// lock so a caller can hold it while the agent widens the real one.
+func (r *Registry) Scope() []string {
+	r.scopeMu.RLock()
+	defer r.scopeMu.RUnlock()
+	return append([]string(nil), r.scope...)
+}
+
+// SetScope replaces a scoped registry's write scope. It is the other half
+// of spec §2.7's "task action: scope … widens the scope and resolves the
+// ask": without it the registry was built once from a copy of the slice, so
+// a widened scope changed nothing for the running sub-agent — which was
+// then told its scope had been widened, wrote the file it had asked about,
+// was refused, and had already spent its one ask.
+func (r *Registry) SetScope(scope []string) {
+	r.scopeMu.Lock()
+	r.scope = append([]string(nil), scope...)
+	r.scopeMu.Unlock()
 }
 
 // realExistingPath resolves symlinks in absPath, walking up to the nearest

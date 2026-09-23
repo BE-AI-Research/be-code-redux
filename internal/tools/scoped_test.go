@@ -214,3 +214,50 @@ func TestScopedToolsAreBoundOrReadOnlyAllowlisted(t *testing.T) {
 		}
 	}
 }
+
+// TestScopedWriteThroughADanglingSymlinkGivesTheScopeWording: realExistingPath
+// returned EvalSymlinks' raw error for a dangling link, so the sub-agent was
+// told "lstat …: no such file or directory" — which reads as a harness bug —
+// instead of being told it may not write there.
+func TestScopedWriteThroughADanglingSymlinkGivesTheScopeWording(t *testing.T) {
+	sub, dir := scopedReg(t, func(string, string) bool { return true })
+	link := filepath.Join(dir, "internal/scan/dangling")
+	if err := os.Symlink(filepath.Join(dir, "no-such-dir"), link); err != nil {
+		t.Fatal(err)
+	}
+	res := sub.Dispatch(context.Background(), call("write_file", `{"path":"internal/scan/dangling/x.go","content":"x"}`))
+	if !res.IsError {
+		t.Fatalf("a write through a dangling symlink was accepted: %+v", res)
+	}
+	if strings.Contains(res.Content, "no such file or directory") ||
+		!strings.Contains(res.Content, "outside your scope (internal/scan)") {
+		t.Fatalf("raw lstat error instead of the scope wording: %q", res.Content)
+	}
+}
+
+// TestSetScopeWidensARunningRegistry: the scope is read from the tool
+// goroutine while the agent widens it (spec §2.7), so it is replaced under
+// a lock and never mutated in place.
+func TestSetScopeWidensARunningRegistry(t *testing.T) {
+	sub, dir := scopedReg(t, func(string, string) bool { return true })
+	res := sub.Dispatch(context.Background(), call("write_file", `{"path":"cmd/y.go","content":"x"}`))
+	if !res.IsError {
+		t.Fatal("an out-of-scope write was accepted before the widening")
+	}
+	sub.SetScope([]string{"internal/scan", "cmd"})
+	if got := sub.Scope(); len(got) != 2 || got[1] != "cmd" {
+		t.Fatalf("Scope: %q", got)
+	}
+	res = sub.Dispatch(context.Background(), call("write_file", `{"path":"cmd/y.go","content":"x"}`))
+	if res.IsError {
+		t.Fatalf("the widened scope did not take: %s", res.Content)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cmd/y.go")); err != nil {
+		t.Fatal("file not written after the widening")
+	}
+	// And the refusal message quotes the current scope, not the original.
+	res = sub.Dispatch(context.Background(), call("write_file", `{"path":"docs/z.md","content":"x"}`))
+	if !res.IsError || !strings.Contains(res.Content, "outside your scope (internal/scan, cmd)") {
+		t.Fatalf("refusal names a stale scope: %+v", res)
+	}
+}
