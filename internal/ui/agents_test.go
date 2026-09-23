@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -167,14 +168,31 @@ func TestAgentsStartDispatchesAfterADecline(t *testing.T) {
 // TestIsAgentsBlockingAgreesWithAgentLines: the TUI decides whether to run
 // an /agents verb off its Update goroutine by asking IsAgentsBlocking
 // (ScheduleSubAgents, which "start" reaches, can raise a notice that takes
-// the session lock — see taskVerbCmd's comment).
+// the session lock — see taskVerbCmd's comment). Unlike a first pass at
+// this test, it does not restate IsAgentsBlocking's own condition and
+// compare it to itself — that passes for any internally consistent but
+// wrong predicate. It cross-checks against AgentLines' real dispatching
+// behaviour instead, the way TestIsTaskVerbAgreesWithTaskVerb cross-checks
+// against TaskVerb's own `handled`: for each form, leave one declined,
+// dormant step behind (withAssignedSubAgent plus a decline), run
+// AgentLines with that form, and observe whether it actually dispatched.
 func TestIsAgentsBlockingAgreesWithAgentLines(t *testing.T) {
-	for _, args := range [][]string{nil, {}, {"stop", "big"}, {"start"}} {
-		got := IsAgentsBlocking(args)
-		want := len(args) == 1 && args[0] == "start"
-		if got != want {
-			t.Fatalf("%q: IsAgentsBlocking=%v want %v", args, got, want)
-		}
+	forms := [][]string{nil, {}, {"stop", "big"}, {"start"}, {"start", "extra"}, {"bogus"}}
+	for _, args := range forms {
+		args := args
+		t.Run(fmt.Sprintf("%v", args), func(t *testing.T) {
+			r, _ := withAssignedSubAgent(t)
+			r.Agent.Tools.Approve = func(string, string) bool { return false }
+			r.Agent.StartSubAgents() // declines; the step stays assigned, todo and dormant
+			AgentLines(r.Agent, args)
+			dispatched := len(r.Agent.RunningSubAgents()) > 0
+			if dispatched {
+				waitForIdle(t, r, "big")
+			}
+			if got := IsAgentsBlocking(args); got != dispatched {
+				t.Fatalf("%q: IsAgentsBlocking=%v but AgentLines actually dispatched=%v", args, got, dispatched)
+			}
+		})
 	}
 }
 
