@@ -27,6 +27,34 @@ func withSubAgent(t *testing.T) (*REPL, string) {
 	return r, root + ".1"
 }
 
+// withAssignedSubAgent is withSubAgent plus a step already owned and scoped
+// directly on the store — the shape a previous session's work is in when
+// this one opens, before StartSubAgents has run at all. Going through
+// AssignOwner/SetScope instead would dispatch it immediately, which is
+// exactly what these tests must not have happen yet.
+func withAssignedSubAgent(t *testing.T) (*REPL, string) {
+	t.Helper()
+	r := newTestREPL(t)
+	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "m", SubAgent: true, MaxScope: []string{"internal"}}}
+	r.Cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://localhost:11434"}
+	st := testStoreFor(t, r)
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return nullProvider{}, 0, nil
+	}
+	t.Cleanup(func() { agent.CoworkerFactory = nil; r.Agent.StopAllSubAgents("test") })
+	cws, _ := r.Cfg.ValidCoworkers()
+	r.Agent.EnableSubAgents(cws, "http://localhost:11434")
+	root := st.Plan("port", []string{"port internal/scan"})
+	id := root + ".1"
+	if err := st.SetOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetScope(id, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	return r, id
+}
+
 // waitForIdle blocks until the named sub-agent has no dispatched run in
 // flight. A valid /task scope on an owned, empty-scope node makes it ready
 // at once, and SetScope schedules unconditionally: with the nullProvider
@@ -106,6 +134,47 @@ func TestAgentLines(t *testing.T) {
 	plain := newTestREPL(t)
 	if got := AgentLines(plain.Agent, nil); len(got) != 1 || !strings.Contains(got[0], "no sub-agents configured") {
 		t.Fatalf("no sub-agents: %q", got)
+	}
+}
+
+// TestAgentsStartReportsNothingWaiting: /agents start with nothing declined
+// and nothing assigned says so rather than a bare empty listing.
+func TestAgentsStartReportsNothingWaiting(t *testing.T) {
+	r, _ := withSubAgent(t)
+	lines := AgentLines(r.Agent, []string{"start"})
+	if len(lines) != 1 || lines[0] != "no sub-agent work is waiting" {
+		t.Fatalf("start with nothing waiting: %v", lines)
+	}
+}
+
+// TestAgentsStartDispatchesAfterADecline: a decline at startup leaves the
+// step dormant; /agents start (AgentLines "start") dispatches it and
+// reports how many.
+func TestAgentsStartDispatchesAfterADecline(t *testing.T) {
+	r, id := withAssignedSubAgent(t)
+	r.Agent.Tools.Approve = func(string, string) bool { return false }
+	r.Agent.StartSubAgents()
+	lines := AgentLines(r.Agent, []string{"start"})
+	if len(lines) != 1 || !strings.Contains(lines[0], "started 1 sub-agent step") || !strings.Contains(lines[0], id) {
+		t.Fatalf("start after decline: %v", lines)
+	}
+	// Let the dispatched scratch agent settle before the test's own cleanup
+	// clears agent.CoworkerFactory — the same race waitForIdle's own comment
+	// describes for a plain SetScope dispatch.
+	waitForIdle(t, r, "big")
+}
+
+// TestIsAgentsBlockingAgreesWithAgentLines: the TUI decides whether to run
+// an /agents verb off its Update goroutine by asking IsAgentsBlocking
+// (ScheduleSubAgents, which "start" reaches, can raise a notice that takes
+// the session lock — see taskVerbCmd's comment).
+func TestIsAgentsBlockingAgreesWithAgentLines(t *testing.T) {
+	for _, args := range [][]string{nil, {}, {"stop", "big"}, {"start"}} {
+		got := IsAgentsBlocking(args)
+		want := len(args) == 1 && args[0] == "start"
+		if got != want {
+			t.Fatalf("%q: IsAgentsBlocking=%v want %v", args, got, want)
+		}
 	}
 }
 

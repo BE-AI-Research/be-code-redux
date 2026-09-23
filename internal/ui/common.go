@@ -81,7 +81,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/coworkers", "list co-working models and how often each was consulted", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
-	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>", true},
+	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
 	{"/task", "task record: /task [show <id>|open|clear|assign <id> <owner>|scope <id> <paths>|reply <id> <text>]", true},
 	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
