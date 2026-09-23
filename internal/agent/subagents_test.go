@@ -498,6 +498,356 @@ func TestANoticeHandlerMayCallBackIntoTheRunner(t *testing.T) {
 	}
 }
 
+// --- startup resume prompt (2026-09-22 §3.6 amendment) ----------------
+
+// TestStartupResumeAskDeclineLeavesNothingDispatched: a decline at startup
+// leaves the resumed step assigned and todo, dispatches nothing, and the
+// operator is told how to run it later.
+func TestStartupResumeAskDeclineLeavesNothingDispatched(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	var gotAction, gotDetail string
+	f.ag.Tools.Approve = func(action, detail string) bool {
+		gotAction, gotDetail = action, detail
+		return false
+	}
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	f.ag.StartSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("dispatched despite decline: %+v", d)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if gotAction != "sub_agent_resume" {
+		t.Fatalf("action = %q", gotAction)
+	}
+	if !strings.Contains(gotDetail, id) || !strings.Contains(gotDetail, "big") || !strings.Contains(gotDetail, "internal/scan") {
+		t.Fatalf("detail: %q", gotDetail)
+	}
+	if len(notices) != 1 || notices[0] != "sub-agent work left dormant; /agents start runs it" {
+		t.Fatalf("notices: %v", notices)
+	}
+	if got := f.st.ShowText(id); !strings.Contains(got, "[ ] "+id+".") {
+		t.Fatalf("step not left assigned and todo:\n%s", got)
+	}
+}
+
+// TestStartupResumeAskAcceptDispatches: an approver that accepts dispatches
+// the resumed work normally.
+func TestStartupResumeAskAcceptDispatches(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, nil)
+	f.assign(t)
+	asked := false
+	f.ag.Tools.Approve = func(action, detail string) bool {
+		asked = action == "sub_agent_resume"
+		return true
+	}
+	f.ag.StartSubAgents()
+	if !asked {
+		t.Fatal("the approver was never asked")
+	}
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+}
+
+// TestStartupResumeAutoApproveSkipsTheAsk: -y (AutoApproveSubAgentResume)
+// dispatches without the approver being called at all.
+func TestStartupResumeAutoApproveSkipsTheAsk(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, func(c *config.Config) { c.AutoApproveSubAgentResume = true })
+	f.assign(t)
+	asked := false
+	f.ag.Tools.Approve = func(action, detail string) bool { asked = true; return true }
+	f.ag.StartSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+	if asked {
+		t.Fatal("the approver must not be called when -y set AutoApproveSubAgentResume")
+	}
+}
+
+// TestAllowSubAgentStartDispatchesAfterDecline: /agents start
+// (Agent.AllowSubAgentStart) dispatches what a decline left dormant and
+// clears the flag.
+func TestAllowSubAgentStartDispatchesAfterDecline(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	started := f.ag.AllowSubAgentStart()
+	if len(started) != 1 || started[0] != id {
+		t.Fatalf("AllowSubAgentStart = %v", started)
+	}
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+}
+
+// TestAllowSubAgentStartWithNothingWaiting: nothing was declined, nothing
+// to start.
+func TestAllowSubAgentStartWithNothingWaiting(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	if started := f.ag.AllowSubAgentStart(); len(started) != 0 {
+		t.Fatalf("AllowSubAgentStart = %v", started)
+	}
+}
+
+// TestAllowSubAgentStartRestoresTheDeclineWhenNothingDispatches is the
+// regression test for design review's L4: AllowSubAgentStart used to clear
+// resumeDeclined unconditionally, even when its own schedule dispatched
+// nothing (every ready candidate still capped, here, by max_concurrent).
+// The operator reads "no sub-agent work is waiting" and reasonably believes
+// nothing changed; a step that becomes ready later — once the cap frees up
+// — must still stay gated and ask again, not dispatch silently.
+func TestAllowSubAgentStartRestoresTheDeclineWhenNothingDispatches(t *testing.T) {
+	bp := &parkingProvider{entered: make(chan struct{}, 1)}
+	f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) {
+		c.SubAgents.MaxConcurrent = 1
+		c.Coworkers = append(c.Coworkers, config.CoworkerConfig{Name: "small", Provider: "ollama", Model: "cw-model-small", SubAgent: true})
+	})
+	if err := os.MkdirAll(filepath.Join(f.dir, "internal/other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	CoworkerFactory = func(_ context.Context, _ *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
+		if cw.Name == "small" {
+			return bp, 0, nil
+		}
+		return &scriptedProvider{}, 0, nil
+	}
+
+	// Occupy the one concurrency slot with an unrelated, indefinitely
+	// running sub-agent before the gate ever runs, so the cap is already
+	// full when the declined step is otherwise ready.
+	occRoot := f.st.Plan("occupy the slot", []string{"hold the cap"})
+	occID := occRoot + ".1"
+	if err := f.st.SetOwner(occID, "small", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetScope(occID, []string{"internal/other"}); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "occupant start")
+	wait(t, bp.entered, "occupant's first request")
+
+	// A separate, otherwise-ready step for big, capped out by the occupant.
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents() // declines; id is ready but capped, so nothing dispatches
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	started := f.ag.AllowSubAgentStart()
+	if len(started) != 0 {
+		t.Fatalf("expected nothing to start (capped), got %v", started)
+	}
+
+	// Free the slot.
+	if err := f.ag.StopSubAgent("small"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.ends, "occupant end")
+
+	// id is now the only thing left, and it is ready — but AllowSubAgentStart
+	// reported nothing waiting, so the decline must still be in force.
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a decline that AllowSubAgentStart reported as nothing-waiting still let a step dispatch once capacity freed: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if got := f.st.ShowText(id); !strings.Contains(got, "[ ] "+id+".") {
+		t.Fatalf("step not left assigned and todo:\n%s", got)
+	}
+}
+
+// TestScheduleAfterDeclineDoesNotDispatch is point 3's invariant: a later
+// ScheduleSubAgents — the same one a `task` tool call or /task command
+// triggers — must not silently dispatch what startup left dormant.
+func TestScheduleAfterDeclineDoesNotDispatch(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a later schedule dispatched declined work: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestNoStartupAskWhenNothingAssigned: nothing assigned, nothing to ask.
+func TestNoStartupAskWhenNothingAssigned(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	asked := false
+	f.ag.Tools.Approve = func(string, string) bool { asked = true; return true }
+	f.ag.StartSubAgents()
+	if asked {
+		t.Fatal("asked with nothing assigned")
+	}
+}
+
+// TestNoStartupAskWithNoSubAgentConfigured: no sub-agent configured, no
+// runner at all — StartSubAgents must not touch the approver.
+func TestNoStartupAskWithNoSubAgentConfigured(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	asked := false
+	ag.Tools.Approve = func(string, string) bool { asked = true; return true }
+	ag.StartSubAgents()
+	if asked {
+		t.Fatal("asked with no sub-agent configured")
+	}
+}
+
+// --- design review fixes (2026-09-22): the inverted decline mechanism ------
+
+// TestFailedAssignOwnerDoesNotClearADecline is the regression test for
+// review's CRITICAL #2: a typo'd or refused /task assign — a name that
+// does not exist, a pinned node, one being worked — must not ungate a
+// declined step it never actually touched. The old code deleted the id
+// from declinedResume unconditionally, outside the `err == nil` guard.
+func TestFailedAssignOwnerDoesNotClearADecline(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// A name that is not a sub-agent at all: AssignOwner must fail.
+	if err := f.ag.AssignOwner(id, "not-a-real-coworker", false); err == nil {
+		t.Fatal("expected AssignOwner to fail on an unknown owner")
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a failed AssignOwner cleared the decline: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestDeclineGatesAStepThatBecomesReadyOnlyLater is the regression test for
+// review's Important #3: the original per-id marking covered only the ids
+// that happened to be ready at the moment of the decline. Two sequenced
+// steps owned by the same sub-agent — 3.1 and 3.2, 3.2 waiting on 3.1 by
+// plain sibling order — leaves only 3.1 a candidate at startup; once 3.1
+// closes by some other means, 3.2 becomes ready for the first time only
+// after the decline, and must stay gated too.
+func TestDeclineGatesAStepThatBecomesReadyOnlyLater(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	root := f.st.Plan("port the scanner", []string{"port internal/scan", "port internal/scan2"})
+	id1, id2 := root+".1", root+".2"
+	for _, id := range []string{id1, id2} {
+		if err := f.st.SetOwner(id, "big", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.st.SetScope(id1, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetScope(id2, []string{"internal/scan2"}); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents() // only id1 was a ready candidate; declined
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// id1 closes by a means that is not a dispatch (an operator marking it
+	// done directly), which is exactly what makes id2 ready for the first
+	// time — after the decline, never having been offered in it.
+	if err := f.st.SetStatusText(id1, "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a step that became ready only after the decline still dispatched: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestNoOpReassertionDoesNotClearADecline is half the regression test for
+// review's Important #4: AssignOwner(id, sameOwner) — the main model
+// restating its own plan through the `task` tool, unprompted — must not
+// silently undo the operator's decline.
+func TestNoOpReassertionDoesNotClearADecline(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The same owner it already has: a no-op by value.
+	if err := f.ag.AssignOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case d := <-f.start:
+		t.Fatalf("a same-value re-assertion cleared the decline: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestAGenuineReassignmentClearsOneDeclineAndNotices is the other half of
+// #4: a real change — reassigning to a different sub-agent — is a fresh
+// initiation of exactly that step and must dispatch, with a notice saying
+// so (an undone decline must never be silent).
+func TestAGenuineReassignmentClearsOneDeclineAndNotices(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, func(c *config.Config) {
+		c.Coworkers = append(c.Coworkers, config.CoworkerConfig{Name: "small", Provider: "ollama", Model: "cw-model-small", SubAgent: true})
+	})
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents()
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	// A genuine change: reassigned to a different sub-agent.
+	if err := f.ag.AssignOwner(id, "small", false); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.start, "start after reassignment")
+	wait(t, f.ends, "end")
+	found := false
+	for _, m := range notices {
+		if strings.Contains(m, id) && strings.Contains(m, "re-assigned") && strings.Contains(m, "small") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no re-assigned notice among: %q", notices)
+	}
+}
+
 func TestEnableDoesNotDispatchUntilStart(t *testing.T) {
 	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
 	f := newSubFixture(t, sub, nil)

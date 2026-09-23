@@ -135,6 +135,11 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		// that one too, and choosing to stop being asked about commands is
 		// not consent to send the workspace to an online co-worker.
 		cfg.AutoApproveConsult = true
+		// A third distinct decision from both of the above: resuming a step
+		// assigned in a previous session dispatches work unattended, but it
+		// is neither "run shell commands" nor "ship code off this machine" —
+		// an online sub-agent still asks its own consent question (§3.6).
+		cfg.AutoApproveSubAgentResume = true
 	}
 	p, err := provider.FromConfig(cfg, flagProvider)
 	if err != nil {
@@ -685,10 +690,6 @@ func runInteractive(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
-		// Approvals and events are wired above (ui.NewREPL sets Tools.Approve);
-		// a dispatch before this point would ask consent of nobody and print
-		// to nobody.
-		ag.StartSubAgents()
 		// In-process: no client roster, so auto resolves to the editor.
 		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
 		coord.SetEditorName(agent.EditorLabel(ag.IDEName))
@@ -698,24 +699,58 @@ func runInteractive(cmd *cobra.Command) error {
 		// really reach the editor: mode "tui" (or no editor at all) resolves
 		// in the terminal instead.
 		ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
-		// Plain mode answers on the one input stream its own loop reads,
-		// so its half of the deferred consent runs inline, on the REPL
+		// Plain mode answers on the one input stream its own loop reads, so
+		// both halves of the deferred consent run inline, on the REPL
 		// goroutine, after the reader is up and before the first line is
-		// taken. The REPL owns the bounding and the prompt context (see
-		// underPrompt), because a switch typed later needs exactly the
-		// same treatment.
-		repl.OnStart = func() { repl.ResolveModelParams(ctx) }
+		// taken — never from a bare goroutine of their own, which would put
+		// a second reader on r.lines and split the user's keystrokes between
+		// it and the main loop (see REPL.OnStart's own comment). Calling
+		// ag.StartSubAgents() here, rather than before repl.Run below, is
+		// exactly that fix: Approve is already wired (ui.NewREPL sets
+		// Tools.Approve above), but a dispatch before Run has created
+		// r.lines and started the readline goroutine would ask its question
+		// on a stream nothing is reading yet, hanging the whole session.
+		// ResolveModelParams already takes the same care; the REPL owns the
+		// bounding and the prompt context (see underPrompt) for both.
+		repl.OnStart = func() {
+			repl.ResolveModelParams(ctx)
+			ag.StartSubAgents()
+		}
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)
-	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
-	// before that would ask consent of nobody and print to nobody.
-	ag.StartSubAgents()
+	// Everything a dispatched sub-agent's own registry reads has to be in
+	// place before StartSubAgentsAsync below can possibly reach one: under
+	// -y the gate returns instantly, and ScheduleSubAgents -> dispatchPicked
+	// -> runSub -> Agent.subAgent calls a.Tools.Scoped, which reads
+	// ReviewWrite and ReviewInvolvesEditor. Assigned after starting the
+	// gate goroutine, that read races the assignment here — too narrow a
+	// window for -race to catch, but wide enough to hand a sub-agent's
+	// first write a nil ReviewWrite and silently drop the editor-side
+	// review §3.3 promises. This is the second time ordering around
+	// StartSubAgentsAsync has bitten (see its own comment below), so
+	// everything here runs first, deliberately.
 	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
 	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 	s.SetReview(coord)
 	ag.Tools.ReviewWrite = coord.Decide
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
+	// before that would ask consent of nobody and print to nobody. But this
+	// goroutine still has to reach s.RunLocal below, which is what actually
+	// starts the program the resume ask's modal renders on — StartSubAgents
+	// blocks on that same modal's answer (Tools.Approve -> Session.Ask,
+	// waiting on a.reply/quitCh/ctx.Done()), and s.rootCtx is not even set
+	// until RunLocal runs. Called synchronously here, the whole session
+	// hangs before any terminal renders, on every workspace with an
+	// assigned, scoped, todo step owned by a sub-agent. StartSubAgentsAsync
+	// runs the resume pass synchronously (it never blocks, and any failure
+	// it hands back should surface deterministically before anything else)
+	// and the gate plus the first schedule on a goroutine of their own,
+	// panic-fenced — Session.Ask tolerates being raised with nobody
+	// rendering yet exactly the way ag.ResolveModel's own goResolve does
+	// below.
+	ag.StartSubAgentsAsync()
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
 	// approval modal, which is the only place under a TUI a person can see

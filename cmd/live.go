@@ -103,9 +103,17 @@ func runSessionHost(code string) error {
 		defer ideSession.Close()
 	}
 	s := tui.NewSession(cfg, ag, p)
-	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
-	// before that would ask consent of nobody and print to nobody here either.
-	ag.StartSubAgents()
+	// Everything a dispatched sub-agent's own registry reads must be in
+	// place before StartSubAgentsAsync below can possibly reach one — see
+	// the matching comment in cmd/root.go's runInteractive, which this
+	// mirrors exactly and where the hazard is spelled out in full: under
+	// -y the gate returns instantly, and a sub-agent's first write reads
+	// ReviewWrite/ReviewInvolvesEditor through a.Tools.Scoped before this
+	// goroutine would otherwise have assigned them. This is the second time
+	// ordering around StartSubAgentsAsync has bitten, so this block runs
+	// first, deliberately, and h (the host) is already built above with
+	// everything Clients() needs.
+	//
 	// Served: auto resolves per write from the roster — the editor alone
 	// while VS Code's own terminal is the only one attached, both places as
 	// soon as anyone else joins. Clients() only takes the host's lock to
@@ -124,6 +132,16 @@ func runSessionHost(code string) error {
 	ag.Tools.ReviewWrite = coord.Decide
 	// See root.go: the editor-side status note only for reviews that reach it.
 	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
+	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
+	// before that would ask consent of nobody and print to nobody here
+	// either. But this goroutine still has to reach s.RunServed below, and a
+	// synchronous StartSubAgents blocks on the resume ask's answer — the
+	// attached client would render nothing and the host log would stay
+	// empty until someone answered a question nothing had shown them yet.
+	// StartSubAgentsAsync keeps the resume pass here (it never blocks) and
+	// moves the gate and the first schedule to a goroutine of their own; see
+	// runInteractive's own comment on this same call in cmd/root.go.
+	ag.StartSubAgentsAsync()
 
 	// The hosted case is the one that most needed this. Here stdio is the
 	// host's log file, so a loader notice printed at startup is written

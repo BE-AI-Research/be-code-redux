@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -56,6 +57,40 @@ type subAgents struct {
 	// changing them (AssignOwner stops a parked run, then rewrites the
 	// owner; a re-dispatch in between would take the node back).
 	hold map[string]bool
+	// resumeAsked is set the first time StartSubAgents runs the startup
+	// gate (2026-09-22 §3.6 amendment): only that first schedule ever asks
+	// "resume sub-agent work?" — a step assigned mid-session dispatches at
+	// once, because the operator or the main model just initiated it.
+	resumeAsked bool
+	// resumeDeclined and resumeAllowed are the inverted form of the startup
+	// gate's decline (design review, 2026-09-22): a decline sets
+	// resumeDeclined and every later ScheduleSubAgents (a `task` tool call,
+	// a `/task` command, a hand-back's own parting schedule) refuses to
+	// dispatch *any* assigned node while it is set, unless that node's id is
+	// in resumeAllowed. The first version of this marked only the ids that
+	// happened to be ready at the moment of the decline, which leaked: a
+	// node that became ready later — the next of two sequenced `@big`
+	// steps, or one whose scope stopped overlapping — dispatched with no
+	// question and no notice. Enumerating every way a node can become ready
+	// later is an arms race the inverted rule avoids by construction: with
+	// nothing on the allow-list, nothing assigned dispatches at all, not
+	// just the ids that were ready at decline time. AllowSubAgentStart
+	// (/agents start) clears resumeDeclined entirely. AssignOwner and
+	// SetScope add exactly the one id they touched to resumeAllowed, and
+	// only when the stored owner or scope genuinely changes (a same-value
+	// re-assertion — the main model restating its own plan through the
+	// `task` tool, say — must not silently undo an operator's decline) —
+	// the same "a fresh initiation of this one step" reasoning the original
+	// per-id design had, kept because a step assigned or reassigned
+	// mid-session must still dispatch at once.
+	//
+	// Both are keyed by the node's positional id (as everything here is);
+	// run() reloads the task documents every turn, and a hand edit that
+	// reorders steps can move an id onto a different node between one
+	// schedule and the next. That is a pre-existing property of every
+	// id-keyed map in this file (hold, pending, runs), not new here.
+	resumeDeclined bool
+	resumeAllowed  map[string]bool
 	// root is every run's parent context — the session's, never a turn's, so
 	// Esc on the main run cannot reach a sub-agent. cancel ends it, and is
 	// the escape hatch StopAllSubAgents pulls after its bounded wait; a
@@ -228,16 +263,189 @@ func (a *Agent) laneFor(providerName string, primary bool) func(ctx context.Cont
 	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, primary) }
 }
 
-// StartSubAgents runs the resume pass and the first schedule. The UIs
-// call it once approvals and events are wired: a dispatch before that
-// would ask consent of nobody and print to nobody. buildAgent never
-// calls it.
+// StartSubAgents runs the resume pass, the startup resume gate and the
+// first schedule, all on the caller's own goroutine. The UIs call it once
+// approvals and events are wired: a dispatch before that would ask consent
+// of nobody and print to nobody. buildAgent never calls it.
+//
+// **This blocks** for as long as the startup gate's approval call takes to
+// answer — potentially forever, if nobody ever does. Headless (`be-code
+// run`) is the only caller that wants that: it has no program left to
+// start, so blocking here is simply doing the question before the work, the
+// same as every other approval headless asks. A caller that must go on to
+// start a served program afterwards (a TUI, in-process or hosted) needs
+// StartSubAgentsAsync instead, or the program never starts and the
+// question is never shown to anyone.
 func (a *Agent) StartSubAgents() {
 	if a.subs == nil {
 		return
 	}
 	a.resumeSubAgents()
+	a.startupResumeGate()
 	a.ScheduleSubAgents()
+}
+
+// StartSubAgentsAsync is StartSubAgents for a caller whose own goroutine
+// must go on to start a served program (tui.Session's RunLocal/RunServed):
+// the resume pass runs here, synchronously, because it never blocks and any
+// failure it hands back or notices about must surface deterministically
+// before anything else — but the gate (which can block for as long as it
+// takes a person to answer the approval it raises) and the first schedule
+// run on a goroutine of their own, panic-fenced like every other sub-agent
+// entry point. That goroutine's own question is shown correctly even
+// though no program is running yet, the same way ag.ResolveModel's
+// goResolve raises the model-parameter consent question before
+// s.RunLocal/RunServed starts: Session.Ask stores the question and
+// broadcasts it to zero views harmlessly, and a program that starts (or a
+// terminal that attaches) afterwards is shown it via Session.NewView.
+func (a *Agent) StartSubAgentsAsync() {
+	if a.subs == nil {
+		return
+	}
+	a.resumeSubAgents()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.notice("sub-agent startup gate failed (%v); nothing from the previous session was dispatched", r)
+			}
+		}()
+		a.startupResumeGate()
+		a.ScheduleSubAgents()
+	}()
+}
+
+// startupResumeGate asks the operator once, before the very first schedule,
+// whether sub-agent work assigned in a previous session should start
+// dispatching again (owner's ruling, 2026-09-22 §3.6 amendment — replacing
+// the original "re-dispatch silently"). It runs only through StartSubAgents,
+// so a step assigned or reassigned mid-session — by the operator or by the
+// main model, through AssignOwner/SetScope — still dispatches at once: this
+// gate has already run and never runs again this session.
+//
+// Nothing is asked when there is nothing ready to dispatch: a resumed step
+// that cannot come back (resumeSubAgents, just above in StartSubAgents) is
+// never a candidate here, and a configuration with no sub-agent never
+// reaches this far at all (a.subs is nil).
+func (a *Agent) startupResumeGate() {
+	s := a.subs
+	s.mu.Lock()
+	if s.resumeAsked {
+		s.mu.Unlock()
+		return
+	}
+	s.resumeAsked = true
+	s.mu.Unlock()
+	steps := a.subSteps("sub-agent resume")
+	if len(steps) == 0 {
+		return
+	}
+	s.mu.Lock()
+	cards, running, cws := s.cards, s.runningLocked(), s.cws
+	s.mu.Unlock()
+	ready, _ := subagent.Ready(steps, cards, running)
+	if len(ready) == 0 {
+		return
+	}
+	if a.Cfg.AutoApproveSubAgentResume {
+		return
+	}
+	approved := a.Tools.Approve != nil && a.Tools.Approve("sub_agent_resume", resumeAskDetail(steps, ready, cws))
+	if approved {
+		return
+	}
+	s.mu.Lock()
+	// A fresh decline starts the allow-list clean: nothing has been
+	// re-initiated yet (resumeAsked just went true above, on this same
+	// call, so nothing could have joined it before this point).
+	s.resumeDeclined = true
+	s.resumeAllowed = nil
+	s.mu.Unlock()
+	a.notice("sub-agent work left dormant; /agents start runs it")
+}
+
+// resumeAskDetail is the startup resume ask's body: one line per pending
+// step, naming where it runs so an online co-worker stands out at a glance.
+func resumeAskDetail(steps []subagent.Step, ready []subagent.Candidate, cws map[string]config.CoworkerConfig) string {
+	var b strings.Builder
+	b.WriteString("resume sub-agent work from the previous session?\n")
+	for _, c := range ready {
+		text, scope := c.ID, ""
+		if step := findStep(steps, c.ID); step != nil {
+			text, scope = step.Text, strings.Join(step.Scope, ", ")
+		}
+		// "(unknown)" rather than defaulting to "(online)": on a
+		// consent-adjacent line, mislabelling a local co-worker as online
+		// would be the wrong direction to get wrong. Not expected to be
+		// reached in practice — subagent.Ready only offers a candidate whose
+		// owner is a known card, and cards/cws are built together in
+		// EnableSubAgents — but a defensive default earns its keep here.
+		where := "(unknown)"
+		if cw, ok := cws[c.Owner]; ok {
+			if cw.Online {
+				where = "(online)"
+			} else {
+				where = fmt.Sprintf("(%s/%s)", cw.Provider, cw.Model)
+			}
+		}
+		fmt.Fprintf(&b, "  %s %s — %s %s, scope: %s\n", c.ID, text, c.Owner, where, scope)
+	}
+	b.WriteString("nothing has been sent to any model yet")
+	return b.String()
+}
+
+// AllowSubAgentStart is /agents start: clears a declined startup ask (the
+// resumeDeclined flag and whatever had joined resumeAllowed since — a fresh
+// decline starts that list clean too, so there is nothing left for it to
+// mean) and dispatches whatever is now ready, without asking. Without this,
+// a decline would be irreversible for the rest of the session.
+//
+// It always schedules, even when nothing was declined: with nothing
+// currently ready that is also not simply because of a decline, that
+// schedule dispatches nothing and costs one no-op tree read — cheaper than
+// the alternative of skipping it, which used to leave newly-ready work
+// ungated after a decline whose one moment of readiness had already passed
+// (a cap that had freed up since, say). It returns the ids actually
+// dispatched, counted synchronously inside the schedule call itself (see
+// scheduleSubAgentsDispatched) rather than by re-reading state afterwards,
+// which would race a dispatch fast enough to already have finished; nil
+// reports "no sub-agent work is waiting".
+//
+// The clear is provisional until something actually dispatches. Clearing
+// unconditionally and reporting "no sub-agent work is waiting" when the
+// schedule dispatched nothing (every ready candidate still capped, say, or
+// nothing was ready at all) would un-gate the session anyway: the operator
+// reads "nothing waiting," reasonably believes nothing changed, and a step
+// that becomes ready ten minutes later then dispatches with no question and
+// no notice — the exact silent-dispatch shape the decline exists to
+// prevent. So a no-op restores resumeDeclined, merged (never clobbered)
+// with whatever resumeAllowed held before this call plus anything a
+// concurrent AssignOwner/SetScope may have added to it in the interval —
+// this call's own clear must not erase a genuine reassignment that landed
+// while the schedule was running.
+func (a *Agent) AllowSubAgentStart() []string {
+	s := a.subs
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	wasDeclined, wasAllowed := s.resumeDeclined, s.resumeAllowed
+	s.resumeDeclined = false
+	s.resumeAllowed = nil
+	s.mu.Unlock()
+	started := a.scheduleSubAgentsDispatched()
+	if len(started) == 0 {
+		s.mu.Lock()
+		s.resumeDeclined = wasDeclined
+		for id := range wasAllowed {
+			if s.resumeAllowed == nil {
+				s.resumeAllowed = map[string]bool{}
+			}
+			s.resumeAllowed[id] = true
+		}
+		s.mu.Unlock()
+	}
+	sort.Strings(started)
+	return started
 }
 
 // SubAgentsEnabled reports whether any sub-agent is configured.
@@ -364,25 +572,43 @@ func (s *subAgents) runningLocked() map[string]bool {
 // ScheduleSubAgents dispatches every ready step up to sub_agents.
 // max_concurrent (spec §2.1, §2.3). Safe from any goroutine; never blocks
 // on a model or a modal.
+func (a *Agent) ScheduleSubAgents() {
+	a.scheduleSubAgentsDispatched()
+}
+
+// scheduleSubAgentsDispatched is ScheduleSubAgents plus the ids it actually
+// installed as running, for AllowSubAgentStart's report — counted here,
+// synchronously, rather than by re-reading s.runs/s.pending afterwards,
+// which races a dispatch fast enough to run and finish (removing itself
+// from both) before that second read happens; a scripted or null provider
+// in a test, or a trivial real step, finishes in well under a millisecond.
 //
 // Three phases, because of the invariant on subAgents: decide and reserve
 // under mu, build each dispatch unlocked — that is where the store and the
 // workspace are read, and where engineDo may raise a notice a UI answers by
 // calling straight back in here — then install and start under mu again.
-func (a *Agent) ScheduleSubAgents() {
+func (a *Agent) scheduleSubAgentsDispatched() []string {
 	s := a.subs
 	if s == nil {
-		return
+		return nil
 	}
 	steps := a.subSteps("sub-agent schedule")
 	if len(steps) == 0 {
-		return
+		return nil
 	}
 	type pick struct {
 		c  subagent.Candidate
 		cw config.CoworkerConfig
 	}
 	var picks []pick
+	// reasserted names every picked id that would otherwise still be gated
+	// by a startup decline but is in resumeAllowed (AssignOwner/SetScope
+	// touched it since) — item 4's "undone decline must never be silent".
+	// Only a pick that actually becomes a dispatch below is noticed: one
+	// that is merely ready but still waiting on max_concurrent would
+	// otherwise repeat the same notice on every schedule attempt until
+	// a slot frees up.
+	reasserted := map[string]bool{}
 	s.mu.Lock()
 	if !s.stopping {
 		ready, _ := subagent.Ready(steps, s.cards, s.runningLocked())
@@ -393,20 +619,36 @@ func (a *Agent) ScheduleSubAgents() {
 			if s.hold[c.ID] {
 				continue
 			}
+			if s.resumeDeclined {
+				if !s.resumeAllowed[c.ID] {
+					continue
+				}
+				reasserted[c.ID] = true
+			}
 			s.pending[c.ID] = true
 			picks = append(picks, pick{c: c, cw: s.cws[c.Owner]})
 		}
 	}
 	s.mu.Unlock()
+	var dispatched []string
 	for _, p := range picks {
-		a.dispatchPicked(steps, p.c, p.cw)
+		if a.dispatchPicked(steps, p.c, p.cw) {
+			dispatched = append(dispatched, p.c.ID)
+			if reasserted[p.c.ID] {
+				a.notice("%s re-assigned; starting %s", p.c.ID, p.c.Owner)
+			}
+		}
 	}
+	return dispatched
 }
 
-// dispatchPicked turns one reserved candidate into a running sub-agent.
+// dispatchPicked turns one reserved candidate into a running sub-agent,
+// reporting whether it actually installed one — false when the store
+// detached, the session stopped, an operator claimed the node, or building
+// the dispatch panicked; the candidate is released either way.
 // **Called with mu NOT held** and it must stay that way: the DispatchContext
 // read, the workspace scan and both engineDo calls below all happen here.
-func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw config.CoworkerConfig) {
+func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw config.CoworkerConfig) bool {
 	s := a.subs
 	// Whatever happens, the reservation is given back.
 	unreserve := func() {
@@ -459,7 +701,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	}()
 	if !ok {
 		unreserve()
-		return
+		return false
 	}
 	s.mu.Lock()
 	delete(s.pending, c.ID)
@@ -467,7 +709,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 		// The session stopped, or an operator claimed the node, while this
 		// dispatch was being built. Nothing was installed, so nothing to undo.
 		s.mu.Unlock()
-		return
+		return false
 	}
 	// Under mu because root is reassigned on resume — and because deriving
 	// a context calls into neither the store nor a notice.
@@ -479,6 +721,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	s.mu.Unlock()
 	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
 	go a.runSub(run)
+	return true
 }
 
 // runSub is one sub-agent's life: consent, provider, scratch agent, run,
@@ -800,8 +1043,16 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 		}
 	}
 	var err error
-	ran := false
-	a.engineDo("task owner", func(st *engine.Store) { ran = true; err = st.SetOwner(id, owner, pinned) })
+	ran, changed := false, false
+	a.engineDo("task owner", func(st *engine.Store) {
+		ran = true
+		before := ""
+		if n := st.Tree().Find(id); n != nil {
+			before = n.Owner
+		}
+		err = st.SetOwner(id, owner, pinned)
+		changed = err == nil && before != owner
+	})
 	if !ran {
 		err = errEngineGone
 	}
@@ -810,6 +1061,20 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 	if s != nil {
 		s.mu.Lock()
 		delete(s.hold, id)
+		// Joining resumeAllowed only on success, and only when the owner
+		// genuinely changed: a failed assign (a typo'd name, a pinned or
+		// currently-worked node) must not ungate a declined step it never
+		// touched, and a same-value re-assertion — the main model restating
+		// its own plan through the `task` tool, say — must not silently
+		// undo the operator's decline either. A real change is a fresh
+		// initiation of exactly this step, the case StartSubAgents' doc
+		// comment carves out of the startup-only ask.
+		if changed {
+			if s.resumeAllowed == nil {
+				s.resumeAllowed = map[string]bool{}
+			}
+			s.resumeAllowed[id] = true
+		}
 		s.mu.Unlock()
 		if err == nil {
 			a.ScheduleSubAgents()
@@ -855,8 +1120,16 @@ func (a *Agent) SetScope(id string, paths []string) error {
 		return fmt.Errorf("%s is being worked by %s; a running sub-agent's scope may only be widened (it already has %s)",
 			id, run.d.Owner, strings.Join(had, ", "))
 	}
-	ran := false
-	a.engineDo("task scope", func(st *engine.Store) { ran = true; err = st.SetScope(id, clean) })
+	ran, changed := false, false
+	a.engineDo("task scope", func(st *engine.Store) {
+		ran = true
+		var before []string
+		if n := st.Tree().Find(id); n != nil {
+			before = n.Scope
+		}
+		err = st.SetScope(id, clean)
+		changed = err == nil && !slices.Equal(before, clean)
+	})
 	if !ran {
 		return errEngineGone
 	}
@@ -878,6 +1151,17 @@ func (a *Agent) SetScope(id string, paths []string) error {
 	var reg *tools.Registry
 	if run != nil {
 		reg = run.reg
+	}
+	// A scope written to this id is the operator's or the model's own fresh
+	// initiation of it, same as AssignOwner — but only when it genuinely
+	// changed (see AssignOwner's own comment): it must not stay dormant
+	// behind a startup decline this call had nothing to do with, and a
+	// same-value re-assertion must not silently undo the operator's decline.
+	if changed {
+		if s.resumeAllowed == nil {
+			s.resumeAllowed = map[string]bool{}
+		}
+		s.resumeAllowed[id] = true
 	}
 	s.mu.Unlock()
 	if reg != nil {

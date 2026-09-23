@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,34 @@ func withSubAgent(t *testing.T) (*REPL, string) {
 	r.Agent.EnableSubAgents(cws, "http://localhost:11434")
 	root := st.Plan("port", []string{"port internal/scan"})
 	return r, root + ".1"
+}
+
+// withAssignedSubAgent is withSubAgent plus a step already owned and scoped
+// directly on the store — the shape a previous session's work is in when
+// this one opens, before StartSubAgents has run at all. Going through
+// AssignOwner/SetScope instead would dispatch it immediately, which is
+// exactly what these tests must not have happen yet.
+func withAssignedSubAgent(t *testing.T) (*REPL, string) {
+	t.Helper()
+	r := newTestREPL(t)
+	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "m", SubAgent: true, MaxScope: []string{"internal"}}}
+	r.Cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://localhost:11434"}
+	st := testStoreFor(t, r)
+	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return nullProvider{}, 0, nil
+	}
+	t.Cleanup(func() { agent.CoworkerFactory = nil; r.Agent.StopAllSubAgents("test") })
+	cws, _ := r.Cfg.ValidCoworkers()
+	r.Agent.EnableSubAgents(cws, "http://localhost:11434")
+	root := st.Plan("port", []string{"port internal/scan"})
+	id := root + ".1"
+	if err := st.SetOwner(id, "big", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetScope(id, []string{"internal/scan"}); err != nil {
+		t.Fatal(err)
+	}
+	return r, id
 }
 
 // waitForIdle blocks until the named sub-agent has no dispatched run in
@@ -106,6 +135,64 @@ func TestAgentLines(t *testing.T) {
 	plain := newTestREPL(t)
 	if got := AgentLines(plain.Agent, nil); len(got) != 1 || !strings.Contains(got[0], "no sub-agents configured") {
 		t.Fatalf("no sub-agents: %q", got)
+	}
+}
+
+// TestAgentsStartReportsNothingWaiting: /agents start with nothing declined
+// and nothing assigned says so rather than a bare empty listing.
+func TestAgentsStartReportsNothingWaiting(t *testing.T) {
+	r, _ := withSubAgent(t)
+	lines := AgentLines(r.Agent, []string{"start"})
+	if len(lines) != 1 || lines[0] != "no sub-agent work is waiting" {
+		t.Fatalf("start with nothing waiting: %v", lines)
+	}
+}
+
+// TestAgentsStartDispatchesAfterADecline: a decline at startup leaves the
+// step dormant; /agents start (AgentLines "start") dispatches it and
+// reports how many.
+func TestAgentsStartDispatchesAfterADecline(t *testing.T) {
+	r, id := withAssignedSubAgent(t)
+	r.Agent.Tools.Approve = func(string, string) bool { return false }
+	r.Agent.StartSubAgents()
+	lines := AgentLines(r.Agent, []string{"start"})
+	if len(lines) != 1 || !strings.Contains(lines[0], "started 1 sub-agent step") || !strings.Contains(lines[0], id) {
+		t.Fatalf("start after decline: %v", lines)
+	}
+	// Let the dispatched scratch agent settle before the test's own cleanup
+	// clears agent.CoworkerFactory — the same race waitForIdle's own comment
+	// describes for a plain SetScope dispatch.
+	waitForIdle(t, r, "big")
+}
+
+// TestIsAgentsBlockingAgreesWithAgentLines: the TUI decides whether to run
+// an /agents verb off its Update goroutine by asking IsAgentsBlocking
+// (ScheduleSubAgents, which "start" reaches, can raise a notice that takes
+// the session lock — see taskVerbCmd's comment). Unlike a first pass at
+// this test, it does not restate IsAgentsBlocking's own condition and
+// compare it to itself — that passes for any internally consistent but
+// wrong predicate. It cross-checks against AgentLines' real dispatching
+// behaviour instead, the way TestIsTaskVerbAgreesWithTaskVerb cross-checks
+// against TaskVerb's own `handled`: for each form, leave one declined,
+// dormant step behind (withAssignedSubAgent plus a decline), run
+// AgentLines with that form, and observe whether it actually dispatched.
+func TestIsAgentsBlockingAgreesWithAgentLines(t *testing.T) {
+	forms := [][]string{nil, {}, {"stop", "big"}, {"start"}, {"start", "extra"}, {"bogus"}}
+	for _, args := range forms {
+		args := args
+		t.Run(fmt.Sprintf("%v", args), func(t *testing.T) {
+			r, _ := withAssignedSubAgent(t)
+			r.Agent.Tools.Approve = func(string, string) bool { return false }
+			r.Agent.StartSubAgents() // declines; the step stays assigned, todo and dormant
+			AgentLines(r.Agent, args)
+			dispatched := len(r.Agent.RunningSubAgents()) > 0
+			if dispatched {
+				waitForIdle(t, r, "big")
+			}
+			if got := IsAgentsBlocking(args); got != dispatched {
+				t.Fatalf("%q: IsAgentsBlocking=%v but AgentLines actually dispatched=%v", args, got, dispatched)
+			}
+		})
 	}
 }
 

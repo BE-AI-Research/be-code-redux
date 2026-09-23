@@ -81,8 +81,18 @@ func splitPaths(s string) []string {
 	return out
 }
 
-// AgentLines is /agents: the model cards and what each is doing, or
-// /agents stop <name>.
+// IsAgentsBlocking reports whether these /agents arguments dispatch
+// sub-agent work and so must run off the Update goroutine, the same reason
+// IsTaskVerb exists: "start" clears the startup decline flag and calls
+// ScheduleSubAgents, whose dispatch fence can raise a notice under the
+// session lock (see taskVerbCmd's comment on /task scope, which schedules
+// the same way).
+func IsAgentsBlocking(args []string) bool {
+	return len(args) == 1 && args[0] == "start"
+}
+
+// AgentLines is /agents: the model cards and what each is doing, /agents
+// stop <name>, or /agents start.
 func AgentLines(ag *agent.Agent, args []string) []string {
 	if !ag.SubAgentsEnabled() {
 		return []string{`no sub-agents configured (set "sub_agent": true on a coworkers entry; see README "Sub-agents")`}
@@ -93,8 +103,19 @@ func AgentLines(ag *agent.Agent, args []string) []string {
 		}
 		return []string{"stopping " + args[1]}
 	}
+	if len(args) == 1 && args[0] == "start" {
+		started := ag.AllowSubAgentStart()
+		if len(started) == 0 {
+			return []string{"no sub-agent work is waiting"}
+		}
+		plural := ""
+		if len(started) != 1 {
+			plural = "s"
+		}
+		return []string{fmt.Sprintf("started %d sub-agent step%s: %s", len(started), plural, strings.Join(started, ", "))}
+	}
 	if len(args) > 0 {
-		return []string{"usage: /agents [stop <name>]"}
+		return []string{"usage: /agents [stop <name>|start]"}
 	}
 	var lines []string
 	for _, s := range ag.SubAgentStates() {

@@ -1,5 +1,59 @@
 # BE-Code Changelog
 
+## v1.1.1 — ask before a sub-agent resumes
+
+1.1.0 re-dispatched a step assigned in a previous session silently, with only
+a failure surfacing. The owner reversed that: a sub-agent must not start
+working behind the operator's back at startup.
+
+- **`StartSubAgents` asks once, before the first schedule.** The resume pass
+  still blocks and hands back whatever cannot come back, unasked, exactly as
+  before; if anything else is ready to dispatch, the operator is asked
+  through the same seam a tool approval uses (`Tools.Approve`, action
+  `sub_agent_resume`), one line per pending step naming its owner, where it
+  runs (`(provider/model)`, or `(online)`), and its scope.
+- **A decline leaves the work dormant, not lost.** The steps stay assigned
+  and `todo`, nothing is dispatched, and the notice names the way back:
+  `sub-agent work left dormant; /agents start runs it`. The decline is a
+  session-scoped flag that holds back *every* assigned node, not a mark on
+  the ids that happened to be ready at that moment — the first version
+  marked only those, which let a step sequenced behind a declined one
+  dispatch later with no question at all once the one ahead of it closed.
+  A later schedule — a `task` tool call, a `/task` command, a hand-back's
+  own parting schedule — will not silently dispatch anything while the flag
+  is set; only `/agents start` clears it, or the operator/model genuinely
+  reassigning one specific step with `/task assign`/`/task scope` (a no-op
+  re-assertion of the same owner or scope does not count, so a model
+  restating its own plan cannot undo the operator's decline) — which also
+  notices (`3.2 re-assigned; starting big`) so an undone decline is never
+  silent.
+- **Only the startup schedule ever asks.** A step assigned or reassigned
+  mid-session, by the operator or by the main model, still dispatches at
+  once — the transcript already says who started it.
+- **`/agents start`** is the new verb beside `/agents stop <name>`, in both
+  UIs: dispatches whatever is waiting and reports how many steps it started,
+  or `no sub-agent work is waiting`.
+- **`-y` proceeds without asking**, through its own config flag
+  (`AutoApproveSubAgentResume`) rather than either of the two `-y` already
+  sets — resuming unattended work is neither "run shell commands" nor "ship
+  code off this machine". A non-interactive run without `-y` declines and
+  prints the same notice — except under `run --json`, which wires no
+  `OnNotice` at all, so only the approver's own stderr denial line appears
+  there. Online consent is unchanged and still asked separately before the
+  first online dispatch.
+- **The ask never blocks a UI from starting.** `StartSubAgents` blocks on
+  the gate's answer, which headless (`run`) wants — it has nothing left to
+  start. A TUI or session host's own goroutine has to go on to start the
+  served program the answer is rendered on, so `runInteractive` and
+  `runSessionHost` now call `StartSubAgentsAsync` instead: the resume pass
+  runs synchronously (it never blocks), and the gate plus the first
+  schedule run on a goroutine of their own, tolerated by the shared modal
+  with no program running yet — exactly like the model-parameter consent
+  question already raised the same way. Plain mode asks from its own REPL
+  goroutine, inside `OnStart`, after the input reader is up — never from a
+  bare goroutine, which would put a second reader on the one input stream
+  the main loop reads and split the user's keystrokes between them.
+
 ## v1.1.0 — sub-agents on the task engine
 
 A co-worker can now own a step of the task tree instead of only being consulted:

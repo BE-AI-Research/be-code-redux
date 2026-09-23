@@ -496,13 +496,85 @@ for more; the header is unchanged.
 
 ### 3.6 Resume
 
-The owner's ruling: re-dispatch silently, and any failure surfaces. On
-`--resume` / `/resume`, once the store is open and the session restored, the
-scheduler runs its ordinary evaluation: every assigned `todo` node that is
-ready is dispatched with `Interrupted: true` and its earlier `Touched` files
-when the note from §3.5 is present, with no prompt and one transcript line
-per node (`big resumed 3.2 port internal/scan`). Online consent is asked again
-— it is per session — before the first online dispatch.
+**Amended 2026-09-22 (v1.1.1).** The original ruling here was "re-dispatch
+silently, and any failure surfaces". The owner reversed that: a sub-agent must
+not start working behind the operator's back at process startup. What follows
+is the amended behaviour; the failure-surfacing half (a node that cannot be
+re-dispatched) is unchanged.
+
+On `--resume` / `/resume`, once the store is open, the session restored and
+approvals wired, `Agent.StartSubAgents` still runs the resume pass first — a
+node that **cannot** be re-dispatched (below) blocks and hands back exactly as
+before, with no question asked about it. Then, *before* the first schedule,
+if at least one assigned `todo` node is otherwise ready to dispatch, the
+operator is asked once, through the same seam a tool approval uses
+(`Tools.Approve`, action `sub_agent_resume`), naming every pending step, its
+owner, where it runs (`(provider/model)`, or `(online)` for a co-worker
+marked `online: true`) and its scope:
+
+```
+resume sub-agent work from the previous session?
+  3.2 port internal/scan — big (ollama-lan/qwen3:32b), scope: internal/scan
+  4.1 write the migration note — claude (online), scope: docs
+nothing has been sent to any model yet
+```
+
+**Yes** dispatches every one of them with `Interrupted: true` and its earlier
+`Touched` files when the note from §3.5 is present, one transcript line per
+node (`big resumed 3.2 port internal/scan`), exactly as the original design
+described. **No** dispatches nothing: the steps stay assigned and `todo`, and
+the terminal is told `sub-agent work left dormant; /agents start runs it`.
+
+The decline is a session-scoped flag (`resumeDeclined`), not a mark on the
+particular ids that happened to be ready at that moment — a first
+implementation that only marked those ids leaked: two steps sequenced onto
+the same sub-agent (`3.1` then `3.2`, both `@big`) offer only `3.1` as a
+ready candidate at decline time, and once `3.1` closed by any means `3.2`
+dispatched later with no question and no notice, never having been marked
+at all. With the flag, *every* later schedule (a `task` tool call, a `/task`
+command, a hand-back's own parting schedule) refuses to dispatch *any*
+assigned node while it is set — gating by construction, not by enumerating
+every way a node can become ready after the moment of the ask. `/agents
+start` clears the flag entirely. So does the operator or the main model
+explicitly re-touching one specific step — `/task assign`/`/task scope`
+(`task owner`/`task scope`) — which adds just that one id to a per-session
+allow-list exempting it from the flag, but **only when the stored owner or
+scope actually changes**: a failed assign (a typo'd name, a pinned or
+currently-worked node) must leave the flag as it found it, and so must a
+same-value re-assertion (the main model restating its own plan through the
+`task` tool, unprompted) — neither is the fresh initiation of that step the
+exemption exists for. Whenever the exemption is what makes a dispatch
+happen, the terminal is told (`3.2 re-assigned; starting big`) — an undone
+decline is never silent.
+
+Only this startup ask ever fires: a step assigned or reassigned **mid-session**
+— by the operator or by the main model, and genuinely so — dispatches at
+once, because the transcript already says who started it. `-y` (headless)
+sets its own flag, `AutoApproveSubAgentResume`, and proceeds without asking
+at all — it is neither "run shell commands" nor "ship code off this
+machine", the two decisions the existing `-y` flags already cover, so it
+earns a flag of its own rather than riding either. A non-interactive run
+without `-y` declines through the ordinary headless approver (denies when
+stdin is not a TTY) and prints the same notice — except under `run --json`,
+which sets `Events{}` (no `OnNotice`) so the dormant notice never reaches the
+JSON output; only the approver's own stderr denial line appears there.
+Online consent is unaffected and still asked again per session, separately,
+before the first online dispatch — "resume this work" and "send code off
+this machine" are different decisions, so an online sub-agent's resumed step
+can ask twice at startup.
+
+The ask itself must never run on a goroutine that has to go on to start a
+served program: `Agent.StartSubAgents` blocks on the gate's approval call
+(unbounded — it waits for a person), which is exactly right for `run`, which
+has no program left to start, but wrong for a TUI, in-process or hosted,
+whose `RunLocal`/`RunServed` is what the resume ask's answer is even
+rendered on. `Agent.StartSubAgentsAsync` is what `runInteractive` and
+`runSessionHost` call instead: the resume pass (never blocking) runs on the
+caller's own goroutine so any failure surfaces deterministically before
+anything else, and the gate plus the first schedule run panic-fenced on a
+goroutine of their own — tolerated by `Session.Ask` with no program running
+yet, the same way `Agent.ResolveModel`'s own `goResolve` raises the
+model-parameter consent question before `RunLocal`/`RunServed` starts.
 
 A node that **cannot** be re-dispatched is not left quiet: the owner missing
 from the config or no longer `sub_agent: true`, its scope outside a changed
@@ -511,7 +583,9 @@ from the config or no longer `sub_agent: true`, its scope outside a changed
 the terminal prints a notice (`sub-agent big cannot resume 3.2: big is not in
 coworkers`) so whichever of the operator or the main model acts first can
 reassign it. A sub-agent that starts and then fails (backend down, turn cap)
-takes the ordinary `blocked` hand-back of §2.6.
+takes the ordinary `blocked` hand-back of §2.6. None of this is gated by the
+startup ask above: a node that cannot resume is surfaced regardless of
+whether the operator would have said yes to the ones that can.
 
 ### 3.7 Errors, in one place
 

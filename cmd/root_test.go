@@ -401,6 +401,27 @@ func TestBuildAgentLeavesSubAgentsDisabledWithoutOne(t *testing.T) {
 	}
 }
 
+// TestFlagYesSetsAutoApproveSubAgentResume: -y is headless use, and the
+// startup resume question (2026-09-22 §3.6 amendment) must proceed without
+// asking, the same as AutoApproveShell/AutoApproveConsult — but through its
+// own flag, since it is neither of those decisions.
+func TestFlagYesSetsAutoApproveSubAgentResume(t *testing.T) {
+	prevDir, prevProvider, prevModel, prevYes, prevResume := flagDir, flagProvider, flagModel, flagYes, flagResume
+	flagDir, flagProvider, flagModel, flagYes, flagResume = t.TempDir(), "", "", true, ""
+	t.Cleanup(func() {
+		flagDir, flagProvider, flagModel, flagYes, flagResume = prevDir, prevProvider, prevModel, prevYes, prevResume
+	})
+	cfg := buildAgentSubAgentConfig(true)
+	_, ag, err := buildAgent(cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ag.StopAllSubAgents("test over"); ag.Tools.Close(); ag.Checkpoints.Cleanup() })
+	if !cfg.AutoApproveSubAgentResume {
+		t.Fatal("-y must set AutoApproveSubAgentResume")
+	}
+}
+
 // --- chooseIDELock: quiet-path Visual Studio auto-attach (spec §6) ---
 
 // writeIDELock stores a lock as <pid>-<port>.json, matching internal/ide's
