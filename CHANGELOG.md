@@ -18,8 +18,10 @@ its scope until it hands the step back.
   to its scope; a write outside it is refused with a note. Stuck on a decision only the
   primary can make, it asks with `ask_main` and parks until `/task reply` (or the
   primary itself) answers.
-- **Per-server lanes, primary first.** Every request — primary or sub-agent — takes its
-  server's lane before it is sent, the primary's own requests always first. A sub-agent
+- **Per-server lanes, primary first.** Every request — the primary's, a sub-agent's, a
+  consultation's, the second-model reviewer's, and a speculative prompt prefill — takes
+  its own server's lane before it is sent, the primary's own requests always first, and
+  the primary's lane follows a `/provider` switch to the server it moved to. A sub-agent
   on its own server runs alongside the primary freely; one sharing the primary's server
   interleaves with it, and — measured on the owner's LAN Ollama — costs the primary a
   cold prompt read at every hand-over, since a local server's prompt cache survives only
@@ -29,8 +31,15 @@ its scope until it hands the step back.
   sub-agent's consent prompt names the step's scope, not just the model.
 - **Resume re-dispatches silently; a failure surfaces.** A step interrupted by `/quit`
   or a crash is picked back up on the next session with what was already touched still
-  on disk; one a reconfigured session can no longer dispatch is handed back blocked and
-  noticed, rather than leaving something nobody is waiting for.
+  on disk, and the sub-agent is told which files those are — from the interruption note
+  after a clean exit, and recovered from the step's own evidence after a crash, which
+  never got to write one; a step a reconfigured session can no longer dispatch is handed
+  back blocked and noticed, rather than leaving something nobody is waiting for.
+- **A hand-back to an idle main model starts a turn.** The leftover-queue rule only
+  fires at the end of a run, and a sub-agent working a long step almost always hands
+  back after the main model's turn has ended — so both UIs now start a turn for a
+  hand-back, or a parked `ask_main`, that arrives while nothing is running. The main
+  model verifies the work and closes the parent without waiting to be prodded.
 - **`/task assign|scope|reply` and `/agents`** (`/agents stop <name>`) are the human
   side of all of the above, in both UIs.
 - **`run --json`** carries a `sub_agents` array — one row per hand-back this run

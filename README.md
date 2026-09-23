@@ -192,10 +192,14 @@ dropped.
 
 `/agents` lists every sub-agent card and what it is doing — idle, waiting on
 a scope or a dependency, working, or asking; `/agents stop <name>` cancels
-whatever it is running and returns the step to `todo` rather than closing it.
-An interrupted step (`/quit`, a crash) is silently re-dispatched on the next
-session with what was already touched still on disk, or handed back blocked
-and noticed when nothing configured can pick it up.
+whatever it is running and closes the step `blocked` with the reason
+`stopped by operator`, handing it back so the main model knows. It is
+`/task assign <id> main` that takes a step away without closing it, putting
+it back to `todo`. An interrupted step (`/quit`, or a crash) is silently
+re-dispatched on the next session, told which files its earlier attempt had
+already written — from the interruption note on a clean exit, and recovered
+from the step's own evidence after a crash, which never got to write one —
+or handed back blocked and noticed when nothing configured can pick it up.
 
 Approvals follow the session's own mode: a write inside a sub-agent's scope
 raises the same modal or diff a primary write does, labelled `sub-agent
@@ -874,7 +878,10 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   and how much; see "Co-working models"
 - `coworkers[].sub_agent` (false) — the co-worker may own a step of the task tree
   (see "Sub-agents"); `coworkers[].max_scope` (`[]`, whole workspace) — the widest
-  set of workspace paths it may ever be given as a scope
+  set of workspace paths it may ever be given as a scope. Entries that escape the
+  workspace are dropped with a warning, and if that leaves none at all the co-worker
+  loses `sub_agent` too: an empty `max_scope` means the whole workspace, so a
+  `max_scope` of `["/docs"]` must not quietly become one
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an

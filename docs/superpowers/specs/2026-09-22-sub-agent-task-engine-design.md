@@ -620,3 +620,32 @@ tool calls to the transcript; a scheduler that reorders by estimated cost;
 prefilling the primary's prompt after a lane hand-over (a measured
 improvement to make once the lane cost is observed on a real session, not
 guessed at); and settings auto-tune.
+
+Two divergences from the sections above were found by the whole-branch
+review at 1.1.0 and ruled SHIP rather than fixed, so a later reader knows
+they were seen and chosen:
+
+- **A dispatched subtree renders in working memory only when it is on or
+  adjacent to the active branch.** §1.5 reads as though the one-line
+  `3.2 port internal/scan  @big  running (at 3.2.1, 9 tool calls)` is always
+  in the main model's block; in fact `Render` composes the active branch
+  with its siblings, so a subtree elsewhere in the tree — under a different
+  root, or a branch the main model is not currently in — does not appear
+  until its hand-back closes it. The alternative is pinning every running
+  subtree into a block whose budget is already a ladder, and the bottom
+  line, `/agents` and the hand-back all name the running work anyway.
+- **An editor "accept all" does not propagate between the main and a scoped
+  registry.** §3.3 says `a` in the terminal modal "means what it means for
+  the main model — all file changes this session, for everyone", and for
+  the *modal* it does: `a` clears the config's `approve_file_writes`, which
+  both UIs' approvers consult before they ask anything, and both registries
+  ask through the same approver. `ReviewAcceptAll` from the **editor** is
+  different: `fs.go` handles it by clearing `ApproveWrites` on the registry
+  that raised that review, and a scoped registry has its own copy of that
+  field, so accepting all in the editor during a sub-agent's write does not
+  stop the main model being reviewed, and vice versa. (For the same reason
+  the terminal `a` stops the sub-agent being *asked* but not its writes
+  being sent to the editor for review, since the scoped registry's own
+  `ApproveWrites` is still set.) Both divergences fall on the conservative
+  side — one more review, never one fewer — which is why threading a shared
+  flag through `Scoped` was not worth the new shared mutable state.
