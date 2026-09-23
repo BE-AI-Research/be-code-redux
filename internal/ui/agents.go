@@ -8,8 +8,28 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 )
 
+// IsTaskVerb reports whether TaskVerb handles these arguments, without
+// running them. A UI that must run TaskVerb off its own goroutine — the
+// TUI, whose Update holds the session lock that TaskVerb's callees may
+// block on — has to know that before it runs anything.
+func IsTaskVerb(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "assign", "scope", "reply":
+		return true
+	}
+	return false
+}
+
 // TaskVerb handles the sub-agent verbs of /task — assign, scope, reply —
 // for both UIs. handled is false for every other /task form.
+//
+// **It may block.** `assign` on a sub-agent parked on an ask stops that run
+// and waits for its goroutine to finish; `scope` and `assign` both schedule,
+// which can raise a notice. A caller holding a lock the agent's own
+// callbacks take must run this somewhere else (see the TUI's taskVerbCmd).
 func TaskVerb(ag *agent.Agent, args []string) (lines []string, handled bool) {
 	if len(args) == 0 {
 		return nil, false

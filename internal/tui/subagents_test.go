@@ -101,8 +101,11 @@ func (s *scriptedSubProvider) Chat(_ context.Context, req provider.ChatRequest, 
 // ("reply to <id>: <text>") must land on every attached terminal — it is a
 // shared broadcast, like the ask and hand-back events themselves, not a
 // local echo to the terminal that typed it.
-func TestSubAgentReplyNoteReachesEveryTerminal(t *testing.T) {
-	s, a, b := twoViews(t)
+// parkedSubAgent builds a session with a real sub-agent parked on an
+// ask_main, and returns the step's id. Shared by the reply-note test and
+// the /task assign deadlock test below.
+func parkedSubAgent(t *testing.T, s *Session, a, b *View) string {
+	t.Helper()
 	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "m", SubAgent: true}}
 	s.cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://sub:11434"}
 	s.ag = agent.New(s.cfg, nullProvider{}, "m", s.ag.Tools, "")
@@ -140,16 +143,88 @@ func TestSubAgentReplyNoteReachesEveryTerminal(t *testing.T) {
 	if !strings.Contains(b.wrapped, "which tokenizer?") {
 		t.Fatalf("the ask did not reach the second terminal:\n%s", b.wrapped)
 	}
+	return id
+}
+
+// TestTaskAssignOnAParkedSubAgentDoesNotDeadlockTheTUI. View.Update holds
+// the session lock for its whole body, and ui.TaskVerb's `assign` on a
+// parked run stops it and waits on its done channel — while that run's own
+// exit path calls Session.onSubAgentEnd, which takes the same lock. Run
+// inline from slashCommand, /task assign froze every attached terminal for
+// good. The verbs now come back as a tea.Cmd, which Bubble Tea runs off
+// the Update goroutine.
+//
+// slashCommand is driven here exactly as Update drives it, lock and all;
+// the timeout is the guard that turns the hang into a failure.
+func TestTaskAssignOnAParkedSubAgentDoesNotDeadlockTheTUI(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.startTurnHook = func(string) {} // no model turn from the hand-back
+	id := parkedSubAgent(t, s, a, b)
+
+	got := make(chan tea.Cmd, 1)
+	go func() {
+		s.mu.Lock()
+		_, cmd := a.slashCommand("/task assign " + id + " main")
+		s.mu.Unlock()
+		got <- cmd
+	}()
+	var cmd tea.Cmd
+	select {
+	case cmd = <-got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("/task assign deadlocked: slashCommand never returned while holding the session lock")
+	}
+	if cmd == nil {
+		t.Fatal("/task assign returned no command")
+	}
+
+	// The blocking work runs off the lock, the way Bubble Tea runs a Cmd.
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the /task assign command never finished")
+	}
+	a.Update(msg)
+	flush(a, b)
+
+	// The terminal that asked sees the outcome...
+	if !strings.Contains(a.wrapped, id+" is the main model's again") {
+		t.Fatalf("the asking terminal lacks the result:\n%s", a.wrapped)
+	}
+	// ...and both see the shared record of the sub-agent being taken off it.
+	for _, v := range []*View{a, b} {
+		if !strings.Contains(v.wrapped, "big ("+id+") interrupted") {
+			t.Fatalf("terminal %d lacks the interruption line:\n%s", v.id, v.wrapped)
+		}
+	}
+	if n := s.ag.Engine.Tree().Find(id); n == nil || n.Owner != "" {
+		t.Fatalf("the step was not returned to the main model: %+v", n)
+	}
+}
+
+func TestSubAgentReplyNoteReachesEveryTerminal(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.startTurnHook = func(string) {} // no model turn from the queued ask
+	id := parkedSubAgent(t, s, a, b)
 
 	// slashCommand is always reached through Update, which holds the
 	// session's own mutex for its whole body (see view.go); calling it
 	// directly here — the only way a test can drive it without a real
 	// keystroke — must take the same lock itself, or its appendEntryLocked
 	// races the sub-agent goroutine's own onSubAgentAsk/onSubAgentEnd
-	// handlers, which lock correctly.
+	// handlers, which lock correctly. The /task verbs now hand back a Cmd
+	// rather than running inline (see taskVerbCmd), so the test runs it the
+	// way Bubble Tea does: off the lock, then back through Update.
 	s.mu.Lock()
-	a.slashCommand("/task reply " + id + " use the old one")
+	_, cmd := a.slashCommand("/task reply " + id + " use the old one")
 	s.mu.Unlock()
+	if cmd == nil {
+		t.Fatal("/task reply returned no command")
+	}
+	a.Update(cmd())
 	flush(a, b)
 
 	for _, v := range []*View{a, b} {

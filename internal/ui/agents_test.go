@@ -108,3 +108,33 @@ func TestAgentLines(t *testing.T) {
 		t.Fatalf("no sub-agents: %q", got)
 	}
 }
+
+// TestIsTaskVerbAgreesWithTaskVerb: the TUI decides whether to run a /task
+// verb off its Update goroutine by asking IsTaskVerb, and then never asks
+// TaskVerb's own `handled`. A verb in one and not the other would either
+// deadlock the TUI again (handled here, run inline) or fall through to the
+// plain /task listing (claimed here, ignored there).
+func TestIsTaskVerbAgreesWithTaskVerb(t *testing.T) {
+	// Forms that reach the verbs with too few arguments still answer with a
+	// usage line, so TaskVerb handles them; anything else must not be.
+	// One argument reaches each switch case and returns its usage line
+	// without touching the agent, so every case of both switches is
+	// compared without needing a live one.
+	for _, args := range [][]string{
+		nil, {}, {"assign"}, {"scope"}, {"reply"},
+		{"show"}, {"open"}, {"clear"}, {"nonsense"},
+	} {
+		_, handled := TaskVerb(nil, args)
+		if got := IsTaskVerb(args); got != handled {
+			t.Fatalf("%q: IsTaskVerb=%v but TaskVerb handled=%v", args, got, handled)
+		}
+	}
+	// And the full forms the TUI actually routes are claimed.
+	for _, args := range [][]string{
+		{"assign", "1.1", "big"}, {"scope", "1.1", "a"}, {"reply", "1.1", "hello"},
+	} {
+		if !IsTaskVerb(args) {
+			t.Fatalf("%q would be run inline on the Update goroutine", args)
+		}
+	}
+}
