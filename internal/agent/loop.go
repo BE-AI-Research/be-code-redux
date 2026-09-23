@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/repomap"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -44,6 +45,11 @@ type Events struct {
 	OnConsultStart    func(name, question, origin string)
 	OnConsultProgress func(name string, filesRead int)
 	OnConsultEnd      func(res ConsultResult, err error)
+	// Sub-agents (spec §3.2): a dispatch began, one asked the main model,
+	// one ended (Status done, blocked or interrupted).
+	OnSubAgentStart func(d subagent.Dispatch)
+	OnSubAgentAsk   func(ask subagent.Ask)
+	OnSubAgentEnd   func(hb subagent.HandBack)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -260,6 +266,11 @@ type Agent struct {
 	modelMu  sync.Mutex
 	loader   ModelLoader
 	modelGen int
+	// subs is the sub-agent runner, nil unless EnableSubAgents ran.
+	// laneAcquire wraps every model call once lanes exist (spec §2.2).
+	subs        *subAgents
+	laneAcquire func(ctx context.Context) (func(), error)
+
 	// sessionMu guards the Session pointer against a UI reading it while
 	// /clear or /resume swaps it from a goroutine of their own. It guards
 	// the pointer, never what it points at.
@@ -384,6 +395,10 @@ func (a *Agent) SetProvider(p provider.Provider) {
 	} else {
 		a.SetLoader(nil)
 	}
+	// A lane is one server, and this is now a different one. Bound once at
+	// wiring time, the primary went on serialising against the server it had
+	// left while running unserialised against the one it had moved to.
+	a.RebindPrimaryLane()
 }
 
 // LoaderFactory builds a model loader for one provider. Injected by cmd,
@@ -957,6 +972,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.Guidance != "" {
 		sys += "\n\n" + a.Guidance
 	}
+	// Stable for the session, so the prompt cache never pays for it: the
+	// block says what sub-agents are, never what any one of them is doing.
+	if a.subs != nil && a.systemOverride == "" {
+		sys += "\n\n" + subAgentGuidance
+	}
 	// A scratch agent (plan mode, a consultation) keeps the summary here: it
 	// is fixed for the few turns such an agent lives, so it costs the cache
 	// nothing, and its prompt stays in one piece.
@@ -1102,6 +1122,14 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			a.engineWarnings(st)
 		})
 		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
+	}
+	// A task document edited by hand between turns is picked up before the
+	// model is called, so an assignment made in an editor starts working
+	// without waiting for the model to touch the task tool. It must run
+	// *after* the reload above, or it schedules against the tree as it was
+	// before the edit and the assignment waits a whole turn.
+	if a.subs != nil {
+		a.ScheduleSubAgents()
 	}
 	a.refreshSystemForRequest(ctx)
 	expanded := ExpandMentions(a.Tools.Root, userInput)
@@ -1465,6 +1493,19 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 			}
 		}
 	}
+	// A task call may have assigned or scoped a step, and a write may have
+	// landed inside a scope a sub-agent is holding. Both are answered here,
+	// on the result, for the same reason the nudge below is.
+	if a.subs != nil {
+		if call.Name == "task" {
+			a.ScheduleSubAgents()
+		}
+		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if note := a.subs.ownedNote(call.Name, args); note != "" {
+				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + note
+			}
+		}
+	}
 	// A step open too long is said here, on the result, because in the
 	// cached layout Working memory is not re-sent between requests.
 	if a.cachedLayout() {
@@ -1744,15 +1785,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 	}
 	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
 
-	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: model,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: compactSystemPrompt},
-			{Role: provider.RoleUser, Content: u.String()},
-		},
-		Temperature: 0.1,
-		NoThink:     true, // a summary does not need minutes of deliberation
-	}, nil)
+	// In the lane: compaction runs between turns, never inside chatWithRetry's
+	// hold, so taking it here cannot nest.
+	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+		return a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: compactSystemPrompt},
+				{Role: provider.RoleUser, Content: u.String()},
+			},
+			Temperature: 0.1,
+			NoThink:     true, // a summary does not need minutes of deliberation
+		}, nil)
+	})
 	if err != nil {
 		// A summary that never arrived is the same situation as one that
 		// arrived empty: the tree is still current, so the session keeps
@@ -1795,17 +1840,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// list is wanted". Its notes are already applied. Ask once more, in
 		// the same exchange so it can see what it wrote — a second request
 		// from scratch gets the same answer.
-		again, rerr := a.Provider.Chat(ctx, provider.ChatRequest{
-			Model: model,
-			Messages: []provider.Message{
-				{Role: provider.RoleSystem, Content: compactSystemPrompt},
-				{Role: provider.RoleUser, Content: u.String()},
-				{Role: provider.RoleAssistant, Content: resp.Content},
-				{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
-			},
-			Temperature: 0.1,
-			NoThink:     true,
-		}, nil)
+		again, rerr := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+			return a.Provider.Chat(ctx, provider.ChatRequest{
+				Model: model,
+				Messages: []provider.Message{
+					{Role: provider.RoleSystem, Content: compactSystemPrompt},
+					{Role: provider.RoleUser, Content: u.String()},
+					{Role: provider.RoleAssistant, Content: resp.Content},
+					{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
+				},
+				Temperature: 0.1,
+				NoThink:     true,
+			}, nil)
+		})
 		if rerr == nil {
 			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
 				summary, resp = s2, again

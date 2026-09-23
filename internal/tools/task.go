@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 // stepMarkerRe matches a numbering or bullet marker at the start of a plan
@@ -23,7 +25,15 @@ type TaskLedger interface {
 	SetStatusText(id, status, reason string) error
 	Note(id, text, file string, decision, keep bool) error
 	ShowText(id string) string
+	// SetOwner and SetScope assign a step to a sub-agent (spec §1.1). The
+	// model's assignments are never pinned; pinning is the operator's.
+	SetOwner(id, owner string, pinned bool) error
+	SetScope(id string, scope []string) error
 }
+
+// taskReplier answers a sub-agent's open ask_main; the agent's ledger
+// implements it, a bare store does not.
+type taskReplier interface{ Reply(id, text string) error }
 
 // taskRoots is an optional capability on a ledger: naming the task in
 // flight is what lets the tool resolve a 0.10.0 step number against the
@@ -33,21 +43,28 @@ type TaskLedger interface {
 // the agent treats a backend's extras.
 type taskRoots interface{ ActiveRootID() string }
 
-type taskTool struct{ l TaskLedger }
+type taskTool struct {
+	l     TaskLedger
+	under string
+}
 
 // NewTask builds the task tool over a ledger.
 func NewTask(l TaskLedger) Tool { return &taskTool{l: l} }
 
+// NewTaskUnder is the task tool a sub-agent gets: add, status, note and
+// show, only for nodes under root.
+func NewTaskUnder(l TaskLedger, root string) Tool { return &taskTool{l: l, under: root} }
+
 func (t *taskTool) Name() string { return "task" }
 
 func (t *taskTool) Description() string {
-	return "Your task record. action=plan records a task and its steps; action=add adds a step or sub-step under one (parent: its id); action=status marks a node doing, done, blocked or dropped (with reason for the last two); action=note records a fact or decision against a node; action=show prints a node, a branch, or the whole tree. Ids are dotted paths like 2.1.3. What you do while a node is doing is recorded against it and survives compaction, so keep exactly one node doing."
+	return "Your task record. action=plan records a task and its steps; action=add adds a step or sub-step under one (parent: its id); action=status marks a node doing, done, blocked or dropped (with reason for the last two); action=note records a fact or decision against a node; action=show prints a node, a branch, or the whole tree; action=owner assigns a step to a sub-agent (owner=main takes it back); action=scope sets the workspace paths that owner may write; action=reply answers a sub-agent's open question. Ids are dotted paths like 2.1.3. What you do while a node is doing is recorded against it and survives compaction, so keep exactly one node doing."
 }
 
 func (t *taskTool) Schema() json.RawMessage {
 	return schema(`{"type":"object","properties":{
-		"action":{"type":"string","enum":["plan","add","status","note","show"],"description":"plan | add | status | note | show"},
-		"text":{"type":"string","description":"plan: the task in one line; add: the step; note: the fact or decision"},
+		"action":{"type":"string","enum":["plan","add","status","note","show","owner","scope","reply"],"description":"plan | add | status | note | show | owner (assign a step to a sub-agent) | scope (paths it may write) | reply (answer a sub-agent's question)"},
+		"text":{"type":"string","description":"plan: the task in one line; add: the step; note: the fact or decision; reply: the answer"},
 		"steps":{"type":"array","items":{"type":"string"},"description":"plan: the steps in order"},
 		"id":{"type":"string","description":"the node, a dotted path like 2.1.3"},
 		"parent":{"type":"string","description":"add: the node to add under; omit for a new top-level task"},
@@ -55,7 +72,9 @@ func (t *taskTool) Schema() json.RawMessage {
 		"reason":{"type":"string","description":"status: why, for blocked and dropped"},
 		"file":{"type":"string","description":"note: the file this note is about"},
 		"decision":{"type":"boolean","description":"note: this is a decision, not just a fact"},
-		"keep":{"type":"boolean","description":"note: also remember this across sessions"}},
+		"keep":{"type":"boolean","description":"note: also remember this across sessions"},
+		"owner":{"type":"string","description":"owner: a sub-agent's name, or main"},
+		"paths":{"type":"array","items":{"type":"string"},"description":"scope: workspace paths the owner may write"}},
 		"required":["action"]}`)
 }
 
@@ -70,6 +89,33 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 			action = "status"
 		} else {
 			action = "add"
+		}
+	}
+	if t.under != "" {
+		switch action {
+		case "plan", "owner", "scope", "reply":
+			return Result{IsError: true, Content: action + " is not available to a sub-agent; use ask_main if the plan must change"}
+		}
+		id := argString(args, "id", "node", "step", "task")
+		if action == "add" {
+			id = argString(args, "parent", "under", "parent_id")
+		}
+		// The legacy "step" verb resolves a bare number against the MAIN
+		// model's active root (resolveStepNumber below) — meaningless to a
+		// sub-agent, and dangerous to guard by testing the raw number
+		// against t.under: "step":"3" under subtree "3" passes that test by
+		// coincidence, while the node actually touched after resolution
+		// (root+"."+"3", root being the MAIN task's root) is a different
+		// task entirely. Refuse the bare-number form outright rather than
+		// resolve-then-check.
+		if legacyStep && action == "status" && isBareStepNumber(id) {
+			return Result{IsError: true, Content: "a bare step number is not addressable in your subtree " + t.under + "; use a dotted id"}
+		}
+		if id == "" {
+			return Result{IsError: true, Content: "name a step under " + t.under}
+		}
+		if id != t.under && !strings.HasPrefix(id, t.under+".") {
+			return Result{IsError: true, Content: id + " is outside your step " + t.under}
 		}
 	}
 	switch action {
@@ -113,8 +159,97 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 		return Result{Content: "noted"}
 	case "show", "list", "tree":
 		return Result{Content: t.l.ShowText(argString(args, "id", "node", "step", "task"))}
+	case "owner", "assign":
+		id := argString(args, "id", "node", "step", "task")
+		if id == "" {
+			return Result{IsError: true, Content: "owner needs an id (a dotted path like 2.1.3)"}
+		}
+		owner := strings.TrimSpace(argString(args, "owner", "to", "who"))
+		if owner == "main" {
+			owner = ""
+		}
+		if err := t.l.SetOwner(id, owner, false); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		if owner == "" {
+			return Result{Content: id + " is yours again"}
+		}
+		return Result{Content: id + " assigned to " + owner + "; set its scope with action scope if it has none"}
+	case "scope":
+		id := argString(args, "id", "node", "step", "task")
+		if id == "" {
+			return Result{IsError: true, Content: "scope needs an id (a dotted path like 2.1.3)"}
+		}
+		paths := argStrings(args, "paths", "scope", "files")
+		switch {
+		case len(paths) == 0:
+			// argStrings only reads a JSON array; a plain comma list arrives
+			// as one string, which argString does read.
+			if s := argString(args, "paths", "scope", "files"); s != "" {
+				paths = splitCommaList(s)
+			}
+		case len(paths) == 1 && strings.Contains(paths[0], ","):
+			paths = splitCommaList(paths[0])
+		}
+		if len(paths) == 0 {
+			// A typo'd or empty paths argument must never silently clear an
+			// existing scope: chained with a registry that fails open on a
+			// nil scope, that would be one typo from unconfined. It no
+			// longer can (Registry.scoped fails closed regardless), but the
+			// tool must still refuse rather than report success for
+			// something that was never asked for.
+			return Result{IsError: true, Content: "scope needs at least one path"}
+		}
+		clean, err := subagent.CleanScope(paths)
+		if err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		if err := t.l.SetScope(id, clean); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		// Echo what was actually stored (cleaned: trimmed, slash-separated,
+		// no "./" or trailing slash), not the raw argument, so the model
+		// sees exactly what it may now write.
+		return Result{Content: id + " scope: " + strings.Join(clean, ", ")}
+	case "reply", "answer":
+		r, ok := t.l.(taskReplier)
+		if !ok {
+			return Result{IsError: true, Content: "no sub-agent is asking"}
+		}
+		id := argString(args, "id", "node", "step", "task")
+		text := argString(args, "text", "answer", "reply")
+		if err := r.Reply(id, text); err != nil {
+			return Result{IsError: true, Content: err.Error()}
+		}
+		return Result{Content: "reply delivered to the sub-agent on " + id}
 	}
-	return Result{IsError: true, Content: "task needs an action (plan, add, status, note, show)"}
+	return Result{IsError: true, Content: "task needs an action (plan, add, status, note, show, owner, scope, reply)"}
+}
+
+// splitCommaList splits a comma-separated string, trimming and dropping
+// empty entries — the plain-string form of "paths" a small model sends
+// alongside the JSON-array form the schema documents.
+func splitCommaList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// isBareStepNumber reports whether id is the legacy step verb's bare-number
+// shape ("2", not "2.1" or "" or "abc") — the only shape resolveStepNumber
+// ever rewrites, and the shape the subtree guard above must refuse outright
+// rather than resolve-then-check.
+func isBareStepNumber(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsRune(id, '.') {
+		return false
+	}
+	_, err := strconv.Atoi(id)
+	return err == nil
 }
 
 // resolveStepNumber turns a 0.10.0 step number into the dotted id of that
@@ -125,10 +260,7 @@ func (t *taskTool) Run(_ context.Context, args map[string]any) Result {
 // written rather than guessed at.
 func (t *taskTool) resolveStepNumber(id string) string {
 	id = strings.TrimSpace(id)
-	if id == "" || strings.ContainsRune(id, '.') {
-		return id
-	}
-	if _, err := strconv.Atoi(id); err != nil {
+	if !isBareStepNumber(id) {
 		return id
 	}
 	r, ok := t.l.(taskRoots)

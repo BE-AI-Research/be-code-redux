@@ -113,4 +113,30 @@ cat "$OUT5"
 grep -q "NUMCTX:32768" "$OUT5"
 echo "[PASS] native"
 
+# Sixth scenario: a sub-agent owns one step. The lead assigns it, the
+# sub-agent writes inside its scope, is refused outside, asks, and the
+# lead's final reply confirms the hand-back named the file.
+SUBWS="$DIR/subws"; mkdir -p "$SUBWS/internal/scan" "$SUBWS/cmd"
+cat > "$HOME/.be-code/config.json" <<CFG
+{"default_provider":"mock","model":"lead-model",
+ "providers":{"mock":{"type":"openai","base_url":"http://127.0.0.1:18111/v1"}},
+ "coworkers":[{"name":"sub","provider":"mock","model":"sub-model","sub_agent":true}],
+ "sub_agents":{"max_concurrent":1,"max_turns":6,"ask_timeout":30},
+ "max_turns":8,"max_repairs":0,"compat_tool_calls":"auto","verify_on_done":false,
+ "engine":{"enabled":true}}
+CFG
+OUT6="$DIR/subagent.out"
+"$(dirname "$0")/../../be-code" run -y -C "$SUBWS" "sub-agent scenario: port the scanner" > "$OUT6"
+cat "$OUT6"
+grep -q "HANDBACK:yes" "$OUT6"
+test -f "$SUBWS/internal/scan/token.go"
+test ! -f "$SUBWS/cmd/x.go"
+# The exact double space before "@sub" and before "scope:", and the two-space
+# indent on the child line, are internal/engine/markdown.go's own rendering
+# (renderFields, indentStep) — a change to that rendering should break this
+# assertion deliberately rather than have it silently stop checking anything.
+grep -q "@sub  scope: internal/scan" "$SUBWS"/.be-code/tasks/*.md
+grep -q "^  - \[x\] .*port internal/scan" "$SUBWS"/.be-code/tasks/*.md
+echo "[PASS] sub-agent"
+
 echo "E2E PASS"

@@ -138,6 +138,9 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
+	if err := t.r.checkScope(p); err != nil {
+		return Result{IsError: true, Content: err.Error()}
+	}
 	content, has := argStringPresent(args, "content", "text", "data")
 	if !has {
 		return Result{IsError: true, Content: "write_file requires a 'content' argument (missing key would have written an empty file); pass the full file content"}
@@ -180,6 +183,9 @@ func (t *editFileTool) Schema() json.RawMessage {
 func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	p, err := t.r.resolve(argString(args, "path", "file", "filename"))
 	if err != nil {
+		return Result{IsError: true, Content: err.Error()}
+	}
+	if err := t.r.checkScope(p); err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
 	oldText := argString(args, "old_text", "old_string", "old", "search")

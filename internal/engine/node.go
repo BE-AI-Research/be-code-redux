@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,19 @@ type Node struct {
 	Calls    int       `json:"calls,omitempty"`
 	Children []*Node   `json:"children,omitempty"`
 	Evidence Evidence  `json:"evidence,omitempty"`
+	// Owner is the co-worker that owns this step ("" is the main model);
+	// OwnerPinned means the operator assigned it ("@name!" in the document)
+	// and the model may not change it. Scope is what the owner may write;
+	// After overrides the positional ready rule. DoneBy is stamped when a
+	// sub-agent closes the node. Dispatched and DispatchedAt are transient
+	// render state the store sets on its copy of the tree (spec §1.5).
+	Owner        string   `json:"owner,omitempty"`
+	OwnerPinned  bool     `json:"owner_pinned,omitempty"`
+	Scope        []string `json:"scope,omitempty"`
+	After        []string `json:"after,omitempty"`
+	DoneBy       string   `json:"done_by,omitempty"`
+	Dispatched   bool     `json:"-"`
+	DispatchedAt string   `json:"-"`
 }
 
 // now is the package clock, replaceable in tests.
@@ -48,6 +62,59 @@ type Tree struct {
 	// nudge is Limits.StepNudge, carried on the copy Render makes so the
 	// renderer stays a function of the tree it is given. Never persisted.
 	nudge int
+	// dispatched names the roots of subtrees a sub-agent is working (spec
+	// §1.3): each is its own pen with its own doing node. Not persisted;
+	// the store sets it.
+	dispatched map[string]bool
+}
+
+// SetDispatched marks or clears a subtree root as dispatched.
+func (t *Tree) SetDispatched(rootID string, on bool) {
+	if t.dispatched == nil {
+		t.dispatched = map[string]bool{}
+	}
+	if on {
+		t.dispatched[rootID] = true
+	} else {
+		delete(t.dispatched, rootID)
+	}
+}
+
+// Dispatched lists the dispatched roots in id order.
+func (t *Tree) Dispatched() []string {
+	ids := make([]string, 0, len(t.dispatched))
+	for id := range t.dispatched {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// penOf is the dispatched root that contains id, or "" for the main
+// model's pen. Ids are positional, so containment is a prefix test. Nested
+// pens should never exist (SetOwner refuses one subtree inside another),
+// but a hand-edited document can still produce one; the longest matching
+// prefix — the innermost pen — wins, so resolution stays deterministic
+// instead of depending on map iteration order.
+func (t *Tree) penOf(id string) string {
+	best := ""
+	for r := range t.dispatched {
+		if (id == r || strings.HasPrefix(id, r+".")) && len(r) > len(best) {
+			best = r
+		}
+	}
+	return best
+}
+
+// DoingUnder is the doing node inside one dispatched subtree.
+func (t *Tree) DoingUnder(rootID string) *Node {
+	var found *Node
+	t.Walk(func(n *Node, _ int) {
+		if found == nil && n.Status == StatusDoing && (n.ID == rootID || strings.HasPrefix(n.ID, rootID+".")) {
+			found = n
+		}
+	})
+	return found
 }
 
 // Add appends a child under parent ("" for a new root) and returns it. Ids
@@ -135,6 +202,19 @@ func (t Tree) Find(id string) *Node {
 	return found
 }
 
+// OwnerOf is the owner of the nearest node up the tree, id itself
+// included, that has one; "" is the main model. Children of an assigned
+// node carry no tag of their own (spec §1.1).
+func (t Tree) OwnerOf(id string) string {
+	parts := strings.Split(id, ".")
+	for i := len(parts); i > 0; i-- {
+		if n := t.Find(strings.Join(parts[:i], ".")); n != nil && n.Owner != "" {
+			return n.Owner
+		}
+	}
+	return ""
+}
+
 // Walk visits every node, parents before children, in document order.
 func (t *Tree) Walk(fn func(n *Node, depth int)) {
 	var rec func(ns []*Node, depth int)
@@ -147,26 +227,45 @@ func (t *Tree) Walk(fn func(n *Node, depth int)) {
 	rec(t.Roots, 0)
 }
 
+// Doing is the main model's doing node: the one not inside any dispatched
+// subtree. A sub-agent's doing node is DoingUnder its root.
 func (t *Tree) Doing() *Node {
-	var d *Node
+	var found *Node
 	t.Walk(func(n *Node, _ int) {
-		if n.Status == StatusDoing {
-			d = n
+		if found != nil || n.Status != StatusDoing || t.penOf(n.ID) != "" {
+			return
 		}
+		// dispatched is transient. A hard kill leaves a [>] inside an
+		// assigned subtree and an empty running set at the next load, so
+		// penOf answers "" for it — but the owner tag survives in the
+		// document, and a doing node under an owner is that owner's, never
+		// the main model's. Without this the main model's evidence files
+		// onto the sub-agent's step until the resume pass re-dispatches the
+		// root.
+		if t.OwnerOf(n.ID) != "" {
+			return
+		}
+		found = n
 	})
-	return d
+	return found
 }
 
-// SetStatus moves one node. Exactly one node is doing at a time, so a new
-// doing node sends the previous one back to todo; the caller (Task 2) is
-// what distils it first.
+// SetStatus moves one node. Exactly one node is doing at a time per pen, so
+// a new doing node sends the previous one in its own pen back to todo; the
+// caller (Task 2) is what distils it first.
 func (t *Tree) SetStatus(id string, s Status, reason string) *Node {
 	n := t.Find(id)
 	if n == nil {
 		return nil
 	}
 	if s == StatusDoing {
-		if prev := t.Doing(); prev != nil && prev != n {
+		var prev *Node
+		if pen := t.penOf(id); pen != "" {
+			prev = t.DoingUnder(pen)
+		} else {
+			prev = t.Doing()
+		}
+		if prev != nil && prev != n {
 			prev.Status = StatusTodo
 		}
 	}
@@ -177,9 +276,26 @@ func (t *Tree) SetStatus(id string, s Status, reason string) *Node {
 		n.Closed = now()
 	}
 	if !s.terminal() {
-		n.Closed = time.Time{}
+		// Reopened, so nobody has finished it: the attribution goes with the
+		// closing time it described, or the report would read "todo by big".
+		n.Closed, n.DoneBy = time.Time{}, ""
 	}
 	n.Status = s
+	if s.terminal() {
+		// Attribution happens at the transition, not at the close. A node
+		// closed from inside a dispatched pen was closed by the sub-agent
+		// that owns that pen — through its own task tool, or through
+		// CloseAs on the way out — and a node closed before the step was
+		// ever delegated keeps its own (empty) attribution, so the report
+		// never tells the operator that the main model's finished work was
+		// "done by big". A hand-edited `[x]` goes nowhere near here: the
+		// merge writes Status directly, because that one is the operator's.
+		if pen := t.penOf(n.ID); pen != "" {
+			if p := t.Find(pen); p != nil {
+				n.DoneBy = p.Owner
+			}
+		}
+	}
 	if reason != "" {
 		n.Reason = strings.TrimSpace(reason)
 	}

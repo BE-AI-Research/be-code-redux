@@ -275,6 +275,35 @@ func (m *View) pingCmd() tea.Cmd {
 	}
 }
 
+// taskVerbMsg carries the outcome of /task assign|scope|reply back to the
+// terminal that typed it, once it has been run off the Update goroutine.
+type taskVerbMsg struct {
+	args  []string
+	lines []string
+}
+
+// taskVerbCmd runs ui.TaskVerb somewhere the session lock is not held.
+//
+// Update holds that lock for its whole body, and TaskVerb blocks on the
+// agent: AssignOwner on a sub-agent parked on an ask sets interrupt,
+// cancels and waits on the run's done channel — and that run's own exit
+// path calls Events.OnSubAgentEnd, which is Session.onSubAgentEnd, which
+// takes the very lock Update is holding. Run inline, /task assign froze
+// every attached terminal for good. SetScope has the same shape by way of
+// ScheduleSubAgents, whose dispatch fence can raise a notice, and
+// Session.notice takes the lock too.
+//
+// A tea.Cmd is the established seam for this (pingCmd, and the goroutine
+// /consult already uses): Bubble Tea runs it on a goroutine of its own and
+// feeds its message back through Update, which takes the lock properly.
+func (m *View) taskVerbCmd(args []string) tea.Cmd {
+	ag := m.ag
+	return func() tea.Msg {
+		lines, _ := ui.TaskVerb(ag, args)
+		return taskVerbMsg{args: args, lines: lines}
+	}
+}
+
 // Update runs this terminal's program. It holds the session lock for its
 // whole body, so everything it reaches — the transcript, the run state, the
 // queue, the roster — is read and written under the one lock the agent
@@ -407,6 +436,14 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// would put one copy of it per terminal. Notes from the agent come
 		// through Session.notice as real entries instead.
 		m.renderEntryLocal(noticeEntry(string(msg)))
+	case taskVerbMsg:
+		if msg.args[0] == "reply" && len(msg.args) > 2 &&
+			len(msg.lines) == 1 && strings.HasPrefix(msg.lines[0], "reply delivered") {
+			// The answer is part of the shared record: every terminal sees it.
+			m.appendEntryLocked(entry{Kind: entryDim,
+				Text: fmt.Sprintf("reply to %s: %s", msg.args[1], strings.Join(msg.args[2:], " "))})
+		}
+		m.renderLocalLines(msg.lines)
 	case statusMsg:
 		m.statusNote = string(msg)
 		if m.statusNote == "" && m.running {
@@ -1150,6 +1187,13 @@ func (m *View) bottomLine() string {
 	if m.ag.IDEName != "" {
 		line += m.st.Accent.Render(" " + m.ideMarker())
 	}
+	if m.runningSubs != nil {
+		if subs := m.runningSubs(); len(subs) == 1 {
+			line += m.st.Accent.Render(" ⚙ " + subs[0].Name + " " + subs[0].At)
+		} else if len(subs) > 1 {
+			line += m.st.Accent.Render(fmt.Sprintf(" ⚙ %d lanes", len(subs)))
+		}
+	}
 	if n := len(m.clients); n > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
@@ -1724,6 +1768,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		if len(fields) > 1 {
 			args = fields[1:]
 		}
+		if ui.IsTaskVerb(args) {
+			// Never inline: Update holds the session lock for its whole
+			// body, and ui.TaskVerb can block on the agent — `/task assign`
+			// on a parked sub-agent stops that run and waits for its
+			// goroutine, whose own hand-back calls Session.onSubAgentEnd and
+			// takes that same lock. Inline, the whole TUI froze. A Cmd runs
+			// on a goroutine of its own and its message comes back through
+			// Update, which takes the lock properly.
+			return m, m.taskVerbCmd(args)
+		}
 		switch {
 		case len(args) > 0 && args[0] == "clear":
 			m.ag.Engine.ClearSession()
@@ -1737,6 +1791,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		default:
 			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
 		}
+		return m, nil
+	case "/agents":
+		var args []string
+		if len(fields) > 1 {
+			args = fields[1:]
+		}
+		m.renderLocalLines(ui.AgentLines(m.ag, args))
 		return m, nil
 	case "/notes":
 		if m.ag.Engine == nil {

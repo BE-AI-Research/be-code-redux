@@ -90,6 +90,35 @@ chat.go`, `internal/tui/dm.go` or `internal/tui/mention.go`.
 20. The naming prompt on a fresh IP.
 21. `/whoami` after an IP change with the ARP fallback.
 
+## Sub-agents
+
+A real sub-agent run needs a second model actually answering requests, resuming
+across a process restart, and an online consent prompt — none of that is faked by
+unit tests. Walk this once per release, or after touching `internal/subagent`,
+`internal/agent/subagents.go`, `internal/engine`'s owner/scope handling or
+`internal/ui/agents.go`.
+
+22. Add a small local co-worker with `"sub_agent": true` pointing at a real Ollama
+    on your LAN. Seed a task with an unassigned step, then
+    `/task assign <id> <name>` and `/task scope <id> <path>`. Expect the dim line
+    `<name> started <id> …`, the bottom line's `⚙ <name> <id>` (or the doing node
+    under it once the sub-agent gets going), and — on every attached terminal —
+    `<name> (<id>)> …` when it hands back. `/task show <id>` afterwards reads
+    `done by <name> (…, N tool calls)`.
+23. Add a second card on a provider naming the **primary's own model**. Assign it
+    a step and watch `/api/ps` on that server while it runs: no reload, and the
+    primary's next request still reads warm.
+24. Add a card with `"online": true` (or a non-local provider address) and assign
+    it a step with a scope. Expect the approval modal (or plain-mode prompt) to
+    name the step's scope, not just the model; `a` allows it for the rest of the
+    session.
+25. Mid-step, `/quit`. Restart with `--resume <code>` (or reattach a live one).
+    Expect the dim line `<name> resumed <id> …` and the step continuing from what
+    was already on disk, not from scratch.
+26. With `approve_file_writes` on, assign a step whose scope includes a real file
+    and let the sub-agent write it. Expect the same diff/approval modal an
+    ordinary write raises, labelled `sub-agent <name> (<id>):`.
+
 If a session never appears, `~/.be-code/live/<code>.log` has the host's own
 stdout/stderr from startup; `~/.be-code/live/<code>.json` is its record (code, pid,
 socket, workspace, model, auth token).

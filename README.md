@@ -165,6 +165,60 @@ than the turn's, so the run is left alone and Esc (or `/quit`) cancels both
 the run and the consultation. A `/consult` never counts against
 `cowork.max_consults_per_run`.
 
+## Sub-agents
+
+`"sub_agent": true` on a `coworkers` entry lets that model own a step of the
+task tree instead of only being consulted: assigned a step, it gets a scoped,
+write-capable scratch agent of its own — `ask_main` to park on a question for
+the primary, and its own `task` tool pinned to the subtree — seeded with the
+step's text, the project notes and the primary's recent context, the same as
+a consultation.
+
+Assign a step with `/task assign <id> <name>` (`/task assign <id> main` gives
+it back), or write the owner straight into the task document:
+
+```
+- [ ] 3.2. port internal/scan  @big  scope: internal/scan, internal/scan_test.go
+- [ ] 3.3. write the migration note  @claude!  scope: docs/scanner.md  after: 3.2
+```
+
+`@name` assigns; `@name!` is pinned by the operator, and the model will not
+reassign it. A step with an owner and no scope is not ready — give it one
+with `/task scope <id> <path>[, <path>…]`. A sub-agent stuck on a decision
+only the primary can make asks with `ask_main`, which parks the step until
+`/task reply <id> <text>` answers it (or the primary does, when it is free);
+a write outside the assigned scope is refused with a note, not silently
+dropped.
+
+`/agents` lists every sub-agent card and what it is doing — idle, waiting on
+a scope or a dependency, working, or asking; `/agents stop <name>` cancels
+whatever it is running and closes the step `blocked` with the reason
+`stopped by operator`, handing it back so the main model knows. It is
+`/task assign <id> main` that takes a step away without closing it, putting
+it back to `todo`. An interrupted step (`/quit`, or a crash) is silently
+re-dispatched on the next session, told which files its earlier attempt had
+already written — from the interruption note on a clean exit, and recovered
+from the step's own evidence after a crash, which never got to write one —
+or handed back blocked and noticed when nothing configured can pick it up.
+
+Approvals follow the session's own mode: a write inside a sub-agent's scope
+raises the same modal or diff a primary write does, labelled `sub-agent
+<name> (<id>):` so it is never mistaken for the primary's own edit. A
+sub-agent marked `"online": true` asks consent once per session before any
+code reaches it, the same as an ordinary co-worker, except the detail names
+the step's scope rather than only the model.
+
+A sub-agent runs on its own per-server lane, the primary's requests always
+first: on its own server it works alongside the primary freely, but a
+sub-agent sharing the primary's server interleaves with it, and each
+hand-over between them costs the primary a cold prompt read — a local
+server's prompt cache survives only a strictly extending prompt, and a
+hand-over is never that. A second server does not.
+
+`sub_agents.max_concurrent`, `sub_agents.max_turns`, `sub_agents.ask_timeout`
+and `coworkers[].max_scope` are in the config reference below. The full
+owner/scope syntax is in [`docs/task-format.md`](docs/task-format.md).
+
 ## Select and copy
 
 Drag with the mouse over the transcript to select text (Shift-drag uses your
@@ -822,6 +876,16 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   max_consults_per_run` (3), `cowork.consult_turns` (12) and
   `cowork.consult_timeout` (300, seconds one consultation may take) tune when
   and how much; see "Co-working models"
+- `coworkers[].sub_agent` (false) — the co-worker may own a step of the task tree
+  (see "Sub-agents"); `coworkers[].max_scope` (`[]`, whole workspace) — the widest
+  set of workspace paths it may ever be given as a scope. Entries that escape the
+  workspace are dropped with a warning, and if that leaves none at all the co-worker
+  loses `sub_agent` too: an empty `max_scope` means the whole workspace, so a
+  `max_scope` of `["/docs"]` must not quietly become one
+- `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
+  `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
+  `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an
+  answer before the step is marked blocked
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
@@ -840,7 +904,7 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
 
 ## Status
 
-v1.0.1 — co-working hardened: `online` corroborated against the provider's address, the advice sanitizer covers Qwen's XML tool calls, a co-worker panic is contained, and a co-worker budgets against its own window. v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
+v1.1.0 — sub-agents: a co-worker marked `sub_agent: true` can own a step of the task tree — a scoped, write-capable scratch agent, `ask_main`, per-server lanes with the primary first, approvals on the main model's schema, and silent resume. v1.0.1 — co-working hardened: `online` corroborated against the provider's address, the advice sanitizer covers Qwen's XML tool calls, a co-worker panic is contained, and a co-worker budgets against its own window. v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
 after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
 for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
 context window after `/model`, and a prompt the server refuses as too large is recovered or

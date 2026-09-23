@@ -3,6 +3,7 @@ package agent
 import (
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/repomap"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -222,6 +223,28 @@ func (l fencedLedger) ShowText(id string) (out string) {
 	return out
 }
 
+// SetOwner and SetScope are the model's own `task owner` / `task scope`,
+// and they take exactly the path the operator's `/task assign` and `/task
+// scope` take. Calling the store directly and scheduling afterwards was not
+// the same thing: AssignOwner stops a parked run and waits for it before
+// rewriting the owner (spec §3.5, which says the model may reassign a
+// parked node), and SetScope pushes the widened scope into the running
+// sub-agent's registry and resolves its ask (§2.7). Both schedule
+// themselves, so nothing is scheduled twice here.
+//
+// pinned is always false: the pin is the operator's mark, and the model may
+// not set it (nor change one that is set — SetOwner refuses that).
+func (l fencedLedger) SetOwner(id, owner string, _ bool) error {
+	return l.a.AssignOwner(id, owner, false)
+}
+
+func (l fencedLedger) SetScope(id string, scope []string) error {
+	return l.a.SetScope(id, scope)
+}
+
+// Reply answers a sub-agent's open ask_main (the task tool's taskReplier).
+func (l fencedLedger) Reply(id, text string) error { return l.a.ReplyAsk(id, text) }
+
 // ActiveRootID is the task tool's optional taskRoots capability.
 func (l fencedLedger) ActiveRootID() (id string) {
 	l.a.engineDo("task root", func(st *engine.Store) { id = st.ActiveRootID() })
@@ -235,4 +258,12 @@ func (a *Agent) EngineBaseline() (head, dirty string) {
 		head, dirty = b.Head, b.Dirty
 	})
 	return head, dirty
+}
+
+// SetEngineCards hands the store the sub-agent cards it validates owner
+// tags against. EnableSubAgents calls it with the real cards; the wiring
+// calls it with nil when no sub-agent is configured, so an orphaned
+// assignment in a task document is still reported once.
+func (a *Agent) SetEngineCards(cards map[string]subagent.Card) {
+	a.engineDo("sub-agent cards", func(st *engine.Store) { st.SetCards(cards) })
 }

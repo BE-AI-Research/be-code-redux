@@ -120,6 +120,13 @@ func (m *View) compactBottomLine() string {
 	if m.ag.IDEName != "" {
 		line += m.st.Accent.Render(" " + m.ideMarker())
 	}
+	if m.runningSubs != nil {
+		if subs := m.runningSubs(); len(subs) == 1 {
+			line += m.st.Accent.Render(" ⚙ " + subs[0].Name + " " + subs[0].At)
+		} else if len(subs) > 1 {
+			line += m.st.Accent.Render(fmt.Sprintf(" ⚙ %d lanes", len(subs)))
+		}
+	}
 	if len(m.clients) > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), len(m.clients)))
 	}

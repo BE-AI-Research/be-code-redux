@@ -29,7 +29,7 @@ const maxBackendRetries = 5
 func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= maxBackendRetries; attempt++ {
-		resp, err := a.chatFiltered(ctx, req)
+		resp, err := a.chatInLane(ctx, req)
 		a.noteNativeFallback()
 		if err == nil {
 			return resp, nil
@@ -54,6 +54,40 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 		return nil, fmt.Errorf("backend unavailable after %d retries: %w", maxBackendRetries, lastErr)
 	}
 	return nil, lastErr
+}
+
+// inLane runs one model call inside the primary's lane on its server, when
+// lanes exist (spec §2.2). The lane is not re-entrant: never call this from
+// inside another inLane. Every site that reaches a.Provider.Chat on the
+// primary's server goes through it — the tool loop below, the compaction
+// summary and its retry, the handoff, the init overview and the commit
+// message — because a compaction colliding with a sub-agent on one Ollama is
+// exactly the overload the lane exists to prevent.
+func (a *Agent) inLane(ctx context.Context, fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
+	return inLaneWith(ctx, a.laneAcquire, fn)
+}
+
+// inLaneWith is inLane for a caller with a lane of its own rather than the
+// primary's — a prefill, which takes the primary's server at background
+// priority. A nil acquirer runs fn directly, which is what a session with
+// no sub-agent configured always does.
+func inLaneWith(ctx context.Context, acquire func(context.Context) (func(), error), fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
+	if acquire == nil {
+		return fn()
+	}
+	release, err := acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return fn()
+}
+
+// chatInLane is chatFiltered inside the server's lane. One call, one lane:
+// the retry loop above takes it afresh each attempt, so a sub-agent sharing
+// the server is not shut out for the whole backoff.
+func (a *Agent) chatInLane(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	return a.inLane(ctx, func() (*provider.ChatResponse, error) { return a.chatFiltered(ctx, req) })
 }
 
 // isRetryableBackendError distinguishes "the server is busy/restarting/

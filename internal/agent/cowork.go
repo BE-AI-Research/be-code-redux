@@ -489,7 +489,11 @@ func (a *Agent) noteSharedServer(cw config.CoworkerConfig) {
 	}
 	a.coworkMu.Unlock()
 	if !noted {
-		a.notice("co-worker %s runs %s on the same server as %s; on one GPU each consultation may evict the primary's model and cost a reload", cw.Name, cw.Model, a.Model)
+		msg := "co-worker %s runs %s on the same server as %s; on one GPU each consultation may evict the primary's model and cost a reload"
+		if cw.SubAgent {
+			msg += "; sub-agents on this server interleave with the primary and cost it a cold prompt read per hand-over"
+		}
+		a.notice(msg, cw.Name, cw.Model, a.Model)
 	}
 }
 
@@ -535,6 +539,10 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 		// too: the wait they are watching is this one.
 		OnTransient: func(msg string) { a.transient("%s", msg) },
 	}
+	// One lane per server (spec §2.2): a consultation is a model call on a
+	// co-worker's backend, and that backend may be the primary's own or a
+	// sub-agent's. Without this it interleaved with both.
+	scratch.laneAcquire = a.laneFor(cw.Provider, true)
 	scratch.knownTools = map[string]bool{}
 	for _, n := range readOnly.Names() {
 		scratch.knownTools[n] = true

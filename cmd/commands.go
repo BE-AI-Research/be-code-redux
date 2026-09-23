@@ -58,6 +58,9 @@ var runCmd = &cobra.Command{
 			ag.Events = ui.Events()
 		}
 		ag.Tools.Approve = headlessApprover(cfg)
+		// Approve and Events are wired above; a dispatch before this point
+		// would ask consent of nobody and print to nobody.
+		ag.StartSubAgents()
 		defer ag.Tools.Close()
 		defer ag.Checkpoints.Cleanup()
 		defer finishSession(ag, false, os.Stderr)
@@ -65,6 +68,17 @@ var runCmd = &cobra.Command{
 			defer ideSession.Close()
 		}
 		answer, rep, err := ag.RunFull(cmd.Context(), prompt)
+		// Sub-agents hand back into the queue; headless, nobody types the
+		// next turn, so the run itself takes up to three of them (a
+		// question, its answer, the hand-back).
+		for round := 0; err == nil && ag.SubAgentsEnabled() && round < 3; round++ {
+			ag.WaitSubAgents(cmd.Context())
+			msgs := ag.DrainInbox()
+			if len(msgs) == 0 {
+				break
+			}
+			answer, rep, err = ag.RunFull(cmd.Context(), strings.Join(msgs, "\n\n"))
+		}
 		if err != nil {
 			return err
 		}
@@ -86,6 +100,7 @@ var runCmd = &cobra.Command{
 				"prompt_processing_seconds": ag.Usage().PromptTime.Seconds(),
 				"model_loading_seconds":     ag.Usage().LoadTime.Seconds(),
 				"uncached_prompt_reads":     ag.Usage().SlowReads,
+				"sub_agents":                subAgentRows(ag),
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -113,6 +128,18 @@ func reviewIssues(rep *agent.ReviewedReport) string {
 		return ""
 	}
 	return rep.ReviewIssues
+}
+
+// subAgentRows is run --json's "sub_agents": every hand-back this run made,
+// including one carried over from a co-worker's prior session, in the shape
+// the flag's other rows already use.
+func subAgentRows(ag *agent.Agent) []map[string]any {
+	rows := []map[string]any{}
+	for _, hb := range ag.SubAgentReport() {
+		rows = append(rows, map[string]any{"node": hb.Node, "owner": hb.Owner, "status": hb.Status,
+			"reason": hb.Reason, "elapsed_seconds": hb.Elapsed.Seconds(), "tool_calls": hb.Calls, "files": hb.Files})
+	}
+	return rows
 }
 
 func changedFiles(ag *agent.Agent) []string {

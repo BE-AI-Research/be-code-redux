@@ -354,6 +354,47 @@ func TestValidCoworkersForcesOnlineForARemoteProvider(t *testing.T) {
 	}
 }
 
+func TestSubAgentsDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.SubAgents.MaxConcurrent != 2 || cfg.SubAgents.MaxTurns != 40 || cfg.SubAgents.AskTimeout != 600 {
+		t.Fatalf("defaults: %+v", cfg.SubAgents)
+	}
+	cfg.SubAgents = SubAgentsConfig{}
+	cfg.rescueZeroValues()
+	if cfg.SubAgents.MaxConcurrent != 2 || cfg.SubAgents.MaxTurns != 40 || cfg.SubAgents.AskTimeout != 600 {
+		t.Fatalf("zero values not rescued: %+v", cfg.SubAgents)
+	}
+	cfg.SubAgents.MaxConcurrent = -3
+	cfg.rescueZeroValues()
+	if cfg.SubAgents.MaxConcurrent != 1 {
+		t.Fatalf("max_concurrent below 1 must be 1, got %d", cfg.SubAgents.MaxConcurrent)
+	}
+}
+
+func TestValidCoworkersCleansMaxScope(t *testing.T) {
+	cfg := Default()
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "big", Provider: "ollama", Model: "m", SubAgent: true,
+			MaxScope: []string{"docs/", "./internal/scan", "../secrets", "/etc"}},
+	}
+	cws, warns := cfg.ValidCoworkers()
+	if len(cws) != 1 {
+		t.Fatalf("want one co-worker, got %d (%v)", len(cws), warns)
+	}
+	got := cws[0].MaxScope
+	if len(got) != 2 || got[0] != "docs" || got[1] != "internal/scan" {
+		t.Fatalf("max_scope cleaned wrong: %q", got)
+	}
+	if len(warns) != 2 {
+		t.Fatalf("want two warnings for the escaping entries, got %q", warns)
+	}
+	for _, w := range warns {
+		if !strings.Contains(w, "escapes the workspace") {
+			t.Fatalf("warning text: %q", w)
+		}
+	}
+}
+
 func TestLocalEndpoint(t *testing.T) {
 	for _, local := range []string{"http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:1234/v1", "http://192.168.1.150:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.4:1/v1", "http://ollama-box:11434", "http://nas.local/v1", "unix:///tmp/x.sock", ""} {
 		if !LocalEndpoint(local) {
@@ -364,5 +405,41 @@ func TestLocalEndpoint(t *testing.T) {
 		if LocalEndpoint(remote) {
 			t.Errorf("%q should be remote", remote)
 		}
+	}
+}
+
+// TestValidCoworkersFailsClosedWhenEveryMaxScopeEntryIsInvalid: an empty
+// max_scope means the whole workspace, so dropping every entry of one that
+// was supplied would widen the confinement instead of enforcing it —
+// "max_scope": ["/docs"] is a plausible way to write it, and it used to
+// print one warning and then grant that co-worker, possibly online, the
+// entire repository.
+func TestValidCoworkersFailsClosedWhenEveryMaxScopeEntryIsInvalid(t *testing.T) {
+	cfg := Default()
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "claude", Provider: "ollama", Model: "m", SubAgent: true,
+			MaxScope: []string{"/docs", "../etc"}},
+	}
+	cws, warns := cfg.ValidCoworkers()
+	if len(cws) != 1 {
+		t.Fatalf("the entry itself stays (consultation is unchanged): %d (%v)", len(cws), warns)
+	}
+	if cws[0].SubAgent {
+		t.Fatal("a co-worker whose whole max_scope was dropped must not stay assignable")
+	}
+	if len(cws[0].MaxScope) != 0 {
+		t.Fatalf("max_scope: %q", cws[0].MaxScope)
+	}
+	joined := strings.Join(warns, "\n")
+	if !strings.Contains(joined, "no usable max_scope entry") {
+		t.Fatalf("warnings: %q", warns)
+	}
+	// A co-worker that never asked to be a sub-agent is untouched.
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "talk", Provider: "ollama", Model: "m", MaxScope: []string{"/docs"}},
+	}
+	cws, _ = cfg.ValidCoworkers()
+	if len(cws) != 1 || cws[0].SubAgent {
+		t.Fatalf("consult-only co-worker: %+v", cws)
 	}
 }

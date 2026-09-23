@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testStore is a store on two temp dirs: a workspace root and a dotdir.
@@ -74,5 +75,29 @@ func TestReportSurfacesDroppedEvidence(t *testing.T) {
 	rep := s.Report(id)
 	if !strings.Contains(rep, "item(s) dropped") {
 		t.Fatalf("dropped evidence not surfaced:\n%s", rep)
+	}
+}
+
+func TestStatusLineOwnerSuffixes(t *testing.T) {
+	n := &Node{ID: "3.2", Text: "port", Status: StatusTodo, Owner: "big", Scope: []string{"internal/scan"}}
+	if got := statusLine(n); got != "3.2. port — todo @big" {
+		t.Fatalf("open assigned: %q", got)
+	}
+	n.OwnerPinned = true
+	if got := statusLine(n); got != "3.2. port — todo @big!" {
+		t.Fatalf("pinned: %q", got)
+	}
+	n.Dispatched, n.DispatchedAt, n.Calls = true, "3.2.1", 9
+	if got := statusLine(n); got != "3.2. port — todo @big! running (at 3.2.1, 9 tool calls)" {
+		t.Fatalf("running: %q", got)
+	}
+	start := time.Now().Add(-14 * time.Minute)
+	d := &Node{ID: "3.2", Text: "port", Status: StatusDone, DoneBy: "big", Started: start, Closed: time.Now(), Calls: 22}
+	if got := statusLine(d); got != "3.2. port — done by big (14m, 22 tool calls)" {
+		t.Fatalf("done by: %q", got)
+	}
+	b := &Node{ID: "3.2", Text: "port", Status: StatusBlocked, DoneBy: "big", Reason: "turn cap of 40 reached"}
+	if got := statusLine(b); got != "3.2. port — blocked by big: turn cap of 40 reached" {
+		t.Fatalf("blocked by: %q", got)
 	}
 }

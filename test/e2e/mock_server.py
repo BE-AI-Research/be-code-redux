@@ -134,6 +134,70 @@ def task_chunks(body):
     compacted = any(NO_SUMMARY in (m.get("content") or "") for m in body["messages"])
     return [text_chunk("TREE:%s COMPACT:%s" % (tree, "yes" if compacted else "no"))]
 
+# Sixth scenario: a sub-agent. The lead plans one step, assigns it to "sub"
+# with a scope, and stops. The sub-agent (model sub-model) writes inside
+# its scope, is refused outside it, asks the lead, and finishes. The
+# headless run feeds the ask and the hand-back back to the lead, whose
+# last reply reports whether the hand-back named the file it wrote.
+LEAD = {"n": 0, "root": "2", "replied": False}
+SUB = {"n": 0}
+
+def lead_chunks(body):
+    n = LEAD["n"]; LEAD["n"] += 1
+    last = body["messages"][-1].get("content") or ""
+    users = [m.get("content") or "" for m in body["messages"] if m["role"] == "user"]
+    if n == 0:
+        return [tool_call_chunk("task", {"action": "plan", "text": "port the scanner",
+                                         "steps": ["port internal/scan"]})]
+    if n == 1:
+        if last.startswith("task "):
+            # The plan's own result is "task <id>", but time_awareness (on by
+            # default) appends a "[HH:MM:SS · took … · context N%]" footer to
+            # every tool result, so the *last* whitespace token is the
+            # footer's, not the id's. "task " is always immediately followed
+            # by the id and nothing else, so the second token is the one to
+            # take.
+            LEAD["root"] = last.split()[1]
+        return [tool_call_chunk("task", {"action": "owner", "id": LEAD["root"] + ".1", "owner": "sub"})]
+    if n == 2:
+        return [tool_call_chunk("task", {"action": "scope", "id": LEAD["root"] + ".1", "paths": ["internal/scan"]})]
+    # Whether the lead's next call after "scope" already sees the ask
+    # depends on a race between this goroutine issuing that call and the
+    # sub-agent's own goroutine reaching ask_main (three of its own model
+    # calls in), so this is gated on the ask actually being present and
+    # answered exactly once, never on a specific call count.
+    if any("asks about" in u for u in users) and not any("finished" in u for u in users) and not LEAD["replied"]:
+        LEAD["replied"] = True
+        return [tool_call_chunk("task", {"action": "reply", "id": LEAD["root"] + ".1", "text": "stay inside internal/scan"})]
+    # Gated on the lead's own answer being echoed back in the hand-back
+    # summary, not merely on the sub-agent having finished: a regression that
+    # turned ask_main into a non-blocking no-op would still finish and still
+    # name the file (written at n == 0, before the ask), so without this the
+    # ask/reply round trip would go unproven. sub_chunks below is the other
+    # half: it only echoes the reply text if it actually saw it.
+    if any("sub-agent sub finished" in u and "wrote internal/scan/token.go" in u
+           and "lead said: stay inside internal/scan" in u for u in users):
+        return [text_chunk("HANDBACK:yes")]
+    return [text_chunk("assigned; waiting")]
+
+def sub_chunks(body):
+    n = SUB["n"]; SUB["n"] += 1
+    if n == 0:
+        return [tool_call_chunk("write_file", {"path": "internal/scan/token.go", "content": "package scan\n"})]
+    if n == 1:
+        return [tool_call_chunk("write_file", {"path": "cmd/x.go", "content": "package cmd\n"})]
+    if n == 2:
+        return [tool_call_chunk("ask_main", {"question": "may I touch cmd/x.go?"})]
+    # ask_main's own tool result is "the main model replied:\n\n<answer>"
+    # (internal/tools/askmain.go), so the answer's presence here is proof the
+    # round trip actually delivered it, not merely that ask_main was called
+    # and something came back. A broken (non-blocking, no-op) ask_main would
+    # never carry this text, so it must not be assumed.
+    answered = any("stay inside internal/scan" in (m.get("content") or "") for m in body["messages"])
+    if answered:
+        return [text_chunk("SUBDONE: token loop ported; lead said: stay inside internal/scan")]
+    return [text_chunk("SUBDONE: no answer received")]
+
 # The native (fake Ollama) scenario. /api/chat records the num_ctx it was
 # sent and answers with it, so the assertion is on what actually reached the
 # wire rather than on anything the harness reports about itself.
@@ -179,6 +243,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # is that the compaction replaces the first user message, so
             # after it there is nothing in the transcript left to route on.
             chunks = task_chunks(body)
+        elif model == "lead-model":
+            chunks = lead_chunks(body)
+        elif model == "sub-model":
+            chunks = sub_chunks(body)
         elif "consult scenario" in first_user_content(body):
             n = state["consult_n"]; state["consult_n"] += 1
             if n == 0:
@@ -228,6 +296,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/api/tags"):
             return self._json({"models": [{"name": "native-model", "size": 1,
                                            "details": {"family": "mock", "quantization_level": "Q4"}}]})
-        self._json({"data": [{"id": "mock-model"}, {"id": "coworker-model"}, {"id": "task-model"}]})
+        self._json({"data": [{"id": "mock-model"}, {"id": "coworker-model"}, {"id": "task-model"},
+                              {"id": "lead-model"}, {"id": "sub-model"}]})
 
 http.server.HTTPServer(("127.0.0.1", 18111), H).serve_forever()

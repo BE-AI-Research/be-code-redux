@@ -120,15 +120,18 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	}
 	b.WriteString(tr)
 	a.awaitWindow(ctx) // never send with no window on the wire
-	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: a.Model,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: handoffSystemPrompt},
-			{Role: provider.RoleUser, Content: b.String()},
-		},
-		Temperature: 0.1,
-		NoThink:     true, // seconds instead of minutes on thinking models
-	}, nil)
+	// In the lane: the handoff is written on the way out, outside any turn.
+	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+		return a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: a.Model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: handoffSystemPrompt},
+				{Role: provider.RoleUser, Content: b.String()},
+			},
+			Temperature: 0.1,
+			NoThink:     true, // seconds instead of minutes on thinking models
+		}, nil)
+	})
 	if err != nil {
 		return "", err
 	}

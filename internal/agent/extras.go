@@ -77,14 +77,17 @@ func (a *Agent) GenerateCommit(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no changes to commit (or not a git repository)")
 	}
 	a.awaitWindow(ctx) // never send with no window on the wire
-	resp, err := a.Provider.Chat(ctx, provider.ChatRequest{
-		Model: a.Model,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: "Write a single-line git commit message (max 72 chars, imperative mood, conventional-commits style when it fits) for this diff. Output ONLY the message."},
-			{Role: provider.RoleUser, Content: diff},
-		},
-		Temperature: 0.1,
-	}, nil)
+	// In the lane: /commit is a UI command, never inside a turn's own call.
+	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
+		return a.Provider.Chat(ctx, provider.ChatRequest{
+			Model: a.Model,
+			Messages: []provider.Message{
+				{Role: provider.RoleSystem, Content: "Write a single-line git commit message (max 72 chars, imperative mood, conventional-commits style when it fits) for this diff. Output ONLY the message."},
+				{Role: provider.RoleUser, Content: diff},
+			},
+			Temperature: 0.1,
+		}, nil)
+	})
 	if err != nil {
 		return "", err
 	}
@@ -137,14 +140,35 @@ func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewer
 	if b.Len() == 0 {
 		return "", nil
 	}
-	resp, err := reviewer.Chat(ctx, provider.ChatRequest{
+	req := provider.ChatRequest{
 		Model: reviewerModel,
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: "You are a strict senior code reviewer. Review the changed files below for bugs, security issues, and broken edge cases. If the code is acceptable, reply with exactly APPROVED. Otherwise list the concrete problems (max 5, most severe first) with file names."},
 			{Role: provider.RoleUser, Content: b.String()},
 		},
 		Temperature: 0.1,
-	}, nil)
+	}
+	// One lane per server (spec §2.2). The reviewer is a second model that
+	// may well share the primary's backend — and does share it in the
+	// common "small model drafts, bigger model reviews on the same Ollama"
+	// setup — so its one request queues like every other.
+	reviewerProvider := a.Cfg.Reviewer.Provider
+	if reviewerProvider == "" {
+		reviewerProvider = a.Cfg.DefaultProvider
+	}
+	// Released with defer, never on the success path alone: Review has no
+	// panic fence of its own, and the reviewer is a second model on a wire
+	// format this process may never have seen. A panic inside its Chat
+	// would otherwise leave the lane held for the life of the session, and
+	// every later request to that server would block for ever.
+	if lane := a.laneFor(reviewerProvider, true); lane != nil {
+		release, lerr := lane(ctx)
+		if lerr != nil {
+			return "", lerr
+		}
+		defer release()
+	}
+	resp, err := reviewer.Chat(ctx, req, nil)
 	if err != nil {
 		return "", err
 	}

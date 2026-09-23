@@ -29,7 +29,7 @@ func TaskLines(eng TaskViewer, args []string) []string {
 		}
 		return splitLines(eng.ShowText(args[1]))
 	default:
-		return []string{"usage: /task [show <id>|open|clear]"}
+		return []string{"usage: /task [show <id>|open|clear|assign|scope|reply]"}
 	}
 }
 
