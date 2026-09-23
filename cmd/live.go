@@ -103,6 +103,9 @@ func runSessionHost(code string) error {
 		defer ideSession.Close()
 	}
 	s := tui.NewSession(cfg, ag, p)
+	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
+	// before that would ask consent of nobody and print to nobody here either.
+	ag.StartSubAgents()
 	// Served: auto resolves per write from the roster — the editor alone
 	// while VS Code's own terminal is the only one attached, both places as
 	// soon as anyone else joins. Clients() only takes the host's lock to

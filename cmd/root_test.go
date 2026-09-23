@@ -337,6 +337,70 @@ func TestASecondaryProviderSendsTheWindowTheServerHolds(t *testing.T) {
 	}
 }
 
+// buildAgentSubAgentConfig is a config buildAgent can run against with no
+// network reachable: the primary provider is openai-typed (applyModelParams
+// skips the loader's probes for anything that is not *provider.Ollama), and
+// the co-worker's own provider is never dialed by buildAgent itself — only a
+// dispatch reaches CoworkerFactory, and neither test here starts one.
+func buildAgentSubAgentConfig(subAgent bool) *config.Config {
+	cfg := config.Default()
+	cfg.DefaultProvider = "primary"
+	cfg.Model = "primary-model"
+	cfg.Providers = map[string]config.ProviderConfig{
+		"primary": {Type: "openai", BaseURL: "http://127.0.0.1:1/v1"},
+		"sub":     {Type: "ollama", BaseURL: "http://sub:11434"},
+	}
+	if subAgent {
+		cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "sub", Model: "cw-model", SubAgent: true}}
+	}
+	return cfg
+}
+
+// callBuildAgent runs buildAgent with the package flags it reads pinned to a
+// scratch workspace and restored afterwards, since they are shared globals.
+func callBuildAgent(t *testing.T, cfg *config.Config) *agent.Agent {
+	t.Helper()
+	prevDir, prevProvider, prevModel, prevYes, prevResume := flagDir, flagProvider, flagModel, flagYes, flagResume
+	flagDir, flagProvider, flagModel, flagYes, flagResume = t.TempDir(), "", "", false, ""
+	t.Cleanup(func() {
+		flagDir, flagProvider, flagModel, flagYes, flagResume = prevDir, prevProvider, prevModel, prevYes, prevResume
+	})
+	_, ag, err := buildAgent(cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ag.StopAllSubAgents("test over")
+		ag.Tools.Close()
+		ag.Checkpoints.Cleanup()
+	})
+	return ag
+}
+
+// TestBuildAgentWiresSubAgentsButDoesNotDispatch: EnableSubAgents only wires
+// the runner — a dispatch before StartSubAgents (which only a UI calls, once
+// its approvals and events are wired) would ask consent of nobody and print
+// to nobody. buildAgent never calls StartSubAgents, so nothing is assigned
+// and RunningSubAgents stays empty regardless.
+func TestBuildAgentWiresSubAgentsButDoesNotDispatch(t *testing.T) {
+	ag := callBuildAgent(t, buildAgentSubAgentConfig(true))
+	if !ag.SubAgentsEnabled() {
+		t.Fatal("sub-agents not enabled with a sub_agent: true co-worker configured")
+	}
+	if len(ag.RunningSubAgents()) != 0 {
+		t.Fatalf("nothing was ever assigned, but running: %+v", ag.RunningSubAgents())
+	}
+}
+
+// TestBuildAgentLeavesSubAgentsDisabledWithoutOne: nothing changes for a
+// configuration with no sub_agent: true co-worker.
+func TestBuildAgentLeavesSubAgentsDisabledWithoutOne(t *testing.T) {
+	ag := callBuildAgent(t, buildAgentSubAgentConfig(false))
+	if ag.SubAgentsEnabled() {
+		t.Fatal("sub-agents enabled without any sub_agent: true co-worker")
+	}
+}
+
 // --- chooseIDELock: quiet-path Visual Studio auto-attach (spec §6) ---
 
 // writeIDELock stores a lock as <pid>-<port>.json, matching internal/ide's

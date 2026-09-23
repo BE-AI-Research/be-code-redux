@@ -83,6 +83,28 @@ func TestConsultRunsAReadOnlyScratchAgentAndReturnsTheAnswer(t *testing.T) {
 	}
 }
 
+// noteSharedServer's notice names the sub-agent cost only for a co-worker
+// marked sub_agent: true; a plain co-worker on the same server still gets
+// the ordinary reload warning, without it.
+func TestSharedServerNoticeNamesTheSubAgentCostOnlyForASubAgent(t *testing.T) {
+	p := &scriptedProvider{}
+	ag, _ := newTestAgent(t, p, nil)
+	var notices []string
+	ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+
+	plain := config.CoworkerConfig{Name: "helper", Provider: p.Name(), Model: "helper-model"}
+	ag.noteSharedServer(plain)
+	if len(notices) != 1 || strings.Contains(notices[0], "cold prompt read per hand-over") {
+		t.Fatalf("plain co-worker notice: %q", notices)
+	}
+
+	sub := config.CoworkerConfig{Name: "sub", Provider: p.Name(), Model: "sub-model", SubAgent: true}
+	ag.noteSharedServer(sub)
+	if len(notices) != 2 || !strings.Contains(notices[1], "cold prompt read per hand-over") {
+		t.Fatalf("sub-agent notice: %q", notices)
+	}
+}
+
 func TestConsultCapAndUnknownName(t *testing.T) {
 	coworkerStub(t, provider.ChatResponse{Content: "ok"})
 	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { withCoworkers("a", "b")(c); c.Cowork.MaxConsultsPerRun = 2 })

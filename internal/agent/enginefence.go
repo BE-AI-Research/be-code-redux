@@ -3,6 +3,7 @@ package agent
 import (
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/repomap"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -257,4 +258,12 @@ func (a *Agent) EngineBaseline() (head, dirty string) {
 		head, dirty = b.Head, b.Dirty
 	})
 	return head, dirty
+}
+
+// SetEngineCards hands the store the sub-agent cards it validates owner
+// tags against. EnableSubAgents calls it with the real cards; the wiring
+// calls it with nil when no sub-agent is configured, so an orphaned
+// assignment in a task document is still reported once.
+func (a *Agent) SetEngineCards(cards map[string]subagent.Card) {
+	a.engineDo("sub-agent cards", func(st *engine.Store) { st.SetCards(cards) })
 }

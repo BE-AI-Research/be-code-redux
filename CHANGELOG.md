@@ -1,5 +1,43 @@
 # BE-Code Changelog
 
+## v1.1.0 — sub-agents on the task engine
+
+A co-worker can now own a step of the task tree instead of only being consulted:
+assigned a step and a scope, it gets a scratch agent that can write, not just read,
+under whatever it was given. Consultation's shape carries over — read-only, its own
+window, sanitized advice — with the difference that a sub-agent keeps the pen inside
+its scope until it hands the step back.
+
+- **Owner and scope live on the node.** `@name` (or `/task assign`) assigns a step;
+  `@name!` is pinned by the operator; `scope:` is the comma-separated paths it may
+  write under, and a step with an owner and no scope is not ready.
+- **One doing node per dispatched subtree.** A sub-agent works its own branch of the
+  tree with its own `task` tool pinned to it, so its evidence is filed under the step
+  it was actually given, never the root.
+- **A scoped registry and `ask_main`.** A sub-agent's tools are the primary's, cut down
+  to its scope; a write outside it is refused with a note. Stuck on a decision only the
+  primary can make, it asks with `ask_main` and parks until `/task reply` (or the
+  primary itself) answers.
+- **Per-server lanes, primary first.** Every request — primary or sub-agent — takes its
+  server's lane before it is sent, the primary's own requests always first. A sub-agent
+  on its own server runs alongside the primary freely; one sharing the primary's server
+  interleaves with it, and — measured on the owner's LAN Ollama — costs the primary a
+  cold prompt read at every hand-over, since a local server's prompt cache survives only
+  a strictly extending prompt and a hand-over is never that.
+- **Approvals go through the main model's schema.** A sub-agent write raises the same
+  modal or diff a primary write does, labelled `sub-agent <name> (<id>):`; an online
+  sub-agent's consent prompt names the step's scope, not just the model.
+- **Resume re-dispatches silently; a failure surfaces.** A step interrupted by `/quit`
+  or a crash is picked back up on the next session with what was already touched still
+  on disk; one a reconfigured session can no longer dispatch is handed back blocked and
+  noticed, rather than leaving something nobody is waiting for.
+- **`/task assign|scope|reply` and `/agents`** (`/agents stop <name>`) are the human
+  side of all of the above, in both UIs.
+- **`run --json`** carries a `sub_agents` array — one row per hand-back this run
+  produced — and a headless run itself answers up to three sub-agent round-trips
+  (a question, its answer, the hand-back) before returning, since nobody is there to
+  type the next turn.
+
 ## v1.0.1 — co-working: the edges of the consent gate
 
 A deep review of the co-working subsystem at 1.0.0 found its centre sound — the co-worker

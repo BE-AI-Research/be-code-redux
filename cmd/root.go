@@ -25,6 +25,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/setup"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/tui"
 	"github.com/brown-enterprises/be-code/internal/ui"
@@ -265,8 +266,33 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
+	cws, _ := cfg.ValidCoworkers()
+	if anySubAgent(cws) {
+		name := flagProvider
+		if name == "" {
+			name = cfg.DefaultProvider
+		}
+		ag.EnableSubAgents(cws, subagent.LaneKey(cfg.Providers[name].BaseURL))
+	} else {
+		// The store validates a document's owner tags against the cards it
+		// holds, so it must be told "there are none" as explicitly as it is
+		// told who exists: a workspace carrying "@big" under a config with
+		// no sub-agent then gets exactly one accurate warning instead of
+		// silence. EnableSubAgents does this itself when there are cards.
+		ag.SetEngineCards(nil)
+	}
 	applyModelParams(cfg, p, reg, ag, model)
 	return p, ag, nil
+}
+
+// anySubAgent reports whether any usable co-worker is marked sub_agent: true.
+func anySubAgent(cws []config.CoworkerConfig) bool {
+	for _, cw := range cws {
+		if cw.SubAgent {
+			return true
+		}
+	}
+	return false
 }
 
 // chooseIDELock decides which live lock (if any) attachIDE should connect
@@ -489,6 +515,7 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 // next session can pick up without loss of fidelity, saves, and prints the
 // resume code. withModel=false keeps headless runs fast.
 func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
+	ag.StopAllSubAgents("session ended")
 	s := ag.Session
 	if s == nil || len(ag.History.Messages) == 0 {
 		return
@@ -658,6 +685,10 @@ func runInteractive(cmd *cobra.Command) error {
 		if err != nil {
 			return err
 		}
+		// Approvals and events are wired above (ui.NewREPL sets Tools.Approve);
+		// a dispatch before this point would ask consent of nobody and print
+		// to nobody.
+		ag.StartSubAgents()
 		// In-process: no client roster, so auto resolves to the editor.
 		coord := review.New(mode, editor, repl.ReviewTerminal(), nil)
 		coord.SetEditorName(agent.EditorLabel(ag.IDEName))
@@ -677,6 +708,9 @@ func runInteractive(cmd *cobra.Command) error {
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)
+	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
+	// before that would ask consent of nobody and print to nobody.
+	ag.StartSubAgents()
 	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
 	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
 	s.SetReview(coord)

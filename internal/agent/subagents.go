@@ -35,11 +35,11 @@ import (
 // model call, an approval, a blocking channel send or a wait on a run, and
 // nothing holding the engine's own lock ever takes it.
 type subAgents struct {
-	mu      sync.Mutex
-	cards   map[string]subagent.Card
-	cws     map[string]config.CoworkerConfig
-	lanes   *subagent.Lanes
-	runs    map[string]*subRun // by node id
+	mu    sync.Mutex
+	cards map[string]subagent.Card
+	cws   map[string]config.CoworkerConfig
+	lanes *subagent.Lanes
+	runs  map[string]*subRun // by node id
 	// pending are candidates reserved by a schedule that has released mu to
 	// build their dispatches. They are not running yet, but they count
 	// against max_concurrent and hold their scope, so a concurrent schedule
@@ -65,6 +65,10 @@ type subAgents struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 	primary string // the primary's lane key
+	// finished is every hand-back so far this session, for run --json.
+	// Appended in runSub in the same critical section that deletes the run
+	// from runs, so a reader never sees a run counted as both.
+	finished []subagent.HandBack
 }
 
 type subRun struct {
@@ -140,7 +144,7 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 	}
 	s.mu.Unlock()
 	a.laneAcquire = func(ctx context.Context) (func(), error) { return s.lanes.Acquire(ctx, primaryServer, true) }
-	a.engineDo("sub-agent cards", func(st *engine.Store) { st.SetCards(cards) })
+	a.SetEngineCards(cards)
 	a.recomposeSystem("")
 }
 
@@ -158,6 +162,55 @@ func (a *Agent) StartSubAgents() {
 
 // SubAgentsEnabled reports whether any sub-agent is configured.
 func (a *Agent) SubAgentsEnabled() bool { return a.subs != nil }
+
+// WaitSubAgents blocks until no sub-agent is running or ctx ends; the
+// headless run uses it before draining hand-backs.
+func (a *Agent) WaitSubAgents(ctx context.Context) {
+	if a.subs == nil {
+		return
+	}
+	for a.subAgentsBusy() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// subAgentsBusy reports whether any run is actually working — never a run
+// parked on ask_main. A run waiting on askMain is "running" by every other
+// measure (SubAgentStates/RunningSubAgents count it, so the bottom line and
+// /agents still show it), but it is waiting on the main model, which a
+// headless run answers itself through the very round WaitSubAgents guards:
+// counting it as busy here would deadlock that round against itself.
+func (a *Agent) subAgentsBusy() bool {
+	s := a.subs
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) > 0 {
+		return true
+	}
+	for _, r := range s.runs {
+		if r.question == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// SubAgentReport is every hand-back so far, for run --json.
+func (a *Agent) SubAgentReport() []subagent.HandBack {
+	if a.subs == nil {
+		return nil
+	}
+	a.subs.mu.Lock()
+	defer a.subs.mu.Unlock()
+	return append([]subagent.HandBack(nil), a.subs.finished...)
+}
 
 // resumeSubAgents handles assigned steps an earlier session interrupted
 // but this configuration cannot re-dispatch: they are blocked, handed
@@ -368,6 +421,7 @@ func (a *Agent) runSub(run *subRun) {
 	hb = a.settleSub(run, answer, err)
 	s.mu.Lock()
 	delete(s.runs, run.d.Node)
+	s.finished = append(s.finished, hb)
 	s.mu.Unlock()
 	if a.Events.OnSubAgentEnd != nil {
 		a.Events.OnSubAgentEnd(hb)

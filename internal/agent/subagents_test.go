@@ -205,7 +205,9 @@ func TestSubAgentTurnCapAndPanicBlock(t *testing.T) {
 		t.Fatalf("turn cap: %+v", hb)
 	}
 	pp := &panicProvider{}
-	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) { return pp, 0, nil }
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return pp, 0, nil
+	}
 	root := f.st.Plan("second", []string{"again"})
 	_ = f.st.SetOwner(root+".1", "big", false)
 	_ = f.st.SetScope(root+".1", []string{"internal/scan"})
@@ -267,7 +269,9 @@ func (p *parkingProvider) Chat(ctx context.Context, req provider.ChatRequest, _ 
 func TestStopAllInterruptsAndResumeRedispatches(t *testing.T) {
 	bp := &parkingProvider{entered: make(chan struct{}, 1)}
 	f := newSubFixture(t, &scriptedProvider{}, nil)
-	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) { return bp, 0, nil }
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
 	id := f.assign(t)
 	f.ag.ScheduleSubAgents()
 	wait(t, f.start, "start")
@@ -293,7 +297,9 @@ func TestStopAllInterruptsAndResumeRedispatches(t *testing.T) {
 	}
 	// Resume: enabling again re-dispatches silently with Interrupted set.
 	bp2 := &parkingProvider{entered: make(chan struct{}, 1)}
-	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) { return bp2, 0, nil }
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp2, 0, nil
+	}
 	cws, _ := f.ag.Cfg.ValidCoworkers()
 	f.ag.EnableSubAgents(cws, "http://primary:11434")
 	f.ag.StartSubAgents()
@@ -350,7 +356,9 @@ func TestAssignOwnerStopsAParkedRunAndStopByName(t *testing.T) {
 	}
 	// Stop by name.
 	bp := &parkingProvider{entered: make(chan struct{}, 1)}
-	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) { return bp, 0, nil }
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
 	_ = f.st.SetOwner(id, "big", true)
 	f.ag.ScheduleSubAgents()
 	wait(t, bp.entered, "request")
@@ -369,7 +377,9 @@ func TestAssignOwnerStopsAParkedRunAndStopByName(t *testing.T) {
 func TestMainWriteInsideARunningScopeGetsAFooter(t *testing.T) {
 	bp := &parkingProvider{entered: make(chan struct{}, 1)}
 	f := newSubFixture(t, &scriptedProvider{}, nil)
-	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) { return bp, 0, nil }
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
 	id := f.assign(t)
 	f.ag.ScheduleSubAgents()
 	wait(t, bp.entered, "request")
@@ -486,6 +496,60 @@ func TestANoticeHandlerMayCallBackIntoTheRunner(t *testing.T) {
 	if _, err := f.ag.Run(context.Background(), "still alive?"); err != nil {
 		t.Fatalf("the primary must survive it: %v", err)
 	}
+}
+
+func TestEnableDoesNotDispatchUntilStart(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}}
+	f := newSubFixture(t, sub, nil)
+	f.assign(t)
+	cws, _ := f.ag.Cfg.ValidCoworkers()
+	f.ag.EnableSubAgents(cws, "http://primary:11434")
+	select {
+	case d := <-f.start:
+		t.Fatalf("dispatched before StartSubAgents: %+v", d)
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.ag.StartSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.ends, "end")
+	if rep := f.ag.SubAgentReport(); len(rep) != 1 || rep[0].Status != "done" {
+		t.Fatalf("report: %+v", rep)
+	}
+}
+
+// WaitSubAgents must not block on a run parked on ask_main: that is exactly
+// the shape a headless run's own round-trip resolves (see Task 10), so
+// counting it as busy would deadlock the run against itself.
+func TestWaitSubAgentsDoesNotCountAnAskAsBusy(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"which tokenizer?"}`),
+		{Content: "done as told"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.asks, "ask")
+	if f.ag.subAgentsBusy() {
+		t.Fatal("a run parked on ask_main must not count as busy")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	waited := make(chan struct{})
+	go func() { f.ag.WaitSubAgents(ctx); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitSubAgents blocked on a run parked on an ask")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("WaitSubAgents returned only because ctx timed out, not because it saw the run as idle")
+	}
+	// Answering the ask makes the run genuinely busy again until it ends.
+	if err := f.ag.ReplyAsk(id, "use the old one"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.ends, "hand-back")
 }
 
 func TestSubAgentStatesAndGuidance(t *testing.T) {

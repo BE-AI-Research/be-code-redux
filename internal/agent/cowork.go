@@ -489,7 +489,11 @@ func (a *Agent) noteSharedServer(cw config.CoworkerConfig) {
 	}
 	a.coworkMu.Unlock()
 	if !noted {
-		a.notice("co-worker %s runs %s on the same server as %s; on one GPU each consultation may evict the primary's model and cost a reload", cw.Name, cw.Model, a.Model)
+		msg := "co-worker %s runs %s on the same server as %s; on one GPU each consultation may evict the primary's model and cost a reload"
+		if cw.SubAgent {
+			msg += "; sub-agents on this server interleave with the primary and cost it a cold prompt read per hand-over"
+		}
+		a.notice(msg, cw.Name, cw.Model, a.Model)
 	}
 }
 
