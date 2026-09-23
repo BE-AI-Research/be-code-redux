@@ -223,23 +223,23 @@ func (l fencedLedger) ShowText(id string) (out string) {
 	return out
 }
 
-// SetOwner and SetScope go through the fence like the methods above, and
-// then schedule: an assignment the model makes mid-turn is what starts a
-// sub-agent, so the dispatch has to follow the write that made it ready.
-func (l fencedLedger) SetOwner(id, owner string, pinned bool) (err error) {
-	l.a.engineDo("task owner", func(st *engine.Store) { err = st.SetOwner(id, owner, pinned) })
-	if err == nil && l.a.subs != nil {
-		l.a.ScheduleSubAgents()
-	}
-	return err
+// SetOwner and SetScope are the model's own `task owner` / `task scope`,
+// and they take exactly the path the operator's `/task assign` and `/task
+// scope` take. Calling the store directly and scheduling afterwards was not
+// the same thing: AssignOwner stops a parked run and waits for it before
+// rewriting the owner (spec §3.5, which says the model may reassign a
+// parked node), and SetScope pushes the widened scope into the running
+// sub-agent's registry and resolves its ask (§2.7). Both schedule
+// themselves, so nothing is scheduled twice here.
+//
+// pinned is always false: the pin is the operator's mark, and the model may
+// not set it (nor change one that is set — SetOwner refuses that).
+func (l fencedLedger) SetOwner(id, owner string, _ bool) error {
+	return l.a.AssignOwner(id, owner, false)
 }
 
-func (l fencedLedger) SetScope(id string, scope []string) (err error) {
-	l.a.engineDo("task scope", func(st *engine.Store) { err = st.SetScope(id, scope) })
-	if err == nil && l.a.subs != nil {
-		l.a.ScheduleSubAgents()
-	}
-	return err
+func (l fencedLedger) SetScope(id string, scope []string) error {
+	return l.a.SetScope(id, scope)
 }
 
 // Reply answers a sub-agent's open ask_main (the task tool's taskReplier).

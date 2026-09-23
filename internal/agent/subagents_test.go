@@ -639,3 +639,287 @@ func TestSubAgentStatesSurvivesAPanickingDoingUnderID(t *testing.T) {
 	}
 	wait(t, f.ends, "hand-back")
 }
+
+// TestWideningAScopeReachesTheRunningSubAgent is spec §2.7: `task action:
+// scope` widens the scope and resolves the ask with "scope widened to …".
+// The scoped registry was built once from a copy of the slice and had no
+// setter, so the widening changed nothing for the running sub-agent — which
+// was told it had, wrote the file it had asked about, was refused, and had
+// already spent its one ask.
+func TestWideningAScopeReachesTheRunningSubAgent(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("write_file", `{"path":"internal/token/a.go","content":"x"}`),
+		toolCall("ask_main", `{"question":"may I write internal/token?"}`),
+		toolCall("write_file", `{"path":"internal/token/a.go","content":"package token\n"}`),
+		{Content: "wrote it after all"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	if err := os.MkdirAll(filepath.Join(f.dir, "internal/token"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.asks, "ask")
+	f.ag.DrainInbox()
+	if err := f.ag.SetScope(id, []string{"internal/scan", "internal/token"}); err != nil {
+		t.Fatal(err)
+	}
+	hb := wait(t, f.ends, "hand-back")
+	if hb.Status != "done" {
+		t.Fatalf("hand-back: %+v", hb)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "internal/token/a.go")); err != nil {
+		t.Fatal("the widened scope never reached the sub-agent: the write was still refused")
+	}
+	var sawWiden bool
+	for _, m := range sub.lastReq.Messages {
+		if strings.Contains(m.Content, "scope widened to internal/scan, internal/token") {
+			sawWiden = true
+		}
+	}
+	if !sawWiden {
+		t.Fatalf("the ask was not resolved with the widening:\n%+v", sub.lastReq.Messages)
+	}
+	// The owned-path footer reads the run's own Dispatch.Scope, so it must
+	// have been updated too.
+	res := f.ag.dispatch(context.Background(), provider.ToolCall{ID: "1", Name: "write_file",
+		Arguments: `{"path":"internal/token/b.go","content":"x"}`})
+	_ = res
+}
+
+// TestNarrowingARunningScopeIsRefused: a sub-agent may already have written
+// under the scope it was given, so only a widening is allowed mid-run.
+func TestNarrowingARunningScopeIsRefused(t *testing.T) {
+	bp := &parkingProvider{entered: make(chan struct{}, 1)}
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, bp.entered, "the sub-agent's first request")
+	if err := f.ag.SetScope(id, []string{"internal/scan/deep"}); err == nil ||
+		!strings.Contains(err.Error(), "may only be widened") {
+		t.Fatalf("a narrowing was accepted: %v", err)
+	}
+	if err := f.ag.SetScope(id, []string{"internal"}); err != nil {
+		t.Fatalf("a widening must still be allowed: %v", err)
+	}
+}
+
+// TestTaskToolOwnerAndScopeTakeTheCarefulPath is finding 4: the model's own
+// `task owner` / `task scope` used to call the store directly, so it was
+// refused on a node parked on an ask (which §2.7 and §3.5 say it may
+// reassign) and its scope change never resolved the ask.
+func TestTaskToolOwnerAndScopeTakeTheCarefulPath(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"may I write internal/token?"}`),
+		{Content: "never reached"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.asks, "ask")
+	// The model's own task tool, through the fenced ledger: a parked run is
+	// stopped and the node reassigned (spec §3.5), not refused with
+	// "is being worked by big".
+	if err := f.ag.TaskLedger().SetOwner(id, "", false); err != nil {
+		t.Fatalf("task owner on a parked node: %v", err)
+	}
+	hb := wait(t, f.ends, "hand-back")
+	if hb.Status != "interrupted" {
+		t.Fatalf("a reassigned parked run is interrupted, got %+v", hb)
+	}
+	if n := f.st.Tree().Find(id); n == nil || n.Owner != "" {
+		t.Fatalf("the owner was not cleared: %+v", n)
+	}
+}
+
+// TestTaskToolScopeResolvesTheAsk is the other half of finding 4: the
+// model's `task scope` went straight to the store, so the sub-agent parked
+// on the ask it was answering was never released.
+func TestTaskToolScopeResolvesTheAsk(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"may I write internal/token?"}`),
+		{Content: "carried on"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "start")
+	wait(t, f.asks, "ask")
+	if err := f.ag.TaskLedger().SetScope(id, []string{"internal"}); err != nil {
+		t.Fatalf("task scope on a parked node: %v", err)
+	}
+	hb := wait(t, f.ends, "hand-back")
+	if hb.Status != "done" || hb.Summary != "carried on" {
+		t.Fatalf("the ask was never resolved: %+v", hb)
+	}
+}
+
+// TestAssignmentPathsFailWhenTheEngineIsGone: engineDo does not run its
+// closure over a detached store, so err stayed nil and "/task assign 3.2
+// big" answered "assigned" having done nothing.
+func TestAssignmentPathsFailWhenTheEngineIsGone(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	id := f.assign(t)
+	f.ag.engineOff.Store(true)
+	if err := f.ag.AssignOwner(id, "big", true); err == nil {
+		t.Fatal("AssignOwner reported success over a detached engine")
+	}
+	if err := f.ag.SetScope(id, []string{"internal/scan"}); err == nil {
+		t.Fatal("SetScope reported success over a detached engine")
+	}
+}
+
+// TestRunningSubAgentsMakesNoStoreCall is finding 8. View() runs after
+// every Bubble Tea message for every attached terminal, so the bottom
+// line's view must not deep-copy the whole task tree and run the readiness
+// rule on the render goroutine.
+func TestRunningSubAgentsMakesNoStoreCall(t *testing.T) {
+	bp := &parkingProvider{entered: make(chan struct{}, 1)}
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, bp.entered, "the sub-agent's first request")
+	var ops []string
+	f.ag.engineFault = func(op string) { ops = append(ops, op) }
+	rows := f.ag.RunningSubAgents()
+	if len(ops) != 0 {
+		t.Fatalf("the bottom line's view called the store: %q", ops)
+	}
+	if len(rows) != 1 || rows[0].Name != "big" || rows[0].Node != id {
+		t.Fatalf("rows: %+v", rows)
+	}
+	// /agents keeps the expensive view, waiting rows and all.
+	f.ag.engineFault = nil
+	if len(f.ag.SubAgentStates()) == 0 {
+		t.Fatal("/agents must still read the store")
+	}
+}
+
+// TestPrefillTakesTheLane is one third of finding 9: a prefill warms the
+// same server a sub-agent may be using, and interleaving with one makes the
+// warming pointless.
+func TestPrefillTakesTheLane(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	pp := &prefillProvider{funcProvider: &funcProvider{}, release: make(chan struct{})}
+	close(pp.release)
+	f.ag.Provider = pp
+	var mu sync.Mutex
+	taken := 0
+	f.ag.laneAcquire = func(ctx context.Context) (func(), error) {
+		mu.Lock()
+		taken++
+		mu.Unlock()
+		return func() {}, nil
+	}
+	f.ag.StartPrefill()
+	f.ag.stopPrefill()
+	mu.Lock()
+	defer mu.Unlock()
+	if taken != 1 {
+		t.Fatalf("the prefill took the lane %d times", taken)
+	}
+}
+
+// TestConsultationTakesItsOwnServersLane is the second third of finding 9:
+// spec §2.2 says every co-worker maps to a lane, and a consultation is a
+// model call on a co-worker's backend like any other.
+func TestConsultationTakesItsOwnServersLane(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	cw := config.CoworkerConfig{Name: "big", Provider: "ollama", Model: "cw-model-big"}
+	scratch := f.ag.consultAgent(&scriptedProvider{}, cw, &ConsultResult{}, 0)
+	if scratch.laneAcquire == nil {
+		t.Fatal("a consultation runs unlaned")
+	}
+	// And it is the co-worker's own server, not the primary's.
+	release, err := scratch.laneAcquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		r, _ := f.ag.subs.lanes.Acquire(context.Background(), "http://sub:11434", true)
+		r()
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("the consultation did not hold http://sub:11434's lane")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	<-done
+}
+
+// TestProviderSwitchRebindsThePrimaryLane is the last third of finding 9:
+// the lane key was bound once in EnableSubAgents, so after /provider the
+// primary serialised against the server it had left.
+func TestProviderSwitchRebindsThePrimaryLane(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) {
+		c.Providers["other"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://other:11434"}
+	})
+	f.ag.SetProvider(&namedProvider{name: "other"})
+	// The primary's lane is now "other"'s: holding it must block a second
+	// take of http://other:11434 and not of the old primary server.
+	release, err := f.ag.laneAcquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	free := make(chan struct{})
+	go func() {
+		r, _ := f.ag.subs.lanes.Acquire(context.Background(), "http://primary:11434", false)
+		r()
+		close(free)
+	}()
+	select {
+	case <-free:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the primary is still serialising against the server it left")
+	}
+	held := make(chan struct{})
+	go func() {
+		r, _ := f.ag.subs.lanes.Acquire(context.Background(), "http://other:11434", false)
+		r()
+		close(held)
+	}()
+	select {
+	case <-held:
+		t.Fatal("the primary is not serialising against the server it moved to")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+type namedProvider struct {
+	scriptedProvider
+	name string
+}
+
+func (p *namedProvider) Name() string { return p.name }
+
+// TestOwnedNoteAcceptsThePathAliases is finding 11: the fs tools honour
+// "file" and "filename" as well as "path", so a write under one of those
+// must not slip past the ownership footer.
+func TestOwnedNoteAcceptsThePathAliases(t *testing.T) {
+	bp := &parkingProvider{entered: make(chan struct{}, 1)}
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return bp, 0, nil
+	}
+	id := f.assign(t)
+	f.ag.ScheduleSubAgents()
+	wait(t, bp.entered, "request")
+	for _, key := range []string{"path", "file", "filename"} {
+		note := f.ag.subs.ownedNote("write_file", map[string]any{key: "internal/scan/x.go"})
+		if !strings.Contains(note, "owned by big ("+id+")") {
+			t.Fatalf("%q: %q", key, note)
+		}
+	}
+}

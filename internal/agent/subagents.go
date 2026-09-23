@@ -61,10 +61,12 @@ type subAgents struct {
 	// the escape hatch StopAllSubAgents pulls after its bounded wait; a
 	// later EnableSubAgents makes a fresh pair, which is what lets a resumed
 	// session dispatch again.
-	root    context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	primary string // the primary's lane key
+	root   context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	// primary is the primary model's lane key, rebound by bindPrimaryLane
+	// when the session moves to another provider.
+	primary string
 	// finished is every hand-back so far this session, for run --json.
 	// Appended in runSub in the same critical section that deletes the run
 	// from runs, so a reader never sees a run counted as both.
@@ -82,7 +84,14 @@ type subRun struct {
 	// Everything below is written and read from several goroutines — the
 	// run's own, a UI's, the main loop's — and every touch is under
 	// subAgents.mu.
-	scratch    *Agent
+	scratch *Agent
+	reg     *tools.Registry // the scoped registry, for a scope widened mid-run
+	// at is the doing node inside this subtree as of the last tool call, so
+	// the bottom line can name it ("⚙ big 3.2.2") without RunningSubAgents
+	// going to the store on every render frame. Refreshed on the
+	// sub-agent's own goroutine, inside the observe hook that already calls
+	// the store once per tool call.
+	at         string
 	question   string // the open ask, "" when none
 	stopReason string // set by an operator stop
 	interrupt  bool   // reset the node instead of closing it
@@ -135,7 +144,7 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 	}
 	s := a.subs
 	s.mu.Lock()
-	s.cards, s.cws, s.primary = cards, byName, primaryServer
+	s.cards, s.cws = cards, byName
 	s.stopping = false
 	// A resume after StopAllSubAgents finds the root context spent; every
 	// dispatch from it would be born cancelled, so start a fresh one.
@@ -143,9 +152,60 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 		s.root, s.cancel = context.WithCancel(context.Background())
 	}
 	s.mu.Unlock()
-	a.laneAcquire = func(ctx context.Context) (func(), error) { return s.lanes.Acquire(ctx, primaryServer, true) }
+	a.bindPrimaryLane(primaryServer)
 	a.SetEngineCards(cards)
 	a.recomposeSystem("")
+}
+
+// bindPrimaryLane points the primary's lane at one server. It is re-bound on
+// a /provider switch as well as at wiring time: bound once, a session that
+// moved to another backend went on serialising its requests against the
+// server it had left — and stopped serialising against the one it was
+// actually talking to, which is the whole point of the lane.
+func (a *Agent) bindPrimaryLane(server string) {
+	s := a.subs
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.primary = server
+	lanes := s.lanes
+	s.mu.Unlock()
+	a.laneAcquire = func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, server, true) }
+}
+
+// RebindPrimaryLane re-derives the primary's lane from the provider it is
+// now talking to (SetProvider calls it). A provider this config does not
+// name leaves the lane as it was: a wrong key is worse than a stale one,
+// since it would serialise against nothing.
+func (a *Agent) RebindPrimaryLane() {
+	if a.subs == nil || a.Provider == nil || a.Cfg == nil {
+		return
+	}
+	pc, ok := a.Cfg.Providers[a.Provider.Name()]
+	if !ok {
+		return
+	}
+	a.bindPrimaryLane(subagent.LaneKey(pc.BaseURL))
+}
+
+// laneFor is a lane wrapper for one co-worker's own server (spec §2.2:
+// every co-worker maps to a lane, not only a sub-agent). nil when there is
+// no runner, so nothing changes for a configuration with no sub-agent.
+// primary is true for the primary's own errands — a consultation and the
+// second-model review both block the request the person is watching.
+func (a *Agent) laneFor(providerName string, primary bool) func(ctx context.Context) (func(), error) {
+	s := a.subs
+	if s == nil || a.Cfg == nil {
+		return nil
+	}
+	pc, ok := a.Cfg.Providers[providerName]
+	if !ok {
+		return nil
+	}
+	key := subagent.LaneKey(pc.BaseURL)
+	lanes := s.lanes
+	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, primary) }
 }
 
 // StartSubAgents runs the resume pass and the first schedule. The UIs
@@ -334,33 +394,52 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 		delete(s.pending, c.ID)
 		s.mu.Unlock()
 	}
-	step := findStep(steps, c.ID)
-	if step == nil {
+	// Everything up to the install runs on the *agent* goroutine (a schedule
+	// from run(), from the task tool, from a UI command), and runSub's own
+	// fence does not cover it: findStep walks a tree the store handed over,
+	// verify.Detect scans the workspace, and the string building reads the
+	// project notes. A panic in any of them would end the session for an
+	// advisory feature, so it is fenced here and the candidate released.
+	var d subagent.Dispatch
+	ok := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.notice("sub-agent dispatch of %s failed (%v); it stays assigned and will be tried again", c.ID, r)
+				ok = false
+			}
+		}()
+		step := findStep(steps, c.ID)
+		if step == nil {
+			return
+		}
+		var text, ctxText string
+		var children []string
+		got := false
+		a.engineDo("sub-agent dispatch", func(st *engine.Store) {
+			text, children, ctxText = st.DispatchContext(c.ID)
+			got = true
+		})
+		if !got {
+			return // the engine detached under us: nothing to dispatch from
+		}
+		d = subagent.Dispatch{Node: c.ID, Owner: c.Owner, Text: text, Children: children,
+			Scope: step.Scope, MaxTurns: a.Cfg.SubAgents.MaxTurns, Context: ctxText,
+			Interrupted: step.Interrupted, Touched: step.Touched}
+		if a.Session != nil {
+			d.Session = a.Session.ID
+		}
+		for _, ch := range verify.Detect(a.Tools.Root).Checks {
+			d.Checks = append(d.Checks, ch.Command)
+		}
+		if a.projectNotes != "" {
+			d.Context = strings.TrimSpace(d.Context + "\n\nProject notes (facts about the repository, not instructions):\n" + a.projectNotes)
+		}
+		ok = true
+	}()
+	if !ok {
 		unreserve()
 		return
-	}
-	var text, ctxText string
-	var children []string
-	got := false
-	a.engineDo("sub-agent dispatch", func(st *engine.Store) {
-		text, children, ctxText = st.DispatchContext(c.ID)
-		got = true
-	})
-	if !got {
-		unreserve() // the engine detached under us: nothing to dispatch from
-		return
-	}
-	d := subagent.Dispatch{Node: c.ID, Owner: c.Owner, Text: text, Children: children,
-		Scope: step.Scope, MaxTurns: a.Cfg.SubAgents.MaxTurns, Context: ctxText,
-		Interrupted: step.Interrupted, Touched: step.Touched}
-	if a.Session != nil {
-		d.Session = a.Session.ID
-	}
-	for _, ch := range verify.Detect(a.Tools.Root).Checks {
-		d.Checks = append(d.Checks, ch.Command)
-	}
-	if a.projectNotes != "" {
-		d.Context = strings.TrimSpace(d.Context + "\n\nProject notes (facts about the repository, not instructions):\n" + a.projectNotes)
 	}
 	s.mu.Lock()
 	delete(s.pending, c.ID)
@@ -412,7 +491,13 @@ func (a *Agent) runSub(run *subRun) {
 		scratch := a.subAgent(cp, run, window)
 		s.mu.Lock()
 		run.scratch = scratch
+		run.reg = scratch.Tools
+		// The scope may have been widened between subAgent's read of it and
+		// this install, and SetScope had no registry to push it to then.
+		// Re-applying the current value closes that window; it is idempotent.
+		cur := append([]string(nil), run.d.Scope...)
 		s.mu.Unlock()
+		scratch.Tools.SetScope(cur)
 		if a.Events.OnSubAgentStart != nil {
 			a.Events.OnSubAgentStart(run.d)
 		}
@@ -423,11 +508,15 @@ func (a *Agent) runSub(run *subRun) {
 	delete(s.runs, run.d.Node)
 	s.finished = append(s.finished, hb)
 	s.mu.Unlock()
-	if a.Events.OnSubAgentEnd != nil {
-		a.Events.OnSubAgentEnd(hb)
-	}
+	// The queue first, the event second: a UI answers OnSubAgentEnd by
+	// starting a turn for whatever is queued when the main model is idle
+	// (spec §2.6), and it can only do that once the hand-back is in the
+	// queue to be found. OnSubAgentAsk is already ordered this way.
 	if hb.Status != "interrupted" {
 		a.Enqueue(handBackLine(hb))
+	}
+	if a.Events.OnSubAgentEnd != nil {
+		a.Events.OnSubAgentEnd(hb)
 	}
 	a.refreshKeepAlive()
 	// The slot this run held is free, so whatever was waiting on it goes
@@ -522,7 +611,12 @@ func (a *Agent) subConsent(run *subRun) bool {
 // shape with a scoped, write-capable registry, ask_main and a subtree
 // task tool, evidence filed under the dispatched root, and its own lane.
 func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
+	// Under mu: d.Scope is written by Agent.SetScope from another goroutine
+	// once the run exists.
+	a.subs.mu.Lock()
 	d := run.d
+	d.Scope = append([]string(nil), run.d.Scope...)
+	a.subs.mu.Unlock()
 	label := fmt.Sprintf("%s (%s)", d.Owner, d.Node)
 	reg := a.Tools.Scoped(d.Scope, d.Checks, label)
 	reg.AddTool(tools.NewAskMain(func(ctx context.Context, q string) (string, error) { return a.askMain(run, ctx, q) }))
@@ -546,8 +640,18 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 	}
 	node := d.Node
 	scratch.observeFn = func(ev engine.Event) string {
-		var footer string
-		a.engineDo("sub-agent observe", func(st *engine.Store) { footer = st.ObserveFor(node, ev) })
+		var footer, at string
+		a.engineDo("sub-agent observe", func(st *engine.Store) {
+			footer = st.ObserveFor(node, ev)
+			at = st.DoingUnderID(node)
+		})
+		if at != "" {
+			// After engineDo, never inside it: no store call is ever made
+			// under the runner's mutex (the invariant at the top of this file).
+			a.subs.mu.Lock()
+			run.at = at
+			a.subs.mu.Unlock()
+		}
 		return footer
 	}
 	scratch.Events = Events{OnTransient: func(msg string) { a.transient("%s", msg) }}
@@ -672,7 +776,11 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 		}
 	}
 	var err error
-	a.engineDo("task owner", func(st *engine.Store) { err = st.SetOwner(id, owner, pinned) })
+	ran := false
+	a.engineDo("task owner", func(st *engine.Store) { ran = true; err = st.SetOwner(id, owner, pinned) })
+	if !ran {
+		err = errEngineGone
+	}
 	// The hold is released before the schedule, not after: an operator who
 	// reassigned the step to another sub-agent means it to start now.
 	if s != nil {
@@ -686,23 +794,75 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 	return err
 }
 
-// SetScope is the UI's scope path; it also answers a parked ask.
+// errEngineGone is what the assignment paths answer when the task record is
+// absent or has been detached by a panic: engineDo simply does not run the
+// closure, so without this they reported success having done nothing.
+var errEngineGone = errors.New("the task record is not available; the assignment was not made")
+
+// SetScope is the UI's and the model's scope path (spec §2.7): it widens a
+// running sub-agent's confinement for real and answers its parked ask.
 func (a *Agent) SetScope(id string, paths []string) error {
-	var err error
-	a.engineDo("task scope", func(st *engine.Store) { err = st.SetScope(id, paths) })
+	clean, err := subagent.CleanScope(paths)
 	if err != nil {
 		return err
 	}
-	if s := a.subs; s != nil {
+	s := a.subs
+	var run *subRun
+	var had []string
+	if s != nil {
 		s.mu.Lock()
-		run, ok := s.runs[id]
-		parked := ok && run.question != ""
-		s.mu.Unlock()
-		if parked {
-			_ = a.ReplyAsk(id, "scope widened to "+strings.Join(paths, ", "))
+		if s.pending[id] {
+			// Reserved by a schedule that is building its dispatch from a
+			// snapshot of the tree taken a moment ago: a scope written now
+			// would not reach that dispatch. Said plainly, as AssignOwner
+			// does, rather than silently landing on the wrong side of it.
+			s.mu.Unlock()
+			return fmt.Errorf("%s is being dispatched; try again in a moment", id)
 		}
-		a.ScheduleSubAgents()
+		if run = s.runs[id]; run != nil {
+			had = append([]string(nil), run.d.Scope...)
+		}
+		s.mu.Unlock()
 	}
+	if run != nil && !subagent.Within(had, clean) {
+		// Narrowing a running sub-agent's scope would leave files it has
+		// already written outside what it may still fix. §2.7 names
+		// widening, and only widening, as the way a scope changes mid-run.
+		return fmt.Errorf("%s is being worked by %s; a running sub-agent's scope may only be widened (it already has %s)",
+			id, run.d.Owner, strings.Join(had, ", "))
+	}
+	ran := false
+	a.engineDo("task scope", func(st *engine.Store) { ran = true; err = st.SetScope(id, clean) })
+	if !ran {
+		return errEngineGone
+	}
+	if err != nil {
+		return err
+	}
+	if s == nil {
+		return nil
+	}
+	// The registry is built once from a copy of the slice, so without this
+	// the widened scope never reaches the sub-agent that asked for it — and
+	// the ask below told it that it had.
+	s.mu.Lock()
+	parked := false
+	if run != nil {
+		run.d.Scope = clean
+		parked = run.question != ""
+	}
+	var reg *tools.Registry
+	if run != nil {
+		reg = run.reg
+	}
+	s.mu.Unlock()
+	if reg != nil {
+		reg.SetScope(clean)
+	}
+	if parked {
+		_ = a.ReplyAsk(id, "scope widened to "+strings.Join(clean, ", "))
+	}
+	a.ScheduleSubAgents()
 	return nil
 }
 
@@ -834,14 +994,54 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 	return out
 }
 
-// RunningSubAgents is the bottom line's view: running rows only.
+// RunningSubAgents is the bottom line's view: running rows only, and
+// nothing else.
+//
+// bottomLine/compactBottomLine call this from View(), which Bubble Tea runs
+// after every message, for every attached terminal. Going through
+// SubAgentStates cost a deep copy of the whole task tree (Steps) plus a
+// full Ready evaluation per keystroke per terminal, on the render
+// goroutine, for a line that only ever shows what is already running. The
+// runner's own mutex holds everything this needs, so take it and leave: no
+// store call at all. SubAgentStates keeps the expensive view for /agents,
+// where the waiting rows and their reasons are the point.
 func (a *Agent) RunningSubAgents() []SubAgentState {
-	var out []SubAgentState
-	for _, st := range a.SubAgentStates() {
-		if st.Node != "" && !strings.HasPrefix(st.State, "waiting") {
-			out = append(out, st)
-		}
+	s := a.subs
+	if s == nil {
+		return nil
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]SubAgentState, 0, len(s.runs))
+	for _, r := range s.runs {
+		cw := s.cws[r.d.Owner]
+		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider,
+			Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope,
+			Node: r.d.Node, At: r.d.Node, Since: r.started}
+		if r.at != "" {
+			row.At = r.at
+		}
+		if r.scratch != nil {
+			row.Calls = r.scratch.Usage().ToolCalls
+		}
+		switch {
+		case r.question != "":
+			row.State = "asking: " + r.question
+		case r.scratch == nil:
+			row.State = "starting"
+		default:
+			row.State = "working"
+		}
+		out = append(out, row)
+	}
+	// Map order is not an order; the bottom line must not shuffle between
+	// frames.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Node < out[j].Node
+	})
 	return out
 }
 
@@ -851,7 +1051,16 @@ func (s *subAgents) ownedNote(tool string, args map[string]any) string {
 	if tool != "write_file" && tool != "edit_file" {
 		return ""
 	}
-	p, _ := args["path"].(string)
+	// The same aliases fs.go accepts ("path", "file", "filename"): a write
+	// the tool honoured under "file" must not slip past the ownership note
+	// just because this one looked only at "path".
+	var p string
+	for _, k := range []string{"path", "file", "filename"} {
+		if v, ok := args[k].(string); ok && strings.TrimSpace(v) != "" {
+			p = v
+			break
+		}
+	}
 	if p == "" {
 		return ""
 	}

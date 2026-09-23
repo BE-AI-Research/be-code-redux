@@ -67,7 +67,13 @@ func (a *Agent) StartPrefill() {
 		defer func() { _ = recover() }() // advisory work: never the session's problem
 		start := time.Now()
 		a.transient("warming the server's prompt cache (about %d tokens)", a.History.Tokens())
-		resp, err := pf.Prefill(ctx, req)
+		// In the lane like every other request to this server. The comment
+		// above says a real request never shares the server with a prefill,
+		// and stopPrefill keeps that true — but a *sub-agent* on the same
+		// server is not a real request of ours, and interleaving with one
+		// makes the warming pointless (the cache it warmed is the cache the
+		// sub-agent's own prompt then evicts).
+		resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) { return pf.Prefill(ctx, req) })
 		if err != nil || resp == nil {
 			return // cancelled by a real request, or a server that would not: neither is news
 		}

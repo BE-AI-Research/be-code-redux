@@ -140,14 +140,36 @@ func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewer
 	if b.Len() == 0 {
 		return "", nil
 	}
-	resp, err := reviewer.Chat(ctx, provider.ChatRequest{
+	req := provider.ChatRequest{
 		Model: reviewerModel,
 		Messages: []provider.Message{
 			{Role: provider.RoleSystem, Content: "You are a strict senior code reviewer. Review the changed files below for bugs, security issues, and broken edge cases. If the code is acceptable, reply with exactly APPROVED. Otherwise list the concrete problems (max 5, most severe first) with file names."},
 			{Role: provider.RoleUser, Content: b.String()},
 		},
 		Temperature: 0.1,
-	}, nil)
+	}
+	// One lane per server (spec §2.2). The reviewer is a second model that
+	// may well share the primary's backend — and does share it in the
+	// common "small model drafts, bigger model reviews on the same Ollama"
+	// setup — so its one request queues like every other.
+	reviewerProvider := a.Cfg.Reviewer.Provider
+	if reviewerProvider == "" {
+		reviewerProvider = a.Cfg.DefaultProvider
+	}
+	lane := a.laneFor(reviewerProvider, true)
+	var resp *provider.ChatResponse
+	var err error
+	call := func() (*provider.ChatResponse, error) { return reviewer.Chat(ctx, req, nil) }
+	if lane != nil {
+		release, lerr := lane(ctx)
+		if lerr != nil {
+			return "", lerr
+		}
+		resp, err = call()
+		release()
+	} else {
+		resp, err = call()
+	}
 	if err != nil {
 		return "", err
 	}

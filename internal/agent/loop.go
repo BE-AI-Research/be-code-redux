@@ -395,6 +395,10 @@ func (a *Agent) SetProvider(p provider.Provider) {
 	} else {
 		a.SetLoader(nil)
 	}
+	// A lane is one server, and this is now a different one. Bound once at
+	// wiring time, the primary went on serialising against the server it had
+	// left while running unserialised against the one it had moved to.
+	a.RebindPrimaryLane()
 }
 
 // LoaderFactory builds a model loader for one provider. Injected by cmd,
@@ -1086,12 +1090,6 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 	a.stopPrefill()
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
-	// A task document edited by hand between turns is picked up before the
-	// model is called, so an assignment made in an editor starts working
-	// without waiting for the model to touch the task tool.
-	if a.subs != nil {
-		a.ScheduleSubAgents()
-	}
 	start := time.Now()
 	defer func() { a.addStats(Stats{Elapsed: time.Since(start)}) }()
 	a.lastGitInfo = ""
@@ -1124,6 +1122,14 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			a.engineWarnings(st)
 		})
 		a.engineDo("ensure root", func(st *engine.Store) { st.EnsureRoot(userInput) })
+	}
+	// A task document edited by hand between turns is picked up before the
+	// model is called, so an assignment made in an editor starts working
+	// without waiting for the model to touch the task tool. It must run
+	// *after* the reload above, or it schedules against the tree as it was
+	// before the edit and the assignment waits a whole turn.
+	if a.subs != nil {
+		a.ScheduleSubAgents()
 	}
 	a.refreshSystemForRequest(ctx)
 	expanded := ExpandMentions(a.Tools.Root, userInput)

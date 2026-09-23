@@ -539,6 +539,10 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 		// too: the wait they are watching is this one.
 		OnTransient: func(msg string) { a.transient("%s", msg) },
 	}
+	// One lane per server (spec §2.2): a consultation is a model call on a
+	// co-worker's backend, and that backend may be the primary's own or a
+	// sub-agent's. Without this it interleaved with both.
+	scratch.laneAcquire = a.laneFor(cw.Provider, true)
 	scratch.knownTools = map[string]bool{}
 	for _, n := range readOnly.Names() {
 		scratch.knownTools[n] = true
