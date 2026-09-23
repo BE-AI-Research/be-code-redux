@@ -304,6 +304,20 @@ func (m *View) taskVerbCmd(args []string) tea.Cmd {
 	}
 }
 
+// agentsMsg carries the outcome of /agents start back to the terminal that
+// typed it, once it has been run off the Update goroutine (see agentsCmd).
+type agentsMsg struct{ lines []string }
+
+// agentsCmd runs ui.AgentLines somewhere the session lock is not held, for
+// the one /agents form that dispatches (see IsAgentsBlocking): the same
+// tea.Cmd seam as taskVerbCmd, and for the same reason.
+func (m *View) agentsCmd(args []string) tea.Cmd {
+	ag := m.ag
+	return func() tea.Msg {
+		return agentsMsg{lines: ui.AgentLines(ag, args)}
+	}
+}
+
 // Update runs this terminal's program. It holds the session lock for its
 // whole body, so everything it reaches — the transcript, the run state, the
 // queue, the roster — is read and written under the one lock the agent
@@ -443,6 +457,8 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendEntryLocked(entry{Kind: entryDim,
 				Text: fmt.Sprintf("reply to %s: %s", msg.args[1], strings.Join(msg.args[2:], " "))})
 		}
+		m.renderLocalLines(msg.lines)
+	case agentsMsg:
 		m.renderLocalLines(msg.lines)
 	case statusMsg:
 		m.statusNote = string(msg)
@@ -737,7 +753,7 @@ func (m *View) showAsk(a *ask) {
 	m.modalVP = viewport.New(m.width-6, m.modalHeight())
 	switch a.Kind {
 	case askApproval:
-		if a.Action == "consult" || a.Action == "model_reload" {
+		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -842,6 +858,12 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				ans = askAnswer{OK: true}
 			}
+		} else if a.Action == "sub_agent_resume" {
+			// This one has no "always": it is a one-time startup question
+			// (StartSubAgents asks it at most once per session), so there is
+			// nothing standing to grant. Falling through to the file-write
+			// branch below would wrongly disable file-write previews.
+			decided = false
 		} else {
 			// Both switches: cfg stops the terminal prompt, the registry
 			// flag stops the editor diff review (see Registry.ApproveWrites).
@@ -1271,6 +1293,12 @@ func (m *View) viewAsk() string {
 		// machine is being changed rather than whose file.
 		title = "Reload the model on the server"
 		hint = "y reload · n keep the loaded window · a always reload on this server · ↑↓ scroll"
+	case "sub_agent_resume":
+		// A startup-only question (§3.6 amendment): declining leaves the
+		// work dormant rather than denying it outright, and /agents start
+		// runs it later, so the hint says that instead of offering "a".
+		title = "Resume sub-agent work"
+		hint = "y resume · n leave dormant (/agents start runs it later) · ↑↓ scroll"
 	}
 	if m.compact() {
 		hint = "y/n/a · ↑↓"
@@ -1796,6 +1824,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		var args []string
 		if len(fields) > 1 {
 			args = fields[1:]
+		}
+		if ui.IsAgentsBlocking(args) {
+			// Never inline, same reason as /task scope above: "start" clears
+			// the startup decline flag and calls ScheduleSubAgents, whose
+			// dispatch fence can raise a notice that takes the session lock
+			// Update is already holding.
+			return m, m.agentsCmd(args)
 		}
 		m.renderLocalLines(ui.AgentLines(m.ag, args))
 		return m, nil
