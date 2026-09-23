@@ -568,6 +568,18 @@ func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
 					kept = append(kept, c)
 				}
 				cw.MaxScope = kept
+				if len(kept) == 0 && cw.SubAgent {
+					// An empty max_scope means "the whole workspace"
+					// (subagent.Within(scope, nil) is true), so dropping
+					// every entry would turn a stated confinement into no
+					// confinement at all — "max_scope": ["/docs"], a
+					// plausible way to write it, would grant a possibly
+					// online model the entire repository. Every other
+					// confinement decision on this feature fails closed;
+					// this one does too.
+					warns = append(warns, fmt.Sprintf("coworker %q: no usable max_scope entry was left, so it may not be a sub-agent (an empty max_scope would mean the whole workspace); fix the paths or remove max_scope", cw.Name))
+					cw.SubAgent = false
+				}
 			}
 			seen[cw.Name] = true
 			ok = append(ok, cw)

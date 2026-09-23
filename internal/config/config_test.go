@@ -407,3 +407,39 @@ func TestLocalEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestValidCoworkersFailsClosedWhenEveryMaxScopeEntryIsInvalid: an empty
+// max_scope means the whole workspace, so dropping every entry of one that
+// was supplied would widen the confinement instead of enforcing it —
+// "max_scope": ["/docs"] is a plausible way to write it, and it used to
+// print one warning and then grant that co-worker, possibly online, the
+// entire repository.
+func TestValidCoworkersFailsClosedWhenEveryMaxScopeEntryIsInvalid(t *testing.T) {
+	cfg := Default()
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "claude", Provider: "ollama", Model: "m", SubAgent: true,
+			MaxScope: []string{"/docs", "../etc"}},
+	}
+	cws, warns := cfg.ValidCoworkers()
+	if len(cws) != 1 {
+		t.Fatalf("the entry itself stays (consultation is unchanged): %d (%v)", len(cws), warns)
+	}
+	if cws[0].SubAgent {
+		t.Fatal("a co-worker whose whole max_scope was dropped must not stay assignable")
+	}
+	if len(cws[0].MaxScope) != 0 {
+		t.Fatalf("max_scope: %q", cws[0].MaxScope)
+	}
+	joined := strings.Join(warns, "\n")
+	if !strings.Contains(joined, "no usable max_scope entry") {
+		t.Fatalf("warnings: %q", warns)
+	}
+	// A co-worker that never asked to be a sub-agent is untouched.
+	cfg.Coworkers = []CoworkerConfig{
+		{Name: "talk", Provider: "ollama", Model: "m", MaxScope: []string{"/docs"}},
+	}
+	cws, _ = cfg.ValidCoworkers()
+	if len(cws) != 1 || cws[0].SubAgent {
+		t.Fatalf("consult-only co-worker: %+v", cws)
+	}
+}
