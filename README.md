@@ -1,4 +1,4 @@
-# BE-Code
+# BE-Code Redux (Be-Code)
 
 **Offline-first agentic coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
@@ -138,7 +138,7 @@ safe to re-run — they upgrade in place.
 ## Quick start
 
 ```bash
-make build                # or: make -f build.mk build
+make -f build.mk build    # there is no Makefile; every target needs -f build.mk
 ./be-code                 # full-screen TUI in the current directory
 ./be-code --plain         # inline REPL (best over SSH / BE-CLI web terminals)
 ./be-code doctor          # check configured backends + workspace toolchain
