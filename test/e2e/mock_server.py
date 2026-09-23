@@ -169,7 +169,14 @@ def lead_chunks(body):
     if any("asks about" in u for u in users) and not any("finished" in u for u in users) and not LEAD["replied"]:
         LEAD["replied"] = True
         return [tool_call_chunk("task", {"action": "reply", "id": LEAD["root"] + ".1", "text": "stay inside internal/scan"})]
-    if any("sub-agent sub finished" in u and "wrote internal/scan/token.go" in u for u in users):
+    # Gated on the lead's own answer being echoed back in the hand-back
+    # summary, not merely on the sub-agent having finished: a regression that
+    # turned ask_main into a non-blocking no-op would still finish and still
+    # name the file (written at n == 0, before the ask), so without this the
+    # ask/reply round trip would go unproven. sub_chunks below is the other
+    # half: it only echoes the reply text if it actually saw it.
+    if any("sub-agent sub finished" in u and "wrote internal/scan/token.go" in u
+           and "lead said: stay inside internal/scan" in u for u in users):
         return [text_chunk("HANDBACK:yes")]
     return [text_chunk("assigned; waiting")]
 
@@ -181,7 +188,15 @@ def sub_chunks(body):
         return [tool_call_chunk("write_file", {"path": "cmd/x.go", "content": "package cmd\n"})]
     if n == 2:
         return [tool_call_chunk("ask_main", {"question": "may I touch cmd/x.go?"})]
-    return [text_chunk("SUBDONE: token loop ported")]
+    # ask_main's own tool result is "the main model replied:\n\n<answer>"
+    # (internal/tools/askmain.go), so the answer's presence here is proof the
+    # round trip actually delivered it, not merely that ask_main was called
+    # and something came back. A broken (non-blocking, no-op) ask_main would
+    # never carry this text, so it must not be assumed.
+    answered = any("stay inside internal/scan" in (m.get("content") or "") for m in body["messages"])
+    if answered:
+        return [text_chunk("SUBDONE: token loop ported; lead said: stay inside internal/scan")]
+    return [text_chunk("SUBDONE: no answer received")]
 
 # The native (fake Ollama) scenario. /api/chat records the num_ctx it was
 # sent and answers with it, so the assertion is on what actually reached the

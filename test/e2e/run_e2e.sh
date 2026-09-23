@@ -131,6 +131,10 @@ cat "$OUT6"
 grep -q "HANDBACK:yes" "$OUT6"
 test -f "$SUBWS/internal/scan/token.go"
 test ! -f "$SUBWS/cmd/x.go"
+# The exact double space before "@sub" and before "scope:", and the two-space
+# indent on the child line, are internal/engine/markdown.go's own rendering
+# (renderFields, indentStep) — a change to that rendering should break this
+# assertion deliberately rather than have it silently stop checking anything.
 grep -q "@sub  scope: internal/scan" "$SUBWS"/.be-code/tasks/*.md
 grep -q "^  - \[x\] .*port internal/scan" "$SUBWS"/.be-code/tasks/*.md
 echo "[PASS] sub-agent"
