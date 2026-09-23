@@ -14,21 +14,49 @@ BINARY=be-code
 PURGE=0
 ASSUME_YES=0
 
+# Printed rather than sed'd out of this file: piped through a shell there is
+# no file to read, and $0 is the shell itself.
+usage() {
+    cat <<'USAGE'
+BE-Code uninstaller — Linux & macOS.
+
+  ./uninstall.sh              remove the binary and shell completions;
+                              KEEPS ~/.be-code (config, sessions, history)
+  ./uninstall.sh --purge      also delete ~/.be-code after confirmation
+  ./uninstall.sh --yes        don't ask for confirmation (for scripts)
+
+Looks in ~/.local/bin, /usr/local/bin, $PREFIX/bin, and anywhere else
+'be-code' resolves on PATH. Also runs without a checkout:
+
+  curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.sh | sh
+USAGE
+}
+
 for arg in "$@"; do
     case "$arg" in
         --purge) PURGE=1 ;;
         --yes|-y) ASSUME_YES=1 ;;
-        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $arg (try --help)" >&2; exit 1 ;;
     esac
 done
 
 say() { printf '%s\n' "$*"; }
 
+# Piped through a shell (curl … | sh) stdin is the script itself, so a plain
+# read would consume the script rather than the answer: ask the terminal.
 confirm() {
     [ "$ASSUME_YES" = 1 ] && return 0
-    printf '%s [y/N] ' "$1"
-    read -r ans || return 1
+    if [ -t 0 ]; then
+        printf '%s [y/N] ' "$1"
+        read -r ans || return 1
+    elif [ -r /dev/tty ]; then
+        printf '%s [y/N] ' "$1" > /dev/tty
+        read -r ans < /dev/tty || return 1
+    else
+        say "skipping (nothing to ask on): $1 — re-run with --yes"
+        return 1
+    fi
     case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
