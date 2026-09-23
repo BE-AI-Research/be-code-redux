@@ -2,10 +2,47 @@
 
 **Offline-first agentic coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
+[![version](https://img.shields.io/badge/version-1.1.1-blue)](CHANGELOG.md)
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
+
 BE-Code combines three lineages: the BE-CLI Go architecture and conventions, the Claude Code
 tool-loop model, and the Codex headless/pipeline style — rebuilt around one premise that neither
 of those tools has: **the model is small, local, and fallible, so the harness must supply the
 quality.** Every design decision follows from that.
+
+It talks to whatever inference you already run — Ollama, llama.cpp, LM Studio, vLLM, a BE AI
+Engine fabric — and nothing else: no telemetry, no account, no network call but the endpoints
+you configured (and web search, which is opt-in and off by default). A session survives the
+terminal that started it, several terminals can watch and drive the same run, and the record of
+what the model has read and decided lives in your project as Markdown you can edit by hand.
+
+## Contents
+
+**Start here** — [Requirements](#requirements) · [Install](#install--uninstall) ·
+[Quick start](#quick-start) · [The two interfaces](#the-two-interfaces) · [Backends](#backends)
+
+**Day to day** — [Approvals](#approvals-and-diff-previews) · [The screen](#the-screen) ·
+[Themes](#themes) · [Select and copy](#select-and-copy) ·
+[Talking to the agent mid-run](#talking-to-the-agent-while-it-works) ·
+[Checkpoints & undo](#checkpoints--undo) · [Plan mode, git, hooks](#plan-mode-git-custom-commands-hooks)
+
+**More than one model** — [Co-working models](#co-working-models) · [Sub-agents](#sub-agents) ·
+[Reviewer routing](#reviewer-routing-multi-model) · [Model profiles](#model-profiles) ·
+[Context window](#context-window) · [Benchmarking](#benchmarking-your-fleet)
+
+**Memory** — [Sessions](#sessions) · [Shared sessions](#shared-sessions) ·
+[Chat and DMs](#chat-and-dms) · [Repo map, @mentions, compaction](#context-repo-map-mentions-compaction) ·
+[Working memory](#working-memory) · [Task record](#task-record) · [Project memory](#project-memory)
+
+**Integrations** — [VS Code](#vs-code) · [Visual Studio](#visual-studio) ·
+[MCP servers](#mcp-servers) · [Web search](#web-search-optional-google-programmable-search) ·
+[Scripting](#scripting)
+
+**Reference** — [Commands](#command-reference) · [Config](#config-reference) · [Safety model](#safety-model) ·
+[Shell safety](#shell-safety--background-processes) · [Layout](#layout) ·
+[Development](#development) · [Documentation](#documentation) · [Status](#status)
 
 ## How it wins with weaker models
 
@@ -13,7 +50,7 @@ quality.** Every design decision follows from that.
    detects the project type (Go, Node, Python, Rust, Makefile) and runs the real toolchain —
    vet/build/test. Failures are condensed and fed back as bounded repair turns
    (`max_repairs`). The model doesn't have to be right the first time; it has to converge.
-2. **Small-model-friendly tool calling.** Six flat tools, forgiving argument parsing
+2. **Small-model-friendly tool calling.** Seven flat tools, forgiving argument parsing
    (double-encoded JSON, alternate key names), and a *compat mode* that embeds tool calls in
    plain text (`<tool_call>{...}</tool_call>`) for models whose native tool-call support is
    broken. `auto` mode tries native and falls back per session.
@@ -22,12 +59,62 @@ quality.** Every design decision follows from that.
    contexts degrade before they overflow; BE-Code trims before that point.
 4. **One failure at a time.** Verification stops at the first failing check — small models
    repair best with a single root cause in front of them.
+5. **A record the conversation cannot lose.** What the model has read, run and decided is
+   written to a task tree — Markdown documents in your own project — as the work happens, and
+   put back in front of the model every turn. When a compaction summary fails or comes back
+   empty, the session continues from that record instead of from a trimmed transcript.
+6. **The local prompt cache is part of the design.** A local server can reuse its cache only
+   when a prompt strictly extends the last one, so BE-Code never changes or takes back what it
+   has sent, and sends the next prompt ahead after anything that empties the cache. Measured on
+   a LAN server: about 6 s a turn instead of 11–41 s.
+
+## Requirements
+
+- **A backend.** Any OpenAI-compatible server on your machine or LAN: Ollama (best supported —
+  native `/api`, a window you set rather than discover), llama.cpp, LM Studio, vLLM, or a BE AI
+  Engine fabric. No cloud account is needed anywhere.
+- **A model that can call tools.** Anything in the 7B–32B class with tool calling works; models
+  whose native tool calling is broken are carried by compat mode (see below). Qwen3-family
+  models are what BE-Code is tuned and measured against.
+- **To build from source: Go 1.25 or newer** (`go.mod` sets the floor). `install.sh` will accept
+  an older toolchain, which then has to fetch 1.25 itself — on a machine with no network,
+  install Go 1.25 or use a prebuilt binary instead.
+- **To run a prebuilt binary: nothing.** One static Go binary, no runtime, no dependencies.
+- **Platforms:** linux/amd64, linux/arm64, darwin/arm64, windows/amd64. `git` is optional
+  (its absence only costs the git-backed lookups and `/commit`); `make`/`sh` are only needed
+  for the build.
 
 ## Install / uninstall
 
+One line, no checkout — it reads the current version from the repository, downloads that
+release's binary for your platform, installs shell completions and offers the setup wizard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh
+```
+
+`--system` and `PREFIX=` work the same way (`| sh -s -- --system`). `BE_CODE_VERSION=1.1.0`
+installs a specific release, `BE_CODE_REF=<branch|tag>` reads the version from somewhere other
+than `main`, and `BE_CODE_REPO=` points the whole thing at a fork or a mirror. When a release
+has no binary for your platform the installer fetches the source and builds it, which needs Go
+1.25+. Uninstall the same way:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.sh | sh
+```
+
+Or download a release binary yourself, make it executable and put it on your PATH:
+
+```bash
+chmod +x be-code-linux-amd64 && mv be-code-linux-amd64 ~/.local/bin/be-code
+be-code --version && be-code setup     # the setup wizard writes your first config
+```
+
+From a checkout (builds or picks up `dist/`, installs shell completions, offers the wizard):
+
 ```bash
 ./install.sh              # user install to ~/.local/bin (builds from source when
-                          # Go >= 1.22 is present, else uses a dist/ or bin/ prebuilt
+                          # a Go toolchain is present, else uses a dist/ or bin/ prebuilt
                           # that reports this tree's build.mk VERSION — a stale one is
                           # refused, never installed under the new version's name);
                           # installs shell completions, offers the setup wizard
@@ -58,6 +145,10 @@ make build                # or: make -f build.mk build
 ./be-code init            # measure the workspace and write BECODE.md project notes
 ./be-code run "add unit tests for pkg/utils"   # headless, verifies before exiting
 ```
+
+Building the release artifacts yourself: `make -f build.mk verify` runs vet, build and the
+whole test suite, and `make -f build.mk release` cross-compiles all four platforms into `dist/`
+and packages the VS Code extension beside them.
 
 **First launch** runs a setup wizard: it probes local backends concurrently
 (Ollama :11434, llama.cpp :8080, LM Studio :1234, vLLM :8000, BE AI Engine :9800),
@@ -786,10 +877,14 @@ write instead of writing unattended.
 
 ```
 cmd/                 cobra commands (root, run, init, bench, models, pull, doctor, verify, config, sessions, attach, setup)
-internal/provider/   OpenAI-compatible client (SSE + tool calls), Ollama native mgmt
+internal/provider/   OpenAI-compatible client (SSE + tool calls), Ollama native /api/chat
+internal/loader/     the only code that loads a model or sends num_ctx; reload consent
 internal/agent/      loop, prompts, embedded-call parsing, budgeting/compaction, plan mode,
-                     think-filtering, @mentions, stats, reviewer routing, autosave
-internal/tools/      file/search/shell/process tools, write approvals, allow/deny, hooks, MCP adapter
+                     think-filtering, @mentions, stats, co-working, sub-agent runner, autosave
+internal/tools/      file/search/shell/process tools, write approvals, allow/deny, hooks,
+                     scoped registries for sub-agents, MCP adapter
+internal/engine/     the task tree: documents in your project, working-memory block, evidence
+internal/subagent/   sub-agent records, scope arithmetic, readiness rule, per-server lanes
 internal/verify/     project detection, check runners, repair summaries
 internal/diff/       pure-Go unified diff for change previews
 internal/checkpoint/ turn-level snapshots for /undo
@@ -797,19 +892,63 @@ internal/repomap/    symbol-level workspace outline
 internal/gitctx/     git awareness (+/commit)
 internal/profiles/   model-family tuning table
 internal/mcp/        stdio MCP client (JSON-RPC 2.0)
-internal/live/       live-session host, attach client, records (~/.be-code/live)
-internal/discover/   workspace measurement for /init (languages, commands, layout, git)
+internal/ide/        editor bridge discovery and MCP-over-TCP client (VS Code, Visual Studio)
 internal/review/     where a file change is reviewed (editor, terminal or both)
+internal/live/       live-session host, attach client, records (~/.be-code/live)
+internal/inbox/      machine-wide DMs (~/.be-code/inbox), no UI, no host
+internal/discover/   workspace measurement for /init (languages, commands, layout, git)
 internal/commands/   custom slash commands (.becode/commands)
 internal/bench/      embedded offline eval suite
 internal/store/      session persistence (~/.be-code/sessions)
 internal/setup/      backend probe + first-run wizard
 internal/config/     ~/.be-code/config.json
+internal/procattr/   hidden child processes (Windows needs this; a test enforces it)
 internal/ui/         plain REPL (readline), markdown/chroma rendering, shared helpers
 internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, themes)
+vscode/              the VS Code extension (TypeScript, its own project)
+visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 ```
 
-## Config reference (`~/.be-code/config.json`)
+## Command reference
+
+**Commands** (`be-code <command>`; with none, the interactive session starts):
+
+| Command | Does |
+| --- | --- |
+| `run [prompt]` | headless run, verification included; `--json` for a machine-readable result; reads stdin when no prompt is given |
+| `init` | measure the workspace and write `BECODE.md` project notes |
+| `setup` | the first-run wizard: probe backends, list models, write the config |
+| `doctor` | probe every configured backend, the workspace toolchain and the editor bridge |
+| `verify` | run the workspace's own build/lint/test checks, non-zero exit on failure |
+| `models` / `pull <model>` | list the backend's models / pull one (Ollama backends) |
+| `sessions` | list saved sessions (`LIVE` marks one being served); `sessions delete <code>`, `sessions kill <code>` |
+| `attach <code\|last>` | attach another terminal to a live session; `--view` for watch-only |
+| `bench` | run the embedded offline eval suite against your models |
+| `config` | print the effective configuration |
+
+**Flags** (persistent, so they work on any command): `-p/--provider`, `-m/--model`,
+`-C/--dir <workspace>`, `-y/--yes` (auto-approve for headless use), `--resume <code|id|last>`,
+`--new`, `--plain`, `--no-host`, `--ide` / `--no-ide`.
+
+**Slash commands** (both UIs; `/` on an empty input opens the palette, `/menu` the grouped menu):
+
+| | |
+| --- | --- |
+| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` |
+| **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` |
+| **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
+| **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
+| **People** | `/chat` `/inbox` `/dm [name]` `/whoami` `/back` |
+| **This terminal** | `/theme [<name>\|default <name>]` `/review [auto\|editor\|tui\|both]` `/copy [reply\|tool\|all]` `/help` `/menu` |
+
+Your own commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or
+`~/.be-code/commands/*.md` (global), with `$ARGS` substitution — they appear in the palette
+beside the built-ins.
+
+## Config reference
+
+Everything lives in `~/.be-code/config.json`, written by `be-code setup` and safe to edit by
+hand; `/config` prints what the running session actually resolved.
 
 - `default_provider`, `model`, `providers{}` — backend selection. A provider
   block also carries the parameters every model on that endpoint runs with:
@@ -922,32 +1061,77 @@ internal/tui/        full-screen Bubble Tea UI (transcript, modals, pickers, the
   `engine.step_nudge` (20) — once the current step has taken more tool calls than this,
   Working memory tells the model to finish it, split it or note why (negative turns it off);
   `engine.tools` — `full` (default) | `minimal` (`task` and `lookup` only); see
+  "Working memory"
 - `reasoning_effort` (`medium`) — the thinking budget asked of a reasoning model: `low`, `medium` or `high` (empty leaves the backend's default, which for Qwen3.x GGUF templates is the highest). The tool loop adapts it per call: one level down once the prompt fills more than half the window, and `low` for the rest of a request after reasoning has exhausted the window. On a 32k window with a 27B thinking model, `low` is the setting that keeps long runs moving.
 - `prompt_layout` (`cached`) — `cached` never changes or takes back anything it has sent: the system prompt is stable for the length of a request, the git summary and Working memory are attached to your message when a request begins and stay in the history, and a fresh snapshot is attached only after a compaction or trim. A local server's prompt cache then covers everything but the new text (measured: about 6 s a turn against 11–41 s). `classic` re-sends Working memory in the system prompt every turn, as every version before 0.14 did.
 - `prompt_prefill` (true) — after anything that empties the server's prompt cache (a model load or reload, a resume, `/compact`), the prompt the next turn will send is sent ahead with generation off, in the background, and cancelled the moment you press Enter. Native Ollama only. `/stats` is the session's metrics screen: context in use against the usable limit and the fixed prompt, the window and reserve, compactions, requests and tokens (hidden reasoning included), the server's prompt-reading time and cache misses, tool calls by tool, repair rounds, attached terminals and the task tree's counts.
 - `time_awareness` (true) — gives the model a clock: every tool result ends with `[14:32:07 · took 3.2s · step 3.2 open 14m · context 61%]` and each of your messages with when it was sent. Appended text only, never the system prompt, so the server's prompt cache is untouched; about fifteen tokens a tool call.
 - `resume_replay` (true) replays the saved transcript when a session is resumed; `resume_replay_turns` (0 = all) caps it to the last N requests.
-  "Working memory"
+
+## Development
+
+```bash
+make -f build.mk verify      # vet + build + the whole test suite — run before claiming done
+go test ./...                # the unit suites on their own (about a second)
+go test ./... -race          # what CI-quality work runs
+sh test/e2e/run_e2e.sh       # end-to-end against a scripted mock backend on :18111
+make -f build.mk release     # the four platform binaries plus the VS Code extension
+make -f build.mk vscode      # the extension alone (npm install, tests, package)
+make -f build.mk visualstudio-test   # the C# bridge and its tests (needs the .NET SDK)
+```
+
+`go vet` is the only linter. The `verify` package's tests invoke the real Go toolchain in
+temp directories and the `mcp` tests spawn a subprocess, so both need `go` and `sh` on PATH;
+`verify` itself never needs the .NET SDK. `go run . doctor` probes your configured backends
+and the workspace toolchain, which is usually the fastest way to find out why a run failed.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [`CHANGELOG.md`](CHANGELOG.md) | every release, what changed and why |
+| [`docs/task-format.md`](docs/task-format.md) | the task-document format in full: marks, ids, evidence lines, owner and scope syntax |
+| [`docs/BE-SPEC-CODE-2026-001.md`](docs/BE-SPEC-CODE-2026-001.md) | the design specification |
+| [`docs/superpowers/specs/`](docs/superpowers/specs) | per-feature design documents (sub-agents, the Visual Studio bridge, …) |
+| [`vscode/README.md`](vscode/README.md) | the VS Code extension's own commands and settings |
+| [`visualstudio/README.md`](visualstudio/README.md) | the Visual Studio bridge: what is proven and what is not |
+| [`docs/live-checklist.md`](docs/live-checklist.md), [`docs/vscode-live-checklist.md`](docs/vscode-live-checklist.md) | manual end-to-end checklists against a real backend |
 
 ## Status
 
-v1.1.0 — sub-agents: a co-worker marked `sub_agent: true` can own a step of the task tree — a scoped, write-capable scratch agent, `ask_main`, per-server lanes with the primary first, approvals on the main model's schema, and silent resume. v1.0.1 — co-working hardened: `online` corroborated against the provider's address, the advice sanitizer covers Qwen's XML tool calls, a co-worker panic is contained, and a co-worker budgets against its own window. v1.0.0 — the release: 0.15.0 renumbered, nothing changed. v0.15.0 — a per-session chat room with @agent, and machine-wide DMs. v0.14.0 — a prompt layout the server's prefix cache survives, background prompt processing
-after a model load, and the server's prompt-reading time in `/stats`. v0.13.0 — pacing guidance, a nudge for a step open too long, a repeat detector, and a clock
-for the model (tool-result time footers, step durations). v0.12.1 — an approved model reload now actually happens, a request never goes out with no
-context window after `/model`, and a prompt the server refuses as too large is recovered or
-explained. v0.12.0 — a Visual Studio 2022/2026 extension beside the VS Code one (compiled against the
-real SDK, not yet run: see `visualstudio/README.md`), and an editor review that can be
-withdrawn without wedging the bridge. v0.11.x — context handling: a task record that survives
-compaction, native Ollama with a configurable window, a model loader gated on consent, and a
-compaction target that can be reached (see the changelog).
-Earlier milestones, from v0.3.0 — the pro-grade pass: checkpoints/undo, repo map + @mentions, model profiles +
-think-filtering, model compaction, plan mode, git awareness + /commit + /init, custom
-commands + hooks, MCP client, reviewer routing, shell allow/deny + background processes,
-bench suite, JSON output, markdown/syntax highlighting, themes, usage stats. Earlier:
-v0.2.0 (dual UI, wizard, diff approvals, sessions), v0.1.0 (core loop + verification).
-4-platform builds; 21 tested Go packages, the two editor extensions' own suites, and scripted-model e2e (repair loop, MCP attach,
-undo, JSON mode, bench harness) driven through the real binary.
+**v1.1.1 (current)** — a sub-agent no longer resumes behind your back: if a previous session
+left work assigned, BE-Code asks once at startup, names every pending step with its owner and
+scope, and dispatches nothing until you answer. `/agents start` runs what a decline left
+dormant.
+
+Recent releases:
+
+- **v1.1.0** — sub-agents: a co-worker marked `sub_agent: true` can own a step of the task tree
+  — a scoped, write-capable scratch agent, `ask_main`, per-server lanes with the primary first,
+  and approvals on the main model's own schema.
+- **v1.0.1** — co-working hardened: `online` corroborated against the provider's address, the
+  advice sanitizer extended to Qwen's XML tool calls, a co-worker panic contained, and a
+  co-worker budgeted against its own window. **v1.0.0** — 0.15.0 renumbered, nothing changed.
+- **v0.15.0** — a per-session chat room with `@agent`, and machine-wide DMs.
+- **v0.14.0** — a prompt layout the server's prefix cache survives, background prompt
+  processing after a model load, and the server's prompt-reading time in `/stats`.
+- **v0.13.0** — pacing guidance, a nudge for a step open too long, a repeat detector, and a
+  clock for the model.
+- **v0.12.x** — the Visual Studio 2022/2026 extension beside the VS Code one, an editor review
+  that can be withdrawn without wedging the bridge, and the model-reload fixes a shared LAN
+  server taught us.
+- **v0.11.x** — context handling: a task record that survives compaction, native Ollama with a
+  configurable window, a model loader gated on consent, a compaction target that can be reached.
+- **v0.3.0** — the pro-grade pass: checkpoints/undo, repo map and `@mentions`, model profiles and
+  think-filtering, model compaction, plan mode, git awareness, custom commands and hooks, the MCP
+  client, reviewer routing, shell allow/deny, background processes, the bench suite, JSON output,
+  themes. Before it: v0.2.0 (dual UI, wizard, diff approvals, sessions), v0.1.0 (the core loop
+  and verification).
+
+Built for four platforms from one Go module. 25 of the 28 Go packages carry tests, the two
+editor extensions have their own suites, and a scripted-model end-to-end run (repair loop, MCP
+attach, undo, JSON mode, bench harness, task record) drives the real binary.
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 BE AI Research.
