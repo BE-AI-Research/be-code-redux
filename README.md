@@ -217,10 +217,16 @@ nothing has been sent to any model yet
 
 Yes dispatches them; no leaves them assigned and `todo` and prints `sub-agent
 work left dormant; /agents start runs it` — that verb dispatches whatever is
-waiting without asking again. A step assigned or reassigned mid-session,
-by you or by the main model, is never held back this way: only the
-one question at startup ever asks. `-y` (headless) skips the question and
-dispatches; a non-interactive run without `-y` declines the same way.
+waiting without asking again. The decline holds back *everything* assigned,
+not just the steps that happened to be ready when it was asked, so a second
+step sequenced behind one of them does not quietly start once the first
+closes. A step assigned or reassigned mid-session, by you or by the main
+model, is never held back this way — as long as it is a genuine change; the
+model restating a plan it already made does not undo your decline — because
+only the one question at startup ever asks. `-y` (headless) skips the
+question and dispatches; a non-interactive run without `-y` declines the
+same way (under `run --json`, that decline's notice does not appear in the
+JSON output — only the approver's own denial line on stderr does).
 
 Approvals follow the session's own mode: a write inside a sub-agent's scope
 raises the same modal or diff a primary write does, labelled `sub-agent

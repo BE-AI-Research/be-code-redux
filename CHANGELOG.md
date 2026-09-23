@@ -14,11 +14,19 @@ working behind the operator's back at startup.
   runs (`(provider/model)`, or `(online)`), and its scope.
 - **A decline leaves the work dormant, not lost.** The steps stay assigned
   and `todo`, nothing is dispatched, and the notice names the way back:
-  `sub-agent work left dormant; /agents start runs it`. A later schedule —
-  a `task` tool call, a `/task` command, a hand-back's own parting
-  schedule — will not silently dispatch the same declined ids; only
-  `/agents start`, or the operator/model explicitly re-touching one of them
-  with `/task assign`/`/task scope`, clears its mark.
+  `sub-agent work left dormant; /agents start runs it`. The decline is a
+  session-scoped flag that holds back *every* assigned node, not a mark on
+  the ids that happened to be ready at that moment — the first version
+  marked only those, which let a step sequenced behind a declined one
+  dispatch later with no question at all once the one ahead of it closed.
+  A later schedule — a `task` tool call, a `/task` command, a hand-back's
+  own parting schedule — will not silently dispatch anything while the flag
+  is set; only `/agents start` clears it, or the operator/model genuinely
+  reassigning one specific step with `/task assign`/`/task scope` (a no-op
+  re-assertion of the same owner or scope does not count, so a model
+  restating its own plan cannot undo the operator's decline) — which also
+  notices (`3.2 re-assigned; starting big`) so an undone decline is never
+  silent.
 - **Only the startup schedule ever asks.** A step assigned or reassigned
   mid-session, by the operator or by the main model, still dispatches at
   once — the transcript already says who started it.
@@ -29,8 +37,22 @@ working behind the operator's back at startup.
   (`AutoApproveSubAgentResume`) rather than either of the two `-y` already
   sets — resuming unattended work is neither "run shell commands" nor "ship
   code off this machine". A non-interactive run without `-y` declines and
-  prints the same notice. Online consent is unchanged and still asked
-  separately before the first online dispatch.
+  prints the same notice — except under `run --json`, which wires no
+  `OnNotice` at all, so only the approver's own stderr denial line appears
+  there. Online consent is unchanged and still asked separately before the
+  first online dispatch.
+- **The ask never blocks a UI from starting.** `StartSubAgents` blocks on
+  the gate's answer, which headless (`run`) wants — it has nothing left to
+  start. A TUI or session host's own goroutine has to go on to start the
+  served program the answer is rendered on, so `runInteractive` and
+  `runSessionHost` now call `StartSubAgentsAsync` instead: the resume pass
+  runs synchronously (it never blocks), and the gate plus the first
+  schedule run on a goroutine of their own, tolerated by the shared modal
+  with no program running yet — exactly like the model-parameter consent
+  question already raised the same way. Plain mode asks from its own REPL
+  goroutine, inside `OnStart`, after the input reader is up — never from a
+  bare goroutine, which would put a second reader on the one input stream
+  the main loop reads and split the user's keystrokes between them.
 
 ## v1.1.0 — sub-agents on the task engine
 

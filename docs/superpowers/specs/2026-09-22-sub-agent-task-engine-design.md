@@ -522,29 +522,59 @@ nothing has been sent to any model yet
 **Yes** dispatches every one of them with `Interrupted: true` and its earlier
 `Touched` files when the note from §3.5 is present, one transcript line per
 node (`big resumed 3.2 port internal/scan`), exactly as the original design
-described. **No** dispatches nothing: the steps stay assigned and `todo`, a
-session-scoped flag records the decline so this question is never asked
-again this session, and the terminal is told `sub-agent work left dormant;
-/agents start runs it`. That flag also holds off every *later* schedule
-(a `task` tool call, a `/task` command, a hand-back's own parting schedule)
-for exactly the declined ids — a decline must not be silently undone by the
-very mechanism that dispatches everything else — until `/agents start` clears
-it, or the operator (or the main model) explicitly re-touches one of those
-ids through `/task assign`/`/task scope` (`task owner`/`task scope`), which
-is a fresh initiation of that one step and clears its own mark.
+described. **No** dispatches nothing: the steps stay assigned and `todo`, and
+the terminal is told `sub-agent work left dormant; /agents start runs it`.
+
+The decline is a session-scoped flag (`resumeDeclined`), not a mark on the
+particular ids that happened to be ready at that moment — a first
+implementation that only marked those ids leaked: two steps sequenced onto
+the same sub-agent (`3.1` then `3.2`, both `@big`) offer only `3.1` as a
+ready candidate at decline time, and once `3.1` closed by any means `3.2`
+dispatched later with no question and no notice, never having been marked
+at all. With the flag, *every* later schedule (a `task` tool call, a `/task`
+command, a hand-back's own parting schedule) refuses to dispatch *any*
+assigned node while it is set — gating by construction, not by enumerating
+every way a node can become ready after the moment of the ask. `/agents
+start` clears the flag entirely. So does the operator or the main model
+explicitly re-touching one specific step — `/task assign`/`/task scope`
+(`task owner`/`task scope`) — which adds just that one id to a per-session
+allow-list exempting it from the flag, but **only when the stored owner or
+scope actually changes**: a failed assign (a typo'd name, a pinned or
+currently-worked node) must leave the flag as it found it, and so must a
+same-value re-assertion (the main model restating its own plan through the
+`task` tool, unprompted) — neither is the fresh initiation of that step the
+exemption exists for. Whenever the exemption is what makes a dispatch
+happen, the terminal is told (`3.2 re-assigned; starting big`) — an undone
+decline is never silent.
 
 Only this startup ask ever fires: a step assigned or reassigned **mid-session**
-— by the operator or by the main model — dispatches at once, because the
-transcript already says who started it. `-y` (headless) sets its own flag,
-`AutoApproveSubAgentResume`, and proceeds without asking at all — it is
-neither "run shell commands" nor "ship code off this machine", the two
-decisions the existing `-y` flags already cover, so it earns a flag of its
-own rather than riding either. A non-interactive run without `-y` declines
-through the ordinary headless approver (denies when stdin is not a TTY) and
-prints the same notice. Online consent is unaffected and still asked again
-per session, separately, before the first online dispatch — "resume this
-work" and "send code off this machine" are different decisions, so an online
-sub-agent's resumed step can ask twice at startup.
+— by the operator or by the main model, and genuinely so — dispatches at
+once, because the transcript already says who started it. `-y` (headless)
+sets its own flag, `AutoApproveSubAgentResume`, and proceeds without asking
+at all — it is neither "run shell commands" nor "ship code off this
+machine", the two decisions the existing `-y` flags already cover, so it
+earns a flag of its own rather than riding either. A non-interactive run
+without `-y` declines through the ordinary headless approver (denies when
+stdin is not a TTY) and prints the same notice — except under `run --json`,
+which sets `Events{}` (no `OnNotice`) so the dormant notice never reaches the
+JSON output; only the approver's own stderr denial line appears there.
+Online consent is unaffected and still asked again per session, separately,
+before the first online dispatch — "resume this work" and "send code off
+this machine" are different decisions, so an online sub-agent's resumed step
+can ask twice at startup.
+
+The ask itself must never run on a goroutine that has to go on to start a
+served program: `Agent.StartSubAgents` blocks on the gate's approval call
+(unbounded — it waits for a person), which is exactly right for `run`, which
+has no program left to start, but wrong for a TUI, in-process or hosted,
+whose `RunLocal`/`RunServed` is what the resume ask's answer is even
+rendered on. `Agent.StartSubAgentsAsync` is what `runInteractive` and
+`runSessionHost` call instead: the resume pass (never blocking) runs on the
+caller's own goroutine so any failure surfaces deterministically before
+anything else, and the gate plus the first schedule run panic-fenced on a
+goroutine of their own — tolerated by `Session.Ask` with no program running
+yet, the same way `Agent.ResolveModel`'s own `goResolve` raises the
+model-parameter consent question before `RunLocal`/`RunServed` starts.
 
 A node that **cannot** be re-dispatched is not left quiet: the owner missing
 from the config or no longer `sub_agent: true`, its scope outside a changed
