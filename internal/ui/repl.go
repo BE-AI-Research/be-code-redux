@@ -70,11 +70,19 @@ type REPL struct {
 	// main prompt: Run checks for it and returns rather than waiting on a
 	// reader that has already exited.
 	OnStart func()
+
+	// wakeCh asks the main loop to start a turn for whatever is queued.
+	// Buffered by one and never blocking: a sub-agent's goroutine pokes it
+	// and carries on (see wakeQueue).
+	wakeCh chan struct{}
 }
 
 type lineEvent struct {
 	line string
 	err  error
+	// wake marks an event that is not a typed line at all: the queue has
+	// something in it and the main loop should start a turn with it.
+	wake bool
 }
 
 // HistoryFile returns the shared input-history path (used by both UIs).
@@ -106,10 +114,52 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	if err != nil {
 		return nil, err
 	}
-	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl}
+	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl,
+		wakeCh: make(chan struct{}, 1)}
 	ag.Tools.Approve = r.approve
 	ag.Tools.ApproveCtx = r.approveCtx
+	r.wireQueueWake()
 	return r, nil
+}
+
+// wireQueueWake makes spec §2.6 true in plain mode: a hand-back, or a
+// question a sub-agent is parked on, arriving while the main model is idle
+// starts a turn. The leftover-queue rule the spec names only fires at the
+// end of a run, and a sub-agent working a long step almost always hands
+// back after the main model's turn has ended — so without this the
+// hand-back sat in the queue until the operator typed something and the
+// work was never verified. It wraps whatever Events the caller installed
+// (ui.Events() in cmd) rather than replacing them.
+func (r *REPL) wireQueueWake() {
+	ag := r.Agent
+	end, ask := ag.Events.OnSubAgentEnd, ag.Events.OnSubAgentAsk
+	ag.Events.OnSubAgentEnd = func(hb subagent.HandBack) {
+		if end != nil {
+			end(hb)
+		}
+		r.wakeQueue()
+	}
+	ag.Events.OnSubAgentAsk = func(a subagent.Ask) {
+		if ask != nil {
+			ask(a)
+		}
+		r.wakeQueue()
+	}
+}
+
+// wakeQueue pokes the main loop, never blocking and never waiting on a
+// lock: it is called from a sub-agent's own goroutine. It is sent whether
+// or not a run is in progress — a run in progress is not reading wakeCh, so
+// the poke simply waits in the buffer and the loop finds an empty queue
+// (that run having drained it) and carries on.
+func (r *REPL) wakeQueue() {
+	if r.wakeCh == nil {
+		return
+	}
+	select {
+	case r.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 func slashCompleterItems() []readline.PrefixCompleterInterface {
@@ -240,7 +290,7 @@ func (r *REPL) Run(ctx context.Context) error {
 	go func() {
 		for {
 			line, err := r.rl.Readline()
-			r.lines <- lineEvent{line, err}
+			r.lines <- lineEvent{line: line, err: err}
 			if err != nil && err != readline.ErrInterrupt {
 				return
 			}
@@ -254,6 +304,14 @@ func (r *REPL) Run(ctx context.Context) error {
 		if !ok {
 			fmt.Println()
 			return nil
+		}
+		if ev.wake {
+			// A sub-agent handed back, or asked something, while nothing
+			// was running. Whatever it queued becomes the next turn.
+			if r.startQueuedTurn(ctx) && r.quitAfter {
+				return nil
+			}
+			continue
 		}
 		if ev.err == readline.ErrInterrupt {
 			continue // ^C at prompt clears the line
@@ -347,7 +405,12 @@ func (r *REPL) nextLine() (lineEvent, bool) {
 	if r.inputDone() {
 		return lineEvent{}, false
 	}
-	return <-r.lines, true
+	select {
+	case ev := <-r.lines:
+		return ev, true
+	case <-r.wakeCh:
+		return lineEvent{wake: true}, true
+	}
 }
 
 // promptCtx is prompt on a cancellable wait: a shared file-change review can
@@ -438,6 +501,22 @@ func (r *REPL) turn(ctx context.Context, input string) {
 		input = strings.Join(left, "\n")
 		fmt.Printf("%s %s\n", cyan("you>"), input)
 	}
+}
+
+// startQueuedTurn runs a turn for whatever is in the agent's queue, and
+// reports whether it ran one. It is the idle half of the leftover-queue
+// rule: turn() already drains the queue when a run ends, and this is what
+// picks up a hand-back or an ask_main that arrived when no run was in
+// flight at all (spec §2.6). An empty queue means a run took it first.
+func (r *REPL) startQueuedTurn(ctx context.Context) bool {
+	left := r.Agent.DrainInbox()
+	if len(left) == 0 {
+		return false
+	}
+	queued := strings.Join(left, "\n")
+	fmt.Printf("%s %s\n", cyan("you>"), queued)
+	r.turn(ctx, queued)
+	return true
 }
 
 // queueCommand implements /queue, /queue edit N, /queue drop N — usable

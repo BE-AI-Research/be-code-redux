@@ -106,10 +106,18 @@ func lastEntryText(s *Session) string {
 // flush delivers every queued broadcast to the given views, in order.
 // Nothing runs a view's mailbox goroutine in a test, so a broadcast raised
 // outside Update (which drains its own mailbox) waits here until asked for.
+//
+// It takes the session lock, because update writes shared Session state
+// (statusNote, among others) and a real program always holds that lock for
+// the whole of Update. A test that drives a view while another goroutine —
+// a sub-agent's, say — is calling into the session would otherwise race it
+// on that state. Callers must not already hold mu.
 func flush(views ...*View) {
 	for _, v := range views {
 		if mb := v.mailboxForTest(); mb != nil {
+			v.mu.Lock()
 			mb.drainInto(v)
+			v.mu.Unlock()
 		}
 	}
 }

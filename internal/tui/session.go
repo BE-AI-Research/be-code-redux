@@ -752,6 +752,11 @@ func (s *Session) onSubAgentAsk(a subagent.Ask) {
 	defer s.mu.Unlock()
 	s.flushLocked()
 	s.appendEntryLocked(entry{Kind: entryCoworkAsk, Label: fmt.Sprintf("%s (%s)", a.Owner, a.Node), Text: a.Question})
+	// The question is already in the main model's queue (askMain enqueues
+	// before it fires this event). If the main model is idle it would sit
+	// there until the operator typed something — and the sub-agent is
+	// parked on the answer, so nothing would move until its ask timed out.
+	s.startQueuedLocked()
 }
 
 // onSubAgentEnd is Events.OnSubAgentEnd: the sub-agent's hand-back — done,
@@ -775,6 +780,14 @@ func (s *Session) onSubAgentEnd(hb subagent.HandBack) {
 		s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s %s: %s", label, hb.Status, hb.Reason)})
 	}
 	s.broadcast(statusMsg(s.statusNote))
+	// Spec §2.6 says the hand-back starts a turn when the main model is
+	// idle — so it verifies the work, closes the parent and carries on. The
+	// leftover-queue rule it names only fires at the end of a run, and a
+	// sub-agent working a long step almost always hands back after the main
+	// model's turn has ended, so without this the hand-back waited for the
+	// operator to type something. An interrupted run enqueued nothing, so
+	// this is a no-op for it.
+	s.startQueuedLocked()
 }
 
 // notice puts one note on the shared transcript. It is Events.OnNotice and
@@ -1015,14 +1028,35 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 		}
 		return
 	}
-	if left := s.ag.DrainItems(); len(left) > 0 {
-		texts := make([]string, 0, len(left))
-		for _, it := range left {
-			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
-			texts = append(texts, it.Text)
-		}
-		s.startTurnLocked(strings.Join(texts, "\n"))
+	s.startQueuedLocked()
+}
+
+// startQueuedLocked turns whatever is queued into the next turn, as one
+// request echoed line by line under the terminal each message came from. It
+// is the leftover-queue rule, factored out so the *other* caller — a
+// sub-agent's hand-back or question arriving while the main model is idle —
+// uses exactly the same rule rather than a second one beside it. A no-op
+// when nothing is queued or a run is already in progress.
+//
+// The caller holds mu, which is what keeps the two callers from racing:
+// finishTurnLocked clears s.running and drains under one hold, so a
+// hand-back enqueued at any point either finds s.running true (and is
+// drained by that run's own finish) or finds it false (and starts a turn
+// here). It can never fall between the two and be stranded.
+func (s *Session) startQueuedLocked() {
+	if s.running {
+		return
 	}
+	left := s.ag.DrainItems()
+	if len(left) == 0 {
+		return
+	}
+	texts := make([]string, 0, len(left))
+	for _, it := range left {
+		s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		texts = append(texts, it.Text)
+	}
+	s.startTurnLocked(strings.Join(texts, "\n"))
 }
 
 // finishInit ends the /init flow on its own goroutine, the way finishTurn

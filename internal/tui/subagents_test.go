@@ -158,3 +158,79 @@ func TestSubAgentReplyNoteReachesEveryTerminal(t *testing.T) {
 		}
 	}
 }
+
+// TestAHandBackToAnIdleMainModelStartsATurn is spec §2.6: "if the main
+// model is idle the existing leftover-queue rule starts a turn with it".
+// That rule only fires at the end of a run, and a sub-agent working a long
+// step almost always hands back after the main model's turn has ended — so
+// the hand-back sat in the queue until the operator typed something, and
+// the work was never verified, the parent never closed.
+func TestAHandBackToAnIdleMainModelStartsATurn(t *testing.T) {
+	s, a, _ := twoViews(t)
+	var started []string
+	s.startTurnHook = func(text string) { started = append(started, text) }
+
+	// The runner enqueues before it fires the event, exactly as
+	// agent.runSub does.
+	s.ag.Enqueue("sub-agent big finished 3.2 (done, 14m, 22 tool calls): ported it")
+	s.onSubAgentEnd(subagent.HandBack{Node: "3.2", Owner: "big", Status: "done", Summary: "ported it"})
+	if len(started) != 1 || !strings.Contains(started[0], "sub-agent big finished 3.2") {
+		t.Fatalf("no turn was started for the hand-back: %q", started)
+	}
+	if s.ag.Pending() != 0 {
+		t.Fatal("the queue was not drained into the turn")
+	}
+	flush(a)
+	if !strings.Contains(a.View(), "sub-agent big finished 3.2") {
+		t.Fatalf("the request was not echoed:\n%s", a.View())
+	}
+
+	// A question the sub-agent is parked on starts one too — nothing else
+	// will, and its ask would otherwise time out.
+	started = nil
+	s.setRunState(false, "")
+	s.ag.Enqueue("sub-agent big asks about 3.3: which tokenizer?")
+	s.onSubAgentAsk(subagent.Ask{Node: "3.3", Owner: "big", Question: "which tokenizer?"})
+	if len(started) != 1 || !strings.Contains(started[0], "asks about 3.3") {
+		t.Fatalf("no turn was started for the ask: %q", started)
+	}
+}
+
+// TestAHandBackMidRunDoesNotStartASecondTurn: the leftover-queue rule
+// already delivers it, and starting one here would clobber the running
+// turn's cancelFn.
+func TestAHandBackMidRunDoesNotStartASecondTurn(t *testing.T) {
+	s, _, _ := twoViews(t)
+	var started []string
+	s.startTurnHook = func(text string) { started = append(started, text) }
+	s.Submit("do the thing", 1) // starts a turn: s.running is now true
+	if len(started) != 1 {
+		t.Fatalf("the typed request did not start a turn: %q", started)
+	}
+	s.ag.Enqueue("sub-agent big finished 3.2 (done): ported it")
+	s.onSubAgentEnd(subagent.HandBack{Node: "3.2", Owner: "big", Status: "done", Summary: "ported it"})
+	if len(started) != 1 {
+		t.Fatalf("a second turn was started under the running one: %q", started)
+	}
+	if s.ag.Pending() != 1 {
+		t.Fatal("the hand-back must stay queued for the running turn to deliver")
+	}
+	// And the run's own end takes it up, exactly as it did before.
+	s.finishTurn(nil, nil)
+	if len(started) != 2 || !strings.Contains(started[1], "sub-agent big finished 3.2") {
+		t.Fatalf("the leftover-queue rule no longer picks it up: %q", started)
+	}
+}
+
+// TestAnInterruptedHandBackStartsNothing: an interrupted run enqueues
+// nothing (a session end is not a hand-back), so the idle session must stay
+// idle rather than start an empty turn.
+func TestAnInterruptedHandBackStartsNothing(t *testing.T) {
+	s, _, _ := twoViews(t)
+	var started []string
+	s.startTurnHook = func(text string) { started = append(started, text) }
+	s.onSubAgentEnd(subagent.HandBack{Node: "3.2", Owner: "big", Status: "interrupted"})
+	if len(started) != 0 {
+		t.Fatalf("an empty queue started a turn: %q", started)
+	}
+}

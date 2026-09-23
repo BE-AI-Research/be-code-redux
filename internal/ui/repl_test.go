@@ -18,6 +18,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -671,3 +672,62 @@ func (l *replConsentLoader) Apply(ctx context.Context, _ string) (int, error) {
 func (*replConsentLoader) OnEvicted(context.Context, string) {}
 func (*replConsentLoader) OnWindowChanged(string, int)       {}
 func (*replConsentLoader) KeepAlive(string) time.Duration    { return 0 }
+
+// TestAHandBackToAnIdleReplStartsATurn is spec §2.6 in plain mode: a
+// hand-back arriving while no run is in flight must start one, rather than
+// sit in the queue until the operator types something. The leftover-queue
+// rule the spec names only fires at the end of a run.
+func TestAHandBackToAnIdleReplStartsATurn(t *testing.T) {
+	r := newTestREPL(t)
+	r.wakeCh = make(chan struct{}, 1)
+	r.lines = make(chan lineEvent)
+	var sawEnd, sawAsk bool
+	r.Agent.Events.OnSubAgentEnd = func(subagent.HandBack) { sawEnd = true }
+	r.Agent.Events.OnSubAgentAsk = func(subagent.Ask) { sawAsk = true }
+	r.wireQueueWake()
+
+	// The runner enqueues before it fires the event, exactly as
+	// agent.runSub does.
+	r.Agent.Enqueue("sub-agent big finished 3.2 (done): ported it")
+	r.Agent.Events.OnSubAgentEnd(subagent.HandBack{Node: "3.2", Owner: "big", Status: "done"})
+	if !sawEnd {
+		t.Fatal("the wrapper swallowed the caller's own handler")
+	}
+	ev, ok := r.nextLine()
+	if !ok || !ev.wake {
+		t.Fatalf("the idle loop was not woken: %+v %v", ev, ok)
+	}
+	if !r.startQueuedTurn(context.Background()) {
+		t.Fatal("the queued hand-back did not become a turn")
+	}
+	if r.Agent.Pending() != 0 {
+		t.Fatal("the queue was not drained")
+	}
+	// An empty queue (a run already took it) starts nothing.
+	if r.startQueuedTurn(context.Background()) {
+		t.Fatal("an empty queue started a turn")
+	}
+	// A parked ask wakes it too.
+	r.Agent.Events.OnSubAgentAsk(subagent.Ask{Node: "3.3", Owner: "big", Question: "which?"})
+	if !sawAsk {
+		t.Fatal("the ask wrapper swallowed the caller's own handler")
+	}
+	select {
+	case <-r.wakeCh:
+	default:
+		t.Fatal("an ask did not wake the idle loop")
+	}
+}
+
+// TestNextLineStillReadsTypedLines: the wake channel must not take the
+// select's place for ordinary input.
+func TestNextLineStillReadsTypedLines(t *testing.T) {
+	r := newTestREPL(t)
+	r.wakeCh = make(chan struct{}, 1)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{line: "hello"}
+	ev, ok := r.nextLine()
+	if !ok || ev.wake || ev.line != "hello" {
+		t.Fatalf("typed line: %+v %v", ev, ok)
+	}
+}
