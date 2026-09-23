@@ -9,3 +9,11 @@
 # SSH credentials for the validation VM (never commit)
 .passfile
 .be-code/
+
+# build artifact: install.sh treats bin/ as an optional prebuilt fallback,
+# but a committed binary has no business in the repository
+/bin/
+
+# personal scratch resume notes
+/QuickResume.md
+/Quick-Resume.md
