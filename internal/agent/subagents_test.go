@@ -599,6 +599,78 @@ func TestAllowSubAgentStartWithNothingWaiting(t *testing.T) {
 	}
 }
 
+// TestAllowSubAgentStartRestoresTheDeclineWhenNothingDispatches is the
+// regression test for design review's L4: AllowSubAgentStart used to clear
+// resumeDeclined unconditionally, even when its own schedule dispatched
+// nothing (every ready candidate still capped, here, by max_concurrent).
+// The operator reads "no sub-agent work is waiting" and reasonably believes
+// nothing changed; a step that becomes ready later — once the cap frees up
+// — must still stay gated and ask again, not dispatch silently.
+func TestAllowSubAgentStartRestoresTheDeclineWhenNothingDispatches(t *testing.T) {
+	bp := &parkingProvider{entered: make(chan struct{}, 1)}
+	f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) {
+		c.SubAgents.MaxConcurrent = 1
+		c.Coworkers = append(c.Coworkers, config.CoworkerConfig{Name: "small", Provider: "ollama", Model: "cw-model-small", SubAgent: true})
+	})
+	if err := os.MkdirAll(filepath.Join(f.dir, "internal/other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	CoworkerFactory = func(_ context.Context, _ *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
+		if cw.Name == "small" {
+			return bp, 0, nil
+		}
+		return &scriptedProvider{}, 0, nil
+	}
+
+	// Occupy the one concurrency slot with an unrelated, indefinitely
+	// running sub-agent before the gate ever runs, so the cap is already
+	// full when the declined step is otherwise ready.
+	occRoot := f.st.Plan("occupy the slot", []string{"hold the cap"})
+	occID := occRoot + ".1"
+	if err := f.st.SetOwner(occID, "small", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.SetScope(occID, []string{"internal/other"}); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.ScheduleSubAgents()
+	wait(t, f.start, "occupant start")
+	wait(t, bp.entered, "occupant's first request")
+
+	// A separate, otherwise-ready step for big, capped out by the occupant.
+	id := f.assign(t)
+	f.ag.Tools.Approve = func(string, string) bool { return false }
+	f.ag.StartSubAgents() // declines; id is ready but capped, so nothing dispatches
+	select {
+	case <-f.start:
+		t.Fatal("dispatched despite decline")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	started := f.ag.AllowSubAgentStart()
+	if len(started) != 0 {
+		t.Fatalf("expected nothing to start (capped), got %v", started)
+	}
+
+	// Free the slot.
+	if err := f.ag.StopSubAgent("small"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.ends, "occupant end")
+
+	// id is now the only thing left, and it is ready — but AllowSubAgentStart
+	// reported nothing waiting, so the decline must still be in force.
+	f.ag.ScheduleSubAgents()
+	select {
+	case d := <-f.start:
+		t.Fatalf("a decline that AllowSubAgentStart reported as nothing-waiting still let a step dispatch once capacity freed: %+v", d)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if got := f.st.ShowText(id); !strings.Contains(got, "[ ] "+id+".") {
+		t.Fatalf("step not left assigned and todo:\n%s", got)
+	}
+}
+
 // TestScheduleAfterDeclineDoesNotDispatch is point 3's invariant: a later
 // ScheduleSubAgents — the same one a `task` tool call or /task command
 // triggers — must not silently dispatch what startup left dormant.

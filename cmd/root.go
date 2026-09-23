@@ -719,6 +719,22 @@ func runInteractive(cmd *cobra.Command) error {
 		return repl.Run(ctx)
 	}
 	s := tui.NewSession(cfg, ag, p)
+	// Everything a dispatched sub-agent's own registry reads has to be in
+	// place before StartSubAgentsAsync below can possibly reach one: under
+	// -y the gate returns instantly, and ScheduleSubAgents -> dispatchPicked
+	// -> runSub -> Agent.subAgent calls a.Tools.Scoped, which reads
+	// ReviewWrite and ReviewInvolvesEditor. Assigned after starting the
+	// gate goroutine, that read races the assignment here — too narrow a
+	// window for -race to catch, but wide enough to hand a sub-agent's
+	// first write a nil ReviewWrite and silently drop the editor-side
+	// review §3.3 promises. This is the second time ordering around
+	// StartSubAgentsAsync has bitten (see its own comment below), so
+	// everything here runs first, deliberately.
+	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
+	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
+	s.SetReview(coord)
+	ag.Tools.ReviewWrite = coord.Decide
+	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 	// NewSession has just wired Registry.Approve and Agent.Events; a dispatch
 	// before that would ask consent of nobody and print to nobody. But this
 	// goroutine still has to reach s.RunLocal below, which is what actually
@@ -735,11 +751,6 @@ func runInteractive(cmd *cobra.Command) error {
 	// rendering yet exactly the way ag.ResolveModel's own goResolve does
 	// below.
 	ag.StartSubAgentsAsync()
-	coord := review.New(mode, editor, s.ReviewTerminal(), nil)
-	coord.SetEditorName(agent.EditorLabel(ag.IDEName))
-	s.SetReview(coord)
-	ag.Tools.ReviewWrite = coord.Decide
-	ag.Tools.ReviewInvolvesEditor = func() bool { return coord.Resolve() != review.ModeTUI && editor != nil }
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
 	// approval modal, which is the only place under a TUI a person can see

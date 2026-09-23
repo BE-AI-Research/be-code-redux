@@ -409,16 +409,41 @@ func resumeAskDetail(steps []subagent.Step, ready []subagent.Candidate, cws map[
 // scheduleSubAgentsDispatched) rather than by re-reading state afterwards,
 // which would race a dispatch fast enough to already have finished; nil
 // reports "no sub-agent work is waiting".
+//
+// The clear is provisional until something actually dispatches. Clearing
+// unconditionally and reporting "no sub-agent work is waiting" when the
+// schedule dispatched nothing (every ready candidate still capped, say, or
+// nothing was ready at all) would un-gate the session anyway: the operator
+// reads "nothing waiting," reasonably believes nothing changed, and a step
+// that becomes ready ten minutes later then dispatches with no question and
+// no notice — the exact silent-dispatch shape the decline exists to
+// prevent. So a no-op restores resumeDeclined, merged (never clobbered)
+// with whatever resumeAllowed held before this call plus anything a
+// concurrent AssignOwner/SetScope may have added to it in the interval —
+// this call's own clear must not erase a genuine reassignment that landed
+// while the schedule was running.
 func (a *Agent) AllowSubAgentStart() []string {
 	s := a.subs
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
+	wasDeclined, wasAllowed := s.resumeDeclined, s.resumeAllowed
 	s.resumeDeclined = false
 	s.resumeAllowed = nil
 	s.mu.Unlock()
 	started := a.scheduleSubAgentsDispatched()
+	if len(started) == 0 {
+		s.mu.Lock()
+		s.resumeDeclined = wasDeclined
+		for id := range wasAllowed {
+			if s.resumeAllowed == nil {
+				s.resumeAllowed = map[string]bool{}
+			}
+			s.resumeAllowed[id] = true
+		}
+		s.mu.Unlock()
+	}
 	sort.Strings(started)
 	return started
 }
