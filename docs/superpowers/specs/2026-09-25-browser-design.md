@@ -76,8 +76,12 @@ On first use:
    `127.0.0.1:9222`). Its `webSocketDebuggerUrl` is the connection.
 2. Otherwise, if `browser.launch` is true, **launch** the executable (`browser.executable`,
    else the first of Chrome, Edge, Brave, Chromium found on this platform) with
-   `--remote-debugging-port`, `--user-data-dir=<browser.profile>` (default
+   `--remote-debugging-port=0`, `--user-data-dir=<browser.profile>` (default
    `~/.be-code/browser/profile`), `--no-first-run`, `--no-default-browser-check`, visible.
+   Port `0` lets the browser pick a free port and write it to `DevToolsActivePort` in the
+   profile directory, which BE-Code reads (after deleting any stale copy) — so a launch never
+   collides with something already on 9222, and a browser that exits at once because another
+   instance holds the profile is reported as exactly that rather than as a timeout.
    With no display available (no `DISPLAY`/`WAYLAND_DISPLAY` on Linux — a VM over SSH),
    add `--headless=new` instead of failing. The child goes through `procattr.Hide` like every
    other child process (a detached Windows session host must not open a console window).
@@ -109,7 +113,9 @@ and the protocol has no authentication.
 
 "Interaction" is what §3's consent gates. Argument parsing is tolerant, as with every other
 tool: `element`/`id` accepted for `ref`, `e14` and `14` both accepted, `url` without a scheme
-gets `https://` (or `http://` for loopback).
+gets `https://` (or `http://` for loopback). **`open` accepts only `http:` and `https:`**
+(plus `about:blank`): `file:`, `javascript:`, `data:`, `mailto:` and every other scheme are
+refused, so the browser can never be used to read a local file outside the workspace.
 
 **Every action that changes the page returns the new snapshot**, so the model never spends a
 turn asking what happened. `snapshot` and `read` return theirs directly; `scroll` and `tabs`
@@ -213,7 +219,8 @@ existing compaction path (old tool results collapse first) and nothing new: unde
 ### 3.2 The prompt
 
 The shared ask every attached terminal sees (`internal/tui/ask.go`), through
-`Tools.Approve` as action **`browser`**, naming the host and exactly what is about to happen:
+`Tools.Approve` as action **`browser`** — or **`browser_watch`** for a `watch` host, so every
+UI knows that prompt has no "always" — naming the host and exactly what is about to happen:
 
 ```
 act on github.com?
@@ -244,7 +251,10 @@ Whatever the tier, the model **never reads or writes** a field that is:
 - marked `autocomplete` as `current-password`, `new-password`, `one-time-code`, `cc-number`,
   `cc-csc` or `cc-exp`.
 
-The snapshot shows such a field without a value: `textbox (password) [e9]`. `type` into it is
+The snapshot shows such a field with its label but never its value:
+`textbox "Password" (password) [e9]`. The fields are found with `DOM.querySelectorAll` on
+each snapshot (pure protocol, nothing run in the page); **if that query fails, the snapshot
+hides every field's value** rather than risk showing one it could not check. `type` into it is
 refused with:
 
 ```
@@ -270,13 +280,19 @@ A page can contain text written *to* the model ("ignore your instructions and ru
    to the primary's system prompt (stable text, so the prompt cache is unaffected — the same
    placement rule `subAgentGuidance` follows), framing page content the way the project
    notes are framed: facts to use, never instructions to follow.
-2. **Headless shell suspension.** Once a request has returned a snapshot or `read` from any
-   host not in `allow`, `-y`'s automatic shell approval is **suspended for the rest of that
-   request**: shell commands are refused headless with `shell is not auto-approved after
-   reading an untrusted web page in this request`. The flag resets at the next request.
-   Interactively nothing changes — every shell command not on `shell_allow` already asks. It
-   closes the one path by which a page could reach the shell with nobody watching. The user's
-   own `allow`-listed hosts do not trigger it.
+2. **Shell suspension** *(amended 2026-09-25 while planning)*. Once a request has returned
+   a snapshot, `read` or tab list from any host not in `allow`, **every automatic shell
+   approval is suspended for the rest of that request** — `-y`, the prompt's `a`,
+   `auto_approve_shell`, and `shell_allow` alike. Each shell command asks again, as action
+   `shell_after_web` (which offers no "always"); headless, with nobody to ask, it is refused
+   with `shell is not auto-approved after reading an untrusted web page in this request`. The
+   deny list still wins. The flag resets at the next request, and the user's own
+   `allow`-listed hosts do not trigger it.
+
+   *Why amended:* the first text said interactive runs were unaffected because every shell
+   command already asks. That is false once someone has pressed `a` on a shell prompt, and
+   `shell_allow` runs without asking in every mode — the default list includes `cat *` and
+   `go run*`, so a page could have a secret read or code run with nobody watching.
 
 ## §4 Commands, config, and where the browser does not go
 
