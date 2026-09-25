@@ -1,5 +1,15 @@
 # BE-Code Changelog
 
+## v1.1.5 (in development)
+
+- **A new terminal is asked for its UserID when it attaches.** A terminal whose chat
+  identity resolves with no name — not in `chat.name`, not bound to its address — gets the
+  naming prompt straight away instead of at its first `/chat`, `/inbox` or `/dm`: the names
+  already seen from its address, or a new one typed in. It waits until the terminal is idle,
+  so it never covers another question (the sub-agent resume, a model reload), a running
+  request, or a line already being typed. `Esc` skips it for that attachment, and the three
+  commands still ask later. A named terminal, and a session with chat off, are never asked.
+
 ## v1.1.1 — ask before a sub-agent resumes
 
 1.1.0 re-dispatched a step assigned in a previous session silently, with only

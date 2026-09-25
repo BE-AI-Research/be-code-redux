@@ -12,8 +12,9 @@ import (
 )
 
 // Who each terminal is, for chat and DMs (spec §3). The session resolves an
-// identity when a terminal attaches; a terminal that needs a prompt gets it
-// the first time it opens /chat, /inbox or /dm, never before.
+// identity when a terminal attaches; a terminal left with no name is asked
+// for one as soon as it is idle (offerNameAtAttach), and may skip it — then
+// /chat, /inbox and /dm ask the first time they are opened.
 
 type identity struct {
 	ID      string
@@ -157,6 +158,7 @@ func (m *View) needName(then func(*View) (tea.Model, tea.Cmd)) (tea.Model, tea.C
 		return then(m)
 	}
 	m.afterName = then
+	m.nameAtAttach = false // offerNameAtAttach sets it back when it is the caller
 	m.nameChoices = m.identityOf(m.id).Choices
 	m.nameSel, m.nameErr, m.nameShared = 0, "", ""
 	m.clearSelection() // the transcript this prompt covers is not selectable from here
@@ -164,6 +166,31 @@ func (m *View) needName(then func(*View) (tea.Model, tea.Cmd)) (tea.Model, tea.C
 	m.input.Reset()
 	m.input.Placeholder = "your name for chat and DMs"
 	return m, nil
+}
+
+// offerNameAtAttach is the startup naming prompt: a terminal that attached
+// with no name is asked for one as soon as it can be without getting in the
+// way — nothing else open, no run in progress, and nothing typed in its input
+// line (opening the prompt resets the input, and a draft typed during the
+// few seconds resolution can take must not be lost). A terminal named by
+// config, IP or MAC is never asked; nor is one with chat off, nor one whose
+// identity has not been resolved yet — the first update after it lands asks.
+// Once per attachment: Esc is a skip, and /chat, /inbox and /dm still ask.
+// View.Update calls it after every update, under mu.
+func (m *View) offerNameAtAttach() {
+	if m.nameOffered || m.mode != modeInput || m.running || !m.cfg.Chat.Enabled || m.input.Value() != "" {
+		return
+	}
+	id, resolved := m.ids[m.id]
+	if !resolved {
+		return
+	}
+	m.nameOffered = true
+	if id.ID != "" {
+		return
+	}
+	m.needName(nil)
+	m.nameAtAttach = true
 }
 
 func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -265,7 +292,11 @@ func (m *View) viewName() string {
 		b.WriteString("\n" + m.st.Err.Render(m.nameErr) + "\n")
 	}
 	body := m.st.Border.Width(m.width - 4).Render(b.String())
-	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(" Enter choose · Esc cancel")
+	hint := " Enter choose · Esc cancel"
+	if m.nameAtAttach {
+		hint = " Enter choose · Esc skip for now (/chat, /inbox and /dm ask later)"
+	}
+	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(hint)
 }
 
 // whoami is /whoami.

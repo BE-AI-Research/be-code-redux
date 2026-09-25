@@ -520,8 +520,12 @@ in a line hands it — with the last `chat.mention_context` lines of the room �
 session's model, whose answer appears in the transcript and in the room. DMs span every
 session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
 (`●` unread), and a message to someone not attached anywhere waits for them. Your name
-comes from `chat.name` in your own config, else the names already seen from your address,
-else you are asked once (`/whoami` says which). Messages live under `~/.be-code/inbox/`;
+comes from `chat.name` in your own config, else the name already bound to your address;
+a terminal that attaches with neither is asked for one straight away — pick a name already
+seen from its address or type a new one — as soon as it is idle (never over another question,
+a running request or a half-typed line). `Esc` skips it for that attachment, and `/chat`,
+`/inbox` or `/dm` ask again when first opened; `/whoami` says where your name came from.
+Messages live under `~/.be-code/inbox/`;
 identity is advisory, not security — anyone with a shell on the host can read them. Plain
 mode and headless runs have neither.
 
