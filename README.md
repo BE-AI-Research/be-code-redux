@@ -404,14 +404,21 @@ to happen. `browser.sites` sets a tier per host glob:
 
 `allow` never asks (`localhost` is allowed unless you say otherwise); a site with no rule asks
 once and is then allowed for the session; `watch` asks every single time; `deny` refuses, though
-the site can still be read. The model never reads or types into a password, one-time-code or
-card field, whatever the tier: signing in is yours, and it will ask you to do it in the window.
+the site can still be read. The model never reads, types into or picks an option in a password,
+one-time-code or card field (a card's expiry month included), whatever the tier: signing in is
+yours, and it will ask you to do it in the window.
 
 A page can contain text written *to* the model. Page content always arrives labelled as data,
 never instructions, and once a request has read a page from a site you have not allowed,
-**every shell command for the rest of that request asks you first** — the allow list, `-y` and
-"always" are all suspended; headless, with nobody to ask, it is refused. Page text is never
-included in what an `online` co-worker is sent.
+**every shell command asks you first until you next type a request yourself** — the allow list,
+`-y` and "always" are all suspended; headless, with nobody to ask, it is refused. A sub-agent's
+hand-back does not end the suspension, and a resumed session whose history holds a page starts
+with it on. The project's checks count as shell commands too: automatic verification after the
+change, and a sub-agent's own checks, ask the same way, and a check nobody approves is skipped
+(`verification skipped: …`), not failed. Page text is never included in what a co-worker is
+sent, nor in the handoff briefing carried into the next session — though the model's own words,
+its last reply among them, may paraphrase a page and can reach a co-worker you have consented
+to.
 
 `/browser` shows what is connected, the tab being driven and the sites allowed this session;
 `/browser forget <host>` revokes one; `/browser close` disconnects. `be-code doctor` reports what
