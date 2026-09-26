@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,12 +34,15 @@ type PageScript struct {
 
 	mu      sync.Mutex
 	targets []*Target
-	nodeIDs map[int]int // DOM nodeId handed out → backend id
 	inputs  []string
 
 	// Sensitive maps a backend id to its attributes as name, value pairs;
 	// these nodes are what the sensitive-field query finds.
 	Sensitive map[int][]string
+	// ShadowSensitive is like Sensitive, but its nodes are placed inside a
+	// shadow root in the DOM.getDocument tree: reachable only by a query
+	// that pierces shadow DOM.
+	ShadowSensitive map[int][]string
 	// Disconnected backends answer isConnected false: a stale ref.
 	Disconnected map[int]bool
 	// SelectResult is what the <select> function returns ("" = chosen).
@@ -49,10 +51,17 @@ type PageScript struct {
 	ReadText string
 	// InView lists the backends laid out inside the viewport.
 	InView []int
-	// FailSensitiveQuery makes DOM.querySelectorAll fail.
+	// FailSensitiveQuery makes DOM.getDocument fail.
 	FailSensitiveQuery bool
+	// FocusLost makes the select-all step report that the element is no
+	// longer document.activeElement (it lost focus before typing).
+	FocusLost bool
 	// NoLoadEvent: navigations never fire Page.loadEventFired.
 	NoLoadEvent bool
+	// StopWithoutLoad: a navigation fires Page.frameStoppedLoading but
+	// never Page.loadEventFired (a load that never signals completion the
+	// normal way).
+	StopWithoutLoad bool
 	// LoadDelay delays loadEventFired after a navigation starts.
 	LoadDelay time.Duration
 	// Pages maps a URL to the title and tree a navigation there shows.
@@ -61,8 +70,8 @@ type PageScript struct {
 
 // NewPage scripts b as a browser with one tab, T1, showing url.
 func NewPage(b *Browser, url, title, tree string) *PageScript {
-	s := &PageScript{B: b, nodeIDs: map[int]int{}, Sensitive: map[int][]string{},
-		Disconnected: map[int]bool{}, Pages: map[string][2]string{}}
+	s := &PageScript{B: b, Sensitive: map[int][]string{},
+		ShadowSensitive: map[int][]string{}, Disconnected: map[int]bool{}, Pages: map[string][2]string{}}
 	s.targets = []*Target{{ID: "T1", URL: url, Title: title, Tree: tree, history: []string{url}}}
 	s.install()
 	return s
@@ -138,7 +147,9 @@ func (s *PageScript) install() {
 		return map[string]any{"targetInfos": infos}, nil
 	})
 	b.Handle("Target.attachToTarget", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ TargetID string `json:"targetId"` }](p)
+		a := arg[struct {
+			TargetID string `json:"targetId"`
+		}](p)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.targetLocked(a.TargetID) == nil {
@@ -147,7 +158,9 @@ func (s *PageScript) install() {
 		return map[string]any{"sessionId": "S-" + a.TargetID}, nil
 	})
 	b.Handle("Target.getTargetInfo", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ TargetID string `json:"targetId"` }](p)
+		a := arg[struct {
+			TargetID string `json:"targetId"`
+		}](p)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		t := s.targetLocked(a.TargetID)
@@ -182,35 +195,17 @@ func (s *PageScript) install() {
 		return json.RawMessage(t.Tree), nil
 	})
 	b.Handle("DOM.getDocument", func(string, json.RawMessage) (any, error) {
-		return map[string]any{"root": map[string]any{"nodeId": 1}}, nil
-	})
-	b.Handle("DOM.querySelectorAll", func(string, json.RawMessage) (any, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.FailSensitiveQuery {
 			return nil, errors.New("Could not find node with given id")
 		}
-		var backends []int
-		for b := range s.Sensitive {
-			backends = append(backends, b)
-		}
-		sort.Ints(backends)
-		ids := []int{}
-		for _, b := range backends {
-			s.nodeIDs[1000+b] = b
-			ids = append(ids, 1000+b)
-		}
-		return map[string]any{"nodeIds": ids}, nil
-	})
-	b.Handle("DOM.describeNode", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ NodeID int `json:"nodeId"` }](p)
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		backend := s.nodeIDs[a.NodeID]
-		return map[string]any{"node": map[string]any{"backendNodeId": backend, "attributes": s.Sensitive[backend]}}, nil
+		return map[string]any{"root": s.documentTreeLocked()}, nil
 	})
 	b.Handle("DOM.resolveNode", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ BackendNodeID int `json:"backendNodeId"` }](p)
+		a := arg[struct {
+			BackendNodeID int `json:"backendNodeId"`
+		}](p)
 		return map[string]any{"object": map[string]any{"objectId": "obj-" + strconv.Itoa(a.BackendNodeID)}}, nil
 	})
 	b.Handle("Runtime.callFunctionOn", func(_ string, p json.RawMessage) (any, error) {
@@ -236,6 +231,7 @@ func (s *PageScript) install() {
 			return map[string]any{"result": map[string]any{"type": "string", "value": s.SelectResult}}, nil
 		case strings.Contains(a.Decl, "selectNodeContents"):
 			s.record("select-all")
+			return map[string]any{"result": map[string]any{"type": "boolean", "value": !s.FocusLost}}, nil
 		}
 		return map[string]any{"result": map[string]any{"type": "undefined"}}, nil
 	})
@@ -243,14 +239,18 @@ func (s *PageScript) install() {
 		return map[string]any{"model": map[string]any{"content": []float64{10, 10, 90, 10, 90, 30, 10, 30}}}, nil
 	})
 	b.Handle("DOM.scrollIntoViewIfNeeded", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ BackendNodeID int `json:"backendNodeId"` }](p)
+		a := arg[struct {
+			BackendNodeID int `json:"backendNodeId"`
+		}](p)
 		s.mu.Lock()
 		s.record("scroll-into-view %d", a.BackendNodeID)
 		s.mu.Unlock()
 		return map[string]any{}, nil
 	})
 	b.Handle("DOM.focus", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ BackendNodeID int `json:"backendNodeId"` }](p)
+		a := arg[struct {
+			BackendNodeID int `json:"backendNodeId"`
+		}](p)
 		s.mu.Lock()
 		s.record("focus %d", a.BackendNodeID)
 		s.mu.Unlock()
@@ -273,7 +273,9 @@ func (s *PageScript) install() {
 		return map[string]any{}, nil
 	})
 	b.Handle("Input.insertText", func(_ string, p json.RawMessage) (any, error) {
-		a := arg[struct{ Text string `json:"text"` }](p)
+		a := arg[struct {
+			Text string `json:"text"`
+		}](p)
 		s.mu.Lock()
 		s.record("text %s", a.Text)
 		s.mu.Unlock()
@@ -290,7 +292,9 @@ func (s *PageScript) install() {
 		return map[string]any{}, nil
 	})
 	b.Handle("Page.navigate", func(sid string, p json.RawMessage) (any, error) {
-		a := arg[struct{ URL string `json:"url"` }](p)
+		a := arg[struct {
+			URL string `json:"url"`
+		}](p)
 		s.mu.Lock()
 		t := s.bySessionLocked(sid)
 		if t == nil {
@@ -319,7 +323,9 @@ func (s *PageScript) install() {
 		return map[string]any{"currentIndex": t.index, "entries": entries}, nil
 	})
 	b.Handle("Page.navigateToHistoryEntry", func(sid string, p json.RawMessage) (any, error) {
-		a := arg[struct{ EntryID int `json:"entryId"` }](p)
+		a := arg[struct {
+			EntryID int `json:"entryId"`
+		}](p)
 		s.mu.Lock()
 		t := s.bySessionLocked(sid)
 		t.index = a.EntryID - 1
@@ -353,13 +359,44 @@ func (s *PageScript) install() {
 		return map[string]any{"result": map[string]any{"type": "string", "value": s.ReadText}}, nil
 	})
 	b.Handle("Page.handleJavaScriptDialog", func(sid string, p json.RawMessage) (any, error) {
-		a := arg[struct{ Accept bool `json:"accept"` }](p)
+		a := arg[struct {
+			Accept bool `json:"accept"`
+		}](p)
 		s.mu.Lock()
 		s.record("dialog accept=%v", a.Accept)
 		s.mu.Unlock()
 		s.B.EmitSoon(sid, "Page.javascriptDialogClosed", map[string]any{"result": a.Accept})
 		return map[string]any{}, nil
 	})
+}
+
+// documentTreeLocked builds a DOM.getDocument {"depth":-1,"pierce":true}
+// tree: Sensitive fields as ordinary children of the document, and
+// ShadowSensitive fields nested inside one host element's shadow root — so
+// a query that pierces shadow DOM finds both, and one that does not finds
+// only the first.
+func (s *PageScript) documentTreeLocked() map[string]any {
+	children := []any{}
+	for backend, attrs := range s.Sensitive {
+		children = append(children, sensitiveDOMNode(backend, attrs))
+	}
+	if len(s.ShadowSensitive) > 0 {
+		shadowChildren := []any{}
+		for backend, attrs := range s.ShadowSensitive {
+			shadowChildren = append(shadowChildren, sensitiveDOMNode(backend, attrs))
+		}
+		children = append(children, map[string]any{
+			"backendNodeId": 900, "nodeName": "CUSTOM-FIELD", "localName": "custom-field",
+			"shadowRoots": []any{
+				map[string]any{"backendNodeId": 901, "nodeName": "#document-fragment", "children": shadowChildren},
+			},
+		})
+	}
+	return map[string]any{"backendNodeId": 1, "nodeName": "#document", "children": children}
+}
+
+func sensitiveDOMNode(backend int, attrs []string) map[string]any {
+	return map[string]any{"backendNodeId": backend, "nodeName": "INPUT", "localName": "input", "attributes": attrs}
 }
 
 // showLocked points t at url, taking its title and tree from Pages when
@@ -379,10 +416,17 @@ func (s *PageScript) showLocked(t *Target, url string) string {
 // the reply), and the load event fires afterwards unless scripted not to.
 func (s *PageScript) emitNav(sid string, t *Target, loader string) {
 	s.mu.Lock()
-	frame, url, noLoad, delay := "F-"+t.ID, t.URL, s.NoLoadEvent, s.LoadDelay
+	frame, url, noLoad, stopOnly, delay := "F-"+t.ID, t.URL, s.NoLoadEvent, s.StopWithoutLoad, s.LoadDelay
 	s.mu.Unlock()
 	s.B.Emit(sid, "Page.frameStartedLoading", map[string]any{"frameId": frame})
 	s.B.Emit(sid, "Page.frameNavigated", map[string]any{"frame": map[string]any{"id": frame, "loaderId": loader, "url": url}})
+	if stopOnly {
+		go func() {
+			time.Sleep(delay)
+			s.B.Emit(sid, "Page.frameStoppedLoading", map[string]any{"frameId": frame})
+		}()
+		return
+	}
 	if noLoad {
 		return
 	}

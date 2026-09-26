@@ -52,3 +52,23 @@ func TestBrowserDropWithNoConnectionIsQuiet(t *testing.T) {
 		t.Fatalf("Drop with no connection reported: %v", errs)
 	}
 }
+
+// TestBrowserEmitAfterClosingIsQuiet: once the fake has begun tearing down
+// (closing set, as New's own t.Cleanup does before it drops the last
+// connection), a late Emit — such as one a background goroutine schedules
+// with EmitSoon, arriving after the test it belongs to has already
+// returned — must return quietly. Calling Errorf at that point would land
+// on a testing.T whose test function may already have finished, which the
+// testing package turns into a process-wide panic instead of a normal
+// failure of just that one test.
+func TestBrowserEmitAfterClosingIsQuiet(t *testing.T) {
+	rt := &recordingTB{TB: t}
+	fb := New(rt)
+	fb.mu.Lock()
+	fb.closing = true
+	fb.mu.Unlock()
+	fb.Emit("", "Page.javascriptDialogClosed", map[string]any{})
+	if errs := rt.errors(); len(errs) != 0 {
+		t.Fatalf("Emit after closing reported: %v", errs)
+	}
+}

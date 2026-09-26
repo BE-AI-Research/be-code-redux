@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -96,6 +97,56 @@ func TestPageSnapshotFailsClosedWhenTheSensitiveQueryFails(t *testing.T) {
 	}
 }
 
+// TestPageSensitiveFieldInsideShadowDOM: a card field reachable only
+// through a shadow root (getFullAXTree flattens across shadow boundaries
+// and shows it like any other field, but a query that does not pierce
+// shadow DOM misses it) must still be hidden in a snapshot and answer
+// IsSensitive true.
+func TestPageSensitiveFieldInsideShadowDOM(t *testing.T) {
+	p, ps, _ := testPageOpts(t, "https://acme.test/checkout", "Checkout", browsertest.ShadowFieldTree, testOptions())
+	ps.Lock()
+	ps.ShadowSensitive = map[int][]string{902: {"autocomplete", "cc-number"}}
+	ps.Unlock()
+	ctx := context.Background()
+	snap, err := p.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap, "(card)") {
+		t.Fatalf("a shadow-only card field was not marked sensitive:\n%s", snap)
+	}
+	if strings.Contains(snap, "4111") {
+		t.Fatalf("a shadow-only card field's value leaked:\n%s", snap)
+	}
+	if yes, err := p.IsSensitive(ctx, "e1"); err != nil || !yes {
+		t.Fatalf("IsSensitive for a shadow-only card field: %v, %v", yes, err)
+	}
+}
+
+// TestPageSnapshotHidesValuesWhenTheDocumentChangesMidQuery: a navigation
+// landing between the accessibility-tree read and the sensitive-field
+// query must not pair one document's values with another's sensitive set —
+// Snapshot must notice the loader changed and fail closed.
+func TestPageSnapshotHidesValuesWhenTheDocumentChangesMidQuery(t *testing.T) {
+	p, _, fb := formPage(t)
+	ctx := context.Background()
+	fb.Handle("DOM.getDocument", func(sid string, _ json.RawMessage) (any, error) {
+		fb.Emit(sid, "Page.frameNavigated", map[string]any{"frame": map[string]any{
+			"id": "F-T1", "loaderId": "L-RACE", "url": "https://acme.test/login",
+		}})
+		return map[string]any{"root": map[string]any{"backendNodeId": 1, "nodeName": "#document", "children": []any{
+			map[string]any{"backendNodeId": 60, "nodeName": "INPUT", "localName": "input", "attributes": []string{"type", "password"}},
+		}}}, nil
+	})
+	snap, err := p.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snap, "ann@example.com") || strings.Contains(snap, "hunter2") {
+		t.Fatalf("a mid-query navigation still let a document's values through:\n%s", snap)
+	}
+}
+
 func TestPageIsSensitive(t *testing.T) {
 	p, ps, _ := formPage(t)
 	ctx := context.Background()
@@ -128,6 +179,45 @@ func TestPageClickDispatchesRealMouseEventsAtTheCentre(t *testing.T) {
 	want := []string{"mouse mouseMoved 50,20", "mouse mousePressed 50,20", "mouse mouseReleased 50,20"}
 	if !inOrder(ps.Inputs(), want) {
 		t.Fatalf("inputs %v", ps.Inputs())
+	}
+}
+
+// TestPageClickReturnsWhenAnInputEventOpensADialog: real Chrome holds the
+// reply to an input event while a dialog it opened is showing (e.g. an
+// onclick handler's confirm()). Click must not then hang until callTimeout
+// (15s) — a dialog appearing mid-dispatch cancels the pending call, which
+// Click treats as success.
+func TestPageClickReturnsWhenAnInputEventOpensADialog(t *testing.T) {
+	p, _, fb := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	release := make(chan struct{})
+	fb.Handle("Input.dispatchMouseEvent", func(sid string, raw json.RawMessage) (any, error) {
+		var e struct {
+			Type string `json:"type"`
+		}
+		json.Unmarshal(raw, &e)
+		if e.Type == "mouseReleased" {
+			fb.Emit(sid, "Page.javascriptDialogOpening", map[string]any{"type": "confirm", "message": "Really?"})
+			<-release // only this test's own channel; never another command
+		}
+		return map[string]any{}, nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- p.Click(ctx, "e4") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("click returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("click did not return within 2s of a dialog opening mid-input")
+	}
+	close(release)
+	snap, _ := p.Snapshot(ctx)
+	if !strings.Contains(snap, `dialog confirm "Really?"`) {
+		t.Fatalf("no dialog in the next snapshot:\n%s", snap)
 	}
 }
 
@@ -169,6 +259,42 @@ func TestPageTypeReplacesAndSubmits(t *testing.T) {
 	want := []string{"focus 40", "select-all", "text bob@example.com", "key keyDown Enter", "key keyUp Enter"}
 	if !inOrder(ps.Inputs(), want) {
 		t.Fatalf("inputs %v", ps.Inputs())
+	}
+}
+
+// TestPageTypeRefusesASensitiveField: Type must not trust an earlier
+// snapshot's classification — it re-checks IsSensitive on the ref itself,
+// right before writing, and refuses a password/one-time-code/card field.
+func TestPageTypeRefusesASensitiveField(t *testing.T) {
+	p, ps, _ := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	err := p.Type(ctx, "e2", "hunter3", false) // e2 is the password field
+	var sens *SensitiveFieldError
+	if !errors.As(err, &sens) || err.Error() != "sign-in is yours — ask the user to sign in in the browser window, then continue" {
+		t.Fatalf("got %v", err)
+	}
+	if has(ps.Inputs(), "text hunter3") {
+		t.Fatal("text was written into a sensitive field")
+	}
+}
+
+// TestPageTypeRefusesWhenFocusIsLost: Type must not write into whatever the
+// browser is left focused on if the field it just selected all of is no
+// longer document.activeElement.
+func TestPageTypeRefusesWhenFocusIsLost(t *testing.T) {
+	p, ps, _ := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	ps.Lock()
+	ps.FocusLost = true
+	ps.Unlock()
+	err := p.Type(ctx, "e1", "bob@example.com", false)
+	if err == nil || !strings.Contains(err.Error(), "e1 lost focus before typing") {
+		t.Fatalf("got %v", err)
+	}
+	if has(ps.Inputs(), "text bob@example.com") {
+		t.Fatal("text was written after the field lost focus")
 	}
 }
 
@@ -275,6 +401,28 @@ func TestPageNavigateTimesOutAsLoading(t *testing.T) {
 	}
 }
 
+// TestPageNavigateSettlesOnFrameStoppedLoadingWithoutLoadEvent: a load that
+// never fires Page.loadEventFired (some SPA navigations don't) must not
+// stall every later action until SettleTimeout — Page.frameStoppedLoading
+// is also a legitimate sign the load finished.
+func TestPageNavigateSettlesOnFrameStoppedLoadingWithoutLoadEvent(t *testing.T) {
+	p, ps, _ := formPage(t)
+	ps.Lock()
+	ps.StopWithoutLoad = true
+	ps.Unlock()
+	start := time.Now()
+	if err := p.Navigate(context.Background(), "https://acme.test/stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("settle ran %s waiting past a frameStoppedLoading with no load event", d)
+	}
+	snap, _ := p.Snapshot(context.Background())
+	if strings.Contains(snap, loadingNote) {
+		t.Fatalf("a page whose frame stopped loading is still marked loading:\n%s", snap)
+	}
+}
+
 func TestPageNavigateReportsNetworkErrors(t *testing.T) {
 	p, _, _ := formPage(t)
 	err := p.Navigate(context.Background(), "https://unreachable.test/")
@@ -294,6 +442,32 @@ func TestPageNavigationResetsRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { _, ok := p.refs.Lookup("e1"); return !ok })
+}
+
+// TestAttachPageFrameNavigatedDuringAttachWins: a Page.frameNavigated for
+// the main frame can arrive (and be processed by onEvent, under p.mu)
+// before attachPage's own Page.getFrameTree reply is decoded. attachPage
+// must not then clobber what the event already set with the tab's older,
+// pre-attach frame info — whichever arrived first wins.
+func TestAttachPageFrameNavigatedDuringAttachWins(t *testing.T) {
+	fb := browsertest.New(t)
+	browsertest.NewPage(fb, "https://acme.test/login", "Sign in", browsertest.FormTree)
+	fb.Handle("Page.getFrameTree", func(sid string, _ json.RawMessage) (any, error) {
+		fb.Emit(sid, "Page.frameNavigated", map[string]any{"frame": map[string]any{
+			"id": "F-RACED", "loaderId": "L-RACED", "url": "https://acme.test/raced",
+		}})
+		return map[string]any{"frameTree": map[string]any{"frame": map[string]any{
+			"id": "F-T1", "loaderId": "L0", "url": "https://acme.test/login",
+		}}}, nil
+	})
+	conn := dialFake(t, fb)
+	p, err := attachPage(context.Background(), conn, "T1", testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.URL() != "https://acme.test/raced" {
+		t.Fatalf("attachPage clobbered a frameNavigated that arrived first: url=%q", p.URL())
+	}
 }
 
 func TestNormalizeURL(t *testing.T) {
@@ -359,17 +533,13 @@ func TestPageConfirmIsShownAndAnsweredByItsRef(t *testing.T) {
 	if !has(ps.Inputs(), "dialog accept=true") {
 		t.Fatalf("inputs %v", ps.Inputs())
 	}
-	// Wait for the fake's Page.javascriptDialogClosed (sent a moment after
-	// the reply, as the real browser orders it) to actually arrive: the
-	// dialog block must clear from a live snapshot before the test ends,
-	// or that event can land after this test's fake browser has already
-	// torn down, crashing the whole run (browsertest.Browser.Emit fails
-	// the test — correctly, for a real dropped event — but the failure
-	// then reaches a *different*, already-completed test).
-	waitFor(t, func() bool {
-		s, _ := p.Snapshot(ctx)
-		return !strings.Contains(s, "dialog confirm")
-	})
+	// Click must clear the dialog itself, synchronously, before settling —
+	// not wait for the fake's own (later, asynchronous) confirmation of the
+	// close — so a snapshot taken right after Click already reads a plain
+	// page, not the dialog it just answered.
+	if s, _ := p.Snapshot(ctx); strings.Contains(s, "dialog confirm") {
+		t.Fatalf("the dialog was still showing right after Click answered it:\n%s", s)
+	}
 }
 
 func TestPageBack(t *testing.T) {

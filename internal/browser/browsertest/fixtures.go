@@ -22,3 +22,15 @@ const FormTree = `{"nodes":[
 {"nodeId":"11","ignored":false,"role":{"type":"role","value":"generic"},"name":{"type":"computedString","value":""},"parentId":"2","childIds":["13"],"backendDOMNodeId":110},
 {"nodeId":"13","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"Card number"},"value":{"type":"string","value":"4111111111111111"},"parentId":"11","childIds":[],"backendDOMNodeId":130}
 ]}`
+
+// ShadowFieldTree is an Accessibility.getFullAXTree result for a checkout
+// page at https://acme.test/checkout with one field, a card number (backend
+// 902, value "4111111111111111") that in the real DOM lives inside a web
+// component's shadow root: getFullAXTree flattens across shadow boundaries
+// and shows it like any other field, which is exactly why a sensitive-field
+// query that does not pierce shadow DOM would miss it.
+const ShadowFieldTree = `{"nodes":[
+{"nodeId":"1","ignored":false,"role":{"type":"role","value":"RootWebArea"},"name":{"type":"computedString","value":"Checkout"},"childIds":["2"],"backendDOMNodeId":1},
+{"nodeId":"2","ignored":false,"role":{"type":"role","value":"main"},"name":{"type":"computedString","value":""},"parentId":"1","childIds":["3"],"backendDOMNodeId":2},
+{"nodeId":"3","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"Card number"},"value":{"type":"string","value":"4111111111111111"},"parentId":"2","childIds":[],"backendDOMNodeId":902}
+]}`

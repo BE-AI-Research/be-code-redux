@@ -121,10 +121,20 @@ func (b *Browser) waitForConn() *WSConn {
 // Emit pushes an event to the connected client now, waiting for a
 // connection if one has not been recorded yet. A test that calls Emit with
 // no connection ever arriving gets an error, not a silent no-op that looks
-// like the event was delivered.
+// like the event was delivered — unless the browser is already closing
+// (New's own cleanup, tearing down after the test that owns it has
+// returned): nothing can observe the event by then, and the test function
+// that could still report a problem may already be finished, so reporting
+// one here would panic the whole run instead of just failing a test.
 func (b *Browser) Emit(sessionID, method string, params any) {
 	sc := b.waitForConn()
 	if sc == nil {
+		b.mu.Lock()
+		closing := b.closing
+		b.mu.Unlock()
+		if closing {
+			return
+		}
 		b.t.Errorf("browsertest: Emit(%s) with no connection", method)
 		return
 	}

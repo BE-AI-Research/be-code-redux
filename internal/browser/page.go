@@ -29,10 +29,14 @@ type Options struct {
 	QuietWindow   time.Duration // network idle that counts as settled; 0 means 500ms
 }
 
-// sensitiveSelector finds the fields whose values the model must never see
-// or write (spec §3.4).
-const sensitiveSelector = `input[type=password i], [autocomplete~="current-password" i], [autocomplete~="new-password" i], ` +
-	`[autocomplete~="one-time-code" i], [autocomplete~="cc-number" i], [autocomplete~="cc-csc" i], [autocomplete~="cc-exp" i]`
+// sensitiveAutocompleteTokens are the autocomplete tokens (spec §3.4,
+// amended) that mark any element's value as one the model must never see
+// or write, regardless of the element's own type. cc-exp-month/-year were
+// added alongside cc-exp: the parts a card expiry is sometimes split into.
+var sensitiveAutocompleteTokens = map[string]bool{
+	"current-password": true, "new-password": true, "one-time-code": true,
+	"cc-number": true, "cc-csc": true, "cc-exp": true, "cc-exp-month": true, "cc-exp-year": true,
+}
 
 // StaleRefError is an action on an element that has left the page.
 type StaleRefError struct{ Ref string }
@@ -44,6 +48,15 @@ type UnknownRefError struct{ Ref string }
 
 func (e *UnknownRefError) Error() string {
 	return e.Ref + " is not an element on this page; take a snapshot and use a ref from it"
+}
+
+// SensitiveFieldError is Type refusing to write into a password,
+// one-time-code or card field: signing in is the user's own act, never the
+// model's, however an earlier snapshot classified the field (spec §3.4).
+type SensitiveFieldError struct{ Ref string }
+
+func (e *SensitiveFieldError) Error() string {
+	return "sign-in is yours — ask the user to sign in in the browser window, then continue"
 }
 
 type pendingDialog struct{ Type, Message string }
@@ -70,6 +83,13 @@ type Page struct {
 	labels   map[string]string
 	loading  bool
 	unsub    func()
+	// cancelInput, while set, cancels the context of an input event
+	// currently being dispatched (Click, Press): real Chrome holds that
+	// command's reply while a dialog it opened is showing, and onEvent
+	// calls this the moment such a dialog opens so the caller is not left
+	// waiting out callTimeout for a reply that will not come until the
+	// dialog is answered.
+	cancelInput context.CancelFunc
 }
 
 // attachPage opens a flat session on a tab and starts listening to it.
@@ -102,7 +122,22 @@ func attachPage(ctx context.Context, conn *Conn, targetID string, opts Options) 
 		p.release()
 		return nil, err
 	}
-	p.frameID, p.loaderID, p.url = ft.FrameTree.Frame.ID, ft.FrameTree.Frame.LoaderID, ft.FrameTree.Frame.URL
+	// onEvent is already subscribed and may have processed a
+	// Page.frameNavigated for the main frame before this reply was
+	// decoded (both are read from the same connection, in wire order): fill
+	// only what is still unset, under the same lock onEvent uses, so
+	// whichever arrived first wins rather than this always clobbering it.
+	p.mu.Lock()
+	if p.frameID == "" {
+		p.frameID = ft.FrameTree.Frame.ID
+	}
+	if p.loaderID == "" {
+		p.loaderID = ft.FrameTree.Frame.LoaderID
+	}
+	if p.url == "" {
+		p.url = ft.FrameTree.Frame.URL
+	}
+	p.mu.Unlock()
 	return p, nil
 }
 
@@ -169,6 +204,20 @@ func (p *Page) onEvent(ev Event) {
 		p.mu.Lock()
 		p.loadGen = p.navGen
 		p.mu.Unlock()
+	case "Page.frameStoppedLoading":
+		// A load that never fires loadEventFired (some SPA navigations
+		// don't) would otherwise stall every later action until
+		// SettleTimeout: the frame's own stop is just as legitimate a
+		// sign the load finished.
+		var e struct {
+			FrameID string `json:"frameId"`
+		}
+		json.Unmarshal(ev.Params, &e)
+		p.mu.Lock()
+		if e.FrameID == p.frameID {
+			p.loadGen = p.navGen
+		}
+		p.mu.Unlock()
 	case "Page.frameNavigated":
 		var e struct {
 			Frame struct {
@@ -217,7 +266,13 @@ func (p *Page) onEvent(ev Event) {
 		default:
 			p.mu.Lock()
 			p.dialog = &pendingDialog{Type: e.Type, Message: e.Message}
+			cancel := p.cancelInput
 			p.mu.Unlock()
+			// Calling a stored cancel func from here is fine: it is not a
+			// Call, just an unblock, and never reaches the browser itself.
+			if cancel != nil {
+				cancel()
+			}
 		}
 	case "Page.javascriptDialogClosed":
 		p.mu.Lock()
@@ -335,6 +390,9 @@ func (p *Page) Snapshot(ctx context.Context) (string, error) {
 		p.setLabels(r.Labels)
 		return r.Text, nil
 	}
+	p.mu.Lock()
+	loaderBefore := p.loaderID
+	p.mu.Unlock()
 	var tree struct {
 		Nodes []AXNode `json:"nodes"`
 	}
@@ -342,8 +400,16 @@ func (p *Page) Snapshot(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("reading the page: %w", err)
 	}
 	in.Nodes = tree.Nodes
-	if sens, err := p.sensitive(ctx); err != nil {
-		in.HideAllValues = true // fail closed (spec §3.4)
+	sens, sErr := p.sensitive(ctx)
+	p.mu.Lock()
+	loaderAfter := p.loaderID
+	p.mu.Unlock()
+	if sErr != nil || loaderBefore != loaderAfter {
+		// Fail closed (spec §3.4): either the query itself failed, or a
+		// navigation landed between the tree read and this query — which
+		// would otherwise pair one document's values with another's
+		// sensitive set.
+		in.HideAllValues = true
 	} else {
 		in.Sensitive = sens
 	}
@@ -386,36 +452,84 @@ func (p *Page) TakeNotes() []string {
 	return n
 }
 
+// domNode is one node of a DOM.getDocument {"depth":-1,"pierce":true}
+// result: enough of the real shape to walk every element, including inside
+// shadow roots and iframes.
+type domNode struct {
+	BackendNodeID   int       `json:"backendNodeId"`
+	NodeName        string    `json:"nodeName"`
+	LocalName       string    `json:"localName"`
+	Attributes      []string  `json:"attributes"` // flat name, value, name, value, ...
+	Children        []domNode `json:"children"`
+	ShadowRoots     []domNode `json:"shadowRoots"`
+	ContentDocument *domNode  `json:"contentDocument"`
+}
+
+// attr returns a node's attribute value, matched case-insensitively.
+func (n *domNode) attr(name string) (string, bool) {
+	for i := 0; i+1 < len(n.Attributes); i += 2 {
+		if strings.EqualFold(n.Attributes[i], name) {
+			return n.Attributes[i+1], true
+		}
+	}
+	return "", false
+}
+
+// isSensitiveDOMNode applies the sensitive-field rule in Go, over a node
+// DOM.querySelectorAll could never have reached inside a shadow root: an
+// <input type=password> (case-insensitive), or any element whose
+// autocomplete attribute's whitespace-separated tokens (case-insensitive)
+// include one of sensitiveAutocompleteTokens.
+func isSensitiveDOMNode(n *domNode) bool {
+	local := strings.ToLower(n.LocalName)
+	if local == "" {
+		local = strings.ToLower(n.NodeName)
+	}
+	if typ, ok := n.attr("type"); ok && local == "input" && strings.EqualFold(typ, "password") {
+		return true
+	}
+	if ac, ok := n.attr("autocomplete"); ok {
+		for _, tok := range strings.Fields(strings.ToLower(ac)) {
+			if sensitiveAutocompleteTokens[tok] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// walkSensitive collects every sensitive node's backend id and kind,
+// recursing into children, shadow roots (the whole point: getFullAXTree
+// already flattens across them, so the DOM query must too) and iframe
+// content documents.
+func walkSensitive(n *domNode, out map[int]string) {
+	if n == nil {
+		return
+	}
+	if isSensitiveDOMNode(n) {
+		out[n.BackendNodeID] = sensitiveKind(n.Attributes)
+	}
+	for i := range n.Children {
+		walkSensitive(&n.Children[i], out)
+	}
+	for i := range n.ShadowRoots {
+		walkSensitive(&n.ShadowRoots[i], out)
+	}
+	walkSensitive(n.ContentDocument, out)
+}
+
 // sensitive finds the password, one-time-code and card fields, by backend
-// id, with their kind — pure protocol, nothing run in the page.
+// id, with their kind — pure protocol (one DOM.getDocument, pierced through
+// shadow DOM, walked in Go), nothing run in the page.
 func (p *Page) sensitive(ctx context.Context) (map[int]string, error) {
 	var doc struct {
-		Root struct {
-			NodeID int `json:"nodeId"`
-		} `json:"root"`
+		Root domNode `json:"root"`
 	}
-	if err := p.call(ctx, "DOM.getDocument", map[string]any{"depth": 0}, &doc); err != nil {
-		return nil, err
-	}
-	var q struct {
-		NodeIDs []int `json:"nodeIds"`
-	}
-	if err := p.call(ctx, "DOM.querySelectorAll", map[string]any{"nodeId": doc.Root.NodeID, "selector": sensitiveSelector}, &q); err != nil {
+	if err := p.call(ctx, "DOM.getDocument", map[string]any{"depth": -1, "pierce": true}, &doc); err != nil {
 		return nil, err
 	}
 	out := map[int]string{}
-	for _, id := range q.NodeIDs {
-		var d struct {
-			Node struct {
-				BackendNodeID int      `json:"backendNodeId"`
-				Attributes    []string `json:"attributes"`
-			} `json:"node"`
-		}
-		if err := p.call(ctx, "DOM.describeNode", map[string]any{"nodeId": id}, &d); err != nil {
-			return nil, err
-		}
-		out[d.Node.BackendNodeID] = sensitiveKind(d.Node.Attributes)
-	}
+	walkSensitive(&doc.Root, out)
 	return out, nil
 }
 
@@ -560,6 +674,14 @@ func (p *Page) Click(ctx context.Context, ref string) error {
 		if err := p.call(ctx, "Page.handleJavaScriptDialog", map[string]any{"accept": accept}, nil); err != nil {
 			return err
 		}
+		// Clear the dialog ourselves now, rather than waiting for the
+		// browser's own (later, asynchronous) Page.javascriptDialogClosed:
+		// settle must see a page free to load, and a caller's very next
+		// Snapshot must not still show what was just answered.
+		p.mu.Lock()
+		p.dialog = nil
+		p.mu.Unlock()
+		p.refs.ClearDialog()
 		p.settle(ctx)
 		return nil
 	}
@@ -578,21 +700,41 @@ func (p *Page) Click(ctx context.Context, ref string) error {
 	}
 	c := box.Model.Content
 	x, y := (c[0]+c[2]+c[4]+c[6])/4, (c[1]+c[3]+c[5]+c[7])/4
+	inputCtx, cancel := context.WithCancel(ctx)
+	p.mu.Lock()
+	p.cancelInput = cancel
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.cancelInput = nil
+		p.mu.Unlock()
+		cancel()
+	}()
 	for _, typ := range []string{"mouseMoved", "mousePressed", "mouseReleased"} {
 		ev := map[string]any{"type": typ, "x": x, "y": y}
 		if typ != "mouseMoved" {
 			ev["button"], ev["clickCount"] = "left", 1
 		}
-		if err := p.call(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
-			return err
+		if err := p.call(inputCtx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+			p.mu.Lock()
+			blocked := p.dialog != nil
+			p.mu.Unlock()
+			if !blocked {
+				return err
+			}
+			// The event itself opened a dialog, which real Chrome holds
+			// this reply behind; the late reply, if it ever comes, is
+			// simply dropped by Conn. Treat the click as done.
+			break
 		}
 	}
 	p.settle(ctx)
 	return nil
 }
 
-const selectAllJS = `function(){ if (typeof this.select === 'function') { this.select(); return } ` +
-	`const r = document.createRange(); r.selectNodeContents(this); const s = getSelection(); s.removeAllRanges(); s.addRange(r) }`
+const selectAllJS = `function(){ if (typeof this.select === 'function') { this.select() } else { ` +
+	`const r = document.createRange(); r.selectNodeContents(this); const s = getSelection(); s.removeAllRanges(); s.addRange(r) } ` +
+	`return this === document.activeElement }`
 
 // Type replaces a field's content with text; submit presses Enter after.
 // An empty text clears the field.
@@ -604,8 +746,19 @@ func (p *Page) Type(ctx context.Context, ref, text string, submit bool) error {
 	if err := p.call(ctx, "DOM.focus", map[string]any{"backendNodeId": backend}, nil); err != nil {
 		return fmt.Errorf("%s cannot take text (is it a field?)", NormalizeRef(ref))
 	}
-	if _, err := p.callOn(ctx, backend, selectAllJS); err != nil {
+	focused, err := p.callOn(ctx, backend, selectAllJS)
+	if err != nil {
 		return err
+	}
+	// Right before writing anything, re-check what an earlier snapshot may
+	// have already told the caller: never trust it. A sensitive field is
+	// refused outright; a field that lost focus between resolving it and
+	// here is refused too, since text would then land somewhere else.
+	if sens, _ := p.IsSensitive(ctx, ref); sens {
+		return &SensitiveFieldError{Ref: NormalizeRef(ref)}
+	}
+	if ok, _ := focused.(bool); !ok {
+		return fmt.Errorf("%s lost focus before typing; take a snapshot and try again", NormalizeRef(ref))
 	}
 	if text == "" {
 		if err := p.key(ctx, keys["delete"]); err != nil {
@@ -651,8 +804,8 @@ type keyDef struct {
 
 var keys = map[string]keyDef{
 	"enter": {"Enter", "Enter", 13, "\r"}, "return": {"Enter", "Enter", 13, "\r"},
-	"tab":       {"Tab", "Tab", 9, ""},
-	"escape":    {"Escape", "Escape", 27, ""}, "esc": {"Escape", "Escape", 27, ""},
+	"tab":    {"Tab", "Tab", 9, ""},
+	"escape": {"Escape", "Escape", 27, ""}, "esc": {"Escape", "Escape", 27, ""},
 	"backspace": {"Backspace", "Backspace", 8, ""},
 	"delete":    {"Delete", "Delete", 46, ""},
 	"space":     {" ", "Space", 32, " "},
@@ -670,8 +823,23 @@ func (p *Page) Press(ctx context.Context, key string) error {
 	if !ok {
 		return fmt.Errorf("unknown key %q; use one of: Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home, End, PageUp, PageDown", key)
 	}
-	if err := p.key(ctx, k); err != nil {
-		return err
+	inputCtx, cancel := context.WithCancel(ctx)
+	p.mu.Lock()
+	p.cancelInput = cancel
+	p.mu.Unlock()
+	err := p.key(inputCtx, k)
+	p.mu.Lock()
+	p.cancelInput = nil
+	p.mu.Unlock()
+	cancel()
+	if err != nil {
+		p.mu.Lock()
+		blocked := p.dialog != nil
+		p.mu.Unlock()
+		if !blocked {
+			return err
+		}
+		// The key itself opened a dialog; see Click's identical case.
 	}
 	p.settle(ctx)
 	return nil
