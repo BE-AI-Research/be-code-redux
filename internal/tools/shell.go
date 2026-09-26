@@ -54,10 +54,20 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 		}
 		return t.execute(ctx, command, args)
 	}
-	switch classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny) {
-	case cmdDenied:
+	class := classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny)
+	switch {
+	case class == cmdDenied:
 		return Result{IsError: true, Content: "this command matches the deny list and will never run; use a safer alternative"}
-	case cmdAllowed:
+	case t.r.UntrustedWeb():
+		// This request has read a page from a host the user has not
+		// allowed: every automatic approval — the allow list, -y, "a",
+		// auto_approve_shell — is suspended, and the command asks as its
+		// own action, which offers no "always" (spec §3.6, amended). With
+		// nobody to ask, it is refused.
+		if t.r.Approve == nil || !t.r.Approve("shell_after_web", command) {
+			return Result{IsError: true, Content: "shell is not auto-approved after reading an untrusted web page in this request, and this command was not approved; say what you wanted to run and why"}
+		}
+	case class == cmdAllowed:
 		// pre-approved by allowlist; no prompt
 	default:
 		if t.r.Approve != nil && !t.r.Approve("shell", command) {
