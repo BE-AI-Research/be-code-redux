@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/schedule"
+	"github.com/brown-enterprises/be-code/internal/store"
 )
 
 func approver(answer bool, log *[]string) func(string, string) bool {
@@ -116,6 +119,9 @@ func TestModelCannotCancelPersonsScheduleWithoutAsking(t *testing.T) {
 	}
 	if len(log) != 1 {
 		t.Fatalf("asked the person: %v", log)
+	}
+	if sc, ok, _ := ag.sched.lookup("mine"); !ok || sc.State != schedule.Active {
+		t.Fatalf("declined: the person's schedule is untouched: %+v %v", sc, ok)
 	}
 	if _, err := ag.ScheduleAction("cancel", "its", "agent"); err != nil {
 		t.Fatalf("its own: no prompt needed: %v", err)
@@ -304,5 +310,324 @@ func TestModelPausesItsOwnWithoutAskingAndCannotResumeAfterWeb(t *testing.T) {
 	}
 	if _, err := ag.ScheduleAction("run", "its", "agent"); err == nil {
 		t.Fatal("only a person runs a schedule now")
+	}
+}
+
+// editInstruction rewrites a stored schedule's instruction, as a hand edit
+// of schedules.md would. Safe from inside an approver: it takes s.mu, so a
+// prompt raised under the lock would deadlock here.
+func editInstruction(t *testing.T, ag *Agent, name, text string) {
+	t.Helper()
+	s := ag.sched
+	s.mu.Lock()
+	defer s.unlock()
+	s.reloadLocked()
+	sc, ok, project := s.findLocked(name)
+	if !ok {
+		t.Fatalf("no %s", name)
+	}
+	sc.Instruction = text
+	s.putLocked(sc, project)
+}
+
+func approvedNow(ag *Agent, name string) bool {
+	s := ag.sched
+	s.mu.Lock()
+	defer s.unlock()
+	s.reloadLocked()
+	sc, _, _ := s.findLocked(name)
+	return s.approvedLocked(sc)
+}
+
+func TestDoneOneOffDoesNotShadowNewSchedule(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "done"}}})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	if _, err := ag.AddSchedule(schedule.Request{Name: "x", When: "in 5m", Instruction: "first"}, "person"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ag.ScheduleAction("run", "x", "person"); err != nil {
+		t.Fatal(err)
+	}
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	if sc, _, _ := ag.sched.lookup("x"); sc.State != schedule.Done {
+		t.Fatalf("ran to done: %+v", sc)
+	}
+	if _, err := ag.AddSchedule(schedule.Request{Name: "x", When: "in 5m", Instruction: "second"}, "person"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, _, _ := ag.sched.lookup("x"); sc.State != schedule.Active || sc.Instruction != "second" {
+		t.Fatalf("the name means the live one: %+v", sc)
+	}
+	if _, err := ag.ScheduleAction("cancel", "x", "person"); err != nil {
+		t.Fatal(err)
+	}
+	if sc, ok, _ := ag.sched.lookup("x"); ok {
+		t.Fatalf("the live one is gone (and the done one was replaced): %+v", sc)
+	}
+	ag.StartSchedules()
+	clock.Advance(10 * time.Minute)
+	ag.sched.kickLoop()
+	time.Sleep(50 * time.Millisecond)
+	if ag.Pending() != 0 {
+		t.Fatal("nothing fires")
+	}
+}
+
+func TestDescribeListsTimesAfterNow(t *testing.T) {
+	old := mk("old", "every 30m")
+	old.Created = t0.Add(-30 * 24 * time.Hour)
+	sp, err := old.Spec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := describe(old, sp, t0)
+	i := strings.Index(d, "next: ")
+	if i < 0 {
+		t.Fatalf("no next line:\n%s", d)
+	}
+	first, err := time.ParseInLocation("Mon 2006-01-02 15:04", d[i+6:i+6+len("Mon 2006-01-02 15:04")], time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.After(t0) {
+		t.Fatalf("first listed time %v is not after now:\n%s", first, d)
+	}
+}
+
+func TestResumeRefusedPastMaxActive(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	ag.Cfg.Schedules.MaxActive = 1
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.AddSchedule(schedule.Request{Name: "a", When: "daily 09:00", Instruction: "x"}, "person")
+	ag.ScheduleAction("pause", "a", "person")
+	if _, err := ag.AddSchedule(schedule.Request{Name: "b", When: "daily 10:00", Instruction: "x"}, "person"); err != nil {
+		t.Fatal(err)
+	}
+	log = nil
+	if _, err := ag.ScheduleAction("resume", "a", "person"); err == nil || !strings.Contains(err.Error(), "max_active") {
+		t.Fatalf("err %v", err)
+	}
+	if len(log) != 0 {
+		t.Fatal("a refusal never asks")
+	}
+	if sc, _, _ := ag.sched.lookup("a"); sc.State != schedule.Paused {
+		t.Fatal("still paused")
+	}
+}
+
+func TestResumeRefusedTooFrequent(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	sc := mk("f", "every 30m")
+	sc.State = schedule.Paused
+	seed(t, ag, sc, true)
+	sc.When = "every 1m" // a hand edit
+	ag.sched.mu.Lock()
+	ag.sched.putLocked(sc, true)
+	ag.sched.unlock()
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	if _, err := ag.ScheduleAction("resume", "f", "person"); err == nil || !strings.Contains(err.Error(), "min_interval") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestStartupYesLeavesTooFrequentPaused(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	notes := noteSink(ag)
+	sc := mk("f", "every 30m")
+	seed(t, ag, sc, true)
+	sc.When = "every 1m" // a hand edit
+	ag.sched.mu.Lock()
+	ag.sched.putLocked(sc, true)
+	ag.sched.unlock()
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.StartSchedules()
+	if got, _, _ := ag.sched.lookup("f"); got.State != schedule.Paused {
+		t.Fatalf("yes does not arm a too-frequent schedule: %+v", got)
+	}
+	if n := notes(); !strings.Contains(n, `"f"`) || !strings.Contains(n, "min_interval") {
+		t.Fatalf("notice names the reason: %q", n)
+	}
+}
+
+func TestStartupYesPastMaxActivePausesTheRest(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	ag.Cfg.Schedules.MaxActive = 1
+	notes := noteSink(ag)
+	seed(t, ag, mk("a", "daily 09:00"), true)
+	seed(t, ag, mk("b", "daily 10:00"), true)
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.StartSchedules()
+	a, _, _ := ag.sched.lookup("a")
+	b, _, _ := ag.sched.lookup("b")
+	if a.State != schedule.Active || b.State != schedule.Paused {
+		t.Fatalf("a %s, b %s", a.State, b.State)
+	}
+	if !strings.Contains(notes(), "max_active") {
+		t.Fatal("notice names the reason")
+	}
+}
+
+func TestResumeChangedWhileAsked(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.AddSchedule(schedule.Request{Name: "n", When: "daily 09:00", Instruction: "x"}, "person")
+	ag.ScheduleAction("pause", "n", "person")
+	ag.Tools.Approve = func(string, string) bool {
+		editInstruction(t, ag, "n", "something else")
+		return true
+	}
+	if _, err := ag.ScheduleAction("resume", "n", "person"); err == nil ||
+		!strings.Contains(err.Error(), "changed while you were asked; nothing was resumed") {
+		t.Fatalf("err %v", err)
+	}
+	if sc, _, _ := ag.sched.lookup("n"); sc.State != schedule.Paused {
+		t.Fatal("not resumed")
+	}
+	if approvedNow(ag, "n") {
+		t.Fatal("the edited content was never approved")
+	}
+}
+
+func TestStartupYesApprovesOnlyWhatWasShown(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	ag.sched.mu.Lock()
+	ag.sched.reloadLocked()
+	ag.sched.putLocked(mk("a", "daily 09:00"), true)
+	ag.sched.putLocked(mk("b", "daily 10:00"), true)
+	ag.sched.unlock()
+	ag.Tools.Approve = func(string, string) bool {
+		editInstruction(t, ag, "b", "something else")
+		return true
+	}
+	ag.StartSchedules()
+	if !approvedNow(ag, "a") {
+		t.Fatal("a approved")
+	}
+	if approvedNow(ag, "b") {
+		t.Fatal("b's edit was never shown, so never approved")
+	}
+}
+
+func TestAddRefusedWhenNameTakenWhileAsked(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	ag.Tools.Approve = func(string, string) bool {
+		seed(t, ag, mk("x", "daily 09:00"), true)
+		return true
+	}
+	if _, err := ag.AddSchedule(schedule.Request{Name: "x", When: "daily 10:00", Instruction: "y"}, "person"); err == nil ||
+		!strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("err %v", err)
+	}
+	if sc, _, _ := ag.sched.lookup("x"); sc.When != "daily 09:00" {
+		t.Fatalf("the other one stands: %+v", sc)
+	}
+}
+
+func TestByMustBePersonOrAgent(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	if _, err := ag.AddSchedule(schedule.Request{Name: "a", When: "in 5m", Instruction: "x"}, "someone"); err == nil {
+		t.Fatal("add refuses an unknown by")
+	}
+	ag.AddSchedule(schedule.Request{Name: "a", When: "in 5m", Instruction: "x"}, "person")
+	if _, err := ag.ScheduleAction("cancel", "a", ""); err == nil {
+		t.Fatal("an action refuses an unknown by")
+	}
+}
+
+func TestStartupGateOnce(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	b := mk("b", "daily 09:00")
+	seed(t, ag, b, true)
+	b.Instruction = "edited"
+	ag.sched.mu.Lock()
+	ag.sched.putLocked(b, true)
+	ag.sched.unlock()
+	var log []string
+	ag.Tools.Approve = approver(false, &log)
+	ag.StartSchedules()
+	ag.StartSchedules()
+	if len(log) != 1 {
+		t.Fatalf("one startup prompt: %v", log)
+	}
+	if !strings.Contains(log[0], "b   (changed since approved)\n  when:") {
+		t.Fatalf("mark on the name line:\n%s", log[0])
+	}
+}
+
+func TestResumePassedOneOffSaysSo(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.AddSchedule(schedule.Request{Name: "o", When: "in 5m", Instruction: "x"}, "person")
+	ag.ScheduleAction("pause", "o", "person")
+	clock.Advance(10 * time.Minute)
+	log = nil
+	if _, err := ag.ScheduleAction("resume", "o", "person"); err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 1 || !strings.Contains(log[0], "its time has passed; it will run as soon as it is resumed") {
+		t.Fatalf("%v", log)
+	}
+}
+
+func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
+	for _, answer := range []bool{false, true} {
+		ag, clock, _ := schedAgent(t, &scriptedProvider{})
+		asked := make(chan string, 4)
+		reply := make(chan bool)
+		ag.Tools.Approve = func(_, detail string) bool { asked <- detail; return <-reply }
+		ag.StartSchedules() // nothing active: no prompt, loop running
+		tm := mk("t", "in 1m")
+		seed(t, ag, tm, false) // approved in an earlier process
+		ag.SetSession(&store.Session{ID: "s0"})
+		clock.Advance(2 * time.Minute) // due
+		ag.SetSession(&store.Session{ID: "s2", Timers: []schedule.Schedule{tm}})
+		var detail string
+		select {
+		case detail = <-asked:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the switched-in timers were not confirmed")
+		}
+		if !strings.Contains(detail, "t\n  when:") {
+			t.Fatalf("lists the timer: %s", detail)
+		}
+		ag.sched.kickLoop()
+		time.Sleep(50 * time.Millisecond)
+		if ag.Pending() != 0 {
+			t.Fatal("nothing queued before the answer")
+		}
+		reply <- answer
+		if answer {
+			waitQueued(t, ag, 1)
+		} else {
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				if sc, _, _ := ag.sched.lookup("t"); sc.State == schedule.Paused {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("no pauses it")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+			if ag.Pending() != 0 {
+				t.Fatal("nothing queued after no")
+			}
+		}
+		select {
+		case d := <-asked:
+			t.Fatalf("asked once: %s", d)
+		default:
+		}
+		ag.StopSchedules()
 	}
 }

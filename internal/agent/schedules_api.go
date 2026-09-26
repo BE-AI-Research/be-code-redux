@@ -37,21 +37,35 @@ func byLabel(by string) string {
 }
 
 // describe is the whole schedule for one prompt: nothing is asked later.
-func describe(sc schedule.Schedule, sp schedule.Spec) string {
+// The due times listed are the next three after now (and after its last
+// run), never ones computed from its creation, which for an old schedule
+// lie weeks in the past.
+func describe(sc schedule.Schedule, sp schedule.Spec, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n  when: %s\n", sc.Name, sc.When)
-	var nexts []string
-	t := sc.Created
-	for i := 0; i < 3; i++ {
-		n, ok := sp.Next(t)
-		if !ok {
-			break
+	if due, ok := sp.Due(); ok {
+		if due.After(now) {
+			fmt.Fprintf(&b, "  next: %s\n", due.Format("Mon 2006-01-02 15:04"))
+		} else {
+			fmt.Fprintf(&b, "  next: %s (already passed)\n", due.Format("Mon 2006-01-02 15:04"))
 		}
-		nexts = append(nexts, n.Format("Mon 2006-01-02 15:04"))
-		t = n
-	}
-	if len(nexts) > 0 {
-		fmt.Fprintf(&b, "  next: %s\n", strings.Join(nexts, " · "))
+	} else {
+		t := now
+		if sc.LastRun.After(t) {
+			t = sc.LastRun
+		}
+		var nexts []string
+		for i := 0; i < 3; i++ {
+			n, ok := sp.Next(t)
+			if !ok {
+				break
+			}
+			nexts = append(nexts, n.Format("Mon 2006-01-02 15:04"))
+			t = n
+		}
+		if len(nexts) > 0 {
+			fmt.Fprintf(&b, "  next: %s\n", strings.Join(nexts, " · "))
+		}
 	}
 	fmt.Fprintf(&b, "  instruction: %s\n", strings.ReplaceAll(sc.Instruction, "\n", "\n    "))
 	if sc.Task != "" {
@@ -72,21 +86,58 @@ func describe(sc schedule.Schedule, sp schedule.Spec) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// describeMarked is describe with mark on the schedule's name line.
+func describeMarked(sc schedule.Schedule, sp schedule.Spec, now time.Time, mark string) string {
+	d := describe(sc, sp, now)
+	if mark == "" {
+		return d
+	}
+	return strings.Replace(d, "\n", mark+"\n", 1)
+}
+
+func validBy(by string) error {
+	if by != "person" && by != "agent" {
+		return fmt.Errorf("by must be \"person\" or \"agent\" (got %q)", by)
+	}
+	return nil
+}
+
+// tooFrequent is add's min_interval refusal, shared with resume and the
+// startup prompt (a hand edit can shorten an approved interval).
+func (a *Agent) tooFrequent(sp schedule.Spec, now time.Time) error {
+	minGap, _, _ := a.Cfg.Schedules.Durations()
+	if sp.Recurring() && sp.ShortestGap(now) < minGap {
+		return fmt.Errorf("%q runs more often than every %s (schedules.min_interval)", sp.String(), minGap)
+	}
+	return nil
+}
+
+// activeLocked counts active schedules other than except.
+func (s *scheduler) activeLocked(except string) int {
+	n := 0
+	for _, o := range s.allLocked() {
+		if o.State == schedule.Active && o.ID != except {
+			n++
+		}
+	}
+	return n
+}
+
+func maxActiveErr(active int) error {
+	return fmt.Errorf("%d schedules are already active (schedules.max_active); cancel one first", active)
+}
+
 // admitLocked refuses a name already in use and an addition past
 // schedules.max_active. Checked before the prompt, so a refusal never asks,
 // and again after it, since the file may have changed meanwhile.
 func (s *scheduler) admitLocked(name string) error {
-	active := 0
 	for _, o := range s.allLocked() {
 		if o.Name == name && o.State != schedule.Done {
 			return fmt.Errorf("a schedule named %q already exists; cancel it first", name)
 		}
-		if o.State == schedule.Active {
-			active++
-		}
 	}
-	if max := s.a.Cfg.Schedules.MaxActive; max > 0 && active >= max {
-		return fmt.Errorf("%d schedules are already active (schedules.max_active); cancel one first", active)
+	if active := s.activeLocked(""); s.a.Cfg.Schedules.MaxActive > 0 && active >= s.a.Cfg.Schedules.MaxActive {
+		return maxActiveErr(active)
 	}
 	return nil
 }
@@ -115,10 +166,12 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 	if s == nil {
 		return "", errSchedulesOff
 	}
+	if err := validBy(by); err != nil {
+		return "", err
+	}
 	if by == "agent" && a.Tools.UntrustedWeb() {
 		return "", errors.New("a web page was read during this request, so the model cannot create schedules until a person's next request; a person can add it with /schedule add")
 	}
-	minGap, _, _ := a.Cfg.Schedules.Durations()
 	now := s.clock.Now()
 	name := strings.TrimSpace(req.Name)
 	if !schedule.ValidName(name) {
@@ -131,8 +184,8 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if g := sp.ShortestGap(now); sp.Recurring() && g < minGap {
-		return "", fmt.Errorf("%q runs more often than every %s (schedules.min_interval)", sp.String(), minGap)
+	if err := a.tooFrequent(sp, now); err != nil {
+		return "", err
 	}
 	if due, ok := sp.Due(); ok && !due.After(now) {
 		return "", fmt.Errorf("that time has already passed (%s)", due.Format("2006-01-02 15:04"))
@@ -157,12 +210,19 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 	if by == "agent" {
 		head = "The model wants to schedule:"
 	}
-	if !a.askSchedule(head + "\n\n" + describe(sc, sp)) {
+	if !a.askSchedule(head + "\n\n" + describe(sc, sp, now)) {
 		return "", errors.New("the schedule was not approved")
 	}
 	s.mu.Lock()
 	s.reloadLocked()
 	if err = s.admitLocked(name); err == nil {
+		// A finished one-off keeps its name in the timers; the new
+		// schedule replaces it, so the name means one thing.
+		for _, o := range s.allLocked() {
+			if o.Name == name && o.State == schedule.Done {
+				s.removeLocked(o.ID)
+			}
+		}
 		if err = s.putLocked(sc, sp.Recurring()); err == nil {
 			s.approveLocked(sc)
 		}
@@ -184,17 +244,21 @@ func (a *Agent) ScheduleAction(action, name, by string) (string, error) {
 	if s == nil {
 		return "", errSchedulesOff
 	}
+	if err := validBy(by); err != nil {
+		return "", err
+	}
 	sc, ok, _ := s.lookup(name)
 	if !ok {
 		return "", fmt.Errorf("no schedule named %q", name)
 	}
+	now := s.clock.Now()
 	switch action {
 	case "pause", "cancel":
 		if by == "agent" && sc.CreatedBy != "agent" {
 			sp, err := sc.Spec()
 			detail := sc.Name + "\n  when: " + sc.When
 			if err == nil {
-				detail = describe(sc, sp)
+				detail = describe(sc, sp, now)
 			}
 			if !a.askSchedule(fmt.Sprintf("The model wants to %s your schedule:\n\n%s", action, detail)) {
 				return "", fmt.Errorf("%s of %q was not approved", action, name)
@@ -232,23 +296,54 @@ func (a *Agent) ScheduleAction(action, name, by string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("%q cannot be resumed: %v", name, err)
 		}
-		if !a.askSchedule("Resume this schedule?\n\n" + describe(sc, sp)) {
+		// Resuming is widening: add's refusals apply, before the prompt
+		// (a refusal never asks) and again after it.
+		check := func() error {
+			if err := a.tooFrequent(sp, s.clock.Now()); err != nil {
+				return err
+			}
+			if max := a.Cfg.Schedules.MaxActive; max > 0 {
+				if n := s.activeLocked(sc.ID); n >= max {
+					return maxActiveErr(n)
+				}
+			}
+			return nil
+		}
+		s.mu.Lock()
+		s.reloadLocked()
+		err = check()
+		s.unlock()
+		if err != nil {
+			return "", err
+		}
+		detail := "Resume this schedule?\n\n" + describe(sc, sp, now)
+		if due, ok := sp.Due(); ok && !due.After(now) {
+			detail += "\n  its time has passed; it will run as soon as it is resumed"
+		}
+		if !a.askSchedule(detail) {
 			return "", fmt.Errorf("resuming %q was not approved", name)
 		}
 		s.mu.Lock()
 		s.reloadLocked()
 		cur, ok, project := s.findLocked(sc.ID)
-		if ok && cur.Hash() == sc.Hash() {
+		same := ok && cur.Hash() == sc.Hash()
+		if same {
+			err = check()
+		}
+		if same && err == nil {
 			cur.State, cur.Failures = schedule.Active, 0
 			s.putLocked(cur, project)
 			s.approveLocked(cur)
+			delete(s.held, cur.ID)
 		}
 		s.unlock()
 		switch {
 		case !ok:
 			return "", fmt.Errorf("no schedule named %q", name)
-		case cur.Hash() != sc.Hash():
+		case !same:
 			return "", fmt.Errorf("%q changed while you were asked; nothing was resumed", name)
+		case err != nil:
+			return "", err
 		}
 		s.kickLoop()
 		return name + ": active", nil
@@ -319,7 +414,7 @@ func (a *Agent) ScheduleShow(name string) ([]string, error) {
 	if project {
 		where = ".be-code/schedules.md"
 	}
-	lines := strings.Split(describe(sc, sp), "\n")
+	lines := strings.Split(describe(sc, sp, a.sched.clock.Now()), "\n")
 	lines = append(lines, "  state: "+string(sc.State), "  set by: "+byLabel(sc.CreatedBy), "  stored in: "+where)
 	if !sc.LastRun.IsZero() {
 		lines = append(lines, fmt.Sprintf("  last run: %s — %s", sc.LastRun.Format("2006-01-02 15:04"), sc.LastOutcome))
@@ -354,58 +449,137 @@ func (a *Agent) NextSchedule() (string, time.Time, bool) {
 }
 
 // StartSchedules raises the startup prompt, when anything is active, and
-// starts the loop (spec §3.5). yes approves exactly what was shown; no
-// pauses every one of them. Plain mode calls it on its own goroutine's way
-// into the REPL; the TUI uses StartSchedulesAsync.
+// starts the loop (spec §3.5). It runs once per scheduler; a second call is
+// a no-op. Plain mode calls it on its own goroutine's way into the REPL;
+// the TUI uses StartSchedulesAsync.
 func (a *Agent) StartSchedules() {
 	s := a.sched
 	if s == nil {
 		return
 	}
+	s.gateOnce.Do(func() {
+		a.gateSchedules(0, "These scheduled events will run while this session is open:")
+		s.startLoop()
+	})
+}
+
+// gateSchedules is the startup-style prompt. gen 0 is the startup prompt
+// proper: every active schedule not held for a prompt of its own. gen > 0
+// is the prompt for the timers loadTimers held under that generation.
+// yes approves exactly what was shown — an edit made while the prompt was
+// open stays unapproved, and the loop pauses it at its time — except a
+// schedule add would refuse now (too frequent, past max_active), which
+// stays paused with a notice. no pauses every one shown. Never asks under
+// s.mu.
+func (a *Agent) gateSchedules(gen int, head string) {
+	s := a.sched
 	s.mu.Lock()
+	if gen == 0 {
+		s.gateBegun = true
+	}
 	s.reloadLocked()
-	var active []schedule.Schedule
+	now := s.clock.Now()
+	var shown []schedule.Schedule
 	var b strings.Builder
-	b.WriteString("These scheduled events will run while this session is open:\n")
+	b.WriteString(head + "\n")
 	for _, sc := range s.allLocked() {
-		if sc.State != schedule.Active {
+		if sc.State != schedule.Active || (gen == 0) != (s.held[sc.ID] == 0) ||
+			(gen != 0 && s.held[sc.ID] != gen) {
 			continue
 		}
-		active = append(active, sc)
+		shown = append(shown, sc)
 		mark := ""
 		if !s.approvedLocked(sc) {
 			mark = "   (changed since approved)"
 		}
 		if sp, err := sc.Spec(); err == nil {
-			fmt.Fprintf(&b, "\n%s%s", describe(sc, sp), mark)
+			fmt.Fprintf(&b, "\n%s", describeMarked(sc, sp, now, mark))
 		} else {
-			fmt.Fprintf(&b, "\n%s\n  when: %s (unreadable: %v)%s", sc.Name, sc.When, err, mark)
+			fmt.Fprintf(&b, "\n%s%s\n  when: %s (unreadable: %v)", sc.Name, mark, sc.When, err)
 		}
 	}
 	s.unlock()
-	if len(active) > 0 {
-		yes := a.askSchedule(b.String())
-		s.mu.Lock()
-		s.reloadLocked()
-		for _, sc := range active {
-			cur, ok, project := s.findLocked(sc.ID)
-			switch {
-			case !ok:
-			case yes && cur.Hash() == sc.Hash():
-				// Only what was shown: an edit made while the prompt was
-				// open stays unapproved, and the loop pauses it at its time.
-				s.approveLocked(cur)
-			case !yes && cur.State == schedule.Active:
-				cur.State = schedule.Paused
-				s.putLocked(cur, project)
-			}
-		}
-		s.unlock()
-		if !yes {
-			a.notice("%d scheduled events paused; /schedule resume <name> brings one back", len(active))
+	if len(shown) == 0 {
+		a.releaseHeld(gen)
+		return
+	}
+	yes := a.askSchedule(b.String())
+	s.mu.Lock()
+	s.reloadLocked()
+	now = s.clock.Now()
+	ids := map[string]bool{}
+	for _, sc := range shown {
+		ids[sc.ID] = true
+	}
+	count := 0
+	for _, o := range s.allLocked() {
+		if o.State == schedule.Active && !ids[o.ID] && s.held[o.ID] == 0 {
+			count++
 		}
 	}
-	s.startLoop()
+	max := a.Cfg.Schedules.MaxActive
+	for _, sc := range shown {
+		cur, ok, project := s.findLocked(sc.ID)
+		if !ok || cur.State != schedule.Active {
+			continue
+		}
+		pause := func(why error) {
+			cur.State = schedule.Paused
+			s.putLocked(cur, project)
+			if why != nil {
+				s.noteLocked("schedule %q stays paused: %v", cur.Name, why)
+			}
+		}
+		if !yes {
+			pause(nil)
+			continue
+		}
+		if sp, err := cur.Spec(); err == nil {
+			if ferr := a.tooFrequent(sp, now); ferr != nil {
+				pause(ferr) // add would refuse it: never left armed
+				continue
+			}
+		}
+		if cur.Hash() != sc.Hash() {
+			count++ // still active; the loop pauses it when it comes due
+			continue
+		}
+		if max > 0 && count >= max {
+			pause(maxActiveErr(count))
+			continue
+		}
+		s.approveLocked(cur)
+		count++
+	}
+	s.releaseHeldLocked(gen)
+	s.unlock()
+	if !yes {
+		a.notice("%d scheduled events paused; /schedule resume <name> brings one back", len(shown))
+	}
+	s.kickLoop()
+}
+
+// releaseHeld drops the holds of generation gen (0: none).
+func (a *Agent) releaseHeld(gen int) {
+	if gen == 0 {
+		return
+	}
+	s := a.sched
+	s.mu.Lock()
+	s.releaseHeldLocked(gen)
+	s.unlock()
+	s.kickLoop()
+}
+
+func (s *scheduler) releaseHeldLocked(gen int) {
+	if gen == 0 {
+		return
+	}
+	for id, g := range s.held {
+		if g == gen {
+			delete(s.held, id)
+		}
+	}
 }
 
 // StartSchedulesAsync is StartSchedules on a goroutine of its own, fenced

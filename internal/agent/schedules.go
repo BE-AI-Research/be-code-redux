@@ -57,6 +57,14 @@ type scheduler struct {
 	// next reread of the file, and fire back to back.
 	floor map[string]time.Time
 
+	// held marks timers loaded by a session switch after the startup prompt
+	// began, by the generation of the prompt that will confirm them; the
+	// loop never queues a held timer (loadTimers).
+	held      map[string]int
+	holdGen   int
+	gateBegun bool // the startup prompt has begun (StartSchedules)
+
+	gateOnce  sync.Once
 	startOnce sync.Once
 	stopOnce  sync.Once
 	kick      chan struct{}
@@ -78,6 +86,7 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 		approvalsPath: filepath.Join(base, "engine", engine.Key(a.Tools.Root), "schedules.json"),
 		warned:        map[string]bool{},
 		pending:       map[string]pendingEvent{},
+		held:          map[string]int{},
 		floor:         map[string]time.Time{},
 		kick:          make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	s.approvals = schedule.LoadApprovals(s.approvalsPath)
@@ -108,12 +117,39 @@ func (s *scheduler) unlock() {
 // loadTimers replaces the one-off timers with a newly installed session's
 // (SetSession: a resume, or /clear with none). They are written back to the
 // session too, so a save of the old list that raced the switch cannot stick.
+//
+// Once the startup prompt has begun, timers arriving this way (plain
+// mode's /resume, a picker switch) were never shown to anyone in this
+// process: their active ones are held — never queued — until a person
+// confirms them with a startup-style prompt of their own (spec §3.5, "starts
+// or resumes"), raised on its own goroutine.
 func (s *scheduler) loadTimers(ts []schedule.Schedule) {
 	s.mu.Lock()
 	s.timers = append([]schedule.Schedule(nil), ts...)
 	s.saveTimersLocked()
+	s.held = map[string]int{}
+	gen := 0
+	if s.gateBegun {
+		s.holdGen++
+		for _, sc := range s.timers {
+			if sc.State == schedule.Active {
+				s.held[sc.ID] = s.holdGen
+				gen = s.holdGen
+			}
+		}
+	}
 	s.unlock()
 	s.kickLoop()
+	if gen != 0 {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.a.notice("confirming this session's timers failed (%v); they stay held", r)
+				}
+			}()
+			s.a.gateSchedules(gen, "This session's timers will run while it is open:")
+		}()
+	}
 }
 
 // reloadLocked rereads schedules.md: the file wins over what we hold.
@@ -156,17 +192,42 @@ func (s *scheduler) floorLocked(sc schedule.Schedule) schedule.Schedule {
 	return sc
 }
 
-// findLocked finds by ID or name, with the LastRun floor applied.
+// findLocked finds by ID, else by name, with the LastRun floor applied. A
+// name prefers a schedule that is not done: a finished one-off keeps its
+// name in the session's timers, and must never shadow a live schedule
+// added under the same name since. A done one is returned only when no
+// live one has the name (/schedule show of a finished timer).
 func (s *scheduler) findLocked(key string) (schedule.Schedule, bool, bool) {
+	type hit struct {
+		sc      schedule.Schedule
+		project bool
+	}
+	var all []hit
 	for _, sc := range s.doc.Schedules() {
-		if sc.ID == key || sc.Name == key {
-			return s.floorLocked(sc), true, true
-		}
+		all = append(all, hit{sc, true})
 	}
 	for _, sc := range s.timers {
-		if sc.ID == key || sc.Name == key {
-			return s.floorLocked(sc), true, false
+		all = append(all, hit{sc, false})
+	}
+	for _, h := range all {
+		if h.sc.ID == key {
+			return s.floorLocked(h.sc), true, h.project
 		}
+	}
+	var done *hit
+	for i, h := range all {
+		if h.sc.Name != key {
+			continue
+		}
+		if h.sc.State != schedule.Done {
+			return s.floorLocked(h.sc), true, h.project
+		}
+		if done == nil {
+			done = &all[i]
+		}
+	}
+	if done != nil {
+		return s.floorLocked(done.sc), true, done.project
 	}
 	return schedule.Schedule{}, false, false
 }
@@ -338,6 +399,9 @@ func (s *scheduler) queueDue() (time.Time, bool) {
 		due, ok := sc.NextDue()
 		if !ok {
 			continue
+		}
+		if s.held[sc.ID] != 0 {
+			continue // awaiting its own confirmation (loadTimers)
 		}
 		if _, waiting := s.pending[sc.ID]; waiting {
 			considerNextAfter(sc, now, consider)
