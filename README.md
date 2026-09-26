@@ -1122,6 +1122,12 @@ hand; `/config` prints what the running session actually resolved.
   `browser.allow_remote` (false) — permit an address off this machine; `browser.sites` ({}) —
   host glob → `allow` | `watch` | `deny`; `browser.snapshot_chars` (12000) — the snapshot
   budget; `browser.settle_timeout` (10, seconds) — how long to wait for a page to settle
+- `schedules.enabled` (true) — scheduled events: `/schedule` and the model's `schedule` tool.
+- `schedules.min_interval` ("5m") — a recurring schedule may not run more often than this.
+- `schedules.max_active` (20) — active schedules and timers across the project and the session.
+- `schedules.ask_timeout` ("10m") — how long a fired event's prompt waits for a person before it is withdrawn and refused.
+- `schedules.max_runtime` ("30m") — a fired event's turn is cancelled after this long.
+- `schedules.pause_after_failures` (3) — a recurring schedule that fails this many runs in a row pauses itself.
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an

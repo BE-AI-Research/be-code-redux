@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIDEDefaults(t *testing.T) {
@@ -478,5 +479,33 @@ func TestValidCoworkersFailsClosedWhenEveryMaxScopeEntryIsInvalid(t *testing.T) 
 	cws, _ = cfg.ValidCoworkers()
 	if len(cws) != 1 || cws[0].SubAgent {
 		t.Fatalf("consult-only co-worker: %+v", cws)
+	}
+}
+
+func TestSchedulesDefaults(t *testing.T) {
+	c := Default()
+	s := c.Schedules
+	if !s.Enabled || s.MinInterval != "5m" || s.MaxActive != 20 || s.AskTimeout != "10m" ||
+		s.MaxRuntime != "30m" || s.PauseAfterFailures != 3 {
+		t.Fatalf("defaults: %+v", s)
+	}
+	mi, at, mr := s.Durations()
+	if mi != 5*time.Minute || at != 10*time.Minute || mr != 30*time.Minute {
+		t.Fatalf("durations %v %v %v", mi, at, mr)
+	}
+	bad := SchedulesConfig{MinInterval: "soon", AskTimeout: "-1m", MaxRuntime: ""}
+	mi, at, mr = bad.Durations()
+	if mi != 5*time.Minute || at != 10*time.Minute || mr != 30*time.Minute {
+		t.Fatalf("unusable values fall back to defaults: %v %v %v", mi, at, mr)
+	}
+}
+
+func TestSchedulesAbsentKeyKeepsDefaults(t *testing.T) {
+	c := Default()
+	if err := json.Unmarshal([]byte(`{"model":"m"}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedules.Enabled || c.Schedules.MaxActive != 20 {
+		t.Fatalf("an older config file keeps the defaults: %+v", c.Schedules)
 	}
 }

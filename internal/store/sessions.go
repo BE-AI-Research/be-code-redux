@@ -15,6 +15,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 )
 
 // Session is one saved conversation.
@@ -40,6 +41,9 @@ type Session struct {
 	// Chat is the session's chat room (/chat), newest last, capped by the
 	// TUI at 2000 lines. Absent for a session that never used it.
 	Chat []ChatLine `json:"chat,omitempty"`
+	// Timers are the session's one-off scheduled events (schedules spec
+	// §1.2); recurring schedules live in the project's schedules.md.
+	Timers []schedule.Schedule `json:"timers,omitempty"`
 }
 
 // ChatLine is one line of the room. User is an ID, "agent", or "" for a
