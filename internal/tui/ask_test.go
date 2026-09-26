@@ -250,3 +250,71 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met in 2s")
 }
+
+// TestAlwaysKeyOnNoAlwaysBrowserPrompts is Review Focus 3: browser_watch
+// and shell_after_web have no "always". handleAskKey's "a" branch falls
+// through to disabling file-write previews for any action it does not
+// name, so both must leave the modal open and change nothing.
+func TestAlwaysKeyOnNoAlwaysBrowserPrompts(t *testing.T) {
+	for _, action := range []string{"browser_watch", "shell_after_web"} {
+		t.Run(action, func(t *testing.T) {
+			s, a, _ := twoViews(t)
+			beforeCfg, beforeReg := s.cfg.ApproveFileWrites, s.ag.Tools.ApproveWrites
+			decided := make(chan bool, 1)
+			go func() { decided <- s.approveFromAgent(action, "act on github.com?\n  click button \"Merge\" [e14]") }()
+			waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+			flush(a)
+			if a.mode != modeAsk {
+				t.Fatal(`"a" closed a prompt that has no "always"`)
+			}
+			if s.cfg.ApproveFileWrites != beforeCfg || s.ag.Tools.ApproveWrites != beforeReg {
+				t.Fatal(`"a" fell through to the file-write branch`)
+			}
+			select {
+			case <-decided:
+				t.Fatal(`"a" answered the prompt`)
+			default:
+			}
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+			select {
+			case ok := <-decided:
+				if ok {
+					t.Fatal("n must decline")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("n never answered")
+			}
+		})
+	}
+}
+
+func TestAlwaysKeyOnABrowserPromptAllowsTheSite(t *testing.T) {
+	s, a, _ := twoViews(t)
+	beforeCfg := s.cfg.ApproveFileWrites
+	decided := make(chan bool, 1)
+	go func() {
+		decided <- s.approveFromAgent("browser", "act on acme.test?\n  click button \"Sign in\" [e4]\ny allows acme.test for the rest of this session")
+	}()
+	waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	select {
+	case ok := <-decided:
+		if !ok {
+			t.Fatal(`"a" on a browser prompt declined`)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal(`"a" never answered`)
+	}
+	if s.cfg.ApproveFileWrites != beforeCfg {
+		t.Fatal(`"a" on a browser prompt changed file-write previews`)
+	}
+}
+
+func TestBrowserPromptAutoApprovedUnderYes(t *testing.T) {
+	s, _, _ := twoViews(t)
+	s.cfg.AutoApproveBrowser = true
+	if !s.approveFromAgent("browser", "act on acme.test?") {
+		t.Fatal("-y did not allow a default-tier site")
+	}
+}

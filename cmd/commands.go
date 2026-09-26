@@ -14,6 +14,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/bench"
+	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
@@ -194,6 +195,16 @@ var benchCmd = &cobra.Command{
 func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 	in := bufio.NewReader(os.Stdin)
 	return func(action, detail string) bool {
+		if action == "browser" && cfg.AutoApproveBrowser {
+			return true
+		}
+		// No "always" exists for these (browser spec §3.3, §3.6): a watched
+		// site, and a shell command after an untrusted page, ask every time
+		// — and an unattended -y run has nobody to ask.
+		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) {
+			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
+			return false
+		}
 		if action == "shell" && cfg.AutoApproveShell {
 			return true
 		}
@@ -214,6 +225,35 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		l := strings.ToLower(strings.TrimSpace(line))
 		return l == "y" || l == "yes"
 	}
+}
+
+// browserDoctorLine is doctor's browser line: off, what answers at the
+// address, or what the first browser call would launch.
+func browserDoctorLine(cfg *config.Config) string {
+	b := cfg.Browser
+	if !b.Enabled {
+		return "browser: off (set browser.enabled in config to enable)"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if v, err := browser.FetchVersion(ctx, b.Address); err == nil {
+		return fmt.Sprintf("browser: %s listening at %s", v.Browser, b.Address)
+	}
+	if !b.Launch {
+		return fmt.Sprintf("browser: nothing at %s, and browser.launch is off", b.Address)
+	}
+	exe := b.Executable
+	if exe == "" {
+		exe = browser.FindExecutable()
+	}
+	if exe == "" {
+		return fmt.Sprintf("browser: nothing at %s, and no Chrome, Edge, Brave or Chromium installed to launch", b.Address)
+	}
+	mode := "visible"
+	if !browser.HasDisplay() {
+		mode = "headless: no display"
+	}
+	return fmt.Sprintf("browser: nothing at %s; the first browser call would launch %s (%s)", b.Address, exe, mode)
 }
 
 var sessionsCmd = &cobra.Command{
@@ -402,6 +442,7 @@ var doctorCmd = &cobra.Command{
 		} else {
 			fmt.Println("web search: off (set web_search.cx in config to enable)")
 		}
+		fmt.Println(browserDoctorLine(cfg))
 		if dir, err := ide.LockDir(); err == nil {
 			if lock, _ := ide.Discover(dir, mustAbs(flagDir)); lock != nil {
 				fmt.Printf("editor bridge: %s v%s on port %d (workspace %s)\n", lock.IDEName, lock.Version, lock.Port, strings.Join(lock.WorkspaceFolders, ", "))

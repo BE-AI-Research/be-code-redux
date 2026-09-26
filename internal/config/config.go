@@ -177,6 +177,13 @@ type Config struct {
 	// -y; never read from the config file.
 	AutoApproveSubAgentResume bool `json:"-"`
 
+	// AutoApproveBrowser lets default-tier browser interactions proceed
+	// without asking. Its own flag, set only by -y: acting in a browser on a
+	// site's behalf is neither "run shell commands" nor "ship code off this
+	// machine". A watched site still refuses with nobody to watch
+	// (browser spec §3.3).
+	AutoApproveBrowser bool `json:"-"`
+
 	// ApproveFileWrites shows a diff preview and asks before the agent
 	// writes or edits any file. On by default.
 	ApproveFileWrites bool `json:"approve_file_writes"`
@@ -273,6 +280,10 @@ type Config struct {
 	// Programmable Search Engine. Off unless CX is set; the API key comes
 	// only from the env var named in APIKeyEnv.
 	WebSearch WebSearchConfig `json:"web_search"`
+
+	// Browser lets the model drive a Chromium over the DevTools protocol
+	// (docs/superpowers/specs/2026-09-25-browser-design.md). Off by default.
+	Browser BrowserConfig `json:"browser"`
 
 	// KeepAlive is how long the backend should keep the model resident after
 	// each request (Ollama keep_alive; Go duration, "0" disables). Refreshed
@@ -382,6 +393,7 @@ func Default() *Config {
 		WebSearch: WebSearchConfig{
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
+		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",
 		CompactWithModel: true,
@@ -411,6 +423,37 @@ type WebSearchConfig struct {
 
 // Enabled reports whether web search is configured.
 func (w WebSearchConfig) Enabled() bool { return w.CX != "" }
+
+// BrowserConfig is the browser tool's configuration (browser spec §4.1).
+type BrowserConfig struct {
+	Enabled       bool              `json:"enabled"`
+	Address       string            `json:"address"`
+	Launch        bool              `json:"launch"`
+	Executable    string            `json:"executable"`
+	Profile       string            `json:"profile"`
+	AllowRemote   bool              `json:"allow_remote"`
+	Sites         map[string]string `json:"sites"`
+	SnapshotChars int               `json:"snapshot_chars"`
+	SettleTimeout int               `json:"settle_timeout"`
+}
+
+// ProfileDir is the launched browser's profile directory: the configured
+// one with "~" expanded, else ~/.be-code/browser/profile.
+func (b BrowserConfig) ProfileDir() string {
+	p := strings.TrimSpace(b.Profile)
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	if p != "" {
+		return p
+	}
+	if dir, err := Dir(); err == nil {
+		return filepath.Join(dir, "browser", "profile")
+	}
+	return filepath.Join(os.TempDir(), "be-code-browser-profile")
+}
 
 // Dir returns the BE-Code dotdir (~/.be-code), creating it if needed.
 func Dir() (string, error) {

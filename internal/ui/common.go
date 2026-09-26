@@ -82,6 +82,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/coworkers", "list co-working models and how often each was consulted", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
 	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
+	{"/browser", "the browser: status, /browser forget <host>, /browser close", true},
 	{"/task", "task record: /task [show <id>|open|clear|assign <id> <owner>|scope <id> <paths>|reply <id> <text>]", true},
 	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
@@ -119,6 +120,9 @@ var busySafe = map[string]bool{
 	// A consultation is the co-worker's own scratch agent: it never touches
 	// the primary's history, so both may run mid-turn.
 	"/coworkers": true, "/consult": true, "/agents": true,
+	// The browser's status, a consent revoked, or a disconnect: none of it
+	// touches the turn's history.
+	"/browser": true,
 	// Listings and edits of the store; the agent reads it under its own lock.
 	"/task": true, "/notes": true,
 	// The room is never the model's own history: entering it, posting to it

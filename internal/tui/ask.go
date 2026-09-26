@@ -301,6 +301,9 @@ func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string
 	if action == "file_write" && !s.cfg.ApproveFileWrites {
 		return true
 	}
+	if action == "browser" && s.cfg.AutoApproveBrowser {
+		return true
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

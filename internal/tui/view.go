@@ -753,7 +753,8 @@ func (m *View) showAsk(a *ask) {
 	m.modalVP = viewport.New(m.width-6, m.modalHeight())
 	switch a.Kind {
 	case askApproval:
-		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" {
+		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
+			a.Action == "browser" || a.Action == "browser_watch" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -858,6 +859,15 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				ans = askAnswer{OK: true}
 			}
+		} else if a.Action == "browser" {
+			// The default tier's yes already means "this site for the rest of
+			// the session" (browser spec §3.1): "a" is the same answer as "y".
+			ans = askAnswer{OK: true}
+		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" {
+			// No "always" to grant: a watched site and a shell command after
+			// an untrusted page ask every time (browser spec §3.2, §3.6).
+			// Falling through would disable file-write previews.
+			decided = false
 		} else if a.Action == "sub_agent_resume" {
 			// This one has no "always": it is a one-time startup question
 			// (StartSubAgents asks it at most once per session), so there is
@@ -1304,6 +1314,18 @@ func (m *View) viewAsk() string {
 		// runs it later, so the hint says that instead of offering "a".
 		title = "Resume sub-agent work"
 		hint = "y resume · n leave dormant (/agents start runs it later) · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "browser":
+		title = "Browser"
+		hint = "y allow this site for the session · n decline · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "browser_watch":
+		title = "Browser — watched site"
+		hint = "y allow this one action · n decline · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "shell_after_web":
+		title = "Shell command after reading a web page"
+		hint = "y run it · n deny · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	}
 	if m.compact() {
@@ -1825,6 +1847,11 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		default:
 			m.renderLocalLines(ui.TaskLines(m.ag.Engine, args))
 		}
+		return m, nil
+	case "/browser":
+		// A listing or a non-blocking close: safe inline (BrowserLines never
+		// waits on the browser).
+		m.renderLocalLines(ui.BrowserLines(m.ag.Tools, fields[1:]))
 		return m, nil
 	case "/agents":
 		var args []string

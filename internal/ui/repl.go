@@ -195,6 +195,16 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	case "model_reload":
 		// Not this workspace: a server other people may be using.
 		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
+	case "browser":
+		if r.Cfg.AutoApproveBrowser {
+			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
+			return true
+		}
+		fmt.Printf("%s\n%s\n", yell("browser:"), detail)
+	case "browser_watch":
+		fmt.Printf("%s\n%s\n", yell("browser (watched site — every action asks):"), detail)
+	case "shell_after_web":
+		fmt.Printf("%s %s\n", yell("run shell (after reading a web page):"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
@@ -788,6 +798,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/agents":
 		for _, l := range AgentLines(r.Agent, fields[1:]) {
+			fmt.Println(l)
+		}
+	case "/browser":
+		for _, l := range BrowserLines(r.Agent.Tools, fields[1:]) {
 			fmt.Println(l)
 		}
 	case "/consult":

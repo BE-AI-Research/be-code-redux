@@ -140,6 +140,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		// is neither "run shell commands" nor "ship code off this machine" —
 		// an online sub-agent still asks its own consent question (§3.6).
 		cfg.AutoApproveSubAgentResume = true
+		// A fourth: acting in a browser on a site's behalf is none of the
+		// above. It covers default-tier sites only; a watched site still
+		// refuses with nobody to watch (browser spec §3.3).
+		cfg.AutoApproveBrowser = true
 	}
 	p, err := provider.FromConfig(cfg, flagProvider)
 	if err != nil {
@@ -178,6 +182,21 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		if os.Getenv(cfg.WebSearch.APIKeyEnv) == "" {
 			fmt.Fprintf(os.Stderr, "warn: web_search configured but %s is not set; searches will fail until it is exported\n", tools.EnvNameForDisplay(cfg.WebSearch.APIKeyEnv))
 		}
+	}
+
+	// Browser (opt-in): the model drives a Chromium over the DevTools
+	// protocol. Registered here, before agent.New composes the system
+	// prompt, so the known-tool list and the compat catalog include it.
+	if cfg.Browser.Enabled {
+		bt := tools.NewBrowser(tools.BrowserConfig{
+			Address: cfg.Browser.Address, Launch: cfg.Browser.Launch, Executable: cfg.Browser.Executable,
+			Profile: cfg.Browser.ProfileDir(), AllowRemote: cfg.Browser.AllowRemote, Sites: cfg.Browser.Sites,
+			SnapshotChars: cfg.Browser.SnapshotChars, SettleTimeout: cfg.Browser.SettleTimeout,
+		})
+		for _, w := range bt.Warnings {
+			fmt.Fprintln(os.Stderr, "warn: "+w)
+		}
+		reg.AddTool(bt)
 	}
 
 	notes := loadProjectNotes(reg.Root)

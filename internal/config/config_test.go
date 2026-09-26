@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -11,6 +13,41 @@ func TestIDEDefaults(t *testing.T) {
 	c := Default()
 	if !c.IDE.Enabled || !c.IDE.AutoContext {
 		t.Fatalf("ide defaults = %+v", c.IDE)
+	}
+}
+
+func TestBrowserConfigDefaults(t *testing.T) {
+	want := BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10}
+	if got := Default().Browser; !reflect.DeepEqual(got, want) {
+		t.Fatalf("defaults %+v", got)
+	}
+	if Default().AutoApproveBrowser {
+		t.Fatal("AutoApproveBrowser on by default")
+	}
+}
+
+func TestBrowserConfigPartialKeepsDefaults(t *testing.T) {
+	c := Default()
+	if err := json.Unmarshal([]byte(`{"browser":{"enabled":true,"sites":{"github.com":"watch"}}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Browser.Enabled || c.Browser.Address != "127.0.0.1:9222" || !c.Browser.Launch || c.Browser.Sites["github.com"] != "watch" {
+		t.Fatalf("browser %+v", c.Browser)
+	}
+}
+
+func TestBrowserProfileDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if got := (BrowserConfig{}).ProfileDir(); got != filepath.Join(home, ".be-code", "browser", "profile") {
+		t.Fatalf("default profile %q", got)
+	}
+	if got := (BrowserConfig{Profile: "~/chrome-be"}).ProfileDir(); got != filepath.Join(home, "chrome-be") {
+		t.Fatalf("~ profile %q", got)
+	}
+	if got := (BrowserConfig{Profile: "/srv/p"}).ProfileDir(); got != "/srv/p" {
+		t.Fatalf("absolute profile %q", got)
 	}
 }
 

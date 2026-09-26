@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brown-enterprises/be-code/internal/browser/browsertest"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -77,5 +78,37 @@ func TestDoctorReportsTheModelfileWhenNothingIsLoaded(t *testing.T) {
 	}
 	if strings.Contains(out, "MISMATCH") || strings.Contains(out, "context_tokens") {
 		t.Fatalf("nothing is wrong here:\n%s", out)
+	}
+}
+
+func TestBrowserDoctorLine(t *testing.T) {
+	cfg := config.Default()
+	if got := browserDoctorLine(cfg); got != "browser: off (set browser.enabled in config to enable)" {
+		t.Fatalf("off: %q", got)
+	}
+	cfg.Browser.Enabled = true
+	fb := browsertest.New(t)
+	cfg.Browser.Address = fb.Addr()
+	if got := browserDoctorLine(cfg); got != "browser: FakeChrome/1.0 listening at "+fb.Addr() {
+		t.Fatalf("listening: %q", got)
+	}
+	cfg.Browser.Address, cfg.Browser.Launch = "127.0.0.1:1", false
+	if got := browserDoctorLine(cfg); got != "browser: nothing at 127.0.0.1:1, and browser.launch is off" {
+		t.Fatalf("launch off: %q", got)
+	}
+}
+
+func TestHeadlessApproverBrowserActions(t *testing.T) {
+	cfg := config.Default()
+	cfg.AutoApproveBrowser, cfg.AutoApproveShell = true, true
+	ap := headlessApprover(cfg)
+	if !ap("browser", "act on acme.test?") {
+		t.Fatal("-y must allow a default-tier site")
+	}
+	if ap("browser_watch", "act on github.com? (watched: every action asks)") {
+		t.Fatal("-y allowed a watched site with nobody watching")
+	}
+	if ap("shell_after_web", "echo hi") {
+		t.Fatal("-y ran shell after an untrusted page")
 	}
 }

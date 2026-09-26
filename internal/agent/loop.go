@@ -977,6 +977,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.subs != nil && a.systemOverride == "" {
 		sys += "\n\n" + subAgentGuidance
 	}
+	// Stable for the session, like the sub-agent block: whether the browser
+	// is registered never changes mid-session, so the cache never pays.
+	if a.systemOverride == "" && a.Tools != nil && a.Tools.Browser() != nil {
+		sys += "\n\n" + browserGuidance
+	}
 	// A scratch agent (plan mode, a consultation) keeps the summary here: it
 	// is fixed for the few turns such an agent lives, so it costs the cache
 	// nothing, and its prompt stays in one piece.
@@ -1524,7 +1529,11 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	// asked below, after OnToolEnd has put the failure on screen.
 	consult := ""
 	if res.IsError {
-		a.lastFailingTool = call.Name + ": " + res.Content
+		// A page's text never goes to a co-worker, which may be online
+		// (browser spec §3.5): browser failures stay out of RecentContext.
+		if call.Name != "browser" {
+			a.lastFailingTool = call.Name + ": " + res.Content
+		}
 		// Three failures of the same tool in a row is the signature of a
 		// small model that has stopped reading the error and started
 		// guessing. Ask a co-worker once per streak; a fourth failure is
@@ -1966,6 +1975,9 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
+	// The shell suspension after an untrusted page lasts one request
+	// (browser spec §3.6).
+	a.Tools.ClearUntrustedWeb()
 	a.autoVerifyUsed = false
 	if a.engine() != nil {
 		// A new request gets a fresh task line unless a plan is still in
