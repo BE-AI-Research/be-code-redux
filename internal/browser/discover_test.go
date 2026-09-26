@@ -5,9 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,6 +52,9 @@ func fakeBrowserMain(mode string) {
 		fmt.Fprintln(os.Stderr, "profile directory is in use")
 		os.Exit(21)
 	case "silent":
+		// TestLaunchHonoursContext reads this back to confirm the process is
+		// gone once Launch has returned.
+		os.WriteFile(filepath.Join(profile, "pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 		time.Sleep(time.Minute)
 	}
 	os.Exit(0)
@@ -193,6 +201,75 @@ func TestFetchVersion(t *testing.T) {
 	}
 	if _, err := FetchVersion(context.Background(), "127.0.0.1:1"); err == nil {
 		t.Fatal("nothing listening, yet a version came back")
+	}
+}
+
+// TestLaunchHonoursContext is the path a user's Esc during a slow launch
+// takes: the fake browser never writes its port file, and the context times
+// out first. Launch must return promptly with the context's own error, and
+// the fake browser process must actually be gone, not merely abandoned.
+func TestLaunchHonoursContext(t *testing.T) {
+	t.Setenv("BE_CODE_FAKE_BROWSER", "silent")
+	profile := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	p, err := Launch(ctx, os.Args[0], profile, false)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Launch took %s to return after its context expired", elapsed)
+	}
+	if p != nil {
+		t.Fatal("Launch returned a *Process on a context that timed out")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	pidBytes, rerr := os.ReadFile(filepath.Join(profile, "pid"))
+	if rerr != nil {
+		t.Fatalf("the fake browser never wrote its pid: %v", rerr)
+	}
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if perr != nil {
+		t.Fatalf("bad pid file %q: %v", pidBytes, perr)
+	}
+	proc, _ := os.FindProcess(pid)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return // gone
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake browser process was still alive 3s after Launch returned")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestFetchVersionRefusesANonDevToolsServer is the case where something is
+// listening at the configured address but it is not a DevTools endpoint: a
+// plain 200 with no webSocketDebuggerUrl, or a 200 that is not even JSON.
+func TestFetchVersionRefusesANonDevToolsServer(t *testing.T) {
+	notDevTools := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"hello":"world"}`))
+	}))
+	defer notDevTools.Close()
+	if _, err := FetchVersion(context.Background(), strings.TrimPrefix(notDevTools.URL, "http://")); err == nil {
+		t.Fatal("a 200 response with no webSocketDebuggerUrl was accepted")
+	}
+
+	notJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	}))
+	defer notJSON.Close()
+	if _, err := FetchVersion(context.Background(), strings.TrimPrefix(notJSON.URL, "http://")); err == nil {
+		t.Fatal("a non-JSON 200 response was accepted")
 	}
 }
 
