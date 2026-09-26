@@ -1,0 +1,424 @@
+package browser
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"path/filepath"
+	"sync"
+	"time"
+)
+
+type targetInfo struct {
+	TargetID string `json:"targetId"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	OpenerID string `json:"openerId"`
+}
+
+type createdTarget struct {
+	id, opener string
+	at         time.Time
+}
+
+// Tab is one open tab, for the tabs action.
+type Tab struct {
+	Index      int
+	Title, URL string
+	Current    bool
+	id         string
+}
+
+// Status is what /browser shows. Reading it never waits on the browser.
+type Status struct {
+	Connected, Launched   bool
+	Product, Address, Exe string
+	Title, URL            string
+}
+
+// Session owns the connection to the browser for one BE-Code session. It
+// attaches or launches lazily on first use (spec §1.3), reconnects when the
+// browser goes away, follows a tab an action opens, and closes a browser
+// only if it launched it.
+type Session struct {
+	opts Options
+
+	mu    sync.Mutex // one operation at a time
+	conn  *Conn
+	proc  *Process
+	page  *Page
+	unsub func()
+
+	evMu      sync.Mutex // written from the connection's reader goroutine
+	created   []createdTarget
+	destroyed map[string]bool
+
+	stMu sync.Mutex // Status reads only this, never mu
+	st   Status
+}
+
+// NewSession prepares a session; nothing connects until Page.
+func NewSession(opts Options) *Session {
+	if opts.Address == "" {
+		opts.Address = "127.0.0.1:9222"
+	}
+	return &Session{opts: opts, destroyed: map[string]bool{}, st: Status{Address: opts.Address}}
+}
+
+// Page returns the page being driven, connecting first — or reconnecting,
+// when the browser went away. The notes say what happened on the way.
+func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var notes []string
+	reconnect := false
+	if s.conn != nil {
+		select {
+		case <-s.conn.Done():
+			s.dropLocked()
+			reconnect = true
+		default:
+		}
+	}
+	if s.conn == nil {
+		note, err := s.connectLocked(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if reconnect {
+			notes = append(notes, "the browser was closed; reconnected")
+		} else if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	if s.page == nil || s.isDestroyed(s.page.targetID) {
+		note, err := s.pickPageLocked(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	s.recordLocked()
+	return s.page, notes, nil
+}
+
+func (s *Session) connectLocked(ctx context.Context) (string, error) {
+	addr := s.opts.Address
+	if !s.opts.AllowRemote && !IsLoopbackAddr(addr) {
+		return "", fmt.Errorf("browser.address %s is not on this machine; set browser.allow_remote to use it", addr)
+	}
+	var wsURL, note string
+	if v, err := FetchVersion(ctx, addr); err == nil {
+		wsURL, note = v.WebSocketURL, "attached to "+v.Browser+" at "+addr
+	} else {
+		if !s.opts.Launch {
+			return "", s.noBrowser(addr)
+		}
+		exe := s.opts.Executable
+		if exe == "" {
+			exe = FindExecutable()
+		}
+		if exe == "" {
+			return "", s.noBrowser(addr)
+		}
+		headless := s.opts.ForceHeadless || !HasDisplay()
+		proc, err := Launch(ctx, exe, s.opts.Profile, headless)
+		if err != nil {
+			return "", err
+		}
+		s.proc, wsURL = proc, proc.WSURL
+		mode := "visible"
+		if headless {
+			mode = "headless"
+		}
+		note = fmt.Sprintf("launched %s (%s, profile %s)", filepath.Base(exe), mode, s.opts.Profile)
+	}
+	conn, err := Dial(ctx, wsURL)
+	if err != nil {
+		s.killLocked()
+		return "", fmt.Errorf("connecting to the browser: %w", err)
+	}
+	var ver struct {
+		Product string `json:"product"`
+	}
+	conn.Call(ctx, "", "Browser.getVersion", nil, &ver)
+	// Downloads are refused at the browser level in 1.1.5 (spec §5).
+	conn.Call(ctx, "", "Browser.setDownloadBehavior", map[string]any{"behavior": "deny"}, nil)
+	s.evMu.Lock()
+	s.created, s.destroyed = nil, map[string]bool{}
+	s.evMu.Unlock()
+	unsub := conn.Subscribe(s.onEvent)
+	if err := conn.Call(ctx, "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil); err != nil {
+		unsub()
+		conn.Close()
+		s.killLocked()
+		return "", err
+	}
+	s.conn, s.unsub = conn, unsub
+	s.stMu.Lock()
+	s.st = Status{Connected: true, Launched: s.proc != nil, Product: ver.Product, Address: addr}
+	if s.proc != nil {
+		s.st.Exe = s.proc.Exe
+	}
+	s.stMu.Unlock()
+	return note, nil
+}
+
+func (s *Session) noBrowser(addr string) error {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		port = "9222"
+	}
+	if !s.opts.Launch {
+		return fmt.Errorf("no browser at %s (browser.launch is off) — start one with --remote-debugging-port=%s", addr, port)
+	}
+	return fmt.Errorf("no browser at %s and none installed to launch — start one with --remote-debugging-port=%s, or set browser.executable", addr, port)
+}
+
+// onEvent runs on the reader goroutine: it records, never calls.
+func (s *Session) onEvent(ev Event) {
+	if ev.SessionID != "" {
+		return
+	}
+	switch ev.Method {
+	case "Target.targetCreated":
+		var e struct {
+			TargetInfo targetInfo `json:"targetInfo"`
+		}
+		if json.Unmarshal(ev.Params, &e) == nil && e.TargetInfo.Type == "page" {
+			s.evMu.Lock()
+			s.created = append(s.created, createdTarget{id: e.TargetInfo.TargetID, opener: e.TargetInfo.OpenerID, at: time.Now()})
+			s.evMu.Unlock()
+		}
+	case "Target.targetDestroyed":
+		var e struct {
+			TargetID string `json:"targetId"`
+		}
+		if json.Unmarshal(ev.Params, &e) == nil {
+			s.evMu.Lock()
+			s.destroyed[e.TargetID] = true
+			s.evMu.Unlock()
+		}
+	}
+}
+
+func (s *Session) isDestroyed(id string) bool {
+	s.evMu.Lock()
+	defer s.evMu.Unlock()
+	return s.destroyed[id]
+}
+
+// pickPageLocked attaches to the most recent open tab, or opens one.
+func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
+	lost := s.page != nil
+	if s.page != nil {
+		s.page.release()
+		s.page = nil
+	}
+	var ts struct {
+		TargetInfos []targetInfo `json:"targetInfos"`
+	}
+	if err := s.conn.Call(ctx, "", "Target.getTargets", nil, &ts); err != nil {
+		return "", err
+	}
+	id := ""
+	for i := len(ts.TargetInfos) - 1; i >= 0; i-- {
+		if t := ts.TargetInfos[i]; t.Type == "page" && !s.isDestroyed(t.TargetID) {
+			id = t.TargetID
+			break
+		}
+	}
+	opened := false
+	if id == "" {
+		var c struct {
+			TargetID string `json:"targetId"`
+		}
+		if err := s.conn.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank"}, &c); err != nil {
+			return "", err
+		}
+		id, opened = c.TargetID, true
+	}
+	p, err := attachPage(ctx, s.conn, id, s.opts)
+	if err != nil {
+		return "", err
+	}
+	s.page = p
+	if !lost {
+		return "", nil
+	}
+	if opened {
+		return "the tab being driven was closed; opened a new one", nil
+	}
+	title, _ := p.Info(ctx)
+	return "the tab being driven was closed; now driving: " + title, nil
+}
+
+// AfterAction follows a tab the last action opened (a target=_blank link,
+// window.open): it becomes the tab driven, settled, with a note.
+func (s *Session) AfterAction(ctx context.Context, since time.Time) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.page == nil || s.conn == nil {
+		return "", nil
+	}
+	s.evMu.Lock()
+	pick := ""
+	for _, c := range s.created {
+		if c.opener == s.page.targetID && !c.at.Before(since) && !s.destroyed[c.id] {
+			pick = c.id
+		}
+	}
+	s.created = nil
+	s.evMu.Unlock()
+	if pick == "" {
+		return "", nil
+	}
+	p, err := attachPage(ctx, s.conn, pick, s.opts)
+	if err != nil {
+		return "", err
+	}
+	s.page.release()
+	s.page = p
+	s.conn.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": pick}, nil)
+	p.settle(ctx)
+	title, _ := p.Info(ctx)
+	s.recordLocked()
+	return "switched to the new tab: " + title, nil
+}
+
+// Tabs lists the open tabs, marking the one being driven.
+func (s *Session) Tabs(ctx context.Context) ([]Tab, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tabsLocked(ctx)
+}
+
+func (s *Session) tabsLocked(ctx context.Context) ([]Tab, error) {
+	if s.conn == nil {
+		return nil, ErrClosed
+	}
+	var ts struct {
+		TargetInfos []targetInfo `json:"targetInfos"`
+	}
+	if err := s.conn.Call(ctx, "", "Target.getTargets", nil, &ts); err != nil {
+		return nil, err
+	}
+	var out []Tab
+	for _, t := range ts.TargetInfos {
+		if t.Type != "page" || s.isDestroyed(t.TargetID) {
+			continue
+		}
+		out = append(out, Tab{Index: len(out) + 1, Title: t.Title, URL: t.URL, id: t.TargetID,
+			Current: s.page != nil && t.TargetID == s.page.targetID})
+	}
+	return out, nil
+}
+
+// SwitchTab drives tab n (1-based, as Tabs numbers them).
+func (s *Session) SwitchTab(ctx context.Context, n int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tabs, err := s.tabsLocked(ctx)
+	if err != nil {
+		return err
+	}
+	if n < 1 || n > len(tabs) {
+		return fmt.Errorf("there is no tab %d; there are %d", n, len(tabs))
+	}
+	if tabs[n-1].Current {
+		return nil
+	}
+	p, err := attachPage(ctx, s.conn, tabs[n-1].id, s.opts)
+	if err != nil {
+		return err
+	}
+	if s.page != nil {
+		s.page.release()
+	}
+	s.page = p
+	s.conn.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": tabs[n-1].id}, nil)
+	p.settle(ctx)
+	s.recordLocked()
+	return nil
+}
+
+// Record copies the page's title and URL into Status; the tool calls it
+// after each action, once the snapshot has refreshed them.
+func (s *Session) Record() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked()
+}
+
+func (s *Session) recordLocked() {
+	if s.page == nil {
+		return
+	}
+	t, u := s.page.Title(), s.page.URL()
+	s.stMu.Lock()
+	s.st.Title, s.st.URL = t, u
+	s.stMu.Unlock()
+}
+
+// Status is a copy of the session's state; it never waits on an operation.
+func (s *Session) Status() Status {
+	s.stMu.Lock()
+	defer s.stMu.Unlock()
+	return s.st
+}
+
+// Close disconnects. A browser BE-Code launched is closed (asked first,
+// then killed); one it attached to is left running.
+func (s *Session) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn != nil {
+		if s.page != nil {
+			s.page.release()
+		}
+		if s.proc != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			s.conn.Call(ctx, "", "Browser.close", nil, nil)
+			cancel()
+		}
+		if s.unsub != nil {
+			s.unsub()
+			s.unsub = nil
+		}
+		s.conn.Close()
+		s.conn = nil
+	}
+	s.page = nil
+	s.killLocked()
+	s.stMu.Lock()
+	s.st = Status{Address: s.opts.Address}
+	s.stMu.Unlock()
+}
+
+// CloseAsync closes on a goroutine of its own, for a caller that must not
+// wait (the TUI's Update goroutine, answering /browser close).
+func (s *Session) CloseAsync() { go s.Close() }
+
+// dropLocked forgets a connection that has already died.
+func (s *Session) dropLocked() {
+	if s.unsub != nil {
+		s.unsub()
+		s.unsub = nil
+	}
+	s.conn, s.page = nil, nil
+	s.killLocked()
+	s.stMu.Lock()
+	s.st = Status{Address: s.opts.Address}
+	s.stMu.Unlock()
+}
+
+func (s *Session) killLocked() {
+	if s.proc != nil {
+		s.proc.Kill()
+		s.proc = nil
+	}
+}
