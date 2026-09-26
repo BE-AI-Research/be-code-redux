@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -22,6 +23,9 @@ import (
 // one timer armed for the nearest due time; a due event is queued, never run
 // here. It is started by a UI (StartSchedules[Async]) and never by
 // buildAgent, so nothing fires before approvals and events are wired.
+//
+// Every hold of s.mu is released on a panic too (a deferred unlock, most
+// through locked): a scheduler left locked would freeze every terminal.
 //
 // Lock order: s.mu, then the Agent's sessionMu/saveMu (saveTimersLocked
 // goes through UpdateSession), inbox.mu (fireNow, queueDue) and fireMu
@@ -77,6 +81,23 @@ type scheduler struct {
 	held      map[string]int
 	holdGen   int
 	gateBegun bool // the startup prompt has begun (StartSchedules)
+	// unconfirmed marks schedules the startup prompt showed but nobody
+	// answered (withdrawn: the session quit, or the prompt was taken
+	// down). Nothing about them is changed or saved; they just never run
+	// unasked in this process — the next start asks again, and a person's
+	// /schedule resume confirms one now.
+	unconfirmed map[string]bool
+
+	// ctx lives as long as the scheduler: StopSchedules cancels it, which
+	// withdraws a schedule prompt still open when the session ends.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// passStarts and passDone count the loop's passes: one starts when
+	// queueDue begins, and is done once its timer is armed. Tests wait on
+	// them (a pass that began after the thing they did has completed)
+	// instead of sleeping and asserting that nothing happened.
+	passStarts, passDone atomic.Int64
 
 	gateOnce  sync.Once
 	startOnce sync.Once
@@ -101,8 +122,10 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 		warned:        map[string]bool{},
 		pending:       map[string]pendingEvent{},
 		held:          map[string]int{},
+		unconfirmed:   map[string]bool{},
 		floor:         map[string]time.Time{},
 		kick:          make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.approvals = schedule.LoadApprovals(s.approvalsPath)
 	a.sessionMu.Lock()
 	if a.Session != nil {
@@ -110,6 +133,14 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 	}
 	a.sessionMu.Unlock()
 	a.sched = s
+}
+
+// locked runs fn holding mu and releases it through unlock even when fn
+// panics.
+func (s *scheduler) locked(fn func()) {
+	s.mu.Lock()
+	defer s.unlock()
+	fn()
 }
 
 // noteLocked holds a notice until the lock is released (see scheduler).
@@ -165,24 +196,27 @@ func (s *scheduler) publishNextLocked() {
 // mode the REPL's own, since a second reader of its input would take the
 // person's next line as the answer.
 func (s *scheduler) loadTimers(ts []schedule.Schedule) {
-	s.mu.Lock()
-	s.timers = append([]schedule.Schedule(nil), ts...)
-	s.saveTimersLocked()
-	s.held = map[string]int{}
-	if s.gateBegun {
-		s.holdGen++
-		for _, sc := range s.timers {
-			if sc.State == schedule.Active {
-				s.held[sc.ID] = s.holdGen
+	s.locked(func() {
+		s.timers = append([]schedule.Schedule(nil), ts...)
+		s.saveTimersLocked()
+		s.held = map[string]int{}
+		if s.gateBegun {
+			s.holdGen++
+			for _, sc := range s.timers {
+				if sc.State == schedule.Active {
+					s.held[sc.ID] = s.holdGen
+				}
 			}
 		}
-	}
-	s.unlock()
+	})
 	s.kickLoop()
 }
 
-// reloadLocked rereads schedules.md: the file wins over what we hold.
+// reloadLocked rereads schedules.md: the file wins over what we hold. It
+// rereads the approvals too, which every session on this workspace shares:
+// one another session revoked (a pause there) is revoked here as well.
 func (s *scheduler) reloadLocked() {
+	s.approvals = schedule.LoadApprovals(s.approvalsPath)
 	d, err := schedule.LoadFile(s.projectPath)
 	if errors.Is(err, schedule.ErrBroken) {
 		aside, rerr := schedule.RenameBroken(s.projectPath, s.clock.Now())
@@ -317,10 +351,35 @@ func (s *scheduler) saveTimersLocked() {
 }
 
 func (s *scheduler) approveLocked(sc schedule.Schedule) {
-	s.approvals[sc.ID] = sc.Hash()
-	if err := s.approvals.Save(s.approvalsPath); err != nil {
+	h := sc.Hash()
+	s.saveApprovalsLocked(func(a schedule.Approvals) { a[sc.ID] = h })
+}
+
+// revokeLocked forgets id's approval. Every pause does this (final review
+// I3): a paused schedule comes back only through /schedule resume, which
+// asks — never through `state: active` written into schedules.md.
+func (s *scheduler) revokeLocked(id string) {
+	s.saveApprovalsLocked(func(a schedule.Approvals) { delete(a, id) })
+}
+
+// saveApprovalsLocked applies change to the approvals as they are on disk
+// now, not as this process last read them: another session on the same
+// workspace shares the file, and a save of a stale copy would drop what it
+// approved (or revoked) since.
+func (s *scheduler) saveApprovalsLocked(change func(schedule.Approvals)) {
+	a := schedule.LoadApprovals(s.approvalsPath)
+	change(a)
+	s.approvals = a
+	if err := a.Save(s.approvalsPath); err != nil {
 		s.noteLocked("could not save schedule approvals: %v", err)
 	}
+}
+
+// pauseLocked pauses sc in its store and revokes its approval.
+func (s *scheduler) pauseLocked(sc schedule.Schedule, project bool) {
+	sc.State = schedule.Paused
+	s.putLocked(sc, project)
+	s.revokeLocked(sc.ID)
 }
 
 func (s *scheduler) approvedLocked(sc schedule.Schedule) bool {
@@ -341,9 +400,7 @@ func (s *scheduler) startLoop() {
 			return // stopped before it ever started: no pass
 		default:
 		}
-		s.mu.Lock()
-		s.started = true
-		s.mu.Unlock()
+		s.locked(func() { s.started = true })
 		go s.loop()
 	})
 }
@@ -354,10 +411,9 @@ func (a *Agent) StopSchedules() {
 	if s == nil {
 		return
 	}
-	s.stopOnce.Do(func() { close(s.stop) })
-	s.mu.Lock()
-	started := s.started
-	s.mu.Unlock()
+	s.stopOnce.Do(func() { close(s.stop); s.cancel() })
+	var started bool
+	s.locked(func() { started = s.started })
 	if started {
 		select {
 		case <-s.done:
@@ -375,26 +431,32 @@ func (s *scheduler) loop() {
 	}()
 	for {
 		next, ok := s.queueDue()
-		var timer schedule.Timer
-		var c <-chan time.Time
+		// Never sleep longer than maxSleep: a timer measures time the
+		// machine was awake, so after a suspend an uncapped one fires hours
+		// late. Each wake re-arms from Now() (final review I5), and rereads
+		// schedules.md, so a hand-added schedule is noticed too.
+		d := maxSleep
 		if ok {
-			timer = s.clock.NewTimer(next.Sub(s.clock.Now()))
-			c = timer.C()
+			if until := next.Sub(s.clock.Now()); until < d {
+				d = until
+			}
 		}
+		timer := s.clock.NewTimer(d)
+		c := timer.C()
+		s.passDone.Add(1)
 		select {
 		case <-s.stop:
-			if timer != nil {
-				timer.Stop()
-			}
+			timer.Stop()
 			return
 		case <-s.kick:
 		case <-c:
 		}
-		if timer != nil {
-			timer.Stop()
-		}
+		timer.Stop()
 	}
 }
+
+// maxSleep is the longest the loop waits between passes.
+const maxSleep = time.Minute
 
 // queueDue queues every due, approved schedule not already waiting, pauses
 // any whose content no longer matches its approval, and returns the nearest
@@ -406,6 +468,7 @@ func (s *scheduler) loop() {
 // that wake finds it no longer waiting and fires it again, rather than the
 // loop sleeping on nothing until some other kick.
 func (s *scheduler) queueDue() (time.Time, bool) {
+	s.passStarts.Add(1)
 	now := s.clock.Now()
 	var fire []schedule.Schedule
 	var next time.Time
@@ -415,42 +478,41 @@ func (s *scheduler) queueDue() (time.Time, bool) {
 			next, have = t, true
 		}
 	}
-	s.mu.Lock()
-	s.reloadLocked()
-	s.settleDroppedLocked()
-	all := s.allLocked()
-	sort.SliceStable(all, func(i, j int) bool {
-		di, _ := all[i].NextDue()
-		dj, _ := all[j].NextDue()
-		return di.Before(dj)
+	s.locked(func() {
+		s.reloadLocked()
+		s.settleDroppedLocked()
+		all := s.allLocked()
+		sort.SliceStable(all, func(i, j int) bool {
+			di, _ := all[i].NextDue()
+			dj, _ := all[j].NextDue()
+			return di.Before(dj)
+		})
+		for _, sc := range all {
+			due, ok := sc.NextDue()
+			if !ok {
+				continue
+			}
+			if s.held[sc.ID] != 0 || s.unconfirmed[sc.ID] {
+				continue // awaiting a person's confirmation (loadTimers, gateSchedules)
+			}
+			if _, waiting := s.pending[sc.ID]; waiting {
+				considerNextAfter(sc, now, consider)
+				continue
+			}
+			if due.After(now) {
+				consider(due)
+				continue
+			}
+			if !s.approvedLocked(sc) {
+				_, _, project := s.findLocked(sc.ID)
+				s.pauseLocked(sc, project)
+				s.noteLocked("schedule %q changed since approved and was paused; /schedule resume %s to approve it", sc.Name, sc.Name)
+				continue
+			}
+			fire = append(fire, sc)
+			considerNextAfter(sc, now, consider) // it is waiting from here on
+		}
 	})
-	for _, sc := range all {
-		due, ok := sc.NextDue()
-		if !ok {
-			continue
-		}
-		if s.held[sc.ID] != 0 {
-			continue // awaiting its own confirmation (loadTimers)
-		}
-		if _, waiting := s.pending[sc.ID]; waiting {
-			considerNextAfter(sc, now, consider)
-			continue
-		}
-		if due.After(now) {
-			consider(due)
-			continue
-		}
-		if !s.approvedLocked(sc) {
-			_, _, project := s.findLocked(sc.ID)
-			sc.State = schedule.Paused
-			s.putLocked(sc, project)
-			s.noteLocked("schedule %q changed since approved and was paused; /schedule resume %s to approve it", sc.Name, sc.Name)
-			continue
-		}
-		fire = append(fire, sc)
-		considerNextAfter(sc, now, consider) // it is waiting from here on
-	}
-	s.unlock()
 	for _, sc := range fire {
 		s.a.fireNow(sc, false)
 	}
@@ -511,14 +573,17 @@ func (a *Agent) fireNow(sc schedule.Schedule, manual bool) bool {
 	if s == nil {
 		return false
 	}
-	s.mu.Lock()
-	if _, dup := s.pending[sc.ID]; dup {
-		s.unlock()
+	dup := false
+	s.locked(func() {
+		if _, dup = s.pending[sc.ID]; dup {
+			return
+		}
+		s.pending[sc.ID] = pendingEvent{queuedAt: s.clock.Now(), manual: manual}
+		a.EnqueueScheduled(sc.ID, sc.Name, fireText(sc))
+	})
+	if dup {
 		return false
 	}
-	s.pending[sc.ID] = pendingEvent{queuedAt: s.clock.Now(), manual: manual}
-	a.EnqueueScheduled(sc.ID, sc.Name, fireText(sc))
-	s.unlock()
 	if a.Events.OnScheduleFire != nil {
 		a.Events.OnScheduleFire(sc.Name)
 	}
@@ -556,15 +621,32 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 		return sc, false, "it no longer exists"
 	case !isPending:
 		return sc, project, "it is no longer queued"
-	case s.held[id] != 0 && !pe.manual:
+	case (s.held[id] != 0 || s.unconfirmed[id]) && !pe.manual:
 		return sc, project, "it is waiting for a person to confirm it"
 	case !s.approvedLocked(sc):
-		sc.State = schedule.Paused
-		s.putLocked(sc, project)
+		s.pauseLocked(sc, project)
 		s.noteLocked("schedule %q changed since approved and was paused; /schedule resume %s to approve it", sc.Name, sc.Name)
 		return sc, project, "it changed since it was approved"
 	case sc.State != schedule.Active && !pe.manual:
 		return sc, project, "it is " + string(sc.State)
+	}
+	if !pe.manual {
+		// Another session on this workspace may have run this very
+		// occurrence (final review I4): its LastRun, reread just now,
+		// already puts the next time after this event was queued — or it
+		// holds the claim and has not saved LastRun yet.
+		due, ok := sc.NextDue()
+		if !ok || due.After(pe.queuedAt) {
+			return sc, project, "it already ran in another session"
+		}
+		if taken, err := s.claimLocked(id, due); err != nil {
+			return sc, project, fmt.Sprintf("it could not be claimed (%v)", err)
+		} else if taken {
+			// Counted as run here too, so the loop does not queue the
+			// same occurrence again on its next wake.
+			s.floor[id] = due
+			return sc, project, "it already ran in another session"
+		}
 	}
 	sc.LastRun = s.clock.Now()
 	s.floor[id] = sc.LastRun
@@ -574,36 +656,79 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 
 // finish records a run's outcome (spec §2.6).
 func (s *scheduler) finish(id, outcome string) {
-	s.mu.Lock()
-	s.reloadLocked()
-	sc, ok, project := s.findLocked(id)
+	var sc schedule.Schedule
+	var ok, paused bool
+	s.locked(func() {
+		s.reloadLocked()
+		var project bool
+		sc, ok, project = s.findLocked(id)
+		if !ok {
+			return
+		}
+		sc.LastOutcome = outcome
+		if outcome == "ok" {
+			sc.Failures = 0
+		} else {
+			sc.Failures++
+		}
+		sp, err := sc.Spec()
+		switch {
+		case err != nil:
+			// Unparseable (a hand edit): record the outcome, decide nothing.
+		case !sp.Recurring():
+			sc.State = schedule.Done
+		case s.a.Cfg.Schedules.PauseAfterFailures > 0 && sc.Failures >= s.a.Cfg.Schedules.PauseAfterFailures:
+			paused = true
+		}
+		if paused {
+			s.pauseLocked(sc, project)
+		} else {
+			s.putLocked(sc, project)
+		}
+	})
 	if !ok {
-		s.unlock()
 		return
 	}
-	sc.LastOutcome = outcome
-	paused := false
-	if outcome == "ok" {
-		sc.Failures = 0
-	} else {
-		sc.Failures++
-	}
-	sp, err := sc.Spec()
-	switch {
-	case err != nil:
-		// Unparseable (a hand edit): record the outcome, decide nothing.
-	case !sp.Recurring():
-		sc.State = schedule.Done
-	case s.a.Cfg.Schedules.PauseAfterFailures > 0 && sc.Failures >= s.a.Cfg.Schedules.PauseAfterFailures:
-		sc.State, paused = schedule.Paused, true
-	}
-	s.putLocked(sc, project)
-	s.unlock()
 	s.a.notice("⏰ %s: %s", sc.Name, outcome)
 	if paused {
 		s.a.notice("schedule %q paused after %d failed runs in a row; /schedule resume %s when it is fixed", sc.Name, sc.Failures, sc.Name)
 	}
 	s.kickLoop()
+}
+
+// claimLocked claims one occurrence of id for this session with a file
+// created O_EXCL under the engine dir, which every session on this
+// workspace shares. taken is true when another session got there first.
+// Claims older than a day are pruned on the way: by then every occurrence
+// they guarded has long been recorded as LastRun.
+func (s *scheduler) claimLocked(id string, due time.Time) (taken bool, err error) {
+	dir := filepath.Join(filepath.Dir(s.approvalsPath), "claims")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	if ents, err := os.ReadDir(dir); err == nil {
+		cutoff := time.Now().Add(-24 * time.Hour)
+		for _, e := range ents {
+			if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	f, err := os.OpenFile(filepath.Join(dir, claimName(id, due)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	fmt.Fprintf(f, "%d\n", os.Getpid())
+	return false, f.Close()
+}
+
+// claimName is the claim file for one occurrence: the schedule's id and
+// its due time.
+func claimName(id string, due time.Time) string {
+	return fmt.Sprintf("%s-%d", id, due.Unix())
 }
 
 // runFired runs a scheduled event's turn under its allowance (spec §2.2–2.6).
@@ -617,9 +742,6 @@ func (a *Agent) runFired(ctx context.Context, f *firing, input string) (answer s
 		}
 		a.notice("scheduled event %q was not run: %s", name, reason)
 		return "", nil, nil
-	}
-	if !project {
-		a.saveBeforeFiredRun()
 	}
 	_, askT, maxRT := a.Cfg.Schedules.Durations()
 	if sc.AskTimeout > 0 {
@@ -648,7 +770,7 @@ func (a *Agent) runFired(ctx context.Context, f *firing, input string) (answer s
 			a.notice("schedule %q: task %s: %v; running without it", sc.Name, sc.Task, terr)
 		}
 	}
-	a.Tools.SetAllowance(sc.Allow, askT)
+	a.prepareFiredRun(sc, !project, askT)
 	rctx, cancel := context.WithTimeout(ctx, maxRT)
 	defer func() {
 		refused, askTimedOut := a.Tools.ClearAllowance()
@@ -669,18 +791,21 @@ func (a *Agent) runFired(ctx context.Context, f *firing, input string) (answer s
 	return a.runFull(rctx, input)
 }
 
-// saveBeforeFiredRun writes the session file once a one-off timer's LastRun
-// is set, so a crash mid-run cannot leave it due again on resume. The same
-// save tidyBeforeColdRead makes: under the turn lock (runFired has not taken
-// it yet; run takes it later), never for an empty conversation (a session
-// has no file until its first request, and the live registry depends on
-// that), and through autosave's save guard.
-func (a *Agent) saveBeforeFiredRun() {
+// prepareFiredRun installs the event's allowance, and for a one-off timer
+// first writes the session file once its LastRun is set, so a crash
+// mid-run cannot leave it due again on resume. Both happen under the turn
+// lock (runFired has not taken it yet; run takes it per round later), so a
+// request still finishing on the agent never runs a step under the event's
+// allowance. The save is the one tidyBeforeColdRead makes: never for an
+// empty conversation (a session has no file until its first request, and
+// the live registry depends on that), and through autosave's save guard.
+func (a *Agent) prepareFiredRun(sc schedule.Schedule, saveSession bool, askT time.Duration) {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
-	if a.History != nil && len(a.History.Messages) > 0 {
+	if saveSession && a.History != nil && len(a.History.Messages) > 0 {
 		a.autosave(a.lastUserInput)
 	}
+	a.Tools.SetAllowance(sc.Allow, askT)
 }
 
 func firedOutcome(parent context.Context, timedOut bool, err error, rep *ReviewedReport, refused string, askTimedOut bool) string {

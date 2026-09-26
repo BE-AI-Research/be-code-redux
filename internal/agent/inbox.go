@@ -307,8 +307,12 @@ func (a *Agent) Held() bool {
 
 // deliverInbox appends queued messages to the history as user turns,
 // tagged so the model knows they arrived mid-task.
+//
+// Nothing is delivered into a scheduled event's turn (final review I1): a
+// person's words and a scheduled event never share a turn, so one set of
+// rules governs each — the lines wait for the leftover drain after it.
 func (a *Agent) deliverInbox() {
-	if a.Held() {
+	if a.Held() || a.Tools.Fired() {
 		return
 	}
 	msgs := a.DrainInbox()

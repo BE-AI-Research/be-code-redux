@@ -172,7 +172,18 @@ func (a *Agent) coworkerByName(who string) (config.CoworkerConfig, error) {
 // approval's "a" and never the config file); otherwise the approval seam is
 // asked once, and "a" (AllowCoworker) or a previous session-wide yes skips it.
 func (a *Agent) consent(cw config.CoworkerConfig, req ConsultRequest) bool {
-	if !cw.Online || strings.HasPrefix(req.Origin, "user:") || a.allowedFor(cw.Name) {
+	if !cw.Online || strings.HasPrefix(req.Origin, "user:") {
+		return true
+	}
+	if a.Tools.Fired() {
+		// A scheduled event's turn: nobody may be there to answer, and the
+		// prompt would have no deadline (final review I6). Nor does a
+		// session-wide yes given while someone was watching apply to a turn
+		// nobody is watching (C1): code goes to an online model only when a
+		// person is asked.
+		return false
+	}
+	if a.allowedFor(cw.Name) {
 		return true
 	}
 	if a.Cfg.AutoApproveConsult { // what -y sets; never the config file

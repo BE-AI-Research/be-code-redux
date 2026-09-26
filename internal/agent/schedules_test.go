@@ -90,9 +90,30 @@ func TestFiresInDueOrderAndOnlyOnce(t *testing.T) {
 		t.Fatalf("header: %q", items[0].Text)
 	}
 	clock.Advance(time.Minute)
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	waitQueued(t, ag, 2) // not queued a second time
+	for _, n := range []string{"sooner", "later"} {
+		if !waitingNow(ag, mustFind(t, ag, n).ID) {
+			t.Fatalf("%s is still waiting, once", n)
+		}
+	}
+}
+
+// waitingNow is waitingLocked under the scheduler's lock.
+func waitingNow(ag *Agent, id string) bool {
+	ag.sched.mu.Lock()
+	defer ag.sched.mu.Unlock()
+	return ag.sched.waitingLocked(id)
+}
+
+// mustFind looks a schedule up by name.
+func mustFind(t *testing.T, ag *Agent, name string) schedule.Schedule {
+	t.Helper()
+	sc, ok, _ := ag.sched.lookup(name)
+	if !ok {
+		t.Fatalf("no schedule %q", name)
+	}
+	return sc
 }
 
 func TestScheduledItemsNeverDeliveredMidRun(t *testing.T) {
@@ -184,10 +205,12 @@ func TestMissedOneOffRunsOnce(t *testing.T) {
 	waitQueued(t, ag, 1)
 	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
 	clock.Advance(time.Hour)
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	if ag.Pending() != 0 {
 		t.Fatal("a one-off runs once")
+	}
+	if sc := mustFind(t, ag, "missed"); sc.State != schedule.Done || sc.LastOutcome != "ok" {
+		t.Fatalf("it ran, once: %+v", sc)
 	}
 }
 
@@ -197,8 +220,17 @@ func TestMissedRecurringRunsOnceNotPerMissedTime(t *testing.T) {
 	clock.Set(t0.Add(5 * time.Hour)) // ten missed times
 	ag.sched.startLoop()
 	waitQueued(t, ag, 1)
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
+	settle(t, ag)
 	waitQueued(t, ag, 1)
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	settle(t, ag)
+	if ag.Pending() != 0 {
+		t.Fatal("one run covers every missed time")
+	}
+	if sc := mustFind(t, ag, "half-hourly"); !sc.LastRun.Equal(t0.Add(5 * time.Hour)) {
+		t.Fatalf("it ran at the time it caught up: %+v", sc)
+	}
 }
 
 func TestDroppedQueuedEventFiresAgain(t *testing.T) {
@@ -226,7 +258,7 @@ func TestHandEditedSchedulePausesAtFire(t *testing.T) {
 	ag.Events.OnNotice = func(m string) { mu.Lock(); notes = append(notes, m); mu.Unlock() }
 	ag.sched.startLoop()
 	clock.Advance(31 * time.Minute)
-	time.Sleep(100 * time.Millisecond)
+	settle(t, ag)
 	if ag.Pending() != 0 {
 		t.Fatal("an edited schedule must not fire")
 	}
@@ -435,16 +467,17 @@ func TestWakeBetweenDrainAndRunFiresOnce(t *testing.T) {
 	sc := mk("once", "in 1m")
 	queueOne(t, ag, clock, sc, false)
 	items := ag.DrainForTurn()
-	ag.sched.kickLoop() // a wake in the drain→begin window
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag) // a wake in the drain→begin window
 	if ag.Pending() != 0 {
 		t.Fatal("re-queued while the drained event had not begun")
+	}
+	if !waitingNow(ag, sc.ID) {
+		t.Fatal("the drained event still counts as waiting (armed)")
 	}
 	if _, _, err := ag.RunFull(context.Background(), items[0].Text); err != nil {
 		t.Fatal(err)
 	}
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	got, _, _ := ag.sched.lookup(sc.ID)
 	if calls != 1 || ag.Pending() != 0 || got.State != schedule.Done {
 		t.Fatalf("calls %d pending %d state %s", calls, ag.Pending(), got.State)
@@ -456,8 +489,7 @@ func TestDroppedOneOffIsDone(t *testing.T) {
 	sc := mk("once", "in 1m")
 	queueOne(t, ag, clock, sc, false)
 	ag.Remove(0)
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	got, _, _ := ag.sched.lookup(sc.ID)
 	if ag.Pending() != 0 || got.State != schedule.Done || got.LastOutcome != "dropped from the queue" {
 		t.Fatalf("pending %d %+v", ag.Pending(), got)
@@ -476,13 +508,19 @@ func TestSaveFailureDoesNotRefire(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(pdir, 0o755) })
+	notes := noteSink(ag)
 	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
 	clock.Advance(5 * time.Minute)
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	if ag.Pending() != 0 {
 		t.Fatal("a run whose LastRun could not be saved fired again at once")
 	}
+	if !strings.Contains(notes(), "could not save schedules.md") {
+		t.Fatalf("the save really failed: %q", notes())
+	}
+	// ... and it still fires at its next time (the floor, not a pause).
+	clock.Advance(30 * time.Minute)
+	waitQueued(t, ag, 1)
 }
 
 func TestTaskLinkToClosedNodeIsNotReopened(t *testing.T) {
@@ -582,9 +620,13 @@ func TestStartAfterStopRunsNoPass(t *testing.T) {
 	clock.Advance(2 * time.Minute)
 	ag.StopSchedules()
 	ag.sched.startLoop()
-	time.Sleep(50 * time.Millisecond)
-	if ag.Pending() != 0 {
-		t.Fatal("a stopped scheduler ran a pass")
+	// Deterministic: startLoop starts no goroutine once stopped, so there
+	// is nothing to wait for.
+	ag.sched.mu.Lock()
+	started := ag.sched.started
+	ag.sched.mu.Unlock()
+	if started || ag.sched.passStarts.Load() != 0 || ag.Pending() != 0 {
+		t.Fatalf("a stopped scheduler ran a pass: started=%v passes=%d", started, ag.sched.passStarts.Load())
 	}
 }
 

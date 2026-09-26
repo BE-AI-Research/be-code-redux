@@ -187,7 +187,7 @@ func TestStartupGate(t *testing.T) {
 		}
 	}
 	clock.Advance(time.Hour)
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	if ag.Pending() != 0 {
 		t.Fatal("nothing fires after no")
 	}
@@ -211,10 +211,12 @@ func TestNothingFiresBeforeStart(t *testing.T) {
 	ag, clock, _ := schedAgent(t, &scriptedProvider{})
 	seed(t, ag, mk("a", "in 1m"), false)
 	clock.Advance(time.Hour)
-	time.Sleep(50 * time.Millisecond)
-	if ag.Pending() != 0 {
+	// Deterministic: no loop goroutine exists before a start.
+	if ag.Pending() != 0 || ag.sched.passStarts.Load() != 0 {
 		t.Fatal("the loop has not started")
 	}
+	ag.StartSchedules()
+	waitQueued(t, ag, 1) // and once started it does fire
 }
 
 func TestScheduleLinesAndNext(t *testing.T) {
@@ -400,8 +402,7 @@ func TestDoneOneOffDoesNotShadowNewSchedule(t *testing.T) {
 	}
 	ag.StartSchedules()
 	clock.Advance(10 * time.Minute)
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 	if ag.Pending() != 0 {
 		t.Fatal("nothing fires")
 	}
@@ -623,8 +624,7 @@ func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
 		ag.SetSession(&store.Session{ID: "s0"})
 		clock.Advance(2 * time.Minute) // due
 		ag.SetSession(&store.Session{ID: "s2", Timers: []schedule.Schedule{tm}})
-		ag.sched.kickLoop()
-		time.Sleep(50 * time.Millisecond)
+		settle(t, ag)
 		select {
 		case d := <-asked:
 			t.Fatalf("loadTimers never asks: %s", d)
@@ -643,8 +643,7 @@ func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
 		if !strings.Contains(detail, "t\n  when:") {
 			t.Fatalf("lists the timer: %s", detail)
 		}
-		ag.sched.kickLoop()
-		time.Sleep(50 * time.Millisecond)
+		settle(t, ag)
 		if ag.Pending() != 0 {
 			t.Fatal("nothing queued before the answer")
 		}
@@ -662,7 +661,7 @@ func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
 				}
 				time.Sleep(5 * time.Millisecond)
 			}
-			time.Sleep(50 * time.Millisecond)
+			settle(t, ag)
 			if ag.Pending() != 0 {
 				t.Fatal("nothing queued after no")
 			}
@@ -702,8 +701,7 @@ func TestConfirmHeldTimersPanicDoesNotPropagate(t *testing.T) {
 	ag.SetSession(&store.Session{ID: "s0"})
 	clock.Advance(2 * time.Minute) // due
 	ag.SetSession(&store.Session{ID: "s2", Timers: []schedule.Schedule{tm}})
-	ag.sched.kickLoop()
-	time.Sleep(50 * time.Millisecond)
+	settle(t, ag)
 
 	done := make(chan struct{})
 	go func() {
