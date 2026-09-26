@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -335,3 +336,296 @@ func (ctxBlockProvider) Chat(ctx context.Context, _ provider.ChatRequest, _ prov
 }
 func (ctxBlockProvider) ListModels(context.Context) ([]provider.ModelInfo, error) { return nil, nil }
 func (ctxBlockProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
+
+// ---- fix round 1: run-time checks, dropped events, durability ----
+
+// noteSink collects notices from any goroutine.
+func noteSink(ag *Agent) func() string {
+	var mu sync.Mutex
+	var notes []string
+	ag.Events.OnNotice = func(m string) { mu.Lock(); notes = append(notes, m); mu.Unlock() }
+	return func() string { mu.Lock(); defer mu.Unlock(); return strings.Join(notes, "\n") }
+}
+
+// countingProvider answers "done" and counts calls.
+func countingProvider(calls *int) *funcProvider {
+	return &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		*calls++
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+}
+
+// queueOne seeds sc, starts the loop, moves past its time and waits for it.
+func queueOne(t *testing.T, ag *Agent, clock *schedule.FakeClock, sc schedule.Schedule, project bool) {
+	t.Helper()
+	seed(t, ag, sc, project)
+	ag.sched.startLoop()
+	clock.Advance(31 * time.Minute)
+	waitQueued(t, ag, 1)
+}
+
+func TestEditAfterQueueDoesNotRun(t *testing.T) {
+	calls := 0
+	ag, clock, dir := schedAgent(t, countingProvider(&calls))
+	notes := noteSink(ag)
+	sc := mk("nightly", "every 30m")
+	queueOne(t, ag, clock, sc, true)
+	// A grant forged into the file after the event was queued.
+	p := filepath.Join(dir, ".be-code", "schedules.md")
+	b, _ := os.ReadFile(p)
+	os.WriteFile(p, []byte(strings.Replace(string(b), "state: active", "allow: write: .\nstate: active", 1)), 0o644)
+	if _, _, err := ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("an event whose schedule changed since approval must not run")
+	}
+	got, _, _ := ag.sched.lookup(sc.ID)
+	n := notes()
+	if got.State != schedule.Paused || !strings.Contains(n, "changed since approved") ||
+		!strings.Contains(n, `scheduled event "nightly" was not run: it changed since it was approved`) {
+		t.Fatalf("paused with notices: %v %q", got.State, n)
+	}
+}
+
+func setState(t *testing.T, ag *Agent, id string, st schedule.State) {
+	t.Helper()
+	s := ag.sched
+	s.mu.Lock()
+	defer s.unlock()
+	sc, ok, project := s.findLocked(id)
+	if !ok {
+		t.Fatal("no such schedule")
+	}
+	sc.State = st
+	s.putLocked(sc, project)
+}
+
+func TestPausedAfterQueueDoesNotRun(t *testing.T) {
+	calls := 0
+	ag, clock, _ := schedAgent(t, countingProvider(&calls))
+	notes := noteSink(ag)
+	sc := mk("tick", "every 30m")
+	queueOne(t, ag, clock, sc, true)
+	setState(t, ag, sc.ID, schedule.Paused)
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	if calls != 0 || !strings.Contains(notes(), "was not run: it is paused") {
+		t.Fatalf("calls %d, notices %q", calls, notes())
+	}
+}
+
+func TestRemovedAfterQueueDoesNotRun(t *testing.T) {
+	calls := 0
+	ag, clock, _ := schedAgent(t, countingProvider(&calls))
+	notes := noteSink(ag)
+	sc := mk("gone", "in 1m")
+	queueOne(t, ag, clock, sc, false)
+	ag.sched.mu.Lock()
+	ag.sched.removeLocked(sc.ID)
+	ag.sched.unlock()
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	if calls != 0 || !strings.Contains(notes(), "was not run: it no longer exists") {
+		t.Fatalf("calls %d, notices %q", calls, notes())
+	}
+}
+
+func TestWakeBetweenDrainAndRunFiresOnce(t *testing.T) {
+	calls := 0
+	ag, clock, _ := schedAgent(t, countingProvider(&calls))
+	sc := mk("once", "in 1m")
+	queueOne(t, ag, clock, sc, false)
+	items := ag.DrainForTurn()
+	ag.sched.kickLoop() // a wake in the drain→begin window
+	time.Sleep(50 * time.Millisecond)
+	if ag.Pending() != 0 {
+		t.Fatal("re-queued while the drained event had not begun")
+	}
+	if _, _, err := ag.RunFull(context.Background(), items[0].Text); err != nil {
+		t.Fatal(err)
+	}
+	ag.sched.kickLoop()
+	time.Sleep(50 * time.Millisecond)
+	got, _, _ := ag.sched.lookup(sc.ID)
+	if calls != 1 || ag.Pending() != 0 || got.State != schedule.Done {
+		t.Fatalf("calls %d pending %d state %s", calls, ag.Pending(), got.State)
+	}
+}
+
+func TestDroppedOneOffIsDone(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	sc := mk("once", "in 1m")
+	queueOne(t, ag, clock, sc, false)
+	ag.Remove(0)
+	ag.sched.kickLoop()
+	time.Sleep(50 * time.Millisecond)
+	got, _, _ := ag.sched.lookup(sc.ID)
+	if ag.Pending() != 0 || got.State != schedule.Done || got.LastOutcome != "dropped from the queue" {
+		t.Fatalf("pending %d %+v", ag.Pending(), got)
+	}
+}
+
+func TestSaveFailureDoesNotRefire(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot write")
+	}
+	ag, clock, dir := schedAgent(t, &scriptedProvider{})
+	sc := mk("tick", "every 30m")
+	queueOne(t, ag, clock, sc, true)
+	pdir := filepath.Join(dir, ".be-code")
+	if err := os.Chmod(pdir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(pdir, 0o755) })
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	clock.Advance(5 * time.Minute)
+	ag.sched.kickLoop()
+	time.Sleep(50 * time.Millisecond)
+	if ag.Pending() != 0 {
+		t.Fatal("a run whose LastRun could not be saved fired again at once")
+	}
+}
+
+func TestTaskLinkToClosedNodeIsNotReopened(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	st := withEngine(t, ag)
+	notes := noteSink(ag)
+	root := st.Plan("work", []string{"a"})
+	st.SetStatus(root+".1", engine.StatusDone, "")
+	sc := mk("linked", "in 1m")
+	sc.Task = root + ".1"
+	queueOne(t, ag, clock, sc, false)
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	if s, _ := st.NodeStatus(root + ".1"); s != engine.StatusDone {
+		t.Fatalf("a done node was reopened: %s", s)
+	}
+	if !strings.Contains(notes(), "task "+root+".1 is done; running without it") {
+		t.Fatalf("notice %q", notes())
+	}
+}
+
+// panicOnceProvider panics on its first call, then writes docs/r.md, then ends.
+type panicOnceProvider struct{ n int }
+
+func (p *panicOnceProvider) Name() string { return "panic" }
+func (p *panicOnceProvider) Chat(context.Context, provider.ChatRequest, provider.StreamFunc) (*provider.ChatResponse, error) {
+	p.n++
+	switch p.n {
+	case 1:
+		panic("boom\nsecond line")
+	case 2:
+		return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "1", Name: "write_file", Arguments: `{"path":"docs/r.md","content":"x"}`}}}, nil
+	}
+	return &provider.ChatResponse{Content: "done"}, nil
+}
+func (p *panicOnceProvider) ListModels(context.Context) ([]provider.ModelInfo, error) {
+	return nil, nil
+}
+func (p *panicOnceProvider) Ping(context.Context) (string, error) { return "ok", nil }
+
+func TestPanicInFiredTurnClearsAllowance(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &panicOnceProvider{})
+	var asked []string
+	ag.Tools.Approve = func(action, detail string) bool { asked = append(asked, action); return false }
+	ag.Tools.ApproveWrites = true
+	sc := mk("boom", "in 1m")
+	sc.Allow = schedule.Allowance{{Kind: "write", Value: "docs"}}
+	queueOne(t, ag, clock, sc, false)
+	func() {
+		defer func() { recover() }()
+		ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+		t.Fatal("the panic propagates")
+	}()
+	if got, _, _ := ag.sched.lookup(sc.ID); got.LastOutcome != "error: boom…" {
+		t.Fatalf("outcome %q", got.LastOutcome)
+	}
+	ag.RunFull(context.Background(), "an ordinary request")
+	if strings.Join(asked, ",") != "file_write" {
+		t.Fatalf("the allowance outlived the panicked turn: %v", asked)
+	}
+}
+
+func TestTypedRequestAfterScheduledDrainGetsNoAllowance(t *testing.T) {
+	p := &scriptedProvider{responses: []provider.ChatResponse{
+		{ToolCalls: []provider.ToolCall{{ID: "1", Name: "write_file", Arguments: `{"path":"docs/r.md","content":"x"}`}}},
+		{Content: "done"},
+	}}
+	ag, clock, _ := schedAgent(t, p)
+	var asked []string
+	ag.Tools.Approve = func(action, detail string) bool { asked = append(asked, action); return false }
+	ag.Tools.ApproveWrites = true
+	sc := mk("report", "in 1m")
+	sc.Allow = schedule.Allowance{{Kind: "write", Value: "docs"}}
+	queueOne(t, ag, clock, sc, false)
+	ag.DrainForTurn() // armed, then a person types something else instead
+	ag.RunFull(context.Background(), "typed by a person")
+	if strings.Join(asked, ",") != "file_write" {
+		t.Fatalf("a typed request ran under the schedule's allowance: %v", asked)
+	}
+	if got, _, _ := ag.sched.lookup(sc.ID); !got.LastRun.IsZero() {
+		t.Fatal("the schedule did not run")
+	}
+}
+
+func TestStaleArmClearedByDrain(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	ag.EnqueueScheduled("id1", "x", "same text")
+	ag.DrainForTurn()
+	ag.DrainItems()
+	if ag.takeFiring("same text") != nil {
+		t.Fatal("a drain clears a stale arm")
+	}
+}
+
+func TestStartAfterStopRunsNoPass(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	seed(t, ag, mk("due", "in 1m"), false)
+	clock.Advance(2 * time.Minute)
+	ag.StopSchedules()
+	ag.sched.startLoop()
+	time.Sleep(50 * time.Millisecond)
+	if ag.Pending() != 0 {
+		t.Fatal("a stopped scheduler ran a pass")
+	}
+}
+
+func TestFinishKeepsStateOnUnparseableSpec(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	sc := mk("odd", "whenever you like")
+	seed(t, ag, sc, false)
+	ag.sched.finish(sc.ID, "ok")
+	if got, _, _ := ag.sched.lookup(sc.ID); got.State != schedule.Active || got.LastOutcome != "ok" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestNewSessionReplacesTimers(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	sc := mk("once", "in 1h")
+	seed(t, ag, sc, false)
+	ag.SetSession(&store.Session{ID: "s2"}) // /clear
+	if _, ok, _ := ag.sched.lookup(sc.ID); ok {
+		t.Fatal("a fresh session carried the old session's timers")
+	}
+	ag.Resume(&store.Session{ID: "s3", Timers: []schedule.Schedule{sc}})
+	if _, ok, _ := ag.sched.lookup(sc.ID); !ok {
+		t.Fatal("a resumed session's timers are loaded")
+	}
+}
+
+func TestOneOffLastRunSavedBeforeTheRun(t *testing.T) {
+	var saved []schedule.Schedule
+	p := &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		if s, err := store.Load("s1"); err == nil {
+			saved = s.Timers
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, clock, _ := schedAgent(t, p)
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "earlier"})
+	sc := mk("once", "in 1m")
+	queueOne(t, ag, clock, sc, false)
+	ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+	if len(saved) != 1 || saved[0].LastRun.IsZero() {
+		t.Fatalf("the session file did not carry LastRun when the model was called: %+v", saved)
+	}
+}

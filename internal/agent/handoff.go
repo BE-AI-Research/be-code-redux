@@ -211,6 +211,9 @@ func (a *Agent) heuristicHandoff() string {
 func (a *Agent) Resume(s *store.Session) {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
+	// SetSession also hands the scheduler this session's one-off timers,
+	// read before the session is published; the project's recurring
+	// schedules are reread on every wake.
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
 	// A saved history that shows the model a page starts this session with
@@ -230,11 +233,6 @@ func (a *Agent) Resume(s *store.Session) {
 	a.modelMu.Lock()
 	a.History.System.Content = a.composeSystem("")
 	a.modelMu.Unlock()
-	// The resumed session's one-off timers replace whatever the scheduler
-	// held; the project's recurring schedules are reread on every wake.
-	if a.sched != nil {
-		a.sched.loadTimers(s.Timers)
-	}
 }
 
 // Handoff returns the briefing carried over from the resumed session.

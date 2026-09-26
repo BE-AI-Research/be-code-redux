@@ -1638,6 +1638,18 @@ func touchedUnder(n *Node) []string {
 // was already written).
 const InterruptedNote = "interrupted "
 
+// NodeStatus is one node's status, and false when there is no such node:
+// the read a caller needs before SetStatus, which would reopen a closed one.
+func (s *Store) NodeStatus(id string) (Status, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return "", false
+	}
+	return n.Status, true
+}
+
 // DoingUnderID is the id of the doing node inside a dispatched subtree,
 // or "" — the bottom line's "⚙ big 3.2.2".
 func (s *Store) DoingUnderID(rootID string) string {

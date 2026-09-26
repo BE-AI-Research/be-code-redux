@@ -941,3 +941,15 @@ func TestAnAdoptedRootLeavesNoDocumentAndNoReport(t *testing.T) {
 		t.Fatalf("adoption lost the evidence: %s", s.TreeText())
 	}
 }
+
+func TestNodeStatusReadsWithoutReopening(t *testing.T) {
+	s, _ := openTest(t, "s1", false)
+	id := s.Plan("work", []string{"a"})
+	s.SetStatus(id+".1", StatusDone, "")
+	if st, ok := s.NodeStatus(id + ".1"); !ok || st != StatusDone {
+		t.Fatalf("%v %v", st, ok)
+	}
+	if _, ok := s.NodeStatus("9.9"); ok {
+		t.Fatal("a missing node is reported missing")
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/repomap"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -1386,11 +1387,23 @@ func (a *Agent) SaveGuard() (blocked bool, owner int) {
 // session is a different file with a different owner, and a run that stood
 // down from one session must still be able to save the next (/clear, a
 // resume after a blocked save).
+//
+// The scheduler's one-off timers are the session's own, so they are
+// replaced by the new session's (none, for /clear). They are read here,
+// before the pointer is published, and loaded after sessionMu is released:
+// the scheduler's lock comes before sessionMu, never after it.
 func (a *Agent) SetSession(s *store.Session) {
+	var timers []schedule.Schedule
+	if s != nil {
+		timers = append(timers, s.Timers...)
+	}
 	a.sessionMu.Lock()
 	a.Session = s
 	a.sessionMu.Unlock()
 	a.saveDisabled, a.saveOwner, a.saveWarned = false, 0, false
+	if a.sched != nil {
+		a.sched.loadTimers(timers)
+	}
 }
 
 // CurrentSession is the session as a goroutine that is not the agent's own
@@ -2023,8 +2036,11 @@ func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Repo
 // under that schedule's allowance and max runtime; everything else runs as
 // it always has.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
-	if f := a.takeFiring(userInput); f != nil && a.sched != nil {
-		return a.runFired(ctx, f, userInput)
+	if f := a.takeFiring(userInput); f != nil {
+		if a.sched != nil {
+			return a.runFired(ctx, f, userInput)
+		}
+		a.releaseFiring(f)
 	}
 	return a.runFull(ctx, userInput)
 }
