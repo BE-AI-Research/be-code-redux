@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +150,88 @@ func TestAllowanceAskTimeoutWithdraws(t *testing.T) {
 	}
 	if refused, timedOut := r.ClearAllowance(); refused != "shell" || !timedOut {
 		t.Fatalf("%q %v", refused, timedOut)
+	}
+}
+
+// TestAllowanceSkipsReviewWrite is fix round 1, item 1: ReviewWrite has no
+// deadline of its own, and a rejection there was never recorded against the
+// allowance's ask_timeout. During a fired turn an uncovered write must skip
+// straight to r.ask, which does have one.
+func TestAllowanceSkipsReviewWrite(t *testing.T) {
+	r, log := allowReg(t, false)
+	reviewCalled := false
+	r.ReviewWrite = func(ctx context.Context, rel, oldC, newC string) ReviewDecision {
+		reviewCalled = true
+		return ReviewAccept
+	}
+	r.SetAllowance(nil, time.Minute)
+	res := dispatchCall(r, "write_file", `{"path":"src/b.go","content":"x"}`)
+	if reviewCalled {
+		t.Fatal("ReviewWrite was called for an uncovered write during a fired turn")
+	}
+	if !res.IsError || strings.Join(log.asked(), ",") != "file_write" {
+		t.Fatalf("expected a file_write ask through Approve: %+v asked=%v", res, log.asked())
+	}
+	if refused, _ := r.ClearAllowance(); refused != "file_write" {
+		t.Fatalf("refusal recorded: %q", refused)
+	}
+}
+
+// TestAllowanceReviewWriteUsedWithoutAllowance pins the "outside a fired turn
+// nothing changes" half of the same ruling.
+func TestAllowanceReviewWriteUsedWithoutAllowance(t *testing.T) {
+	r, _ := allowReg(t, true)
+	reviewCalled := false
+	r.ReviewWrite = func(ctx context.Context, rel, oldC, newC string) ReviewDecision {
+		reviewCalled = true
+		return ReviewAccept
+	}
+	res := dispatchCall(r, "write_file", `{"path":"src/b.go","content":"x"}`)
+	if !reviewCalled || res.IsError {
+		t.Fatalf("ReviewWrite must still run without an allowance: %+v reviewCalled=%v", res, reviewCalled)
+	}
+}
+
+// TestSubsetSeesParentsUntrustedWeb is fix round 1, item 2: the browser tool
+// that sets untrustedWeb is never itself exposed through Subset, so a
+// Subset("shell") could otherwise never learn the parent request read an
+// untrusted page and would skip shell_after_web (browser spec §3.6).
+func TestSubsetSeesParentsUntrustedWeb(t *testing.T) {
+	r, log := allowReg(t, true)
+	r.MarkUntrustedWeb()
+	sub := r.Subset("shell")
+	dispatchCall(sub, "shell", `{"command":"echo hi"}`)
+	if strings.Join(log.asked(), ",") != "shell_after_web" {
+		t.Fatalf("asked %v", log.asked())
+	}
+}
+
+// TestAllowanceWriteThroughSymlinkEscapeStillAsks is fix round 1, item 4:
+// WriteAllowed matched the textual path only, so a symlink inside a granted
+// directory could point outside the workspace and land an unattended,
+// never-diffed write there.
+func TestAllowanceWriteThroughSymlinkEscapeStillAsks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need elevated privileges on windows")
+	}
+	r, log := allowReg(t, true)
+	r.SetAllowance(grants(t, "write: docs"), time.Minute)
+	if err := os.MkdirAll(filepath.Join(r.Root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(r.Root, "docs", "out")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	res := dispatchCall(r, "write_file", `{"path":"docs/out/x.txt","content":"x"}`)
+	if res.IsError {
+		t.Fatalf("the approver answers yes, so the write should still land: %+v", res)
+	}
+	if strings.Join(log.asked(), ",") != "file_write" {
+		t.Fatalf("a write through a symlink escaping the grant must still ask: asked=%v", log.asked())
+	}
+	if _, err := os.Stat(filepath.Join(outside, "x.txt")); err != nil {
+		t.Fatalf("write did not land at the resolved (outside) target: %v", err)
 	}
 }
 

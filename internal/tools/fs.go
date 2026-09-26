@@ -37,12 +37,17 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 	rel, _ := filepath.Rel(r.Root, absPath)
 	rejected := Result{IsError: true,
 		Content: "user rejected this file change; ask what they want instead or take a different approach"}
-	if r.allowWrite(rel) {
+	if r.allowWrite(absPath) {
 		// Covered by the scheduled event's allowance: no editor diff, no
 		// prompt. The checkpoint snapshot (OnBeforeWrite) still runs.
 		return Result{}, true
 	}
-	if r.ReviewWrite != nil {
+	// During a fired turn an uncovered write skips the editor review too:
+	// ReviewWrite has no deadline of its own, and a rejection there is never
+	// recorded against the allowance's ask_timeout (spec §2.4). Go straight
+	// to the terminal prompt through r.ask, which does have one. Outside a
+	// fired turn (r.fired nil) nothing changes.
+	if r.fired.Load() == nil && r.ReviewWrite != nil {
 		// Only say VS Code when VS Code is really being asked: in mode "tui",
 		// or with no editor attached, the review resolves in this terminal
 		// and the note would be a lie the user cannot act on.

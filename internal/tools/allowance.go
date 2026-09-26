@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,9 +52,32 @@ func (r *Registry) allowShell(command string) bool {
 	return len(globs) > 0 && classifyCommand(command, globs, nil) == cmdAllowed
 }
 
-func (r *Registry) allowWrite(rel string) bool {
+// allowWrite reports whether absPath is covered by the fired allowance.
+// resolve() only checks the path textually, so a symlink already inside a
+// granted directory (planted before the event fired, or by an earlier
+// covered write in the same turn) could otherwise point anywhere and land an
+// unattended, never-diffed write outside the grant; realExistingPath (also
+// used by checkScope) resolves it, and both the resolved path's containment
+// in Root and its Root-relative path's WriteAllowed must hold, or this falls
+// through to the normal prompt.
+func (r *Registry) allowWrite(absPath string) bool {
 	p := r.fired.Load()
-	return p != nil && p.allow.WriteAllowed(rel)
+	if p == nil {
+		return false
+	}
+	real, err := realExistingPath(absPath)
+	if err != nil {
+		return false
+	}
+	root := r.Root
+	if rr, err := filepath.EvalSymlinks(r.Root); err == nil {
+		root = rr
+	}
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return p.allow.WriteAllowed(filepath.ToSlash(rel))
 }
 
 func (r *Registry) allowHost(host string) bool {

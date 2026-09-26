@@ -174,12 +174,21 @@ func NewRegistry(dir string, approve ApproveFunc) (*Registry, error) {
 }
 
 // Subset returns a registry sharing this one's root/approval but exposing
-// only the named tools — used by plan mode for a read-only phase.
+// only the named tools — used by plan mode for a read-only phase, and by
+// Scoped to build a sub-agent's registry. ApproveCtx is deliberately left
+// unset: a scratch or sub-agent registry drives no model-parameter
+// resolution of its own.
 func (r *Registry) Subset(names ...string) *Registry {
 	sub := &Registry{
 		Root: r.Root, Approve: r.Approve, ApproveWrites: r.ApproveWrites,
 		OnBeforeWrite: r.OnBeforeWrite, ShellAllow: r.ShellAllow,
 		ShellDeny: r.ShellDeny, Hooks: r.Hooks,
+		ReviewWrite: r.ReviewWrite, ReviewInvolvesEditor: r.ReviewInvolvesEditor,
+		EditorName: r.EditorName, OnStatus: r.OnStatus,
+		// parent lets UntrustedWeb() (and, for a Scoped registry, the scoped
+		// shell path) see the request's flag even though the browser tool
+		// that sets it is never itself exposed through Subset or Scoped.
+		parent: r,
 		byName: map[string]Tool{}, procs: r.procs,
 	}
 	sub.maxOutput.Store(r.maxOutput.Load())
@@ -206,9 +215,12 @@ func (r *Registry) Subset(names ...string) *Registry {
 }
 
 // rebindBuiltinTool constructs a fresh instance of one of the built-in tools
-// bound to sub, for Subset (and Scoped, which builds its own registry the
-// same way). ok is false for anything Subset/Scoped never rebuilds — those
-// tools are shared by reference.
+// bound to sub. Subset calls this for every name it is asked for — including
+// on Scoped's behalf, since Scoped gets its registry from Subset too — so
+// there is exactly one place that decides which tools must be rebound. ok is
+// false for anything else (an MCP tool, a git lookup, …): those are shared
+// by reference from the parent, which TestScopedToolsAreBoundOrReadOnlyAllowlisted
+// pins to an explicit read-only allowlist for Scoped.
 func rebindBuiltinTool(name string, sub *Registry) (Tool, bool) {
 	switch name {
 	case "read_file":
@@ -236,43 +248,23 @@ func rebindBuiltinTool(name string, sub *Registry) (Tool, bool) {
 // shares the main registry's approval seam, so a write is approved and
 // checkpointed exactly as the main model's is.
 func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
+	// Subset rebinds read_file/write_file/edit_file/list_dir/search/shell to
+	// the returned registry (rebindBuiltinTool) so confinement reads
+	// sub.scope; lookup/history/show/changes are not built-ins, so they come
+	// back shared by reference from the PARENT registry — safe only because
+	// all four are read-only today. If a future git tool can write, it must
+	// be added to rebindBuiltinTool before it can be listed here — sharing
+	// it by reference would let a sub-agent write through the parent's
+	// confinement instead of its own. TestScopedToolsAreBoundOrReadOnlyAllowlisted
+	// pins this.
 	sub := r.Subset("read_file", "write_file", "edit_file", "list_dir", "search", "shell",
 		"lookup", "history", "show", "changes")
-	// A scoped registry drives no model-parameter resolution of its own: it
-	// runs no loader. Leaving ApproveCtx set would let a caller bypass the
-	// "sub-agent <label>:" prefix below by asking through that seam instead.
-	sub.ApproveCtx = nil
-	sub.ReviewWrite = r.ReviewWrite
-	sub.ReviewInvolvesEditor = r.ReviewInvolvesEditor
-	sub.EditorName = r.EditorName
-	sub.OnStatus = r.OnStatus
 	sub.scoped = true
-	sub.parent = r
 	sub.scope, sub.checks = append([]string(nil), scope...), checks
-	sub.maxOutput.Store(r.maxOutput.Load())
 	if r.Approve != nil {
 		parent := r.Approve
 		sub.Approve = func(action, detail string) bool {
 			return parent(action, "sub-agent "+label+":\n"+detail)
-		}
-	}
-	// The tools hold a pointer to the registry they were built with; rebind
-	// them to this one so confinement reads sub.scope.
-	sub.tools, sub.byName = nil, map[string]Tool{}
-	for _, t := range []Tool{&readFileTool{r: sub}, &writeFileTool{r: sub}, &editFileTool{r: sub},
-		&listDirTool{r: sub}, &searchTool{r: sub}, &shellTool{r: sub}} {
-		sub.add(t)
-	}
-	// lookup/history/show/changes are shared by reference, bound to the
-	// PARENT registry, not sub: that is safe only because all four are
-	// read-only today. If a future git tool can write, it must be rebound
-	// to sub (like the six above) before it can be added here — sharing it
-	// by reference would let a sub-agent write through the parent's
-	// confinement instead of its own. TestScopedToolsAreBoundOrReadOnlyAllowlisted
-	// pins this.
-	for _, n := range []string{"lookup", "history", "show", "changes"} {
-		if t, ok := r.byName[n]; ok {
-			sub.add(t)
 		}
 	}
 	return sub
@@ -403,8 +395,16 @@ func (r *Registry) Close() {
 // MarkUntrustedWeb records that this request has read an untrusted page.
 func (r *Registry) MarkUntrustedWeb() { r.untrustedWeb.Store(true) }
 
-// UntrustedWeb reports whether this request has read an untrusted page.
-func (r *Registry) UntrustedWeb() bool { return r.untrustedWeb.Load() }
+// UntrustedWeb reports whether this request has read an untrusted page —
+// its own flag, or (Subset and Scoped both set parent) its parent's: a
+// Subset sharing shell/process with the main registry must still suspend
+// auto-approval after the primary request read an untrusted page (browser
+// spec §3.6), and the browser tool that sets the flag is never itself
+// exposed through Subset or Scoped, so a subset registry can only ever
+// learn this from its parent.
+func (r *Registry) UntrustedWeb() bool {
+	return r.untrustedWeb.Load() || (r.parent != nil && r.parent.UntrustedWeb())
+}
 
 // ClearUntrustedWeb puts the flag down. Agent.BeginTypedRequest is its one
 // caller: a request a person typed, never a hand-back.
