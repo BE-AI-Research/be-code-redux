@@ -37,6 +37,11 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 	rel, _ := filepath.Rel(r.Root, absPath)
 	rejected := Result{IsError: true,
 		Content: "user rejected this file change; ask what they want instead or take a different approach"}
+	if r.allowWrite(rel) {
+		// Covered by the scheduled event's allowance: no editor diff, no
+		// prompt. The checkpoint snapshot (OnBeforeWrite) still runs.
+		return Result{}, true
+	}
 	if r.ReviewWrite != nil {
 		// Only say VS Code when VS Code is really being asked: in mode "tui",
 		// or with no editor attached, the review resolves in this terminal
@@ -66,7 +71,7 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 		// ReviewUnavailable: fall through to the terminal prompt.
 	}
 	preview := diff.Preview(rel, oldContent, newContent, false)
-	if r.Approve("file_write", preview) {
+	if r.ask(ctx, "file_write", preview, true) {
 		return Result{}, true
 	}
 	return rejected, false

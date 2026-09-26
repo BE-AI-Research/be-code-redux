@@ -72,16 +72,18 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 	case t.r.UntrustedWeb():
 		// This request has read a page from a host the user has not
 		// allowed: every automatic approval — the allow list, -y, "a",
-		// auto_approve_shell — is suspended, and the command asks as its
-		// own action, which offers no "always" (spec §3.6, amended). With
-		// nobody to ask, it is refused.
-		if t.r.Approve == nil || !t.r.Approve("shell_after_web", command) {
+		// auto_approve_shell, a scheduled event's allowance — is suspended,
+		// and the command asks as its own action, which offers no "always"
+		// (spec §3.6, amended). With nobody to ask, it is refused.
+		if !t.r.ask(ctx, "shell_after_web", command, false) {
 			return Result{IsError: true, Content: "shell is not auto-approved after reading an untrusted web page in this request, and this command was not approved; say what you wanted to run and why"}
 		}
 	case class == cmdAllowed:
 		// pre-approved by allowlist; no prompt
+	case t.r.allowShell(command):
+		// covered by the scheduled event's allowance (schedules spec §2.3)
 	default:
-		if t.r.Approve != nil && !t.r.Approve("shell", command) {
+		if !t.r.ask(ctx, "shell", command, true) {
 			return Result{IsError: true, Content: "user denied this command; propose an alternative or ask what to do"}
 		}
 	}

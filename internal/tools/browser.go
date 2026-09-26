@@ -291,7 +291,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		if t.consent.Tier(host) == browser.TierDeny {
 			return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
 		}
-		if t.approve("browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
+		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
 		}
 		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
@@ -302,14 +302,19 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 	case browser.TierDeny:
 		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
 	case browser.TierWatch:
-		if t.approve("browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
+		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
 		}
 	default:
 		if t.consent.Granted(host) {
 			return "", host, judgedURL
 		}
-		if t.approve("browser", fmt.Sprintf("act on %s?\n  %s\ny allows %s for the rest of this session", disp, what, disp)) {
+		if t.r != nil && t.r.allowHost(host) {
+			// Covered by the scheduled event's allowance (schedules spec §2.3);
+			// never the watch tier or a page with no address, which ask above.
+			return "", host, judgedURL
+		}
+		if t.approve(ctx, "browser", fmt.Sprintf("act on %s?\n  %s\ny allows %s for the rest of this session", disp, what, disp)) {
 			t.consent.Grant(host)
 			return "", host, judgedURL
 		}
@@ -331,8 +336,8 @@ func (t *BrowserTool) hostDisplay(host string, page *browser.Page) string {
 
 // approve asks through the registry's seam; with nobody to ask, the answer
 // is no.
-func (t *BrowserTool) approve(action, detail string) bool {
-	return t.r != nil && t.r.Approve != nil && t.r.Approve(action, detail)
+func (t *BrowserTool) approve(ctx context.Context, action, detail string) bool {
+	return t.r != nil && t.r.ask(ctx, action, detail, false)
 }
 
 // describe says exactly what is about to happen, for a person deciding

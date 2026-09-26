@@ -135,6 +135,30 @@ func TestBrowserWatchAsksEveryTime(t *testing.T) {
 	}
 }
 
+func TestBrowserAllowanceGrantsHost(t *testing.T) {
+	var log askLog
+	reg, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(false))
+	reg.SetAllowance(grants(t, "browser: acme.test"), time.Minute)
+	do(bt, map[string]any{"action": "snapshot"})
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+		t.Fatalf("click: %s", res.Content)
+	}
+	if log.count() != 0 {
+		t.Fatalf("a host covered by the allowance asked: %v", log.actions)
+	}
+
+	var log2 askLog
+	reg2, bt2, _, _ := browserFixture(t, "https://acme.test/login", map[string]string{"acme.test": "watch"}, log2.approver(true))
+	reg2.SetAllowance(grants(t, "browser: acme.test"), time.Minute)
+	do(bt2, map[string]any{"action": "snapshot"})
+	if res := do(bt2, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+		t.Fatalf("click: %s", res.Content)
+	}
+	if log2.count() != 1 || log2.actions[0] != "browser_watch" {
+		t.Fatalf("the watch tier must still ask despite the grant: %v", log2.actions)
+	}
+}
+
 func TestBrowserDenyRefusesWithoutAsking(t *testing.T) {
 	var log askLog
 	_, bt, ps, _ := browserFixture(t, "https://acme.test/login", map[string]string{"acme.test": "deny"}, log.approver(true))

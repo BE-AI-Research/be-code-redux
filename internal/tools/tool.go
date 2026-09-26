@@ -148,6 +148,9 @@ type Registry struct {
 	// a person typed clears it (Agent.BeginTypedRequest); a resumed history
 	// holding a page sets it again.
 	untrustedWeb atomic.Bool
+	// fired is a scheduled event's allowance while its turn runs
+	// (allowance.go). Never copied by Subset or Scoped.
+	fired atomic.Pointer[firedPolicy]
 }
 
 // NewRegistry builds the standard tool set rooted at dir.
@@ -179,13 +182,52 @@ func (r *Registry) Subset(names ...string) *Registry {
 		ShellDeny: r.ShellDeny, Hooks: r.Hooks,
 		byName: map[string]Tool{}, procs: r.procs,
 	}
+	sub.maxOutput.Store(r.maxOutput.Load())
 	for _, n := range names {
-		if t, ok := r.byName[n]; ok {
-			sub.tools = append(sub.tools, t)
-			sub.byName[n] = t
+		t, ok := r.byName[n]
+		if !ok {
+			continue
 		}
+		// A built-in tool holds a pointer back to the registry it was
+		// constructed with, so sharing the parent's instance would run every
+		// call against the PARENT's fields (Approve, ShellAllow/Deny, and a
+		// scheduled event's allowance) rather than this subset's own —
+		// silently defeating the point of a read-only or restricted subset
+		// the moment it is asked to expose one of these. Rebind it to sub;
+		// anything else (an MCP tool, a git lookup, …) is still shared by
+		// reference, as before.
+		if rebuilt, ok := rebindBuiltinTool(n, sub); ok {
+			t = rebuilt
+		}
+		sub.tools = append(sub.tools, t)
+		sub.byName[n] = t
 	}
 	return sub
+}
+
+// rebindBuiltinTool constructs a fresh instance of one of the built-in tools
+// bound to sub, for Subset (and Scoped, which builds its own registry the
+// same way). ok is false for anything Subset/Scoped never rebuilds — those
+// tools are shared by reference.
+func rebindBuiltinTool(name string, sub *Registry) (Tool, bool) {
+	switch name {
+	case "read_file":
+		return &readFileTool{r: sub}, true
+	case "write_file":
+		return &writeFileTool{r: sub}, true
+	case "edit_file":
+		return &editFileTool{r: sub}, true
+	case "list_dir":
+		return &listDirTool{r: sub}, true
+	case "search":
+		return &searchTool{r: sub}, true
+	case "shell":
+		return &shellTool{r: sub}, true
+	case "process":
+		return &processTool{r: sub}, true
+	default:
+		return nil, false
+	}
 }
 
 // Scoped is a sub-agent's registry: reads anywhere, writes under scope,
