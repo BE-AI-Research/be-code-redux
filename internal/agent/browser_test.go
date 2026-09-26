@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,6 +42,38 @@ func TestRecentContextKeepsPageTextOut(t *testing.T) {
 	ag.Run(context.Background(), "read the page")
 	if rc := ag.RecentContext(); strings.Contains(rc, "SECRET PAGE TEXT") {
 		t.Fatalf("page text reached the co-worker context:\n%s", rc)
+	}
+}
+
+// TestAutoToolConsultationWithholdsBrowserPageText is fix round 1's Important
+// (browser spec §3.5): three consecutive failing browser calls still trigger
+// auto:tool, but the streak buffer handed to the co-worker must never carry
+// the page text those failures returned.
+func TestAutoToolConsultationWithholdsBrowserPageText(t *testing.T) {
+	cw := coworkerStub(t, provider.ChatResponse{Content: "try a different selector."})
+	calls := 0
+	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		calls++
+		if calls <= 3 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: fmt.Sprint(calls), Name: "browser", Arguments: `{"action":"click","ref":"e1"}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	ag, _ := newTestAgent(t, p, withCoworkers("big"))
+	ag.Tools.AddTool(pageTool{})
+	if _, err := ag.Run(context.Background(), "click the button"); err != nil {
+		t.Fatal(err)
+	}
+	if len(cw.lastReq.Messages) == 0 {
+		t.Fatal("the co-worker was never consulted")
+	}
+	for _, m := range cw.lastReq.Messages {
+		if strings.Contains(m.Content, "SECRET PAGE TEXT") {
+			t.Fatalf("page text reached the co-worker:\n%s", m.Content)
+		}
+	}
+	if !strings.Contains(cw.lastReq.Messages[1].Content, "(browser result withheld: page content stays on this machine)") {
+		t.Fatalf("auto:tool question lacks the withheld placeholder:\n%s", cw.lastReq.Messages[1].Content)
 	}
 }
 

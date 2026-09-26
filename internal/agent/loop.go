@@ -1543,7 +1543,15 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		} else {
 			a.toolFailStreak = toolFailStreak{name: call.Name, n: 1}
 		}
-		a.toolFailStreak.last = append(a.toolFailStreak.last, res.Content)
+		// Same rule as lastFailingTool above, applied to the streak buffer
+		// that auto:tool hands a co-worker: a failed browser call's Content
+		// is the page outline (browser spec §3.5), so it is withheld here
+		// too, even though the streak itself keeps counting.
+		streakEntry := res.Content
+		if call.Name == "browser" {
+			streakEntry = "(browser result withheld: page content stays on this machine)"
+		}
+		a.toolFailStreak.last = append(a.toolFailStreak.last, streakEntry)
 		if len(a.toolFailStreak.last) > 3 {
 			a.toolFailStreak.last = a.toolFailStreak.last[1:]
 		}

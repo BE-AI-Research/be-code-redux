@@ -112,3 +112,24 @@ func TestHeadlessApproverBrowserActions(t *testing.T) {
 		t.Fatal("-y ran shell after an untrusted page")
 	}
 }
+
+// TestHeadlessApproverBrowserWatchMessageWithoutDashY is fix round 1's Minor
+// 4: without -y, browser_watch and shell_after_web still deny (as every
+// action does non-interactively), but the message must not promise that -y
+// would have helped, since it never approves either one.
+func TestHeadlessApproverBrowserWatchMessageWithoutDashY(t *testing.T) {
+	oldTTY := stdinIsTTY
+	stdinIsTTY = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTY = oldTTY })
+	cfg := config.Default() // AutoApproveBrowser and AutoApproveShell both off
+	ap := headlessApprover(cfg)
+	for _, action := range []string{"browser_watch", "shell_after_web"} {
+		out := captureStderr(t, func() { ap(action, "detail") })
+		if !strings.Contains(out, "this action always asks a person") {
+			t.Fatalf("%s: message still promises -y would help:\n%s", action, out)
+		}
+		if strings.Contains(out, "use -y to auto-approve") {
+			t.Fatalf("%s: message wrongly kept the -y hint:\n%s", action, out)
+		}
+	}
+}

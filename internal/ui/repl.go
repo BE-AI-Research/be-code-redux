@@ -208,7 +208,13 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	switch strings.ToLower(r.promptCtx(ctx, yell("approve? [y/N/a(lways)] "))) {
+	// browser_watch and shell_after_web have no "always" (browser spec
+	// §3.2, §3.6): the prompt must not advertise a key that does nothing.
+	prompt := "approve? [y/N/a(lways)] "
+	if action == "browser_watch" || action == "shell_after_web" {
+		prompt = "approve? [y/N] "
+	}
+	switch strings.ToLower(r.promptCtx(ctx, yell(prompt))) {
 	case "y", "yes":
 		return true
 	case "a", "always":

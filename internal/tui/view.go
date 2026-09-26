@@ -1265,6 +1265,19 @@ func shortModelTo(name string, max int) string {
 	return name
 }
 
+// browserConsentHost pulls the host out of a browser approval's detail,
+// whose first line is "act on <host>?" (tools.BrowserTool.approve). "" for
+// anything else, so a changed detail format falls back to a hint with no
+// name rather than a wrong one — the same defence as agent.ConsentCoworker.
+func browserConsentHost(detail string) string {
+	line := strings.SplitN(detail, "\n", 2)[0]
+	rest, ok := strings.CutPrefix(line, "act on ")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(rest, "?")
+}
+
 // viewAsk renders the shared question: the approval modal, the plan modal or
 // the picker list. "" means there is nothing to draw (the ask was resolved
 // between the answer and this view's askResolvedMsg).
@@ -1317,7 +1330,11 @@ func (m *View) viewAsk() string {
 		compactHint = "y/n · ↑↓"
 	case "browser":
 		title = "Browser"
-		hint = "y allow this site for the session · n decline · ↑↓ scroll"
+		host := browserConsentHost(a.Detail)
+		if host == "" {
+			host = "this site"
+		}
+		hint = "y allow this site for the session · n decline · a allow " + host + " for this session · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	case "browser_watch":
 		title = "Browser — watched site"
