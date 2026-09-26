@@ -266,7 +266,18 @@ func (b *builder) interactive(n *AXNode, role, name string) *line {
 		l.target = b.shortTarget(n.prop("url"))
 	}
 	l.states = states(n)
-	l.children = b.children(n, true) // a listbox's options still render; text does not
+	switch {
+	case sensitive:
+		// A sensitive field's value can otherwise leak through its
+		// descendants — a card-expiry <select>'s chosen option, for
+		// instance — so it renders with no subtree at all (spec §3.4).
+	case (role == "combobox" || role == "listbox") && b.in.HideAllValues:
+		// The sensitive-field query failed, so any control might be
+		// sensitive: a combobox/listbox's options carry its value, so
+		// they are withheld along with every other value (spec §3.4).
+	default:
+		l.children = b.children(n, true) // a listbox's options still render; text does not
+	}
 	return l
 }
 

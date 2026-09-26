@@ -308,6 +308,52 @@ func TestRenderLinkToAnotherHost(t *testing.T) {
 	}
 }
 
+// expiryCombobox is a combobox "Expiry month" (backend 300) with two
+// option children "01" and "02", the second selected.
+func expiryCombobox() []AXNode {
+	return []AXNode{
+		ax("1", "", "RootWebArea", "", 1, nil, "2"),
+		ax("2", "1", "combobox", "Expiry month", 300, nil, "3", "4"),
+		ax("3", "2", "option", "01", 301, nil),
+		ax("4", "2", "option", "02", 302, axProps("selected", "true")),
+	}
+}
+
+func TestRenderSensitiveSubtreeIsHidden(t *testing.T) {
+	in := RenderInput{URL: "https://acme.test/pay", Nodes: expiryCombobox(), Refs: NewRefTable(),
+		Sensitive: map[int]string{300: "card"}}
+	got := Render(in).Text
+	if !strings.Contains(got, `combobox "Expiry month" (card) [e1]`) {
+		t.Fatalf("sensitive combobox line missing:\n%s", got)
+	}
+	for _, s := range []string{`"01"`, `"02"`, "selected"} {
+		if strings.Contains(got, s) {
+			t.Fatalf("sensitive combobox subtree leaked %q:\n%s", s, got)
+		}
+	}
+}
+
+func TestRenderHideAllValuesHidesOptions(t *testing.T) {
+	in := RenderInput{URL: "https://acme.test/pay", Nodes: expiryCombobox(), Refs: NewRefTable(), HideAllValues: true}
+	got := Render(in).Text
+	if !strings.Contains(got, `combobox "Expiry month" [e1]`) {
+		t.Fatalf("combobox line missing:\n%s", got)
+	}
+	for _, s := range []string{`"01"`, `"02"`, "selected"} {
+		if strings.Contains(got, s) {
+			t.Fatalf("HideAllValues still shows %q:\n%s", s, got)
+		}
+	}
+}
+
+func TestRenderOrdinaryComboboxShowsOptions(t *testing.T) {
+	in := RenderInput{URL: "https://acme.test/pay", Nodes: expiryCombobox(), Refs: NewRefTable()}
+	got := Render(in).Text
+	if !strings.Contains(got, `"01"`) || !strings.Contains(got, `"02"`) || !strings.Contains(got, "selected") {
+		t.Fatalf("ordinary combobox lost its options:\n%s", got)
+	}
+}
+
 func TestPageLine(t *testing.T) {
 	cases := map[[2]string]string{
 		{"PR", "https://github.com/acme/api/pull/42"}: "page: PR — github.com/acme/api/pull/42",
