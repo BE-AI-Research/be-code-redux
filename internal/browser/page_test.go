@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"fmt"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -695,5 +696,70 @@ func TestPageSnapshotOverBudgetFetchesTheViewport(t *testing.T) {
 	}
 	if len(fb.Calls("DOMSnapshot.captureSnapshot")) != 1 {
 		t.Fatal("an over-budget snapshot did not ask where the viewport is")
+	}
+}
+
+func countOf(list []string, want string) int {
+	n := 0
+	for _, s := range list {
+		if s == want {
+			n++
+		}
+	}
+	return n
+}
+
+// Final review I4: a hostile page's alert loop is bounded. More than five
+// auto-accepts within a second stops auto-accepting, and the next alert is
+// left pending as a dialog the snapshot shows.
+func TestPageAlertFloodStopsAutoAccepting(t *testing.T) {
+	p, ps, fb := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	for i := 0; i < 100; i++ {
+		fb.Emit("S-T1", "Page.javascriptDialogOpening", map[string]any{"type": "alert", "message": fmt.Sprintf("spam %d", i)})
+	}
+	var snap string
+	waitFor(t, func() bool {
+		snap, _ = p.Snapshot(ctx)
+		return strings.Contains(snap, `dialog alert "spam`)
+	})
+	time.Sleep(200 * time.Millisecond) // any late accept would land by now
+	if n := countOf(ps.Inputs(), "dialog accept=true"); n != alertBurst {
+		t.Fatalf("auto-accepted %d alerts, want %d", n, alertBurst)
+	}
+	if notes := p.TakeNotes(); len(notes) > maxNotes {
+		t.Fatalf("%d notes kept", len(notes))
+	}
+	if snap, _ = p.Snapshot(ctx); !strings.Contains(snap, `dialog alert "spam`) {
+		t.Fatalf("the held alert is not shown as a dialog:\n%s", snap)
+	}
+	// The model's next action resumes auto-accepting.
+	p.NextAction()
+	accept, _ := p.refs.DialogRefs()
+	if err := p.Click(ctx, accept); err != nil {
+		t.Fatal(err)
+	}
+	fb.Emit("S-T1", "Page.javascriptDialogOpening", map[string]any{"type": "alert", "message": "after"})
+	waitFor(t, func() bool { return countOf(ps.Inputs(), "dialog accept=true") == alertBurst+2 })
+}
+
+// Notes are capped; what is dropped is counted in one line.
+func TestPageNotesAreCapped(t *testing.T) {
+	p, ps, fb := formPage(t)
+	p.Snapshot(context.Background())
+	for batch := 1; batch <= 5; batch++ {
+		for i := 0; i < alertBurst; i++ {
+			fb.Emit("S-T1", "Page.javascriptDialogOpening", map[string]any{"type": "alert", "message": "hi"})
+		}
+		waitFor(t, func() bool { return countOf(ps.Inputs(), "dialog accept=true") == batch*alertBurst })
+		p.NextAction()
+	}
+	notes := p.TakeNotes()
+	if len(notes) != maxNotes+1 || notes[maxNotes] != "(+5 more notes)" {
+		t.Fatalf("notes (%d): %q", len(notes), notes)
+	}
+	if len(p.TakeNotes()) != 0 {
+		t.Fatal("the dropped count survived TakeNotes")
 	}
 }

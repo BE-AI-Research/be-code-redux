@@ -61,6 +61,17 @@ func (e *SensitiveFieldError) Error() string {
 
 type pendingDialog struct{ Type, Message string }
 
+// A page can raise alerts in a loop. Notes are capped at maxNotes, the rest
+// counted in one line; and after alertBurst auto-accepts within
+// alertWindow the page's dialogs are left pending — shown in the snapshot,
+// answered by the model — until the model's next action (final review I4).
+const (
+	maxNotes   = 20
+	alertBurst = 5
+)
+
+var alertWindow = time.Second
+
 // Page is the one tab the model drives: its events, its refs, its actions.
 type Page struct {
 	conn      *Conn
@@ -80,6 +91,16 @@ type Page struct {
 	lastNet  time.Time
 	dialog   *pendingDialog
 	notes    []string
+	// notesDropped counts notes past maxNotes since the last TakeNotes.
+	notesDropped int
+	// autoAccepted is when each recent dialog was auto-accepted, pruned to
+	// alertWindow; alertsHeld stops auto-accepting until NextAction.
+	autoAccepted []time.Time
+	alertsHeld   bool
+	// autoPending counts auto-accepted dialogs whose Closed event has not
+	// arrived yet: such a Closed belongs to them, never to a dialog held
+	// after them.
+	autoPending int
 	labels   map[string]string
 	loading  bool
 	unsub    func()
@@ -261,38 +282,94 @@ func (p *Page) onEvent(ev Event) {
 			Message string `json:"message"`
 		}
 		json.Unmarshal(ev.Params, &e)
-		switch e.Type {
-		case "alert", "beforeunload":
+		auto := e.Type == "alert" || e.Type == "beforeunload"
+		p.mu.Lock()
+		if auto && p.mayAutoAcceptLocked(time.Now()) {
+			p.autoPending++
 			if e.Type == "alert" {
-				p.mu.Lock()
-				p.notes = append(p.notes, "alert: "+quote(clip(e.Message, 200)))
-				p.mu.Unlock()
-			}
-			go p.answerDialog(true)
-		default:
-			p.mu.Lock()
-			p.dialog = &pendingDialog{Type: e.Type, Message: e.Message}
-			cancel := p.cancelInput
-			if cancel != nil {
-				p.dialogCancelled = true
+				p.addNoteLocked("alert: " + quote(clip(e.Message, 200)))
 			}
 			p.mu.Unlock()
-			// Calling a stored cancel func from here is fine: it is not a
-			// Call, just an unblock, and never reaches the browser itself.
-			if cancel != nil {
-				cancel()
-			}
+			go p.answerDialog(true)
+			return
+		}
+		p.dialog = &pendingDialog{Type: e.Type, Message: e.Message}
+		cancel := p.cancelInput
+		if cancel != nil {
+			p.dialogCancelled = true
+		}
+		p.mu.Unlock()
+		// Calling a stored cancel func from here is fine: it is not a
+		// Call, just an unblock, and never reaches the browser itself.
+		if cancel != nil {
+			cancel()
 		}
 	case "Page.javascriptDialogClosed":
 		p.mu.Lock()
+		if p.autoPending > 0 {
+			// The close of a dialog auto-accepted above, not of one held
+			// since: that one stays until it is answered.
+			p.autoPending--
+			p.mu.Unlock()
+			return
+		}
 		p.dialog = nil
 		p.mu.Unlock()
 		p.refs.ClearDialog()
 	}
 }
 
+// mayAutoAcceptLocked records an auto-accept at now and reports true, or
+// reports false — and holds dialogs from here on — once alertBurst have
+// been accepted within alertWindow. The caller holds mu.
+func (p *Page) mayAutoAcceptLocked(now time.Time) bool {
+	if p.alertsHeld {
+		return false
+	}
+	kept := p.autoAccepted[:0]
+	for _, at := range p.autoAccepted {
+		if now.Sub(at) < alertWindow {
+			kept = append(kept, at)
+		}
+	}
+	p.autoAccepted = kept
+	if len(p.autoAccepted) >= alertBurst {
+		p.alertsHeld = true
+		return false
+	}
+	p.autoAccepted = append(p.autoAccepted, now)
+	return true
+}
+
+// addNoteLocked keeps a background note, up to maxNotes; the rest are only
+// counted. The caller holds mu.
+func (p *Page) addNoteLocked(n string) {
+	if len(p.notes) < maxNotes {
+		p.notes = append(p.notes, n)
+		return
+	}
+	p.notesDropped++
+}
+
+// NextAction is the model acting on the page again: dialogs held after an
+// alert flood are auto-accepted again from here (a dialog already held
+// stays pending until it is answered).
+func (p *Page) NextAction() {
+	p.mu.Lock()
+	p.alertsHeld = false
+	p.autoAccepted = nil
+	p.mu.Unlock()
+}
+
 func (p *Page) answerDialog(accept bool) {
-	p.call(context.Background(), "Page.handleJavaScriptDialog", map[string]any{"accept": accept}, nil)
+	if err := p.call(context.Background(), "Page.handleJavaScriptDialog", map[string]any{"accept": accept}, nil); err != nil {
+		// No Closed will come for it.
+		p.mu.Lock()
+		if p.autoPending > 0 {
+			p.autoPending--
+		}
+		p.mu.Unlock()
+	}
 }
 
 // settle waits for the page after an action: any navigation's load event,
@@ -457,7 +534,10 @@ func (p *Page) TakeNotes() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := p.notes
-	p.notes = nil
+	if p.notesDropped > 0 {
+		n = append(n, fmt.Sprintf("(+%d more notes)", p.notesDropped))
+	}
+	p.notes, p.notesDropped = nil, 0
 	return n
 }
 

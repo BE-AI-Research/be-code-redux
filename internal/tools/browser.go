@@ -119,6 +119,9 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	if err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
+	// The model is acting again: dialogs held after an alert flood are
+	// auto-accepted again from here (final review I4).
+	page.NextAction()
 	tabN := argInt(args, 0, "switch", "tab", "index", "number")
 	if action == "tabs" && tabN == 0 {
 		return t.tabs(ctx, notes)
