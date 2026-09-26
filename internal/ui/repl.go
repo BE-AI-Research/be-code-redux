@@ -185,16 +185,22 @@ func (r *REPL) approve(action, detail string) bool {
 
 // approveCtx is approve for an asker that can give up on its own question,
 // which waits on that asker's context instead. See tools.ApproveCtxFunc.
+//
+// A question a scheduled event's turn raised (tools.FiredAsk) never takes
+// the session-level shortcuts (final review C1): "a", -y and accept-all were
+// given by someone watching. A prompt that ends with nobody answering (EOF,
+// Ctrl-C, its context ended) is marked withdrawn on ctx (tools.MarkWithdrawn).
 func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
+	fired := tools.FiredAsk(ctx)
 	switch action {
 	case "shell":
-		if r.Cfg.AutoApproveShell {
+		if r.Cfg.AutoApproveShell && !fired {
 			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
 			return true
 		}
 		fmt.Printf("%s %s\n", yell("run shell:"), detail)
 	case "file_write":
-		if !r.Cfg.ApproveFileWrites {
+		if !r.Cfg.ApproveFileWrites && !fired {
 			return true
 		}
 		fmt.Println(yell("file change:"))
@@ -203,7 +209,7 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		// Not this workspace: a server other people may be using.
 		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
 	case "browser":
-		if r.Cfg.AutoApproveBrowser {
+		if r.Cfg.AutoApproveBrowser && !fired {
 			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
 			return true
 		}
@@ -225,7 +231,12 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	if noAlways {
 		prompt = "approve? [y/N] "
 	}
-	switch strings.ToLower(r.promptCtx(ctx, yell(prompt))) {
+	answer, answered := r.promptAnswer(ctx, yell(prompt))
+	if !answered {
+		tools.MarkWithdrawn(ctx)
+		return false
+	}
+	switch strings.ToLower(answer) {
 	case "y", "yes":
 		return true
 	case "a", "always":
@@ -448,6 +459,14 @@ func (r *REPL) nextLine() (lineEvent, bool) {
 // then the answer is no longer wanted. An empty string is the result either
 // way, which reads as "no".
 func (r *REPL) promptCtx(ctx context.Context, q string) string {
+	line, _ := r.promptAnswer(ctx, q)
+	return line
+}
+
+// promptAnswer is promptCtx that also says whether anybody answered: false
+// when the input ended, Ctrl-C was pressed or ctx ended — a question
+// withdrawn, not a "no".
+func (r *REPL) promptAnswer(ctx context.Context, q string) (string, bool) {
 	r.setPrompt(q)
 	defer r.setPrompt(cyan("be-code> "))
 	r.mu.Lock()
@@ -469,20 +488,20 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 					r.inputEnded = true
 					r.mu.Unlock()
 				}
-				return ""
+				return "", false
 			}
-			return strings.TrimSpace(ev.line)
+			return strings.TrimSpace(ev.line), true
 		case <-ctx.Done():
-			return ""
+			return "", false
 		}
 	}
 	defer func() { r.mu.Lock(); r.ask = nil; r.mu.Unlock() }()
 	select {
 	case line := <-ch:
-		return strings.TrimSpace(line)
+		return strings.TrimSpace(line), true
 	case <-ctx.Done():
 		r.abandonAsk(ch)
-		return ""
+		return "", false
 	}
 }
 

@@ -27,7 +27,12 @@ func (r *Registry) beforeWrite(absPath string) error {
 // ctx is the tool call's context: it bounds an editor-side review, so a
 // cancelled run does not stay blocked on a diff nobody answers.
 func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string) (Result, bool) {
-	if !r.ApproveWrites || r.Approve == nil {
+	// During a fired turn "accept all" (ApproveWrites off) and "no
+	// approver" never let a write through unasked: only the allowance does,
+	// and anything it does not cover asks under the deadline (final review
+	// C1) — or, with nobody to ask, is refused (r.ask).
+	fired := r.Fired()
+	if !fired && (!r.ApproveWrites || r.Approve == nil) {
 		return Result{}, true
 	}
 	oldContent := ""
@@ -47,7 +52,7 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 	// recorded against the allowance's ask_timeout (spec §2.4). Go straight
 	// to the terminal prompt through r.ask, which does have one. Outside a
 	// fired turn (r.fired nil) nothing changes.
-	if r.fired.Load() == nil && r.ReviewWrite != nil {
+	if !fired && r.ReviewWrite != nil {
 		// Only say VS Code when VS Code is really being asked: in mode "tui",
 		// or with no editor attached, the review resolves in this terminal
 		// and the note would be a lie the user cannot act on.

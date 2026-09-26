@@ -817,3 +817,63 @@ func TestREPLFailedRunLeavesScheduledEventQueued(t *testing.T) {
 		t.Fatalf("the scheduled event was drained by a failed run: pending=%d", r.Agent.Pending())
 	}
 }
+
+// TestFiredTurnIgnoresSessionAutoApprovalsREPL is final review C1's plain
+// mode half: AutoApproveShell and accept-all do not answer a question a
+// fired turn raised; the person is asked.
+func TestFiredTurnIgnoresSessionAutoApprovalsREPL(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.AutoApproveShell = true
+	r.Cfg.ApproveFileWrites = false
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+	r.Agent.Tools.SetAllowance(nil, time.Minute)
+	defer r.Agent.Tools.ClearAllowance()
+	r.lines = make(chan lineEvent, 2)
+	r.lines <- lineEvent{line: "n"}
+	r.lines <- lineEvent{line: "n"}
+	var shell, write tools.Result
+	capture(t, func() {
+		shell = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "1", Name: "shell", Arguments: `{"command":"echo hi"}`})
+		write = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "2", Name: "write_file", Arguments: `{"path":"x.txt","content":"x"}`})
+	})
+	if !shell.IsError || !write.IsError || len(r.lines) != 0 {
+		t.Fatalf("both asked and refused: shell=%+v write=%+v unread=%d", shell, write, len(r.lines))
+	}
+	// Outside a fired turn the shortcut still applies.
+	r.Agent.Tools.ClearAllowance()
+	var ok bool
+	capture(t, func() { ok = r.approve("shell", "echo hi") })
+	if !ok {
+		t.Fatal("AutoApproveShell still answers an ordinary question")
+	}
+}
+
+// TestWithdrawnPromptIsNotAnAnswerREPL is final review I2's plain-mode
+// half: a prompt that ends on EOF or a cancelled context is withdrawn, an
+// answered "n" is not.
+func TestWithdrawnPromptIsNotAnAnswerREPL(t *testing.T) {
+	for _, c := range []struct {
+		ev       lineEvent
+		withdraw bool
+	}{{lineEvent{err: io.EOF}, true}, {lineEvent{line: "n"}, false}, {lineEvent{line: ""}, false}} {
+		r := newTestREPL(t)
+		r.lines = make(chan lineEvent, 1)
+		r.lines <- c.ev
+		ctx, out := tools.WithAskOutcome(context.Background())
+		var ok bool
+		capture(t, func() { ok = r.approveCtx(ctx, "schedule", "These scheduled events will run") })
+		if ok || out.Withdrawn() != c.withdraw {
+			t.Fatalf("%+v: ok=%v withdrawn=%v", c.ev, ok, out.Withdrawn())
+		}
+	}
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx, out := tools.WithAskOutcome(ctx)
+	capture(t, func() { r.approveCtx(ctx, "schedule", "x") })
+	if !out.Withdrawn() {
+		t.Fatal("a cancelled question is withdrawn")
+	}
+}

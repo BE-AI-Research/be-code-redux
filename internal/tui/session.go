@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -43,6 +44,9 @@ type subAgentGlyph struct{ Name, At string }
 // from either side — nothing under mu may block on a channel that the Update
 // goroutine is the one draining.
 type Session struct {
+	// fireHandled counts finished onScheduleFire callbacks (tests wait on it).
+	fireHandled atomic.Int64
+
 	mu sync.Mutex // guards every field below except viewsMu/views and the test seams
 
 	cfg      *config.Config
@@ -1088,8 +1092,12 @@ func (s *Session) startQueuedLocked() {
 // lock-take to a fresh goroutine is safe because startQueuedLocked is
 // idempotent (it checks s.running) and this callback owns no state of its
 // own to lose by running later.
+//
+// fireHandled counts the callbacks that have finished, so a test can wait
+// for one instead of sleeping and asserting that nothing happened.
 func (s *Session) onScheduleFire(name string) {
 	go func() {
+		defer s.fireHandled.Add(1)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.startQueuedLocked()

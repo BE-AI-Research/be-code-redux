@@ -306,7 +306,11 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 			return "", host, judgedURL
 		}
 	default:
-		if t.consent.Granted(host) {
+		// A session grant ("y allows <host> for the rest of this session")
+		// was given by someone watching: a fired turn does not take it
+		// (final review C1). The allow tier above is standing config and
+		// still applies.
+		if t.consent.Granted(host) && (t.r == nil || !t.r.Fired()) {
 			return "", host, judgedURL
 		}
 		if t.r != nil && t.r.allowHost(host) {

@@ -1,13 +1,16 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/schedule"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 func TestScheduledTurnShownAsSchedule(t *testing.T) {
@@ -119,8 +122,9 @@ func TestOnScheduleFireNoOpWhileRunning(t *testing.T) {
 	s.running = true
 	s.mu.Unlock()
 
+	before := s.fireHandled.Load()
 	s.onScheduleFire("nightly")
-	time.Sleep(50 * time.Millisecond) // let the callback's own goroutine run
+	waitFor(t, func() bool { return s.fireHandled.Load() > before }) // the callback ran
 
 	s.mu.Lock()
 	got, pending := ran, s.ag.Pending()
@@ -135,7 +139,10 @@ func TestBottomLineShowsNextSchedule(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, a, _ := twoViews(t)
 	s.ag.EnableSchedules(schedule.NewFakeClock(time.Date(2026, 9, 26, 10, 0, 0, 0, time.Local)))
+	// The schedule prompt goes through ApproveCtx (so a withdrawn prompt
+	// can be told from a "no"); stand in for both seams.
 	s.ag.Tools.Approve = func(string, string) bool { return true }
+	s.ag.Tools.ApproveCtx = func(context.Context, string, string) bool { return true }
 	if _, err := s.ag.AddSchedule(schedule.Request{Name: "soon", When: "in 5m", Instruction: "x"}, "person"); err != nil {
 		t.Fatal(err)
 	}
@@ -145,5 +152,86 @@ func TestBottomLineShowsNextSchedule(t *testing.T) {
 	a.mu.Unlock()
 	if !strings.Contains(line, "next: soon 10:05") {
 		t.Fatalf("status: %q", line)
+	}
+}
+
+// TestFiredTurnIgnoresSessionAutoApprovals is final review C1: "a" on a
+// shell prompt (AutoApproveShell) and accept-all (ApproveFileWrites off)
+// were given by a person who was watching. A fired turn's uncovered action
+// must still reach the modal, whatever they say.
+func TestFiredTurnIgnoresSessionAutoApprovals(t *testing.T) {
+	s, a, _ := twoViews(t)
+	s.cfg.AutoApproveShell = true
+	s.cfg.ApproveFileWrites = false
+	s.ag.Tools.ApproveWrites = false
+	s.ag.Tools.SetAllowance(nil, time.Minute)
+	defer s.ag.Tools.ClearAllowance()
+	for _, c := range []struct{ tool, args string }{
+		{"shell", `{"command":"echo hi"}`},
+		{"write_file", `{"path":"x.txt","content":"x"}`},
+	} {
+		done := make(chan tools.Result, 1)
+		go func() {
+			done <- s.ag.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "1", Name: c.tool, Arguments: c.args})
+		}()
+		asked := false
+		deadline := time.Now().Add(2 * time.Second)
+		for !asked && time.Now().Before(deadline) {
+			select {
+			case res := <-done:
+				t.Fatalf("%s ran unasked during a fired turn: %+v", c.tool, res)
+			default:
+			}
+			flush(a)
+			asked = a.mode == modeAsk
+			time.Sleep(5 * time.Millisecond)
+		}
+		if !asked {
+			t.Fatalf("%s: no prompt", c.tool)
+		}
+		a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		flush(a)
+		select {
+		case res := <-done:
+			if !res.IsError {
+				t.Fatalf("%s: refused: %+v", c.tool, res)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: never answered", c.tool)
+		}
+	}
+	// Outside a fired turn the shortcut still answers at once.
+	if !s.approveFromAgent("shell", "echo hi") {
+		t.Fatal("AutoApproveShell still applies to an ordinary question")
+	}
+}
+
+// TestWithdrawnAskIsNotAnAnswer is final review I2's TUI half: a question
+// closed with nobody answering (quit, CancelAsk) is reported as withdrawn,
+// an answered "n" is not.
+func TestWithdrawnAskIsNotAnAnswer(t *testing.T) {
+	s, a, _ := twoViews(t)
+	for _, withdraw := range []bool{true, false} {
+		ctx, out := tools.WithAskOutcome(context.Background())
+		done := make(chan bool, 1)
+		go func() { done <- s.approveFromAgentCtx(ctx, "schedule", "These scheduled events will run") }()
+		waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+		if withdraw {
+			s.mu.Lock()
+			gen := s.ask.Gen
+			s.mu.Unlock()
+			s.CancelAsk(gen, "")
+		} else {
+			a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		}
+		flush(a)
+		select {
+		case ok := <-done:
+			if ok || out.Withdrawn() != withdraw {
+				t.Fatalf("withdraw=%v: ok=%v withdrawn=%v", withdraw, ok, out.Withdrawn())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("never returned")
+		}
 	}
 }

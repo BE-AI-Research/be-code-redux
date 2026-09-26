@@ -159,6 +159,25 @@ func TestBrowserAllowanceGrantsHost(t *testing.T) {
 	}
 }
 
+// TestBrowserSessionGrantNotUsedByFiredTurn is final review C1: "y allows
+// <host> for the rest of this session" was said by someone watching; a
+// fired turn acting on that host is still asked.
+func TestBrowserSessionGrantNotUsedByFiredTurn(t *testing.T) {
+	var log askLog
+	reg, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(true))
+	do(bt, map[string]any{"action": "snapshot"})
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError || log.count() != 1 {
+		t.Fatalf("the first click asks and grants the host: %s %v", res.Content, log.actions)
+	}
+	reg.SetAllowance(nil, time.Minute)
+	do(bt, map[string]any{"action": "snapshot"})
+	do(bt, map[string]any{"action": "click", "ref": "e4"})
+	reg.ClearAllowance()
+	if log.count() != 2 {
+		t.Fatalf("a fired turn is asked despite the session grant: %v", log.actions)
+	}
+}
+
 func TestBrowserDenyRefusesWithoutAsking(t *testing.T) {
 	var log askLog
 	_, bt, ps, _ := browserFixture(t, "https://acme.test/login", map[string]string{"acme.test": "deny"}, log.approver(true))

@@ -245,3 +245,86 @@ func TestNoAllowanceBehaviourUnchanged(t *testing.T) {
 		t.Fatal("nothing to clear")
 	}
 }
+
+// TestFiredTurnIgnoresSessionWriteShortcut is final review C1: "accept all"
+// (ApproveWrites=false) is a session-level shortcut a person gave while
+// watching. It must not let an unattended fired turn write outside its
+// allowance: the uncovered write asks through the deadline prompt.
+func TestFiredTurnIgnoresSessionWriteShortcut(t *testing.T) {
+	r, log := allowReg(t, false)
+	r.ApproveWrites = false
+	r.SetAllowance(nil, time.Minute)
+	res := dispatchCall(r, "write_file", `{"path":"src/b.go","content":"x"}`)
+	if !res.IsError || strings.Join(log.asked(), ",") != "file_write" {
+		t.Fatalf("an uncovered write during a fired turn asks: %+v asked=%v", res, log.asked())
+	}
+	if _, err := os.Stat(filepath.Join(r.Root, "src", "b.go")); err == nil {
+		t.Fatal("the refused write landed")
+	}
+	r.ClearAllowance()
+	res = dispatchCall(r, "write_file", `{"path":"src/b.go","content":"x"}`)
+	if res.IsError || len(log.asked()) != 1 {
+		t.Fatalf("outside a fired turn accept-all still applies: %+v asked=%v", res, log.asked())
+	}
+}
+
+// TestFiredAskIsMarked: the UIs' approvers skip their session-level
+// shortcuts (AutoApproveShell, !ApproveFileWrites, AutoApproveBrowser) for a
+// question a fired turn raised, which they learn from the context (C1).
+func TestFiredAskIsMarked(t *testing.T) {
+	r, _ := allowReg(t, false)
+	var marked []bool
+	r.ApproveCtx = func(ctx context.Context, action, detail string) bool {
+		marked = append(marked, FiredAsk(ctx))
+		return false
+	}
+	r.SetAllowance(nil, 0) // no deadline: still through ApproveCtx, still marked
+	dispatchCall(r, "shell", `{"command":"ls"}`)
+	r.ClearAllowance()
+	if len(marked) != 1 || !marked[0] {
+		t.Fatalf("the fired ask goes through ApproveCtx marked: %v", marked)
+	}
+	if FiredAsk(context.Background()) {
+		t.Fatal("an ordinary context is not marked")
+	}
+}
+
+// TestFiredTurnWithNoApproverRefuses: with nobody to ask, an uncovered
+// action of a fired turn is refused, never run.
+func TestFiredTurnWithNoApproverRefuses(t *testing.T) {
+	r, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetAllowance(nil, time.Minute)
+	if res := dispatchCall(r, "shell", `{"command":"echo hi"}`); !res.IsError {
+		t.Fatalf("refused: %+v", res)
+	}
+	if res := dispatchCall(r, "write_file", `{"path":"a.txt","content":"x"}`); !res.IsError {
+		t.Fatalf("refused: %+v", res)
+	}
+}
+
+// TestAllowanceNeverCoversSchedulesOrDotdir is final review I3(c): no grant
+// covers .be-code/schedules.md (a fired turn could otherwise re-activate a
+// paused schedule, or widen its own allowance) nor anything under the
+// BE-Code dotdir.
+func TestAllowanceNeverCoversSchedulesOrDotdir(t *testing.T) {
+	r, log := allowReg(t, false)
+	home := filepath.Join(r.Root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	r.SetAllowance(grants(t, "write: ."), time.Minute)
+	for _, p := range []string{".be-code/schedules.md", "home/.be-code/config.json", "home/.be-code/engine/x/schedules.json"} {
+		res := dispatchCall(r, "write_file", `{"path":"`+p+`","content":"x"}`)
+		if !res.IsError {
+			t.Fatalf("%s: a write: . grant must not cover it: %+v", p, res)
+		}
+	}
+	if got := strings.Join(log.asked(), ","); got != "file_write,file_write,file_write" {
+		t.Fatalf("each asked: %q", got)
+	}
+	if res := dispatchCall(r, "write_file", `{"path":".be-code/notes.md","content":"x"}`); res.IsError {
+		t.Fatalf("the rest of the project .be-code is still under the grant: %+v", res)
+	}
+}
