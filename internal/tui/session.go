@@ -869,6 +869,7 @@ func (s *Session) runContextLocked() context.Context {
 // a keystroke to submit. (mu is not reentrant, so there is no unlocked
 // variant to call by mistake.)
 func (s *Session) Submit(text string, from int) {
+	s.ag.BeginTypedRequest() // a person typed this (browser spec §3.6)
 	s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(from), Text: text})
 	s.startTurnLocked(text)
 }
@@ -1050,6 +1051,11 @@ func (s *Session) startQueuedLocked() {
 	left := s.ag.DrainItems()
 	if len(left) == 0 {
 		return
+	}
+	// Only a drain a person typed every line of is a person's request; a
+	// hand-back in it leaves the untrusted-web flag as it is.
+	if agent.TypedByPerson(left) {
+		s.ag.BeginTypedRequest()
 	}
 	texts := make([]string, 0, len(left))
 	for _, it := range left {

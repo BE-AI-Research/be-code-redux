@@ -141,8 +141,9 @@ type Registry struct {
 	onClose []func()
 	// untrustedWeb is set when this request has shown the model a page from
 	// a host not in the browser's allow tier; while it is set every shell
-	// command asks as "shell_after_web" (spec §3.6, amended). Agent.RunFull
-	// clears it at the start of each request.
+	// command asks as "shell_after_web" (spec §3.6, amended). Only a request
+	// a person typed clears it (Agent.BeginTypedRequest); a resumed history
+	// holding a page sets it again.
 	untrustedWeb atomic.Bool
 }
 
@@ -359,7 +360,8 @@ func (r *Registry) MarkUntrustedWeb() { r.untrustedWeb.Store(true) }
 // UntrustedWeb reports whether this request has read an untrusted page.
 func (r *Registry) UntrustedWeb() bool { return r.untrustedWeb.Load() }
 
-// ClearUntrustedWeb starts a new request with the flag down.
+// ClearUntrustedWeb puts the flag down. Agent.BeginTypedRequest is its one
+// caller: a request a person typed, never a hand-back.
 func (r *Registry) ClearUntrustedWeb() { r.untrustedWeb.Store(false) }
 
 // Browser is the registered browser tool, or nil when it is off.

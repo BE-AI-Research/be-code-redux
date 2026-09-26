@@ -61,8 +61,10 @@ func (a *Agent) planAgent() *Agent {
 	return scratch
 }
 
-// ExecutePlan runs the approved plan through the normal loop.
+// ExecutePlan runs the approved plan through the normal loop. A person
+// approved it, so it begins a typed request.
 func (a *Agent) ExecutePlan(ctx context.Context, request, plan string) (string, *ReviewedReport, error) {
+	a.BeginTypedRequest()
 	a.engineDo("plan", func(st *engine.Store) { st.Plan(request, engine.ParsePlanSteps(plan)) })
 	return a.RunFull(ctx, fmt.Sprintf(planExecutePrefix, request, plan))
 }

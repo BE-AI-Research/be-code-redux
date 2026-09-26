@@ -27,10 +27,47 @@ type Inbox struct {
 type InboxItem struct {
 	Text string
 	From int
+	// Harness is true for a line nobody typed — a sub-agent's hand-back or
+	// question. A drain holding one is not a person's request, so it never
+	// clears the untrusted-web flag (browser spec §3.6).
+	Harness bool
 }
 
 // Enqueue queues a user message typed at the local terminal.
 func (a *Agent) Enqueue(text string) { a.EnqueueFrom(text, 0) }
+
+// EnqueueHarness queues a line the harness wrote rather than a person — a
+// sub-agent's hand-back or question — marked so a drain can tell.
+func (a *Agent) EnqueueHarness(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	a.inbox.mu.Lock()
+	a.inbox.items = append(a.inbox.items, InboxItem{Text: text, Harness: true})
+	a.inbox.mu.Unlock()
+}
+
+// TypedByPerson reports whether every item of a drain was typed by a
+// person: false for an empty drain and for any drain holding a harness line.
+func TypedByPerson(items []InboxItem) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, it := range items {
+		if it.Harness {
+			return false
+		}
+	}
+	return true
+}
+
+// BeginTypedRequest is called where a request a person typed begins — the
+// UIs' submit paths, headless run's own task, an approved plan — and only
+// there. It ends the shell suspension an untrusted page started (browser
+// spec §3.6): a hand-back re-entering RunFull while the page is still in
+// history must not.
+func (a *Agent) BeginTypedRequest() { a.Tools.ClearUntrustedWeb() }
 
 // EnqueueFrom queues a user message for delivery at the next model call,
 // remembering which attached terminal typed it.

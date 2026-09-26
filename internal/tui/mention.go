@@ -119,7 +119,10 @@ func (s *Session) startMentionLocked(item mentionItem) bool {
 	s.mentionActive = &item
 	s.broadcast(mentionBusyMsg(item.from))
 	if s.running {
-		s.ag.EnqueueFrom(req, 0) // lands after the current tool results
+		// Lands after the current tool results. Queued as a harness line:
+		// the request is built from the room, not only the person's own
+		// words, so it never clears the untrusted-web flag.
+		s.ag.EnqueueHarness(req)
 		return false
 	}
 	s.appendEntryLocked(entry{Kind: entryUser, Label: "chat> ", Text: item.from + " mentioned the agent"})

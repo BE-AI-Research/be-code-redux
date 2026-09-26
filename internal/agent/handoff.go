@@ -102,6 +102,12 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	var t strings.Builder
 	for _, m := range a.History.Messages {
 		if isToolResult(m) {
+			if browserResult(m, a.History.Messages) {
+				// A page's text never reaches the next session's system
+				// prompt (browser spec §3.5, same rule as RecentContext).
+				t.WriteString("[tool result] [browser result withheld]\n")
+				continue
+			}
 			fmt.Fprintf(&t, "[tool result] %.300s\n", m.Content)
 			continue
 		}
@@ -207,6 +213,15 @@ func (a *Agent) Resume(s *store.Session) {
 	defer a.turnMu.Unlock()
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	// A saved history that shows the model a page starts this session with
+	// the shell suspended, as the request that read it did (browser spec
+	// §3.6); a person's next typed request clears it as usual.
+	for _, m := range a.History.Messages {
+		if browserResult(m, a.History.Messages) {
+			a.Tools.MarkUntrustedWeb()
+			break
+		}
+	}
 	a.sessionMu.Lock()
 	a.handoff = s.Handoff
 	a.sessionMu.Unlock()
@@ -339,4 +354,29 @@ func (a *Agent) capToolOutput(limit int) {
 		capBytes = 4 * 1024
 	}
 	a.Tools.SetMaxOutput(capBytes)
+}
+
+// browserResult reports whether m is a tool result the browser produced: a
+// native tool message named browser (or, unnamed, answering a browser call
+// in msgs), or an embedded <tool_result> message carrying a browser block.
+// An embedded message is judged whole — a page can print its own
+// </tool_result>, so its blocks are never split apart.
+func browserResult(m provider.Message, msgs []provider.Message) bool {
+	if !isToolResult(m) {
+		return false
+	}
+	if m.Role != provider.RoleTool {
+		return strings.Contains(m.Content, `<tool_result name="browser"`)
+	}
+	if m.Name != "" {
+		return m.Name == "browser"
+	}
+	for _, prev := range msgs {
+		for _, tc := range prev.ToolCalls {
+			if tc.ID == m.ToolCallID && m.ToolCallID != "" {
+				return tc.Name == "browser"
+			}
+		}
+	}
+	return false
 }

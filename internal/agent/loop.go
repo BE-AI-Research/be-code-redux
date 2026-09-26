@@ -1983,9 +1983,9 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
-	// The shell suspension after an untrusted page lasts one request
-	// (browser spec §3.6).
-	a.Tools.ClearUntrustedWeb()
+	// The untrusted-web flag is deliberately not cleared here: a sub-agent's
+	// hand-back comes through RunFull too, with the page still in history.
+	// BeginTypedRequest clears it where a person's own request begins.
 	a.autoVerifyUsed = false
 	if a.engine() != nil {
 		// A new request gets a fresh task line unless a plan is still in

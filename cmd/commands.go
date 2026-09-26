@@ -68,17 +68,19 @@ var runCmd = &cobra.Command{
 		if ideSession != nil {
 			defer ideSession.Close()
 		}
+		// The task on the command line is the person's own request.
+		ag.BeginTypedRequest()
 		answer, rep, err := ag.RunFull(cmd.Context(), prompt)
 		// Sub-agents hand back into the queue; headless, nobody types the
 		// next turn, so the run itself takes up to three of them (a
 		// question, its answer, the hand-back).
 		for round := 0; err == nil && ag.SubAgentsEnabled() && round < 3; round++ {
 			ag.WaitSubAgents(cmd.Context())
-			msgs := ag.DrainInbox()
-			if len(msgs) == 0 {
+			next, ok := nextHeadlessRequest(ag)
+			if !ok {
 				break
 			}
-			answer, rep, err = ag.RunFull(cmd.Context(), strings.Join(msgs, "\n\n"))
+			answer, rep, err = ag.RunFull(cmd.Context(), next)
 		}
 		if err != nil {
 			return err
@@ -192,6 +194,25 @@ var benchCmd = &cobra.Command{
 
 // headlessApprover approves per cfg flags; when stdin is a TTY it falls
 // back to a simple y/N prompt, otherwise it denies (safe default for CI).
+// nextHeadlessRequest takes whatever is queued as headless run's next
+// request. Headless, those are sub-agents' hand-backs and questions, which
+// nobody typed: only a drain a person typed every line of would clear the
+// untrusted-web flag (browser spec §3.6).
+func nextHeadlessRequest(ag *agent.Agent) (string, bool) {
+	items := ag.DrainItems()
+	if len(items) == 0 {
+		return "", false
+	}
+	if agent.TypedByPerson(items) {
+		ag.BeginTypedRequest()
+	}
+	texts := make([]string, 0, len(items))
+	for _, it := range items {
+		texts = append(texts, it.Text)
+	}
+	return strings.Join(texts, "\n\n"), true
+}
+
 func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 	in := bufio.NewReader(os.Stdin)
 	return func(action, detail string) bool {

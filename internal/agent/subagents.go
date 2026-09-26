@@ -521,7 +521,7 @@ func (a *Agent) resumeSubAgents() {
 		}
 		hb := subagent.HandBack{Node: w.ID, Owner: w.Owner, Status: "blocked", Reason: w.Reason, Files: step.Touched}
 		a.engineDo("sub-agent resume", func(st *engine.Store) { _ = st.CloseAs(w.ID, w.Owner, "blocked", w.Reason) })
-		a.Enqueue(handBackLine(hb))
+		a.EnqueueHarness(handBackLine(hb))
 		a.notice("sub-agent %s cannot resume %s: %s", w.Owner, w.ID, w.Reason)
 		if a.Events.OnSubAgentEnd != nil {
 			a.Events.OnSubAgentEnd(hb)
@@ -780,7 +780,7 @@ func (a *Agent) runSub(run *subRun) {
 	// (spec §2.6), and it can only do that once the hand-back is in the
 	// queue to be found. OnSubAgentAsk is already ordered this way.
 	if hb.Status != "interrupted" {
-		a.Enqueue(handBackLine(hb))
+		a.EnqueueHarness(handBackLine(hb))
 	}
 	if a.Events.OnSubAgentEnd != nil {
 		a.Events.OnSubAgentEnd(hb)
@@ -969,7 +969,7 @@ func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, err
 	run.question = q
 	s.mu.Unlock()
 	a.engineDo("sub-agent ask", func(st *engine.Store) { _ = st.Note(run.d.Node, "asked: "+q, "", false, false) })
-	a.Enqueue(fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q))
+	a.EnqueueHarness(fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q))
 	if a.Events.OnSubAgentAsk != nil {
 		a.Events.OnSubAgentAsk(subagent.Ask{Node: run.d.Node, Owner: run.d.Owner, Question: q})
 	}
