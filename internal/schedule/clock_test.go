@@ -73,3 +73,25 @@ func TestFakeClockStopConcurrent(t *testing.T) {
 		t.Fatalf("Stop() succeeded %d times, want at most 1", stopped)
 	}
 }
+
+// TestFakeClockSuspend: a suspended machine's wall clock moves on while its
+// timers (monotonic) do not elapse — pending timers move with the clock.
+func TestFakeClockSuspend(t *testing.T) {
+	c := NewFakeClock(time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC))
+	tm := c.NewTimer(time.Minute)
+	c.Suspend(3 * time.Hour)
+	select {
+	case <-tm.C():
+		t.Fatal("a timer does not elapse while suspended")
+	default:
+	}
+	if got := c.Now(); !got.Equal(time.Date(2026, 9, 26, 13, 0, 0, 0, time.UTC)) {
+		t.Fatalf("wall clock moved: %v", got)
+	}
+	c.Advance(time.Minute)
+	select {
+	case <-tm.C():
+	default:
+		t.Fatal("it fires a minute of awake time later")
+	}
+}

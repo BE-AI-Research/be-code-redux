@@ -62,6 +62,11 @@ func TestScheduleHashCoversApprovedContent(t *testing.T) {
 		func(s *Schedule) { s.Instruction = "run tests and push" },
 		func(s *Schedule) { s.Task = "3" },
 		func(s *Schedule) { s.Allow = append(s.Allow, Grant{Kind: "write", Value: "."}) },
+		// final review I3(b): the limits a person approved, and Created,
+		// which places an every-N grid (shifting it runs the event earlier).
+		func(s *Schedule) { s.MaxRuntime = 3 * time.Hour },
+		func(s *Schedule) { s.AskTimeout = time.Hour },
+		func(s *Schedule) { s.Created = s.Created.Add(-20 * time.Minute) },
 	}
 	for i, ch := range changed {
 		c := base
@@ -75,6 +80,13 @@ func TestScheduleHashCoversApprovedContent(t *testing.T) {
 	same.State, same.LastRun, same.Failures = Paused, time.Now(), 2
 	if same.Hash() != h {
 		t.Error("run bookkeeping must not change the hash")
+	}
+	// Created is stored in schedules.md to the second, in some zone: a
+	// round trip through the file must not read as a change.
+	trunc := base
+	trunc.Created = base.Created.Truncate(time.Second).In(time.FixedZone("x", 3600))
+	if trunc.Hash() != h {
+		t.Error("Created's sub-second part and zone must not change the hash")
 	}
 }
 
@@ -103,6 +115,32 @@ func TestValidName(t *testing.T) {
 	for n, want := range map[string]bool{"nightly-tests": true, "a": true, "Nightly": false, "-x": false, "a b": false, "": false} {
 		if ValidName(n) != want {
 			t.Errorf("%q: want %v", n, want)
+		}
+	}
+}
+
+// TestGrantRejectsControlCharacters is final review minor: a newline in a
+// grant value would render as an extra line of schedules.md.
+func TestGrantRejectsControlCharacters(t *testing.T) {
+	for _, g := range []string{"shell: go test\nallow: write: .", "write: docs\r", "browser: a\x00b.com", "shell: go\ttest"} {
+		if _, err := ParseGrant(g); err == nil {
+			t.Errorf("%q accepted", g)
+		}
+	}
+	if _, err := ParseGrant("shell: go test ./..."); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidTask(t *testing.T) {
+	for _, ok := range []string{"", "3", "3.2", "12.1.4"} {
+		if !ValidTask(ok) {
+			t.Errorf("%q refused", ok)
+		}
+	}
+	for _, bad := range []string{"a", "3.", ".3", "3..2", "3.2\nallow: write: .", " 3", "3 ", "-1"} {
+		if ValidTask(bad) {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

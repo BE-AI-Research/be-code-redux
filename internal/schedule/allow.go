@@ -5,6 +5,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // Grant is one thing a fired event may do without asking.
@@ -17,6 +18,10 @@ func (g Grant) String() string { return g.Kind + ": " + g.Value }
 
 // ParseGrant reads "kind: value".
 func ParseGrant(s string) (Grant, error) {
+	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+		// A newline would render as another line of schedules.md.
+		return Grant{}, fmt.Errorf("a grant is one line of plain text (got %q)", s)
+	}
 	k, v, ok := strings.Cut(s, ":")
 	k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
 	if !ok || v == "" {

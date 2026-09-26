@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -46,8 +47,11 @@ type Request struct {
 
 func (s Schedule) Spec() (Spec, error) { return Parse(s.When, s.Created) }
 
-// Hash covers exactly what a person approved: time, instruction, task and
-// allowance — never the run bookkeeping.
+// Hash covers exactly what a person approved: time (the spec and Created,
+// which places an every-N grid), instruction, task, allowance and the
+// limits (max runtime, ask timeout) — never the run bookkeeping (state,
+// last run, outcome, failures). Created counts to the second, the precision
+// schedules.md stores it at, and in no particular zone.
 func (s Schedule) Hash() string {
 	var b strings.Builder
 	b.WriteString(strings.Join(strings.Fields(s.When), " "))
@@ -59,6 +63,7 @@ func (s Schedule) Hash() string {
 		b.WriteByte(0)
 		b.WriteString(g.String())
 	}
+	fmt.Fprintf(&b, "\x00created %d\x00max %s\x00ask %s", s.Created.Unix(), s.MaxRuntime, s.AskTimeout)
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])[:16]
 }
@@ -96,3 +101,9 @@ func NewID() string {
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
 func ValidName(n string) bool { return nameRe.MatchString(n) }
+
+var taskRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+
+// ValidTask reports whether t is a task id in the engine's format (digits
+// and dots, e.g. 3.2), or empty (no task).
+func ValidTask(t string) bool { return t == "" || taskRe.MatchString(t) }

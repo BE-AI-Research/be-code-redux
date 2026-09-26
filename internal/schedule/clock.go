@@ -91,6 +91,18 @@ func (c *FakeClock) Set(t time.Time) {
 	c.fireLocked()
 }
 
+// Suspend models a machine asleep for d: the wall clock moves on, but a
+// timer measures awake (monotonic) time, so every pending timer's deadline
+// moves with it and none fires.
+func (c *FakeClock) Suspend(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	for _, t := range c.timers {
+		t.at = t.at.Add(d)
+	}
+}
+
 func (c *FakeClock) fireLocked() {
 	kept := c.timers[:0]
 	for _, t := range c.timers {
