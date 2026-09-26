@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -252,10 +254,12 @@ func TestBrowserStatusForgetAndClose(t *testing.T) {
 	}
 }
 
-// TestBrowserBlankHostAsksWithThePageURLNotAnEmptyHost: HostOf("about:blank")
-// is "", which is TierAsk (not Allow, since 2026-09-25); the prompt must
-// never show an empty host, so it names the page by its URL instead.
-func TestBrowserBlankHostAsksWithThePageURLNotAnEmptyHost(t *testing.T) {
+// TestBrowserBlankHostAlwaysAsksAsWatch: HostOf("about:blank") is "", which
+// is TierAsk (not Allow, since 2026-09-25) — but a page with no address is
+// never granted a session-wide "always" either (fix round 1, item 3): every
+// interaction on it asks, watch-style, action browser_watch, and the prompt
+// never shows an empty host.
+func TestBrowserBlankHostAlwaysAsksAsWatch(t *testing.T) {
 	var log askLog
 	fb := browsertest.New(t)
 	browsertest.NewPage(fb, "about:blank", "Sign in — Acme", browsertest.FormTree)
@@ -268,13 +272,201 @@ func TestBrowserBlankHostAsksWithThePageURLNotAnEmptyHost(t *testing.T) {
 	t.Cleanup(reg.Close)
 	do(bt, map[string]any{"action": "snapshot"})
 	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
-		t.Fatalf("click: %s", res.Content)
+		t.Fatalf("click 1: %s", res.Content)
 	}
-	if log.count() != 1 || log.actions[0] != "browser" {
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+		t.Fatalf("click 2: %s", res.Content)
+	}
+	if log.count() != 2 || log.actions[0] != "browser_watch" || log.actions[1] != "browser_watch" {
 		t.Fatalf("asks %v", log.actions)
 	}
-	if !strings.Contains(log.details[0], "a page with no address (about:blank)") {
-		t.Fatalf("prompt lacks the blank-host phrasing:\n%s", log.details[0])
+	for _, d := range log.details {
+		if !strings.Contains(d, "act on a page with no address (about:blank)? (every action on a page with no address asks)") {
+			t.Fatalf("prompt lacks the blank-host phrasing:\n%s", d)
+		}
+		if strings.Contains(d, "y allows") {
+			t.Fatalf("a blank-host prompt offered \"always\":\n%s", d)
+		}
+	}
+}
+
+// TestBrowserRefusesWhenThePageMovedWhileWaitingForApproval (fix round 1,
+// item 2): the host gate judged and the host the interaction would actually
+// run on can differ if the page navigates while the approval prompt is
+// open. press has no ref to protect it (unlike click/type/select, whose ref
+// resolution fails on a new document), so Run must re-check the host itself.
+func TestBrowserRefusesWhenThePageMovedWhileWaitingForApproval(t *testing.T) {
+	fb := browsertest.New(t)
+	ps := browsertest.NewPage(fb, "https://acme.test/login", "Sign in — Acme", browsertest.FormTree)
+	approve := func(action, detail string) bool {
+		fb.Emit("S-T1", "Page.frameNavigated", map[string]any{
+			"frame": map[string]any{"id": "F-T1", "loaderId": "L2", "url": "https://evil.test/"},
+		})
+		time.Sleep(50 * time.Millisecond) // let the event land before answering
+		return true
+	}
+	reg, err := NewRegistry(t.TempDir(), approve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "press", "key": "Enter"})
+	if !res.IsError || !strings.Contains(res.Content, "the page moved to evil.test while waiting for approval; take a snapshot and try again") {
+		t.Fatalf("result %q", res.Content)
+	}
+	for _, in := range ps.Inputs() {
+		if strings.HasPrefix(in, "key ") {
+			t.Fatal("a key was dispatched after the page moved out from under the approval")
+		}
+	}
+}
+
+// TestBrowserDescribePressIsQuoted (fix round 1, item 5): describe()'s
+// "press" case must quote the key, matching type/select.
+func TestBrowserDescribePressIsQuoted(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := browserFixture(t, "https://acme.test/login", map[string]string{"acme.test": "watch"}, log.approver(true))
+	do(bt, map[string]any{"action": "snapshot"})
+	do(bt, map[string]any{"action": "press", "key": "Enter"})
+	if log.count() != 1 || !strings.Contains(log.details[0], `press "Enter"`) {
+		t.Fatalf("asks %v %q", log.actions, log.details)
+	}
+}
+
+// TestBrowserSnapshotFailureIsHeadedAndMarksUntrusted (fix round 1, item 4):
+// the "reading the page failed:" result must still carry the header (it can
+// include page-controlled notes, like an alert's message) and must still
+// mark the request untrusted.
+func TestBrowserSnapshotFailureIsHeadedAndMarksUntrusted(t *testing.T) {
+	fb := browsertest.New(t)
+	ps := browsertest.NewPage(fb, "https://acme.test/login", "Sign in — Acme", browsertest.FormTree)
+	reg, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"}) // connect first
+	fb.Emit("S-T1", "Page.javascriptDialogOpening", map[string]any{"type": "alert", "message": "hi"})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		found := false
+		for _, in := range ps.Inputs() {
+			if in == "dialog accept=true" {
+				found = true
+			}
+		}
+		if found || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	fb.Handle("Accessibility.getFullAXTree", func(string, json.RawMessage) (any, error) {
+		return nil, errors.New("boom")
+	})
+	res := do(bt, map[string]any{"action": "snapshot"})
+	if !res.IsError || !strings.HasPrefix(res.Content, WebHeader+"\n") {
+		t.Fatalf("result:\n%s", res.Content)
+	}
+	if !strings.Contains(res.Content, `alert: "hi"`) {
+		t.Fatalf("missing the alert note:\n%s", res.Content)
+	}
+	if !reg.UntrustedWeb() {
+		t.Fatal("a failed snapshot on an untrusted host did not mark the request")
+	}
+}
+
+// TestBrowserTypeRefusesWhenFieldBecomesSensitiveAtWriteTime (fix round 1,
+// item 6a): the write-time re-check inside browser.Page.Type, not the
+// gate's own earlier IsSensitive check, is what fires here — the field was
+// ordinary when the gate looked at it (so the model's own consent prompt
+// still ran) and only turned sensitive while that prompt was open.
+func TestBrowserTypeRefusesWhenFieldBecomesSensitiveAtWriteTime(t *testing.T) {
+	fb := browsertest.New(t)
+	ps := browsertest.NewPage(fb, "https://acme.test/login", "Sign in — Acme", browsertest.FormTree)
+	approve := func(action, detail string) bool {
+		ps.Lock()
+		ps.Sensitive[40] = []string{"autocomplete", "one-time-code"} // e1, the email field
+		ps.Unlock()
+		return true
+	}
+	reg, err := NewRegistry(t.TempDir(), approve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "type", "ref": "e1", "text": "oops"})
+	if !res.IsError || res.Content != "sign-in is yours — ask the user to sign in in the browser window, then continue" {
+		t.Fatalf("result %q", res.Content)
+	}
+	for _, in := range ps.Inputs() {
+		if strings.HasPrefix(in, "text ") {
+			t.Fatal("typed into a field that became sensitive mid-approval")
+		}
+	}
+}
+
+// TestBrowserReadMarksUntrustedWeb (fix round 1, item 6b).
+func TestBrowserReadMarksUntrustedWeb(t *testing.T) {
+	reg, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, nil)
+	if res := do(bt, map[string]any{"action": "read"}); res.IsError {
+		t.Fatalf("read: %s", res.Content)
+	}
+	if !reg.UntrustedWeb() {
+		t.Fatal("read on an untrusted host did not mark the request")
+	}
+}
+
+// TestBrowserBlankHostSnapshotMarksUntrustedWeb (fix round 1, item 6b).
+func TestBrowserBlankHostSnapshotMarksUntrustedWeb(t *testing.T) {
+	fb := browsertest.New(t)
+	browsertest.NewPage(fb, "about:blank", "", browsertest.EmptyTree)
+	reg, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	if res := do(bt, map[string]any{"action": "snapshot"}); res.IsError {
+		t.Fatalf("snapshot: %s", res.Content)
+	}
+	if !reg.UntrustedWeb() {
+		t.Fatal("a blank-host snapshot did not mark the request")
+	}
+}
+
+// TestBrowserFillAliasIsGated (fix round 1, item 6c): "fill" aliases to
+// "type", which must still gate consent like the canonical name.
+func TestBrowserFillAliasIsGated(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(true))
+	do(bt, map[string]any{"action": "snapshot"})
+	do(bt, map[string]any{"action": "fill", "ref": "e1", "text": "ann@example.com"})
+	if log.count() != 1 || log.actions[0] != "browser" {
+		t.Fatalf("the fill alias did not gate: %v", log.actions)
+	}
+}
+
+// TestShellAfterUntrustedWebWithNoApproverRefuses (fix round 1, item 1): a
+// nil approver on the shell_after_web ask must refuse, never proceed.
+func TestShellAfterUntrustedWebWithNoApproverRefuses(t *testing.T) {
+	reg, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.ShellAllow = []string{"echo*"}
+	reg.MarkUntrustedWeb()
+	res := reg.byName["shell"].Run(context.Background(), map[string]any{"command": "echo hi"})
+	if !res.IsError || !strings.Contains(res.Content, "shell is not auto-approved after reading an untrusted web page in this request") {
+		t.Fatalf("result %q", res.Content)
 	}
 }
 

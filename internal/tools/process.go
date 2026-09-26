@@ -178,11 +178,25 @@ func (t *processTool) Run(_ context.Context, args map[string]any) Result {
 		if command == "" {
 			return Result{IsError: true, Content: "command is required for start"}
 		}
-		if classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny) == cmdDenied {
+		// Same ordering shell.go's Run applies: the deny list wins outright,
+		// then — while this request has read an untrusted page — every
+		// automatic approval is suspended and the command asks again as its
+		// own action (no "always"; nobody to ask is a refusal), and only
+		// then the ordinary allow-list/ask path (spec §3.6, amended). A
+		// background command is exactly the "cat *"/"go run*" kind of
+		// allow-listed command the amendment worried about.
+		class := classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny)
+		switch {
+		case class == cmdDenied:
 			return Result{IsError: true, Content: "this command matches the deny list"}
-		}
-		if t.r.Approve != nil && classifyCommand(command, t.r.ShellAllow, t.r.ShellDeny) != cmdAllowed {
-			if !t.r.Approve("shell", command+"  (background)") {
+		case t.r.UntrustedWeb():
+			if t.r.Approve == nil || !t.r.Approve("shell_after_web", command+"  (background)") {
+				return Result{IsError: true, Content: "shell is not auto-approved after reading an untrusted web page in this request, and this command was not approved; say what you wanted to run and why"}
+			}
+		case class == cmdAllowed:
+			// pre-approved by allowlist; no prompt
+		default:
+			if t.r.Approve != nil && !t.r.Approve("shell", command+"  (background)") {
 				return Result{IsError: true, Content: "user denied this background command"}
 			}
 		}

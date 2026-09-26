@@ -125,8 +125,20 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	ref := browser.NormalizeRef(argString(args, "ref", "element", "id", "target"))
 	if browserInteractions[action] {
-		if refusal := t.gate(ctx, page, action, ref, args); refusal != "" {
+		refusal, judgedHost := t.gate(ctx, page, action, ref, args)
+		if refusal != "" {
 			return Result{IsError: true, Content: refusal}
+		}
+		// The approval prompt can sit open for a while; the page may have
+		// navigated (or been navigated by other content) before the user
+		// answered it. click/type/select are protected by their own ref,
+		// which a new document invalidates, but press acts on whatever has
+		// focus with no ref at all — so the host is re-checked here,
+		// against the exact host gate judged, for every interaction alike.
+		if newHost := browser.HostOf(page.URL()); newHost != judgedHost {
+			return Result{IsError: true, Content: fmt.Sprintf(
+				"the page moved to %s while waiting for approval; take a snapshot and try again",
+				t.hostDisplay(newHost, page))}
 		}
 	}
 	since := time.Now()
@@ -183,7 +195,11 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	if body == "" {
 		snap, err := page.Snapshot(ctx)
 		if err != nil {
-			return Result{IsError: true, Content: strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
+			// This can still carry page-controlled notes (an alert's own
+			// text): headed and marked exactly like any other result that
+			// shows something about the page (spec §3.6).
+			t.markIfUntrusted(page.URL())
+			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
 		}
 		body = snap
 	}
@@ -203,36 +219,46 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 
 // gate is consent for one interaction (spec §3.1–3.4). It returns "" to
 // proceed, or the refusal the model reads.
-func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref string, args map[string]any) string {
+func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref string, args map[string]any) (string, string) {
+	host := browser.HostOf(page.URL())
 	if action == "type" {
 		// Before any prompt: a password is refused whatever the tier, so
 		// asking the user first would only teach them to say yes to it.
 		if sens, err := page.IsSensitive(ctx, ref); err == nil && sens {
-			return signInYours
+			return signInYours, host
 		}
 	}
-	host := browser.HostOf(page.URL())
 	disp := t.hostDisplay(host, page)
 	what := t.describe(page, action, ref, args)
+	if host == "" {
+		// A page with no address (about:blank, data:, a blob: URL) can be
+		// written into by any other page — the same worry HostOf's own
+		// doc comment names. It is never granted a session-wide "always":
+		// every interaction on it asks, watch-style (fix round 1, item 3).
+		if t.approve("browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
+			return "", host
+		}
+		return fmt.Sprintf("the user declined: %s on %s", what, disp), host
+	}
 	switch t.consent.Tier(host) {
 	case browser.TierAllow:
-		return ""
+		return "", host
 	case browser.TierDeny:
-		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp)
+		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host
 	case browser.TierWatch:
 		if t.approve("browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
-			return ""
+			return "", host
 		}
 	default:
 		if t.consent.Granted(host) {
-			return ""
+			return "", host
 		}
 		if t.approve("browser", fmt.Sprintf("act on %s?\n  %s\ny allows %s for the rest of this session", disp, what, disp)) {
 			t.consent.Grant(host)
-			return ""
+			return "", host
 		}
 	}
-	return fmt.Sprintf("the user declined: %s on %s", what, disp)
+	return fmt.Sprintf("the user declined: %s on %s", what, disp), host
 }
 
 // hostDisplay is host for every message gate prints, except that a page
@@ -269,7 +295,7 @@ func (t *BrowserTool) describe(page *browser.Page, action, ref string, args map[
 	case "select":
 		return "select " + strconv.Quote(argString(args, "value", "option", "text")) + " in " + el
 	case "press":
-		return "press " + argString(args, "key", "keys", "text")
+		return "press " + strconv.Quote(argString(args, "key", "keys", "text"))
 	}
 	return action
 }
