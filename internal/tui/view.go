@@ -248,6 +248,10 @@ type View struct {
 	// that startup one, which changes only its Esc hint.
 	nameOffered  bool
 	nameAtAttach bool
+	// nameRename is the name /whoami set is replacing ("" for a first
+	// naming): the prompt then moves this terminal's address to the new
+	// name (inbox.Rebind) instead of adding one beside it.
+	nameRename string
 
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
@@ -1509,7 +1513,7 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/whoami":
-		m.whoami()
+		m.whoami(fields[1:])
 		return m, nil
 	case "/theme":
 		// This terminal's own theme, never a shared one: bare opens the

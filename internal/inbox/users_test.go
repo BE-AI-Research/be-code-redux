@@ -108,3 +108,56 @@ func TestResolveInvalidConfigNameReportsAndAsks(t *testing.T) {
 		t.Fatalf("a bad name was bound: %+v", u.Users)
 	}
 }
+
+func TestRebindMovesOnlyThisAddress(t *testing.T) {
+	p := usersFile(t)
+	a, b := Terminal{IP: "10.0.0.1"}, Terminal{IP: "10.0.0.2"}
+	if err := Bind(p, "alice", a, "aa:bb:cc:dd:ee:ff"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Bind(p, "alice", b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rebind(p, "alice", "Carol", a); err != nil {
+		t.Fatal(err)
+	}
+	u, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := u.idsForIP("10.0.0.1"); len(ids) != 1 || ids[0] != "carol" {
+		t.Fatalf("10.0.0.1 is now %v, want [carol]", ids)
+	}
+	if ids := u.idsForIP("10.0.0.2"); len(ids) != 1 || ids[0] != "alice" {
+		t.Fatalf("alice's other device moved: %v", ids)
+	}
+	if u.Users["carol"].Devices[0].MAC != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("the device's MAC did not come with it: %+v", u.Users["carol"].Devices[0])
+	}
+}
+
+func TestRebindFreesANameLeftWithNoDevices(t *testing.T) {
+	p := usersFile(t)
+	a := Terminal{IP: "10.0.0.1"}
+	Bind(p, "alice", a, "")
+	if err := Rebind(p, "alice", "carol", a); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := Load(p)
+	if _, ok := u.Users["alice"]; ok {
+		t.Fatal("alice kept a record with no devices")
+	}
+}
+
+func TestRebindRejectsABadID(t *testing.T) {
+	p := usersFile(t)
+	a := Terminal{IP: "10.0.0.1"}
+	Bind(p, "alice", a, "")
+	if err := Rebind(p, "alice", "agent", a); err == nil {
+		t.Fatal("a reserved name was accepted")
+	}
+	u, _ := Load(p)
+	if ids := u.idsForIP("10.0.0.1"); len(ids) != 1 || ids[0] != "alice" {
+		t.Fatalf("a refused rebind changed the file: %v", ids)
+	}
+}

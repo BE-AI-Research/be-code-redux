@@ -524,7 +524,9 @@ comes from `chat.name` in your own config, else the name already bound to your a
 a terminal that attaches with neither is asked for one straight away — pick a name already
 seen from its address or type a new one — as soon as it is idle (never over another question,
 a running request or a half-typed line). `Esc` skips it for that attachment, and `/chat`,
-`/inbox` or `/dm` ask again when first opened; `/whoami` says where your name came from.
+`/inbox` or `/dm` ask again when first opened; `/whoami` says where your name came from, and
+`/whoami set` chooses a new one for this device (the old name keeps its other devices and its
+DMs; a name set in `chat.name` is changed in your config).
 Messages live under `~/.be-code/inbox/`;
 identity is advisory, not security — anyone with a shell on the host can read them. Plain
 mode and headless runs have neither.
@@ -942,7 +944,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 | **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
-| **People** | `/chat` `/inbox` `/dm [name]` `/whoami` `/back` |
+| **People** | `/chat` `/inbox` `/dm [name]` `/whoami [set]` `/back` |
 | **This terminal** | `/theme [<name>\|default <name>]` `/review [auto\|editor\|tui\|both]` `/copy [reply\|tool\|all]` `/help` `/menu` |
 
 Your own commands are markdown prompt templates in `.becode/commands/*.md` (workspace) or

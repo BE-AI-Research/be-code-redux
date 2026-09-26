@@ -168,3 +168,87 @@ func TestAttachPromptWaitsForAnOpenAsk(t *testing.T) {
 	}
 	waitFor(t, func() bool { flush(v); return v.mode == modeName })
 }
+
+// namedSession is one terminal already named alice (how says where from),
+// recording rebinds and binds.
+func namedSession(t *testing.T, how string, rebound, bound *[2]string) (*Session, *View) {
+	t.Helper()
+	s := newTestSession(t)
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) { return inbox.Resolution{ID: "alice", How: how}, nil }
+	s.rebindFn = func(oldID, newID string, _ inbox.Terminal) error { *rebound = [2]string{oldID, newID}; return nil }
+	s.bindFn = func(id string, _ inbox.Terminal) error { *bound = [2]string{"", id}; return nil }
+	s.usedFromFn = func(string) string { return "" }
+	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.1"}})
+	v := s.NewView(1, "l")
+	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	return s, v
+}
+
+func TestWhoamiSetChangesTheName(t *testing.T) {
+	var rebound, bound [2]string
+	s, v := namedSession(t, "ip", &rebound, &bound)
+	v.slashCommand("/whoami set")
+	if v.mode != modeName || !strings.Contains(v.View(), "you are alice") {
+		t.Fatalf("mode %v:\n%s", v.mode, v.View())
+	}
+	v.input.SetValue("Carol")
+	bindEnter(t, v)
+	if rebound != [2]string{"alice", "carol"} || bound != [2]string{} {
+		t.Fatalf("rebound %v bound %v", rebound, bound)
+	}
+	if v.userID() != "carol" || v.mode != modeInput || !strings.Contains(lastEntryText(s), "you are now carol") {
+		t.Fatalf("id %q mode %v last %q", v.userID(), v.mode, lastEntryText(s))
+	}
+}
+
+func TestWhoamiSetSameNameChangesNothing(t *testing.T) {
+	var rebound, bound [2]string
+	s, v := namedSession(t, "ip", &rebound, &bound)
+	v.slashCommand("/whoami set")
+	v.input.SetValue("alice")
+	bindEnter(t, v)
+	if rebound != [2]string{} || v.userID() != "alice" || v.mode != modeInput || !strings.Contains(lastEntryText(s), "you are already alice") {
+		t.Fatalf("rebound %v id %q mode %v last %q", rebound, v.userID(), v.mode, lastEntryText(s))
+	}
+}
+
+func TestWhoamiSetEscKeepsTheName(t *testing.T) {
+	var rebound, bound [2]string
+	_, v := namedSession(t, "ip", &rebound, &bound)
+	v.slashCommand("/whoami set")
+	v.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if v.mode != modeInput || v.userID() != "alice" || rebound != [2]string{} {
+		t.Fatalf("mode %v id %q rebound %v", v.mode, v.userID(), rebound)
+	}
+}
+
+func TestWhoamiSetWithAConfigNameSaysEditTheConfig(t *testing.T) {
+	var rebound, bound [2]string
+	s, v := namedSession(t, "config", &rebound, &bound)
+	v.slashCommand("/whoami set")
+	if v.mode != modeInput || !strings.Contains(lastEntryText(s), "chat.name") {
+		t.Fatalf("mode %v last %q", v.mode, lastEntryText(s))
+	}
+}
+
+// With no name yet, /whoami set is just the ordinary first naming: a bind.
+func TestWhoamiSetWithNoNameBinds(t *testing.T) {
+	var bound string
+	_, v := attachUnnamed(t, nil, &bound)
+	v.Update(tea.KeyMsg{Type: tea.KeyEsc}) // skip the startup prompt
+	v.slashCommand("/whoami set")
+	v.input.SetValue("erin")
+	bindEnter(t, v)
+	if bound != "erin" || v.userID() != "erin" {
+		t.Fatalf("bound %q id %q", bound, v.userID())
+	}
+}
+
+func TestWhoamiMentionsSet(t *testing.T) {
+	var rebound, bound [2]string
+	s, v := namedSession(t, "ip", &rebound, &bound)
+	v.slashCommand("/whoami")
+	if !strings.Contains(lastEntryText(s), "/whoami set changes it") {
+		t.Fatalf("%q", lastEntryText(s))
+	}
+}

@@ -155,6 +155,41 @@ func Bind(path, id string, t Terminal, mac string) error {
 	})
 }
 
+// Rebind moves one terminal's address from oldID to newID — a person
+// changing their name on this device (/whoami set). oldID keeps its other
+// devices; a name left with none is removed so it is free again. The
+// device's MAC comes with it. Mailboxes are not touched: messages sent to
+// the old name stay under it.
+func Rebind(path, oldID, newID string, t Terminal) error {
+	newID, err := ValidID(newID)
+	if err != nil {
+		return err
+	}
+	return withLock(path, func() error {
+		u, err := Load(path)
+		if err != nil {
+			return err
+		}
+		mac := ""
+		if r := u.Users[oldID]; r != nil {
+			kept := r.Devices[:0]
+			for _, d := range r.Devices {
+				if d.IP == t.IP {
+					mac = d.MAC
+					continue
+				}
+				kept = append(kept, d)
+			}
+			r.Devices = kept
+			if len(r.Devices) == 0 {
+				delete(u.Users, oldID)
+			}
+		}
+		u.touch(newID, t, mac)
+		return save(path, u)
+	})
+}
+
 // Resolve decides who a terminal is (spec §3.3): the config name; else the
 // one ID bound to its IP, or a choice among several; else — and only then —
 // a MAC lookup for a device whose IP changed; else a prompt. lookupMAC may
