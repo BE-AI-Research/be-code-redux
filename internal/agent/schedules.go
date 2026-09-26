@@ -411,19 +411,25 @@ func considerNextAfter(sc schedule.Schedule, now time.Time, consider func(time.T
 // fireNow queues sc's event and wakes an idle UI. manual is a person's own
 // /schedule run, which begin lets run a paused schedule. The event is
 // recorded as pending and queued under one hold of s.mu, so a begin can
-// never see it queued but not pending.
-func (a *Agent) fireNow(sc schedule.Schedule, manual bool) {
+// never see it queued but not pending. An event already pending is not
+// queued again (a /schedule run racing the loop's own pass); false then.
+func (a *Agent) fireNow(sc schedule.Schedule, manual bool) bool {
 	s := a.sched
 	if s == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
+	if _, dup := s.pending[sc.ID]; dup {
+		s.unlock()
+		return false
+	}
 	s.pending[sc.ID] = pendingEvent{queuedAt: s.clock.Now(), manual: manual}
 	a.EnqueueScheduled(sc.ID, sc.Name, fireText(sc))
 	s.unlock()
 	if a.Events.OnScheduleFire != nil {
 		a.Events.OnScheduleFire(sc.Name)
 	}
+	return true
 }
 
 // fireText is the request a fired event becomes (schedules spec §2.2).
