@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,5 +31,45 @@ func TestFakeClockFiresOnAdvance(t *testing.T) {
 	}
 	if immediate := c.NewTimer(0); len(immediate.C()) != 1 {
 		t.Fatal("a zero timer fires at once")
+	}
+}
+
+func TestFakeClockStopConcurrent(t *testing.T) {
+	// Verify Stop() is safe to call concurrently with Advance().
+	// This test is meant to be run with go test -race.
+	c := NewFakeClock(time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC))
+	tm := c.NewTimer(1 * time.Hour)
+
+	var wg sync.WaitGroup
+	var stopped int
+	var mu sync.Mutex
+
+	// Goroutine 1: Call Stop() repeatedly
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			if tm.Stop() {
+				mu.Lock()
+				stopped++
+				mu.Unlock()
+			}
+		}
+	}()
+
+	// Goroutine 2: Call Advance() repeatedly to trigger fireLocked()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			c.Advance(1 * time.Second)
+		}
+	}()
+
+	wg.Wait()
+
+	// At most one Stop() should succeed (timer can only be stopped once)
+	if stopped > 1 {
+		t.Fatalf("Stop() succeeded %d times, want at most 1", stopped)
 	}
 }

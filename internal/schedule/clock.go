@@ -42,6 +42,7 @@ type FakeClock struct {
 }
 
 type fakeTimer struct {
+	clock   *FakeClock
 	at      time.Time
 	ch      chan time.Time
 	stopped bool
@@ -50,6 +51,8 @@ type fakeTimer struct {
 
 func (f *fakeTimer) C() <-chan time.Time { return f.ch }
 func (f *fakeTimer) Stop() bool {
+	f.clock.mu.Lock()
+	defer f.clock.mu.Unlock()
 	was := !f.stopped && !f.fired
 	f.stopped = true
 	return was
@@ -66,7 +69,7 @@ func (c *FakeClock) Now() time.Time {
 func (c *FakeClock) NewTimer(d time.Duration) Timer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	t := &fakeTimer{at: c.now.Add(d), ch: make(chan time.Time, 1)}
+	t := &fakeTimer{clock: c, at: c.now.Add(d), ch: make(chan time.Time, 1)}
 	c.timers = append(c.timers, t)
 	c.fireLocked()
 	return t
