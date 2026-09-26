@@ -11,6 +11,15 @@
   never interrupting one in progress, and is checked again against its schedule when it actually
   runs — one edited, paused or cancelled after it queued does not run. `/schedule`, the `schedule`
   tool, `.be-code/schedules.md`, and a `schedules` config block.
+- A fired event runs only under its own allowance: the session's shortcuts (an earlier `a`,
+  `-y`, accepting all file changes, a site or co-worker allowed for the session) do not apply
+  to it, no grant covers `.be-code/schedules.md` or `~/.be-code`, lines typed meanwhile wait
+  for its turn to end, and the model cannot add, resume or pause a person's schedule during it. Pausing a schedule
+  revokes its approval, and the approval now covers its limits and creation time too. Two
+  sessions on one workspace run each occurrence once (a claim file under the engine dir), and
+  share the approvals file without overwriting each other's. An unanswered startup prompt
+  changes nothing rather than pausing everything. The loop wakes at least once a minute, so a
+  suspend no longer delays an event by hours.
 - Dropping a queued scheduled event from the queue popup skips that occurrence rather than
   wedging the schedule: a one-off is marked done, a recurring one fires again at its next time.
 - A session picker or `/resume` switch that loads new timers into an already-running session

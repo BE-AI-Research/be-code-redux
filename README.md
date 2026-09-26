@@ -436,7 +436,8 @@ there is no background daemon.
 - **The model** can ask for one with its `schedule` tool; you approve it in one prompt that
   shows the time, the instruction and everything it may do without asking. It cannot create or
   resume a schedule while a web page read this request is still untrusted (`shell_after_web`);
-  it has to say what it wanted and let you add it with `/schedule add`.
+  it has to say what it wanted and let you add it with `/schedule add`. Nor can it create,
+  resume, or pause one of yours while a scheduled event is running.
 - **Times:** `in 20m`, `at 09:00`, `at 2026-09-27 09:00`, `every 30m`, `daily 09:00`,
   `weekdays 09:00`, `mon,thu 14:30`, or five-field cron. Local time; a spring-forward gap runs
   once at the gap's end rather than twice or not at all.
@@ -444,22 +445,35 @@ there is no background daemon.
   unasked; anything else — including a write reached through a symlink that a `write:` grant
   does not itself cover — is asked in the terminal, on the same prompt a file write always uses
   (never as a VS Code diff, even with the editor bridge attached), and a question nobody answers
-  within `schedules.ask_timeout` is withdrawn and refused. The deny list, the browser's watch
-  tier and the shell-after-a-web-page rule still apply inside the allowance. `-y` never approves
-  a schedule, and the approval has no "always".
+  within `schedules.ask_timeout` is withdrawn and refused. The shortcuts you gave the session
+  while watching it — an earlier `a` on a prompt, `-y`, accepting all file changes, a site or
+  co-worker allowed for the session — do not apply to a fired event; only its allowance and
+  your standing config (`shell_allow`, the browser's `allow` sites) do, and an online co-worker
+  is not consulted during one. No grant ever covers `.be-code/schedules.md` or anything under
+  `~/.be-code`. The deny list, the browser's watch tier and the shell-after-a-web-page rule still
+  apply inside the allowance. `-y` never approves a schedule, and the approval has no "always".
 - **Checked again when it fires, not just when it is queued.** A fired event only runs if its
   schedule is still active and unchanged from what was approved; one edited, paused or cancelled
   after it queued does not run (`scheduled event "<name>" was not run: <reason>`), and an edit
   found at fire time pauses the schedule instead ("changed since approved").
-- **Where they live:** recurring schedules in `.be-code/schedules.md` (readable, editable — an
-  edited schedule is asked about again); one-off timers in the session.
-- **When a session starts** with saved schedules, one prompt lists them; `no` pauses them all. A
+- **Where they live:** recurring schedules in `.be-code/schedules.md` (readable, editable — a
+  schedule whose time, instruction, task, allowance or limits were edited is asked about again);
+  one-off timers in the session. Pausing a schedule (by hand, from the startup prompt, or after
+  repeated failures) withdraws its approval: only `/schedule resume` brings it back, and writing
+  `state: active` into the file just gets it paused again at its time.
+- **Two sessions on one workspace** run each occurrence once: the first to start it claims it,
+  and the other reports `it already ran in another session`.
+- **When a session starts** with saved schedules, one prompt lists them; `no` pauses them all;
+  leaving it unanswered (quitting with it open) changes nothing, but none of them runs in that
+  session unless you `/schedule resume` it — the next session asks again. A
   schedule past `schedules.max_active` or running more often than `schedules.min_interval` stays
   paused even after `yes`, with a notice saying why. Timers a session picker or `/resume` loads
   into an already-running session are held the same way, until you confirm them in a prompt of
   their own.
 - A fired event is queued like a message and runs as its own turn (`⏰ name`), never interrupting
-  a turn in progress.
+  a turn in progress; what you type while it runs waits for it to finish and then runs as a turn
+  of its own. The loop wakes at least once a minute, so a laptop that slept through an event's
+  time runs it within a minute of waking.
 - **Dropping a queued event** from the queue popup skips that occurrence: a one-off is marked
   done ("dropped from the queue"); a recurring one simply fires again at its next time.
 - `/schedule` lists them; `/schedule show|pause|resume|cancel|run <name>` manages them.
