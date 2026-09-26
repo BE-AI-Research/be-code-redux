@@ -47,6 +47,20 @@ func fakeBrowserMain(mode string) {
 			port, path = "45678", "/devtools/browser/abc"
 		}
 		os.WriteFile(filepath.Join(profile, "DevToolsActivePort"), []byte(port+"\n"+path+"\n"), 0o600)
+		// BE_CODE_FAKE_CLOSE_DELAY (Task 7 fix round 1's Close-waits test):
+		// after this delay the fake browser exits on its own — os.Exit(0),
+		// never a signal — and, if BE_CODE_FAKE_CLOSE_MARKER is set, writes
+		// that file first. A process killed by SIGKILL never reaches that
+		// write, so the marker's presence proves the exit was voluntary.
+		if delay := os.Getenv("BE_CODE_FAKE_CLOSE_DELAY"); delay != "" {
+			if d, err := time.ParseDuration(delay); err == nil {
+				time.Sleep(d)
+				if marker := os.Getenv("BE_CODE_FAKE_CLOSE_MARKER"); marker != "" {
+					os.WriteFile(marker, []byte("closed voluntarily\n"), 0o600)
+				}
+				os.Exit(0)
+			}
+		}
 		time.Sleep(time.Minute)
 	case "exit":
 		fmt.Fprintln(os.Stderr, "profile directory is in use")

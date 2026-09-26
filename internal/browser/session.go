@@ -3,8 +3,11 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"time"
@@ -21,6 +24,23 @@ type targetInfo struct {
 type createdTarget struct {
 	id, opener string
 	at         time.Time
+}
+
+// closeWaitTimeout bounds how long Close waits for a launched browser to
+// exit on its own, after Browser.close has replied, before killing it. A
+// var so a test can shorten it.
+var closeWaitTimeout = 5 * time.Second
+
+// errEnded is what every operation returns once Close has run: the session
+// is final and must never reconnect or launch again.
+var errEnded = errors.New("the browser session has ended")
+
+// jsonListEntry is one entry of GET /json/list — real Chromium's own
+// endpoint, which (unlike Target.getTargets) lists tabs most-recently-active
+// first.
+type jsonListEntry struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
 // Tab is one open tab, for the tabs action.
@@ -45,11 +65,13 @@ type Status struct {
 type Session struct {
 	opts Options
 
-	mu    sync.Mutex // one operation at a time
-	conn  *Conn
-	proc  *Process
-	page  *Page
-	unsub func()
+	mu       sync.Mutex // one operation at a time
+	conn     *Conn
+	proc     *Process
+	page     *Page
+	unsub    func()
+	ended    bool   // Close has run; never reconnect or launch again
+	listAddr string // where GET /json/list is asked: opts.Address when attached, the launched browser's own host:port otherwise
 
 	evMu      sync.Mutex // written from the connection's reader goroutine
 	created   []createdTarget
@@ -72,6 +94,9 @@ func NewSession(opts Options) *Session {
 func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ended {
+		return nil, nil, errEnded
+	}
 	var notes []string
 	reconnect := false
 	if s.conn != nil {
@@ -111,9 +136,9 @@ func (s *Session) connectLocked(ctx context.Context) (string, error) {
 	if !s.opts.AllowRemote && !IsLoopbackAddr(addr) {
 		return "", fmt.Errorf("browser.address %s is not on this machine; set browser.allow_remote to use it", addr)
 	}
-	var wsURL, note string
+	var wsURL, note, listAddr string
 	if v, err := FetchVersion(ctx, addr); err == nil {
-		wsURL, note = v.WebSocketURL, "attached to "+v.Browser+" at "+addr
+		wsURL, note, listAddr = v.WebSocketURL, "attached to "+v.Browser+" at "+addr, addr
 	} else {
 		if !s.opts.Launch {
 			return "", s.noBrowser(addr)
@@ -131,6 +156,7 @@ func (s *Session) connectLocked(ctx context.Context) (string, error) {
 			return "", err
 		}
 		s.proc, wsURL = proc, proc.WSURL
+		listAddr = wsHostPort(proc.WSURL)
 		mode := "visible"
 		if headless {
 			mode = "headless"
@@ -146,8 +172,13 @@ func (s *Session) connectLocked(ctx context.Context) (string, error) {
 		Product string `json:"product"`
 	}
 	conn.Call(ctx, "", "Browser.getVersion", nil, &ver)
-	// Downloads are refused at the browser level in 1.1.5 (spec §5).
-	conn.Call(ctx, "", "Browser.setDownloadBehavior", map[string]any{"behavior": "deny"}, nil)
+	// Downloads are refused at the browser level in 1.1.5 (spec §5); a
+	// browser that refuses the request itself is noticed, never silently
+	// left downloading.
+	if err := conn.Call(ctx, "", "Browser.setDownloadBehavior", map[string]any{"behavior": "deny"}, nil); err != nil {
+		note += "; downloads could not be refused by this browser"
+	}
+	s.listAddr = listAddr
 	s.evMu.Lock()
 	s.created, s.destroyed = nil, map[string]bool{}
 	s.evMu.Unlock()
@@ -212,12 +243,54 @@ func (s *Session) isDestroyed(id string) bool {
 	return s.destroyed[id]
 }
 
-// pickPageLocked attaches to the most recent open tab, or opens one.
-func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
-	lost := s.page != nil
-	if s.page != nil {
-		s.page.release()
-		s.page = nil
+// wsHostPort is the host:port a browser-level WebSocket URL (Process.WSURL)
+// answers GET requests on too — the launched browser's own DevTools HTTP
+// endpoint, as opposed to the configured Options.Address of one attached to.
+func wsHostPort(wsURL string) string {
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// fetchTargetList asks addr for GET /json/list, bounded to 2s: real
+// Chromium's own endpoint for the tab list, ordered most-recently-active
+// first — unlike Target.getTargets, which documents no order at all.
+func fetchTargetList(ctx context.Context, addr string) ([]jsonListEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/json/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s/json/list: %s", addr, resp.Status)
+	}
+	var list []jsonListEntry
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// mostRecentPageLocked picks the tab a real user would consider "current":
+// the first page entry of GET /json/list when that succeeds and names one
+// still open, else the last live page target of Target.getTargets (the
+// order this package used before /json/list was consulted, and still the
+// fallback when a browser has no such endpoint or lists nothing usable).
+func (s *Session) mostRecentPageLocked(ctx context.Context) (string, error) {
+	if list, err := fetchTargetList(ctx, s.listAddr); err == nil {
+		for _, e := range list {
+			if e.Type == "page" && !s.isDestroyed(e.ID) {
+				return e.ID, nil
+			}
+		}
 	}
 	var ts struct {
 		TargetInfos []targetInfo `json:"targetInfos"`
@@ -225,12 +298,24 @@ func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 	if err := s.conn.Call(ctx, "", "Target.getTargets", nil, &ts); err != nil {
 		return "", err
 	}
-	id := ""
 	for i := len(ts.TargetInfos) - 1; i >= 0; i-- {
 		if t := ts.TargetInfos[i]; t.Type == "page" && !s.isDestroyed(t.TargetID) {
-			id = t.TargetID
-			break
+			return t.TargetID, nil
 		}
+	}
+	return "", nil
+}
+
+// pickPageLocked attaches to the most recent open tab, or opens one.
+func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
+	lost := s.page != nil
+	if s.page != nil {
+		s.page.release()
+		s.page = nil
+	}
+	id, err := s.mostRecentPageLocked(ctx)
+	if err != nil {
+		return "", err
 	}
 	opened := false
 	if id == "" {
@@ -262,6 +347,9 @@ func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 func (s *Session) AfterAction(ctx context.Context, since time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ended {
+		return "", errEnded
+	}
 	if s.page == nil || s.conn == nil {
 		return "", nil
 	}
@@ -294,6 +382,9 @@ func (s *Session) AfterAction(ctx context.Context, since time.Time) (string, err
 func (s *Session) Tabs(ctx context.Context) ([]Tab, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ended {
+		return nil, errEnded
+	}
 	return s.tabsLocked(ctx)
 }
 
@@ -322,6 +413,9 @@ func (s *Session) tabsLocked(ctx context.Context) ([]Tab, error) {
 func (s *Session) SwitchTab(ctx context.Context, n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ended {
+		return errEnded
+	}
 	tabs, err := s.tabsLocked(ctx)
 	if err != nil {
 		return err
@@ -371,19 +465,48 @@ func (s *Session) Status() Status {
 	return s.st
 }
 
-// Close disconnects. A browser BE-Code launched is closed (asked first,
-// then killed); one it attached to is left running.
+// Close disconnects, finally: once it has run, the session never
+// reconnects or launches again (Page, AfterAction, Tabs and SwitchTab all
+// return errEnded). A browser BE-Code launched is closed (asked first, then
+// killed only if it does not exit on its own); one it attached to is left
+// running.
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.disconnectLocked()
+	s.ended = true
+}
+
+// CloseAsync disconnects on a goroutine of its own, for a caller that must
+// not wait (the TUI's Update goroutine, answering /browser close) — a
+// restartable disconnect, unlike Close: Page reconnects (or relaunches)
+// after it, exactly as after the browser dropping on its own.
+func (s *Session) CloseAsync() { go s.disconnect() }
+
+func (s *Session) disconnect() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.disconnectLocked()
+}
+
+func (s *Session) disconnectLocked() {
 	if s.conn != nil {
 		if s.page != nil {
 			s.page.release()
 		}
 		if s.proc != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			s.conn.Call(ctx, "", "Browser.close", nil, nil)
+			err := s.conn.Call(ctx, "", "Browser.close", nil, nil)
 			cancel()
+			if err == nil {
+				// Give it a chance to shut down cleanly — flush the
+				// persistent profile's cookies and session state — before
+				// resorting to a kill (spec §1.3, amended).
+				select {
+				case <-s.proc.Exited():
+				case <-time.After(closeWaitTimeout):
+				}
+			}
 		}
 		if s.unsub != nil {
 			s.unsub()
@@ -398,10 +521,6 @@ func (s *Session) Close() {
 	s.st = Status{Address: s.opts.Address}
 	s.stMu.Unlock()
 }
-
-// CloseAsync closes on a goroutine of its own, for a caller that must not
-// wait (the TUI's Update goroutine, answering /browser close).
-func (s *Session) CloseAsync() { go s.Close() }
 
 // dropLocked forgets a connection that has already died.
 func (s *Session) dropLocked() {

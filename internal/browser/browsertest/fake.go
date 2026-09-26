@@ -21,6 +21,15 @@ type Call struct {
 	Params    json.RawMessage
 }
 
+// ListEntry is one entry of a scripted GET /json/list response.
+type ListEntry struct {
+	ID                   string `json:"id"`
+	Type                 string `json:"type"`
+	Title                string `json:"title"`
+	URL                  string `json:"url"`
+	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+}
+
 // Browser is a scripted DevTools endpoint: GET /json/version, and a
 // WebSocket at /devtools/browser/fake answering each command from a handler
 // table. Commands with no handler succeed with an empty result, so the
@@ -40,6 +49,8 @@ type Browser struct {
 	// connection is ever coming again, so waitForConn must not sit out its
 	// full bound finding that out — every other caller still gets the
 	// full wait, since only a test's very last Drop can know this.
+	list    []ListEntry
+	listSet bool // unset: GET /json/list 404s, the way a browser with no such endpoint does
 }
 
 // New starts a fake browser, closed when the test ends.
@@ -55,6 +66,7 @@ func New(t testing.TB) *Browser {
 		})
 	})
 	mux.HandleFunc("/devtools/browser/fake", b.serveWS)
+	mux.HandleFunc("/json/list", b.serveList)
 	b.Srv = httptest.NewServer(mux)
 	t.Cleanup(func() {
 		b.mu.Lock()
@@ -77,6 +89,27 @@ func (b *Browser) Handle(method string, h Handler) {
 	b.mu.Lock()
 	b.handlers[method] = h
 	b.mu.Unlock()
+}
+
+// SetList scripts GET /json/list's response, in the order given — real
+// Chromium lists its most-recently-active tab first. Unset (the default),
+// it 404s, the way a browser with no such endpoint does.
+func (b *Browser) SetList(entries []ListEntry) {
+	b.mu.Lock()
+	b.list, b.listSet = entries, true
+	b.mu.Unlock()
+}
+
+func (b *Browser) serveList(w http.ResponseWriter, r *http.Request) {
+	b.mu.Lock()
+	list, ok := b.list, b.listSet
+	b.mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
 }
 
 // Calls returns the commands received for method, in order ("" for all).
