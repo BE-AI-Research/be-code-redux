@@ -118,3 +118,55 @@ func TestApprovals(t *testing.T) {
 		t.Fatal("corrupt is empty")
 	}
 }
+
+func TestWindowsLineEndings(t *testing.T) {
+	original := sample()
+	var d Doc
+	d.Put(original)
+	rendered := d.Render()
+
+	// Convert to CRLF (Windows line endings)
+	crlfText := strings.ReplaceAll(rendered, "\n", "\r\n")
+	// Add a foreign line with CRLF
+	crlfText = strings.Replace(crlfText, "state: active\r\n", "state: active\r\nmy-note: windows\r\n", 1)
+
+	// Parse the CRLF version
+	d2 := ParseDoc(crlfText)
+	parsed := d2.Schedules()
+
+	if len(parsed) != 1 {
+		t.Fatalf("expected 1 schedule, got %d", len(parsed))
+	}
+
+	s := parsed[0]
+	// Instruction should match exactly (no trailing \r)
+	if s.Instruction != original.Instruction {
+		t.Errorf("instruction mismatch:\ngot: %q\nwant: %q", s.Instruction, original.Instruction)
+	}
+
+	// Hash should match (no \r affecting the hash)
+	if s.Hash() != original.Hash() {
+		t.Errorf("hash mismatch after CRLF parse: %q != %q", s.Hash(), original.Hash())
+	}
+
+	// No \r anywhere in instruction
+	if strings.Contains(s.Instruction, "\r") {
+		t.Errorf("instruction contains \\r: %q", s.Instruction)
+	}
+
+	// No \r anywhere in Extra
+	for i, e := range s.Extra {
+		if strings.Contains(e, "\r") {
+			t.Errorf("Extra[%d] contains \\r: %q", i, e)
+		}
+	}
+
+	// Foreign line should come back without \r
+	out := d2.Render()
+	if !strings.Contains(out, "my-note: windows") {
+		t.Fatal("foreign line lost")
+	}
+	if strings.Contains(out, "\r") {
+		t.Errorf("output contains \\r after normalization")
+	}
+}

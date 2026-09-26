@@ -35,6 +35,10 @@ type Doc struct {
 }
 
 func ParseDoc(text string) Doc {
+	// Normalize Windows line endings to Unix
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
 	var d Doc
 	parts := strings.Split("\n"+text, "\n## ")
 	d.Preamble = strings.TrimPrefix(parts[0], "\n")
