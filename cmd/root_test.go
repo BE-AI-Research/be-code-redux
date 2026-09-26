@@ -791,3 +791,47 @@ func TestIDELockToAttachQuietPathNothingLiveIsSilent(t *testing.T) {
 		t.Fatalf("quiet path printed to stderr: %q", stderr)
 	}
 }
+
+func buildWith(t *testing.T, cfg *config.Config, headless bool) *agent.Agent {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	prevDir, prevProvider, prevModel, prevYes, prevResume := flagDir, flagProvider, flagModel, flagYes, flagResume
+	flagDir, flagProvider, flagModel, flagYes, flagResume = t.TempDir(), "", "", false, ""
+	t.Cleanup(func() {
+		flagDir, flagProvider, flagModel, flagYes, flagResume = prevDir, prevProvider, prevModel, prevYes, prevResume
+	})
+	_, ag, err := buildAgent(cfg, headless)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ag.StopSchedules()
+		ag.StopAllSubAgents("test over")
+		ag.Tools.Close()
+		ag.Checkpoints.Cleanup()
+	})
+	return ag
+}
+
+func hasTool(ag *agent.Agent, name string) bool {
+	for _, n := range ag.Tools.Names() {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestScheduleToolOnlyInInteractiveSessions(t *testing.T) {
+	if ag := buildWith(t, buildAgentSubAgentConfig(false), true); hasTool(ag, "schedule") || ag.SchedulesEnabled() {
+		t.Fatal("headless run has no schedule tool and no scheduler")
+	}
+	if ag := buildWith(t, buildAgentSubAgentConfig(false), false); !hasTool(ag, "schedule") || !ag.SchedulesEnabled() {
+		t.Fatal("interactive sessions get both")
+	}
+	off := buildAgentSubAgentConfig(false)
+	off.Schedules.Enabled = false
+	if ag := buildWith(t, off, false); hasTool(ag, "schedule") || ag.SchedulesEnabled() {
+		t.Fatal("schedules.enabled false turns both off")
+	}
+}

@@ -222,7 +222,9 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// No "always" exists for these (browser spec §3.3, §3.6): a watched
 		// site, and a shell command after an untrusted page, ask every time
 		// — and an unattended -y run has nobody to ask.
-		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) {
+		// -y never approves a schedule (schedules spec §3.1).
+		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
+			(action == "schedule" && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}
@@ -233,7 +235,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 			return true
 		}
 		if !stdinIsTTY() {
-			if action == "browser_watch" || action == "shell_after_web" {
+			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" {
 				// -y never approves these two (browser spec §3.3, §3.6), so
 				// the usual "use -y" hint would be a false promise.
 				fmt.Fprintf(os.Stderr, "denied %s (non-interactive; this action always asks a person): %.120s\n", action, detail)

@@ -656,6 +656,38 @@ func TestConfirmHeldTimersNoopWithNothingHeld(t *testing.T) {
 	}
 }
 
+// TestConfirmHeldTimersPanicDoesNotPropagate: both UIs call ConfirmHeldTimers
+// on a bare goroutine with no fence of their own, so a panicking approver
+// must not take the session host down with it (controller ruling, task 7).
+func TestConfirmHeldTimersPanicDoesNotPropagate(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	notes := noteSink(ag)
+	ag.Tools.Approve = func(_, _ string) bool { panic("boom") }
+	ag.StartSchedules()
+	tm := mk("t", "in 1m")
+	seed(t, ag, tm, false)
+	ag.SetSession(&store.Session{ID: "s0"})
+	clock.Advance(2 * time.Minute) // due
+	ag.SetSession(&store.Session{ID: "s2", Timers: []schedule.Schedule{tm}})
+	ag.sched.kickLoop()
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ag.ConfirmHeldTimers()
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ConfirmHeldTimers hung or the panic escaped")
+	}
+	if !strings.Contains(notes(), "confirming this session's timers failed") {
+		t.Fatalf("expected a notice about the failed confirmation: %q", notes())
+	}
+	ag.StopSchedules()
+}
+
 func TestStaleHoldPromptAppliesToNothing(t *testing.T) {
 	ag, clock, _ := schedAgent(t, &scriptedProvider{})
 	notes := noteSink(ag)

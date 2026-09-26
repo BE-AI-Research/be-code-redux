@@ -595,6 +595,14 @@ func (a *Agent) ConfirmHeldTimers() {
 	if gen == 0 || !waiting {
 		return
 	}
+	// Called on a bare goroutine by both UIs, with no fence of their own —
+	// a panicking approver (or anything else downstream of Approve) must
+	// not take the session host down with it. The timers simply stay held.
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("confirming this session's timers failed (%v); they stay held", r)
+		}
+	}()
 	a.gateSchedules(gen, "This session's timers will run while it is open:")
 }
 

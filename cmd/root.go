@@ -23,6 +23,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 	"github.com/brown-enterprises/be-code/internal/setup"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/subagent"
@@ -290,6 +291,14 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
+	if !headless && cfg.Schedules.Enabled {
+		// Scheduled events: interactive sessions only — a one-shot run has
+		// no "later" (schedules spec §1.3). The scheduler is created here but
+		// started by the UI once its approvals and events are wired.
+		ag.EnableSchedules(schedule.RealClock{})
+		reg.AddTool(tools.NewScheduleTool(ag))
+		ag.RefreshSystem()
+	}
 	cws, _ := cfg.ValidCoworkers()
 	if anySubAgent(cws) {
 		name := flagProvider
