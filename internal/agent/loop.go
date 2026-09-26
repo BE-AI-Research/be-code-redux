@@ -50,6 +50,9 @@ type Events struct {
 	OnSubAgentStart func(d subagent.Dispatch)
 	OnSubAgentAsk   func(ask subagent.Ask)
 	OnSubAgentEnd   func(hb subagent.HandBack)
+	// OnScheduleFire fires after a due scheduled event was queued, so an
+	// idle UI can start its turn (the same wake a sub-agent's hand-back uses).
+	OnScheduleFire func(name string)
 }
 
 // Stats accumulates per-session usage for /stats and the status bar.
@@ -139,6 +142,10 @@ type Agent struct {
 	engineOff   atomic.Bool
 	engineFault func(op string)
 	flushWarned atomic.Bool
+	// sched runs scheduled events (schedules.go); nil when disabled or headless.
+	sched  *scheduler
+	fireMu sync.Mutex
+	armed  *firing
 	// ContextProvider, when set, returns a short note about what the user
 	// is looking at in their editor; it is prepended to each new request.
 	ContextProvider func(ctx context.Context) string
@@ -2011,7 +2018,19 @@ func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Repo
 // RunFull runs the request, then the verify→repair cycle, then (when
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
+//
+// A request DrainForTurn armed as a scheduled event runs through runFired,
+// under that schedule's allowance and max runtime; everything else runs as
+// it always has.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
+	if f := a.takeFiring(userInput); f != nil && a.sched != nil {
+		return a.runFired(ctx, f, userInput)
+	}
+	return a.runFull(ctx, userInput)
+}
+
+// runFull is RunFull's pipeline itself. Only RunFull and runFired call it.
+func (a *Agent) runFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
 	// The untrusted-web flag is deliberately not cleared here: a sub-agent's
 	// hand-back comes through RunFull too, with the page still in history.
