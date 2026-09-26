@@ -123,6 +123,33 @@ func TestPageSensitiveFieldInsideShadowDOM(t *testing.T) {
 	}
 }
 
+// TestPageSensitiveFieldsInsideIframeAndNestedDeeper: a card field inside
+// an <iframe>'s contentDocument, and one two plain element levels below the
+// document (neither a shadow root nor an iframe), must both be hidden in a
+// snapshot and answer IsSensitive true — proving the walk recurses past a
+// single level and into contentDocument, not just shadowRoots.
+func TestPageSensitiveFieldsInsideIframeAndNestedDeeper(t *testing.T) {
+	p, ps, _ := testPageOpts(t, "https://acme.test/checkout", "Checkout", browsertest.NestedFieldsTree, testOptions())
+	ps.Lock()
+	ps.IframeSensitive = map[int][]string{903: {"autocomplete", "cc-number"}}
+	ps.DeepSensitive = map[int][]string{904: {"autocomplete", "cc-number"}}
+	ps.Unlock()
+	ctx := context.Background()
+	snap, err := p.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(snap, "4111") {
+		t.Fatalf("a nested sensitive field's value leaked:\n%s", snap)
+	}
+	if yes, err := p.IsSensitive(ctx, "e1"); err != nil || !yes {
+		t.Fatalf("IsSensitive for the iframe field: %v, %v", yes, err)
+	}
+	if yes, err := p.IsSensitive(ctx, "e2"); err != nil || !yes {
+		t.Fatalf("IsSensitive for the deeply nested field: %v, %v", yes, err)
+	}
+}
+
 // TestPageSnapshotHidesValuesWhenTheDocumentChangesMidQuery: a navigation
 // landing between the accessibility-tree read and the sensitive-field
 // query must not pair one document's values with another's sensitive set —
@@ -221,6 +248,31 @@ func TestPageClickReturnsWhenAnInputEventOpensADialog(t *testing.T) {
 	}
 }
 
+// TestPageClickPropagatesTheCallersOwnCancellationEvenWithADialogPending:
+// "an input call failed while a dialog is pending" is not, by itself,
+// evidence that this input opened that dialog — a dialog already pending
+// from something else entirely, plus the caller's own cancellation (Esc),
+// must not be swallowed as a successful click.
+func TestPageClickPropagatesTheCallersOwnCancellationEvenWithADialogPending(t *testing.T) {
+	p, _, fb := formPage(t)
+	bgCtx, cancel := context.WithCancel(context.Background())
+	p.Snapshot(bgCtx)
+	// A dialog already pending before Click even starts, unrelated to it.
+	fb.Emit("S-T1", "Page.javascriptDialogOpening", map[string]any{"type": "confirm", "message": "Already open"})
+	waitFor(t, func() bool {
+		s, _ := p.Snapshot(bgCtx)
+		return strings.Contains(s, "dialog confirm")
+	})
+	fb.Handle("Input.dispatchMouseEvent", func(string, json.RawMessage) (any, error) {
+		cancel() // the caller's own cancellation (e.g. Esc), unrelated to the dialog
+		<-bgCtx.Done()
+		return map[string]any{}, nil
+	})
+	if err := p.Click(bgCtx, "e4"); err == nil {
+		t.Fatal("Click succeeded despite the caller's own context being cancelled while an unrelated dialog was already pending")
+	}
+}
+
 func TestPageStaleRef(t *testing.T) {
 	p, ps, _ := formPage(t)
 	ctx := context.Background()
@@ -295,6 +347,65 @@ func TestPageTypeRefusesWhenFocusIsLost(t *testing.T) {
 	}
 	if has(ps.Inputs(), "text bob@example.com") {
 		t.Fatal("text was written after the field lost focus")
+	}
+}
+
+// TestPageTypeRefusesAfterACrossDocumentNavigationDuringSelectAll: a
+// navigation landing between select-all and the sensitive re-check resets
+// refs, so re-checking IsSensitive by ref alone fails open (UnknownRefError
+// discarded, sens defaults to false) and can let text land wherever the new
+// document happens to have focused. Type must notice the document itself
+// changed and refuse, using the backend already resolved, not the ref.
+func TestPageTypeRefusesAfterACrossDocumentNavigationDuringSelectAll(t *testing.T) {
+	p, ps, fb := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	fb.Handle("Runtime.callFunctionOn", func(sid string, raw json.RawMessage) (any, error) {
+		var a struct {
+			Decl string `json:"functionDeclaration"`
+		}
+		json.Unmarshal(raw, &a)
+		switch {
+		case strings.Contains(a.Decl, "isConnected"):
+			return map[string]any{"result": map[string]any{"type": "boolean", "value": true}}, nil
+		case strings.Contains(a.Decl, "selectNodeContents"):
+			// A navigation lands mid-select-all, resetting refs.
+			fb.Emit(sid, "Page.frameNavigated", map[string]any{"frame": map[string]any{
+				"id": "F-T1", "loaderId": "L-NAV", "url": "https://acme.test/login",
+			}})
+			return map[string]any{"result": map[string]any{"type": "boolean", "value": true}}, nil
+		}
+		return map[string]any{"result": map[string]any{"type": "undefined"}}, nil
+	})
+	err := p.Type(ctx, "e1", "bob@example.com", false)
+	if err == nil || !strings.Contains(err.Error(), "the page changed before typing into e1") {
+		t.Fatalf("got %v", err)
+	}
+	if has(ps.Inputs(), "text bob@example.com") {
+		t.Fatal("text was written after a cross-document navigation mid-select-all")
+	}
+}
+
+// TestPageTypeSelectAllChecksShadowAwareFocus: `this === document.activeElement`
+// is false for an element inside a shadow root even when it genuinely has
+// focus (the shadow host, not the element itself, is document.activeElement
+// there) — that would refuse every field inside a shadow root. The select-all
+// step's focus check must instead be `this.getRootNode().activeElement === this`.
+func TestPageTypeSelectAllChecksShadowAwareFocus(t *testing.T) {
+	p, _, fb := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	if err := p.Type(ctx, "e1", "x", false); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range fb.Calls("Runtime.callFunctionOn") {
+		if strings.Contains(string(c.Params), "getRootNode") && strings.Contains(string(c.Params), "activeElement") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("select-all's focus check does not use getRootNode().activeElement, so it would refuse every field inside a shadow root")
 	}
 }
 

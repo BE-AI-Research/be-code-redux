@@ -34,3 +34,14 @@ const ShadowFieldTree = `{"nodes":[
 {"nodeId":"2","ignored":false,"role":{"type":"role","value":"main"},"name":{"type":"computedString","value":""},"parentId":"1","childIds":["3"],"backendDOMNodeId":2},
 {"nodeId":"3","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"Card number"},"value":{"type":"string","value":"4111111111111111"},"parentId":"2","childIds":[],"backendDOMNodeId":902}
 ]}`
+
+// NestedFieldsTree is an Accessibility.getFullAXTree result for a checkout
+// page with two card fields that in the real DOM sit nested deeper than one
+// level — one inside an <iframe>'s contentDocument (backend 903), one two
+// plain element levels below the document (backend 904) — both of which
+// Accessibility.getFullAXTree flattens and shows like any other field.
+const NestedFieldsTree = `{"nodes":[
+{"nodeId":"1","ignored":false,"role":{"type":"role","value":"RootWebArea"},"name":{"type":"computedString","value":"Checkout"},"childIds":["2","3"],"backendDOMNodeId":1},
+{"nodeId":"2","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"Card (iframe)"},"value":{"type":"string","value":"4111111111111111"},"parentId":"1","childIds":[],"backendDOMNodeId":903},
+{"nodeId":"3","ignored":false,"role":{"type":"role","value":"textbox"},"name":{"type":"computedString","value":"Card (nested)"},"value":{"type":"string","value":"4111111111111111"},"parentId":"1","childIds":[],"backendDOMNodeId":904}
+]}`

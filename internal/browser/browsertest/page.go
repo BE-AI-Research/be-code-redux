@@ -43,6 +43,13 @@ type PageScript struct {
 	// shadow root in the DOM.getDocument tree: reachable only by a query
 	// that pierces shadow DOM.
 	ShadowSensitive map[int][]string
+	// IframeSensitive is like Sensitive, but its nodes are placed inside an
+	// <iframe>'s contentDocument in the DOM.getDocument tree.
+	IframeSensitive map[int][]string
+	// DeepSensitive is like Sensitive, but its nodes are nested two plain
+	// (non-shadow, non-iframe) element levels below the document, to prove
+	// the sensitive-field walk recurses past a single level of children.
+	DeepSensitive map[int][]string
 	// Disconnected backends answer isConnected false: a stale ref.
 	Disconnected map[int]bool
 	// SelectResult is what the <select> function returns ("" = chosen).
@@ -71,7 +78,8 @@ type PageScript struct {
 // NewPage scripts b as a browser with one tab, T1, showing url.
 func NewPage(b *Browser, url, title, tree string) *PageScript {
 	s := &PageScript{B: b, Sensitive: map[int][]string{},
-		ShadowSensitive: map[int][]string{}, Disconnected: map[int]bool{}, Pages: map[string][2]string{}}
+		ShadowSensitive: map[int][]string{}, IframeSensitive: map[int][]string{}, DeepSensitive: map[int][]string{},
+		Disconnected: map[int]bool{}, Pages: map[string][2]string{}}
 	s.targets = []*Target{{ID: "T1", URL: url, Title: title, Tree: tree, history: []string{url}}}
 	s.install()
 	return s
@@ -371,14 +379,28 @@ func (s *PageScript) install() {
 }
 
 // documentTreeLocked builds a DOM.getDocument {"depth":-1,"pierce":true}
-// tree: Sensitive fields as ordinary children of the document, and
-// ShadowSensitive fields nested inside one host element's shadow root — so
-// a query that pierces shadow DOM finds both, and one that does not finds
-// only the first.
+// tree: Sensitive fields as ordinary children of the document,
+// ShadowSensitive fields nested inside one host element's shadow root,
+// IframeSensitive fields inside an <iframe>'s contentDocument, and
+// DeepSensitive fields two plain element levels below the document — so a
+// query that only looks at direct children, or does not pierce shadow DOM
+// or iframes, finds less than the full set.
 func (s *PageScript) documentTreeLocked() map[string]any {
 	children := []any{}
 	for backend, attrs := range s.Sensitive {
 		children = append(children, sensitiveDOMNode(backend, attrs))
+	}
+	if len(s.DeepSensitive) > 0 {
+		deepChildren := []any{}
+		for backend, attrs := range s.DeepSensitive {
+			deepChildren = append(deepChildren, sensitiveDOMNode(backend, attrs))
+		}
+		children = append(children, map[string]any{
+			"backendNodeId": 700, "nodeName": "DIV", "localName": "div",
+			"children": []any{
+				map[string]any{"backendNodeId": 701, "nodeName": "DIV", "localName": "div", "children": deepChildren},
+			},
+		})
 	}
 	if len(s.ShadowSensitive) > 0 {
 		shadowChildren := []any{}
@@ -389,6 +411,18 @@ func (s *PageScript) documentTreeLocked() map[string]any {
 			"backendNodeId": 900, "nodeName": "CUSTOM-FIELD", "localName": "custom-field",
 			"shadowRoots": []any{
 				map[string]any{"backendNodeId": 901, "nodeName": "#document-fragment", "children": shadowChildren},
+			},
+		})
+	}
+	if len(s.IframeSensitive) > 0 {
+		iframeChildren := []any{}
+		for backend, attrs := range s.IframeSensitive {
+			iframeChildren = append(iframeChildren, sensitiveDOMNode(backend, attrs))
+		}
+		children = append(children, map[string]any{
+			"backendNodeId": 800, "nodeName": "IFRAME", "localName": "iframe",
+			"contentDocument": map[string]any{
+				"backendNodeId": 801, "nodeName": "#document", "children": iframeChildren,
 			},
 		})
 	}

@@ -90,6 +90,12 @@ type Page struct {
 	// waiting out callTimeout for a reply that will not come until the
 	// dialog is answered.
 	cancelInput context.CancelFunc
+	// dialogCancelled is set the moment onEvent actually calls cancelInput
+	// (never merely because some dialog happens to be pending): Click and
+	// Press reset it to false before dispatching, so it only ever means
+	// "this exact dispatch is what opened the dialog that cancelled it" —
+	// never a dialog that was already pending for some unrelated reason.
+	dialogCancelled bool
 }
 
 // attachPage opens a flat session on a tab and starts listening to it.
@@ -267,6 +273,9 @@ func (p *Page) onEvent(ev Event) {
 			p.mu.Lock()
 			p.dialog = &pendingDialog{Type: e.Type, Message: e.Message}
 			cancel := p.cancelInput
+			if cancel != nil {
+				p.dialogCancelled = true
+			}
 			p.mu.Unlock()
 			// Calling a stored cancel func from here is fine: it is not a
 			// Call, just an unblock, and never reaches the browser itself.
@@ -703,6 +712,7 @@ func (p *Page) Click(ctx context.Context, ref string) error {
 	inputCtx, cancel := context.WithCancel(ctx)
 	p.mu.Lock()
 	p.cancelInput = cancel
+	p.dialogCancelled = false
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
@@ -716,25 +726,44 @@ func (p *Page) Click(ctx context.Context, ref string) error {
 			ev["button"], ev["clickCount"] = "left", 1
 		}
 		if err := p.call(inputCtx, "Input.dispatchMouseEvent", ev, nil); err != nil {
-			p.mu.Lock()
-			blocked := p.dialog != nil
-			p.mu.Unlock()
-			if !blocked {
-				return err
+			if p.inputCancelledByDialog(err, ctx) {
+				// The event itself opened a dialog, which real Chrome holds
+				// this reply behind; the late reply, if it ever comes, is
+				// simply dropped by Conn. Treat the click as done.
+				break
 			}
-			// The event itself opened a dialog, which real Chrome holds
-			// this reply behind; the late reply, if it ever comes, is
-			// simply dropped by Conn. Treat the click as done.
-			break
+			return err
 		}
 	}
 	p.settle(ctx)
 	return nil
 }
 
+// inputCancelledByDialog reports whether a failed input call's own error is
+// exactly this dispatch's dialog cancelling it, never merely "some dialog
+// happens to be pending": the error must be context.Canceled, onEvent must
+// have actually called this dispatch's own cancelInput (dialogCancelled),
+// and the caller's own ctx must not itself be the thing that got
+// cancelled — the caller's own cancellation (Esc, a timeout, a dead
+// connection) always wins and is always propagated as an error.
+func (p *Page) inputCancelledByDialog(err error, callerCtx context.Context) bool {
+	if !errors.Is(err, context.Canceled) || callerCtx.Err() != nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dialogCancelled
+}
+
+// selectAllJS's focus check is this.getRootNode().activeElement === this,
+// not this === document.activeElement: inside a shadow root,
+// document.activeElement is the shadow host, never the focused element
+// itself, so the simpler check would refuse every field in a shadow root.
+// getRootNode() returns the shadow root for an element inside one, and the
+// document itself otherwise, and each has its own activeElement.
 const selectAllJS = `function(){ if (typeof this.select === 'function') { this.select() } else { ` +
 	`const r = document.createRange(); r.selectNodeContents(this); const s = getSelection(); s.removeAllRanges(); s.addRange(r) } ` +
-	`return this === document.activeElement }`
+	`return this.getRootNode().activeElement === this }`
 
 // Type replaces a field's content with text; submit presses Enter after.
 // An empty text clears the field.
@@ -743,6 +772,9 @@ func (p *Page) Type(ctx context.Context, ref, text string, submit bool) error {
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	loaderAtResolve := p.loaderID
+	p.mu.Unlock()
 	if err := p.call(ctx, "DOM.focus", map[string]any{"backendNodeId": backend}, nil); err != nil {
 		return fmt.Errorf("%s cannot take text (is it a field?)", NormalizeRef(ref))
 	}
@@ -751,11 +783,21 @@ func (p *Page) Type(ctx context.Context, ref, text string, submit bool) error {
 		return err
 	}
 	// Right before writing anything, re-check what an earlier snapshot may
-	// have already told the caller: never trust it. A sensitive field is
-	// refused outright; a field that lost focus between resolving it and
-	// here is refused too, since text would then land somewhere else.
-	if sens, _ := p.IsSensitive(ctx, ref); sens {
+	// have already told the caller: never trust it, and never re-check by
+	// ref — a cross-document navigation between select-all and here resets
+	// refs, so looking ref up again fails open (an UnknownRefError silently
+	// discarded) instead of refusing. Use the backend already resolved
+	// above, fail closed on a query error, and refuse outright if the
+	// document itself changed underneath us.
+	sens, sErr := p.sensitive(ctx)
+	if _, ok := sens[backend]; sErr != nil || ok {
 		return &SensitiveFieldError{Ref: NormalizeRef(ref)}
+	}
+	p.mu.Lock()
+	loaderNow := p.loaderID
+	p.mu.Unlock()
+	if loaderNow != loaderAtResolve {
+		return fmt.Errorf("the page changed before typing into %s; take a snapshot and try again", NormalizeRef(ref))
 	}
 	if ok, _ := focused.(bool); !ok {
 		return fmt.Errorf("%s lost focus before typing; take a snapshot and try again", NormalizeRef(ref))
@@ -826,21 +868,18 @@ func (p *Page) Press(ctx context.Context, key string) error {
 	inputCtx, cancel := context.WithCancel(ctx)
 	p.mu.Lock()
 	p.cancelInput = cancel
+	p.dialogCancelled = false
 	p.mu.Unlock()
 	err := p.key(inputCtx, k)
 	p.mu.Lock()
 	p.cancelInput = nil
 	p.mu.Unlock()
 	cancel()
-	if err != nil {
-		p.mu.Lock()
-		blocked := p.dialog != nil
-		p.mu.Unlock()
-		if !blocked {
-			return err
-		}
-		// The key itself opened a dialog; see Click's identical case.
+	if err != nil && !p.inputCancelledByDialog(err, ctx) {
+		return err
 	}
+	// Either err was nil, or the key itself opened a dialog; see Click's
+	// identical case.
 	p.settle(ctx)
 	return nil
 }
