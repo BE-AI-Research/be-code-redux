@@ -33,6 +33,7 @@ const (
 	// second voice in the transcript is never mistaken for the primary's.
 	entryCoworkAsk // Label = co-worker name ("<name>? "), Text = the question
 	entryCowork    // Label = co-worker name ("<name>> "), Text = the Markdown answer
+	entrySchedule  // Label = schedule name, Text = the fired request
 )
 
 type entry struct {
@@ -84,6 +85,14 @@ func renderEntry(e entry, st styles, width int, compact, richText bool) string {
 		return st.Cowork.Render(e.Label+"? ") + e.Text
 	case entryCowork:
 		return st.Cowork.Render(e.Label+"> ") + ui.RenderMarkdown(e.Text, richText)
+	case entrySchedule:
+		// The header line is for the model; the transcript names the
+		// schedule in its own prefix and shows only the instruction.
+		text := e.Text
+		if i := strings.IndexByte(text, '\n'); i >= 0 && strings.HasPrefix(text, "[Scheduled event") {
+			text = text[i+1:]
+		}
+		return st.Schedule.Render("⏰ "+e.Label) + " " + st.Dim.Render(strings.TrimRight(text, "\n"))
 	case entryVerdict:
 		v := st.Err.Render(e.Text)
 		if e.Text == "approved" {

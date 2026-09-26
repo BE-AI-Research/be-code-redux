@@ -773,3 +773,47 @@ func TestResumeConfirmsHeldTimersOnTheREPLGoroutine(t *testing.T) {
 		t.Fatalf("no pauses the timer:\n%s", strings.Join(r.Agent.ScheduleLines(), "\n"))
 	}
 }
+
+func TestREPLScheduledTurnEchoesSchedule(t *testing.T) {
+	r := newTestREPL(t)
+	r.Agent.EnqueueScheduled("id1", "nightly", "[Scheduled event \"nightly\" — daily 09:00, set by you 2026-09-26]\nrun tests")
+	out := capture(t, func() {
+		if !r.startQueuedTurn(context.Background()) {
+			t.Error("the scheduled event did not start a turn")
+		}
+	})
+	if !strings.Contains(out, "⏰ nightly") || strings.Contains(out, "you>") {
+		t.Fatalf("echo:\n%s", out)
+	}
+}
+
+func TestREPLScheduleApprovalHasNoAlways(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{line: "a"}
+	beforeShell, beforeWrites := r.Cfg.AutoApproveShell, r.Cfg.ApproveFileWrites
+	var ok bool
+	out := capture(t, func() { ok = r.approveCtx(context.Background(), "schedule", "Add this schedule?") })
+	if ok {
+		t.Fatal(`"a" is not an answer to a schedule prompt`)
+	}
+	if r.Cfg.AutoApproveShell != beforeShell || r.Cfg.ApproveFileWrites != beforeWrites {
+		t.Fatal(`"a" changed a standing approval`)
+	}
+	if !strings.Contains(out, "schedule:") {
+		t.Fatalf("header:\n%s", out)
+	}
+}
+
+// A scheduled event queued while a run fails stays queued: the failed run
+// must not drain (and so arm and lose) it.
+func TestREPLFailedRunLeavesScheduledEventQueued(t *testing.T) {
+	r := newTestREPL(t)
+	r.Agent.EnqueueScheduled("id1", "nightly", "scheduled")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	capture(t, func() { r.turn(ctx, "typed", true) })
+	if r.Agent.Pending() != 1 {
+		t.Fatalf("the scheduled event was drained by a failed run: pending=%d", r.Agent.Pending())
+	}
+}

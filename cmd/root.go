@@ -549,6 +549,7 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 // resume code. withModel=false keeps headless runs fast.
 func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	ag.StopAllSubAgents("session ended")
+	ag.StopSchedules()
 	s := ag.Session
 	if s == nil || len(ag.History.Messages) == 0 {
 		return
@@ -740,9 +741,13 @@ func runInteractive(cmd *cobra.Command) error {
 		// on a stream nothing is reading yet, hanging the whole session.
 		// ResolveModelParams already takes the same care; the REPL owns the
 		// bounding and the prompt context (see underPrompt) for both.
+		// Scheduled events go the same way, and for the same reason: their
+		// startup prompt is answered on r.lines, so StartSchedules runs
+		// here on the REPL goroutine rather than on a goroutine of its own.
 		repl.OnStart = func() {
 			repl.ResolveModelParams(ctx)
 			ag.StartSubAgents()
+			ag.StartSchedules()
 		}
 		return repl.Run(ctx)
 	}
@@ -779,6 +784,8 @@ func runInteractive(cmd *cobra.Command) error {
 	// rendering yet exactly the way ag.ResolveModel's own goResolve does
 	// below.
 	ag.StartSubAgentsAsync()
+	// Scheduled events: the same shape — the startup prompt is a shared ask.
+	ag.StartSchedulesAsync()
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
 	// approval modal, which is the only place under a TUI a person can see

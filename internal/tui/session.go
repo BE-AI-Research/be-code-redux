@@ -307,6 +307,7 @@ func wireEvents(s *Session) {
 		OnSubAgentStart:   s.onSubAgentStart,
 		OnSubAgentAsk:     s.onSubAgentAsk,
 		OnSubAgentEnd:     s.onSubAgentEnd,
+		OnScheduleFire:    s.onScheduleFire,
 	}
 	ag.Tools.OnStatus = s.setStatus
 }
@@ -1029,6 +1030,9 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 		// model call; the typist still sees their line land, as they would
 		// have on any other path.
 		for _, it := range s.ag.PeekItems() {
+			if it.Scheduled != "" {
+				continue // not delivered into the turn; it waits for one of its own
+			}
 			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
 		}
 		return
@@ -1052,7 +1056,7 @@ func (s *Session) startQueuedLocked() {
 	if s.running {
 		return
 	}
-	left := s.ag.DrainItems()
+	left := s.ag.DrainForTurn()
 	if len(left) == 0 {
 		return
 	}
@@ -1063,10 +1067,23 @@ func (s *Session) startQueuedLocked() {
 	}
 	texts := make([]string, 0, len(left))
 	for _, it := range left {
-		s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		if it.Scheduled != "" {
+			s.appendEntryLocked(entry{Kind: entrySchedule, Label: it.ScheduleName, Text: it.Text})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		}
 		texts = append(texts, it.Text)
 	}
 	s.startTurnLocked(strings.Join(texts, "\n"))
+}
+
+// onScheduleFire is Events.OnScheduleFire: a due event was queued. An idle
+// session starts its turn now; a busy one picks it up when its run ends
+// (finishTurnLocked's leftover-queue drain), never mid-run.
+func (s *Session) onScheduleFire(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startQueuedLocked()
 }
 
 // finishInit ends the /init flow on its own goroutine, the way finishTurn

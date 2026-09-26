@@ -17,6 +17,7 @@ type Palette struct {
 	// (see entry.go). It has to read as neither the person nor a tool, so
 	// every theme gives it a hue of its own.
 	Cowork                                 string
+	Schedule                               string // a scheduled event's prefix; "" borrows Cowork's hue
 	StatusBG, StatusFG, ModalTitle, Border string
 	BG, FG                                 string // terminal window colours (OSC 11/10); "" leaves the terminal alone
 	Light                                  bool   // for readers; dark is the default
@@ -62,6 +63,7 @@ func lookupTheme(name string) (Palette, bool) {
 type styles struct {
 	Accent, Dim, Tool, Err, OK, Warn, User, Status, ModalTi, Border lipgloss.Style
 	Cowork                                                          lipgloss.Style // the co-working model's voice
+	Schedule                                                        lipgloss.Style // a scheduled event's prefix
 	ChatUser, ChatSystem                                            lipgloss.Style // the room: another person's name, and a system/join/leave line
 	Text                                                            lipgloss.Style // body text; mono leaves it uncoloured
 	name                                                            string
@@ -86,6 +88,7 @@ func newStyles(name string) (styles, bool) {
 		// person's own prefix does: both are voices, and mono has one way of
 		// saying so.
 		st.Cowork = lipgloss.NewStyle().Bold(true)
+		st.Schedule = lipgloss.NewStyle().Bold(true)
 		st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 		st.Status = lipgloss.NewStyle().Reverse(true).Padding(0, 1)
 		st.ModalTi = lipgloss.NewStyle().Bold(true)
@@ -98,6 +101,11 @@ func newStyles(name string) (styles, bool) {
 	st.Err, st.OK, st.Warn = fg(p.Err), fg(p.OK), fg(p.Warn)
 	st.User = fg(p.User).Bold(true)
 	st.Cowork = fg(p.Cowork).Bold(true)
+	sched := p.Schedule
+	if sched == "" {
+		sched = p.Cowork // palettes without their own schedule colour borrow the co-worker's
+	}
+	st.Schedule = fg(sched).Bold(true)
 	st.ChatUser, st.ChatSystem = st.Accent, st.Dim
 	st.Status = lipgloss.NewStyle().Background(lipgloss.Color(p.StatusBG)).Foreground(lipgloss.Color(p.StatusFG)).Padding(0, 1)
 	st.ModalTi = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.ModalTitle))
