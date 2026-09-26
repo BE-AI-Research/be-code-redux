@@ -32,11 +32,19 @@ func TestConsentDefaults(t *testing.T) {
 	c, _ := NewConsent(nil)
 	for host, want := range map[string]Tier{
 		"example.com": TierAsk, "192.168.1.10": TierAsk, "127.0.0.1": TierAllow,
-		"[::1]:3000": TierAllow, "app.localhost": TierAllow, "localhost:8080": TierAllow, "": TierAllow,
+		"[::1]:3000": TierAllow, "app.localhost": TierAllow, "localhost:8080": TierAllow, "": TierAsk,
 	} {
 		if got := c.Tier(host); got != want {
 			t.Errorf("Tier(%q) = %v, want %v", host, got, want)
 		}
+	}
+	// Blank hosts (about:blank, data:, unparsable) are TierAsk because a page
+	// can create one itself and write into it.
+	if c.Tier(HostOf("about:blank")) != TierAsk {
+		t.Errorf("HostOf(about:blank) should be TierAsk")
+	}
+	if c.Tier(HostOf("data:text/html,hi")) != TierAsk {
+		t.Errorf("HostOf(data: URL) should be TierAsk")
 	}
 }
 
@@ -88,6 +96,22 @@ func TestHostOf(t *testing.T) {
 	} {
 		if got := HostOf(in); got != want {
 			t.Errorf("HostOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestConsentEqualPatternsResolveDeterministically(t *testing.T) {
+	// When two config keys normalise to the same pattern, the stricter tier
+	// must win regardless of JSON key order.
+	for i := 0; i < 20; i++ {
+		c, warns := NewConsent(map[string]string{
+			"GitHub.com": "allow", "github.com": "deny",
+		})
+		if len(warns) != 0 {
+			t.Fatalf("warnings %v", warns)
+		}
+		if got := c.Tier("github.com"); got != TierDeny {
+			t.Fatalf("Tier(github.com) = %v, want TierDeny (stricter tier must win)", got)
 		}
 	}
 }

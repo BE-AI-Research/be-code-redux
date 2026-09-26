@@ -34,6 +34,22 @@ func (t Tier) String() string {
 	return "ask"
 }
 
+// strictness ranks tiers from strictest to most permissive, for deterministic
+// tie-breaking when equal patterns are configured with different tiers.
+func (t Tier) strictness() int {
+	switch t {
+	case TierDeny:
+		return 4
+	case TierWatch:
+		return 3
+	case TierAsk:
+		return 2
+	case TierAllow:
+		return 1
+	}
+	return 0
+}
+
 // ParseTier reads a browser.sites value.
 func ParseTier(s string) (Tier, bool) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -80,8 +96,8 @@ func NewConsent(sites map[string]string) (*Consent, []string) {
 		c.rules = append(c.rules, siteRule{pattern: p, tier: tier, wild: strings.Count(p, "*") + strings.Count(p, "?")})
 	}
 	// Most specific first: an exact host before any glob, fewer wildcards
-	// before more, a longer pattern before a shorter — so the JSON's own
-	// (unordered) key order never decides.
+	// before more, a longer pattern before a shorter, stricter tiers before
+	// permissive ones — so the JSON's own (unordered) key order never decides.
 	sort.Slice(c.rules, func(i, j int) bool {
 		a, b := c.rules[i], c.rules[j]
 		if a.wild != b.wild {
@@ -90,20 +106,22 @@ func NewConsent(sites map[string]string) (*Consent, []string) {
 		if len(a.pattern) != len(b.pattern) {
 			return len(a.pattern) > len(b.pattern)
 		}
-		return a.pattern < b.pattern
+		if a.pattern != b.pattern {
+			return a.pattern < b.pattern
+		}
+		// Equal patterns: stricter tier comes first
+		return a.tier.strictness() > b.tier.strictness()
 	})
 	sort.Strings(warns)
 	return c, warns
 }
 
-// Tier returns the tier for a host. A blank host (about:blank) has nothing
-// to act on and is allowed; with no matching rule, loopback is allowed and
-// everything else asks.
+// Tier returns the tier for a host. A page with no host (about:blank, data:,
+// anything unparsable) is asked about like any unknown site, because a page
+// can open one itself and write into it. With no matching rule, loopback is
+// allowed and everything else asks.
 func (c *Consent) Tier(host string) Tier {
 	h := NormalizeHost(host)
-	if h == "" {
-		return TierAllow
-	}
 	for _, r := range c.rules {
 		if ok, _ := path.Match(r.pattern, h); ok {
 			return r.tier
