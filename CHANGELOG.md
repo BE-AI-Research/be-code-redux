@@ -1,10 +1,33 @@
 # BE-Code Changelog
 
-## v1.1.5 — a browser the model can drive (in development)
+## v1.2.0 — scheduled events (in development)
+
+- **Scheduled events.** A running session can wake the model at a chosen time — one-off
+  follow-ups the model sets for itself ("check the build again in 20 minutes"), recurring
+  upkeep a person sets for the project ("every weekday at 09:00, pull, test, summarise what
+  broke"). Each schedule carries an allowance (`shell:`, `write:`, `browser:` grants) approved
+  up front; anything outside it is asked in the terminal when the event fires, never as a VS
+  Code diff, under its own `ask_timeout`. A fired event queues as a turn of its own (`⏰ name`),
+  never interrupting one in progress, and is checked again against its schedule when it actually
+  runs — one edited, paused or cancelled after it queued does not run. `/schedule`, the `schedule`
+  tool, `.be-code/schedules.md`, and a `schedules` config block.
+- Dropping a queued scheduled event from the queue popup skips that occurrence rather than
+  wedging the schedule: a one-off is marked done, a recurring one fires again at its next time.
+- A session picker or `/resume` switch that loads new timers into an already-running session
+  holds them until a person confirms them in a prompt of their own, rather than queuing them
+  unseen.
+- Resuming a schedule refuses past `schedules.max_active` or under `schedules.min_interval`, the
+  same as adding one; the startup prompt's "yes" leaves such a schedule paused with a notice
+  instead of arming it anyway.
+- Fixed: the plain REPL's `a` (always) no longer approves `browser_watch` or `shell_after_web` —
+  those actions, and now `schedule`, have no "always" and re-ask every time.
+- Fixed: a plain-mode run that fails no longer discards the lines you typed while it was running;
+  they stay queued for the next turn.
+
+## v1.1.5 — a browser the model can drive
 
 The model can drive a Chromium over the DevTools protocol, spoken from Go with no new
-dependency. Off by default (`browser.enabled`). The general-purpose task engine joins this
-release before it is tagged.
+dependency. Off by default (`browser.enabled`).
 
 - **Attach or launch.** On its first `browser` call BE-Code attaches to a browser on
   `browser.address`, or launches Chrome, Edge, Brave or Chromium on its own persistent profile
