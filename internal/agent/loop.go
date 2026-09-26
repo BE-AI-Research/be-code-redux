@@ -1978,6 +1978,26 @@ type ReviewedReport struct {
 // Injected by cmd to avoid an import cycle; nil disables review.
 var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 
+// runChecks is RunFull's automatic verification. Once this request has
+// read an untrusted page, each check command is a command like any other
+// (browser spec §3.6): it asks as shell_after_web, and a refusal — or
+// nobody to ask — skips it. A skipped verification is no report at all:
+// not a failure, so no repair round and no auto:verify consultation.
+func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Report {
+	var allow func(string) bool
+	if a.Tools.UntrustedWeb() {
+		allow = func(command string) bool {
+			return a.Tools.Approve != nil && a.Tools.Approve("shell_after_web", command)
+		}
+	}
+	rep := verify.RunChecksGated(ctx, a.Tools.Root, proj, allow)
+	if rep.Declined != "" {
+		a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
+		return nil
+	}
+	return rep
+}
+
 // RunFull runs the request, then the verify→repair cycle, then (when
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
@@ -2011,8 +2031,8 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 		proj := verify.Detect(a.Tools.Root)
 		if len(proj.Checks) > 0 {
 			for attempt := 0; attempt <= a.Cfg.MaxRepairs; attempt++ {
-				rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
-				if rep.Verify.Passed() || attempt == a.Cfg.MaxRepairs {
+				rep.Verify = a.runChecks(ctx, proj)
+				if rep.Verify == nil || rep.Verify.Passed() || attempt == a.Cfg.MaxRepairs {
 					break
 				}
 				a.notice("verification failed (%s); repair attempt %d/%d",
@@ -2041,7 +2061,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 					if err != nil {
 						return "", rep, err
 					}
-					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
+					rep.Verify = a.runChecks(ctx, proj)
 				}
 			}
 			if rep.Verify != nil && !rep.Verify.Passed() {
@@ -2074,7 +2094,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 			if a.Cfg.VerifyOnDone {
 				proj := verify.Detect(a.Tools.Root)
 				if len(proj.Checks) > 0 {
-					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
+					rep.Verify = a.runChecks(ctx, proj)
 				}
 			}
 		}

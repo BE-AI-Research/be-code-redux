@@ -40,7 +40,7 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 	// something destructive under approval, but the harness itself is the
 	// one running the project's own detected checks at verification, so a
 	// scoped registry's exact-check path deliberately bypasses ShellDeny
-	// too.
+	// too — until the request has read an untrusted page, below.
 	if t.r.scoped {
 		allowed := false
 		for _, c := range t.r.checks {
@@ -51,6 +51,17 @@ func (t *shellTool) Run(ctx context.Context, args map[string]any) Result {
 		}
 		if !allowed {
 			return Result{IsError: true, Content: "only the project's checks may be run: " + strings.Join(t.r.checks, ", ")}
+		}
+		// Once the parent's request has read an untrusted page, a check is a
+		// command like any other (browser spec §3.6): deny globs first, then
+		// it asks through the parent's seam exactly as the main shell does.
+		if t.r.parent != nil && t.r.parent.UntrustedWeb() {
+			if classifyCommand(command, nil, t.r.ShellDeny) == cmdDenied {
+				return Result{IsError: true, Content: "this command matches the deny list and will never run; use a safer alternative"}
+			}
+			if t.r.Approve == nil || !t.r.Approve("shell_after_web", command) {
+				return Result{IsError: true, Content: "shell is not auto-approved after reading an untrusted web page in this request, and this check was not approved; say what you wanted to run and why"}
+			}
 		}
 		return t.execute(ctx, command, args)
 	}

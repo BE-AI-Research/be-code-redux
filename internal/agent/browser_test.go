@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -194,5 +195,87 @@ func TestBrowserGuidanceOnlyWithTheBrowserTool(t *testing.T) {
 	ag.Tools.AddTool(tools.NewBrowser(tools.BrowserConfig{Address: "127.0.0.1:1"}))
 	if !strings.Contains(ag.composeSystem(""), browserGuidance) {
 		t.Fatal("no browser guidance with the browser registered")
+	}
+}
+
+// brokenWrite scripts a request that writes code the project's checks fail.
+func brokenWrite() *scriptedProvider {
+	return &scriptedProvider{responses: []provider.ChatResponse{
+		{ToolCalls: []provider.ToolCall{{ID: "1", Name: "write_file",
+			Arguments: `{"path":"add.go","content":"package main\n\nfunc Add(a, b int) int { return a + b\n"}`}}},
+		{Content: "added Add"},
+	}}
+}
+
+// Final review I3: after an untrusted page, an automatic verification check
+// is a command like any other — refused, it is skipped, not failed.
+func TestVerificationAfterAPageAsksAndARefusalSkips(t *testing.T) {
+	ag, dir := newTestAgent(t, brokenWrite(), func(c *config.Config) { c.VerifyOnDone = true; c.MaxRepairs = 1 })
+	goProject(t, ag, dir)
+	var asked []string
+	ag.Tools.Approve = func(action, detail string) bool {
+		if action == "shell_after_web" {
+			asked = append(asked, detail)
+			return false
+		}
+		return true
+	}
+	var notices []string
+	ag.Events.OnNotice = func(m string) { notices = append(notices, m) }
+	ag.Tools.MarkUntrustedWeb()
+	_, rep, err := ag.RunFull(context.Background(), "add an Add function")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 {
+		t.Fatalf("asked %d times, want once (verification stops at the refusal): %q", len(asked), asked)
+	}
+	if rep != nil && rep.Verify != nil {
+		t.Fatalf("a refused check still produced a verification report: %+v", rep.Verify)
+	}
+	if ag.Usage().Repairs != 0 {
+		t.Fatalf("a skipped check started %d repair rounds", ag.Usage().Repairs)
+	}
+	joined := strings.Join(notices, "\n")
+	if !strings.Contains(joined, "verification skipped: a web page was read this request and nobody approved running "+asked[0]) {
+		t.Fatalf("no skip notice:\n%s", joined)
+	}
+}
+
+func TestVerificationAfterAPageRunsWhenApproved(t *testing.T) {
+	ag, dir := newTestAgent(t, brokenWrite(), func(c *config.Config) { c.VerifyOnDone = true; c.MaxRepairs = 0 })
+	goProject(t, ag, dir)
+	asked := 0
+	ag.Tools.Approve = func(action, detail string) bool {
+		if action == "shell_after_web" {
+			asked++
+		}
+		return true
+	}
+	ag.Tools.MarkUntrustedWeb()
+	_, rep, err := ag.RunFull(context.Background(), "add an Add function")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked == 0 {
+		t.Fatal("the check ran without asking")
+	}
+	if rep == nil || rep.Verify == nil || rep.Verify.Passed() {
+		t.Fatalf("the approved check did not run (or passed broken code): %+v", rep)
+	}
+}
+
+// Without a page, verification asks nobody, as before.
+func TestVerificationWithoutAPageAsksNobody(t *testing.T) {
+	ag, dir := newTestAgent(t, brokenWrite(), func(c *config.Config) { c.VerifyOnDone = true; c.MaxRepairs = 0 })
+	goProject(t, ag, dir)
+	ag.Tools.Approve = func(action, detail string) bool {
+		if action == "shell_after_web" {
+			t.Errorf("asked %s with no page read", action)
+		}
+		return true
+	}
+	if _, rep, err := ag.RunFull(context.Background(), "add an Add function"); err != nil || rep == nil || rep.Verify == nil {
+		t.Fatalf("verification did not run: %+v %v", rep, err)
 	}
 }

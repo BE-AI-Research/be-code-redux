@@ -50,6 +50,9 @@ type CheckResult struct {
 type Report struct {
 	Project Project
 	Results []CheckResult
+	// Declined is the command RunChecksGated's gate refused; the run
+	// stopped before it. Empty when every command was allowed.
+	Declined string
 }
 
 func exists(root, rel string) bool {
@@ -126,10 +129,26 @@ func skipReason(c Check, out string, err error) (string, bool) {
 // failure (later checks usually cascade from the same root cause, and the
 // model repairs best with one failure at a time).
 func RunChecks(ctx context.Context, root string, proj Project) *Report {
+	return RunChecksGated(ctx, root, proj, nil)
+}
+
+// RunChecksGated is RunChecks with every command — a check's own and its
+// fallback — put to allow first (nil allows everything). The first command
+// allow refuses is not run: the report stops there with Declined naming it,
+// and the checks before it are kept.
+func RunChecksGated(ctx context.Context, root string, proj Project, allow func(command string) bool) *Report {
 	rep := &Report{Project: proj}
 	for _, c := range proj.Checks {
+		if allow != nil && !allow(c.Command) {
+			rep.Declined = c.Command
+			return rep
+		}
 		out, err := tools.RunShell(ctx, root, c.Command, c.Timeout)
 		if err != nil && c.Fallback != "" {
+			if allow != nil && !allow(c.Fallback) {
+				rep.Declined = c.Fallback
+				return rep
+			}
 			out, err = tools.RunShell(ctx, root, c.Fallback, c.Timeout)
 		}
 		res := CheckResult{Check: c, Passed: err == nil, Output: out, Err: err}

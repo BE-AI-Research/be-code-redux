@@ -130,6 +130,9 @@ type Registry struct {
 	scopeMu sync.RWMutex
 	scope   []string
 	checks  []string
+	// parent is the registry Scoped was built from: a sub-agent's check
+	// consults the parent's untrusted-web flag, which is the request's.
+	parent *Registry
 
 	tools  []Tool
 	byName map[string]Tool
@@ -202,6 +205,7 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	sub.EditorName = r.EditorName
 	sub.OnStatus = r.OnStatus
 	sub.scoped = true
+	sub.parent = r
 	sub.scope, sub.checks = append([]string(nil), scope...), checks
 	sub.maxOutput.Store(r.maxOutput.Load())
 	if r.Approve != nil {
