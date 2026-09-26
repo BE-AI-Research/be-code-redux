@@ -977,6 +977,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	if a.subs != nil && a.systemOverride == "" {
 		sys += "\n\n" + subAgentGuidance
 	}
+	// Stable for the session, like the sub-agent block: whether the browser
+	// is registered never changes mid-session, so the cache never pays.
+	if a.systemOverride == "" && a.Tools != nil && a.Tools.Browser() != nil {
+		sys += "\n\n" + browserGuidance
+	}
 	// A scratch agent (plan mode, a consultation) keeps the summary here: it
 	// is fixed for the few turns such an agent lives, so it costs the cache
 	// nothing, and its prompt stays in one piece.
@@ -1488,6 +1493,16 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		// is observed exactly as it ran; arguments no tool could run are
 		// simply not observed.
 		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if call.Name == "browser" {
+				// Working memory keeps the action and the page's own URL,
+				// never the page's text (the engine drops the rest).
+				args = map[string]any{"action": args["action"], "url": args["url"]}
+				if bt := a.Tools.Browser(); bt != nil {
+					if u := bt.PageURL(); u != "" {
+						args["url"] = u
+					}
+				}
+			}
 			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 			}
@@ -1524,7 +1539,11 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 	// asked below, after OnToolEnd has put the failure on screen.
 	consult := ""
 	if res.IsError {
-		a.lastFailingTool = call.Name + ": " + res.Content
+		// A page's text never goes to a co-worker, which may be online
+		// (browser spec §3.5): browser failures stay out of RecentContext.
+		if call.Name != "browser" {
+			a.lastFailingTool = call.Name + ": " + res.Content
+		}
 		// Three failures of the same tool in a row is the signature of a
 		// small model that has stopped reading the error and started
 		// guessing. Ask a co-worker once per streak; a fourth failure is
@@ -1534,7 +1553,15 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		} else {
 			a.toolFailStreak = toolFailStreak{name: call.Name, n: 1}
 		}
-		a.toolFailStreak.last = append(a.toolFailStreak.last, res.Content)
+		// Same rule as lastFailingTool above, applied to the streak buffer
+		// that auto:tool hands a co-worker: a failed browser call's Content
+		// is the page outline (browser spec §3.5), so it is withheld here
+		// too, even though the streak itself keeps counting.
+		streakEntry := res.Content
+		if call.Name == "browser" {
+			streakEntry = "(browser result withheld: page content stays on this machine)"
+		}
+		a.toolFailStreak.last = append(a.toolFailStreak.last, streakEntry)
 		if len(a.toolFailStreak.last) > 3 {
 			a.toolFailStreak.last = a.toolFailStreak.last[1:]
 		}
@@ -1961,11 +1988,34 @@ type ReviewedReport struct {
 // Injected by cmd to avoid an import cycle; nil disables review.
 var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 
+// runChecks is RunFull's automatic verification. Once this request has
+// read an untrusted page, each check command is a command like any other
+// (browser spec §3.6): it asks as shell_after_web, and a refusal — or
+// nobody to ask — skips it. A skipped verification is no report at all:
+// not a failure, so no repair round and no auto:verify consultation.
+func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Report {
+	var allow func(string) bool
+	if a.Tools.UntrustedWeb() {
+		allow = func(command string) bool {
+			return a.Tools.Approve != nil && a.Tools.Approve("shell_after_web", command)
+		}
+	}
+	rep := verify.RunChecksGated(ctx, a.Tools.Root, proj, allow)
+	if rep.Declined != "" {
+		a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
+		return nil
+	}
+	return rep
+}
+
 // RunFull runs the request, then the verify→repair cycle, then (when
 // configured) a second-model review with one repair round. This pipeline is
 // the quality multiplier when the underlying model is a small local one.
 func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *ReviewedReport, error) {
 	a.resetConsults() // the consultation budget is per request
+	// The untrusted-web flag is deliberately not cleared here: a sub-agent's
+	// hand-back comes through RunFull too, with the page still in history.
+	// BeginTypedRequest clears it where a person's own request begins.
 	a.autoVerifyUsed = false
 	if a.engine() != nil {
 		// A new request gets a fresh task line unless a plan is still in
@@ -1991,8 +2041,8 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 		proj := verify.Detect(a.Tools.Root)
 		if len(proj.Checks) > 0 {
 			for attempt := 0; attempt <= a.Cfg.MaxRepairs; attempt++ {
-				rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
-				if rep.Verify.Passed() || attempt == a.Cfg.MaxRepairs {
+				rep.Verify = a.runChecks(ctx, proj)
+				if rep.Verify == nil || rep.Verify.Passed() || attempt == a.Cfg.MaxRepairs {
 					break
 				}
 				a.notice("verification failed (%s); repair attempt %d/%d",
@@ -2021,7 +2071,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 					if err != nil {
 						return "", rep, err
 					}
-					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
+					rep.Verify = a.runChecks(ctx, proj)
 				}
 			}
 			if rep.Verify != nil && !rep.Verify.Passed() {
@@ -2054,7 +2104,7 @@ func (a *Agent) RunFull(ctx context.Context, userInput string) (string, *Reviewe
 			if a.Cfg.VerifyOnDone {
 				proj := verify.Detect(a.Tools.Root)
 				if len(proj.Checks) > 0 {
-					rep.Verify = verify.RunChecks(ctx, a.Tools.Root, proj)
+					rep.Verify = a.runChecks(ctx, proj)
 				}
 			}
 		}

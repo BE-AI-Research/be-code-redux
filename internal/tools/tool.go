@@ -130,10 +130,24 @@ type Registry struct {
 	scopeMu sync.RWMutex
 	scope   []string
 	checks  []string
+	// parent is the registry Scoped was built from: a sub-agent's check
+	// consults the parent's untrusted-web flag, which is the request's.
+	parent *Registry
 
 	tools  []Tool
 	byName map[string]Tool
 	procs  *ProcessManager
+
+	// onClose runs when the registry closes: a tool that owns something
+	// outside the process (the browser tool's launched browser) registers
+	// its teardown here from attach.
+	onClose []func()
+	// untrustedWeb is set when this request has shown the model a page from
+	// a host not in the browser's allow tier; while it is set every shell
+	// command asks as "shell_after_web" (spec §3.6, amended). Only a request
+	// a person typed clears it (Agent.BeginTypedRequest); a resumed history
+	// holding a page sets it again.
+	untrustedWeb atomic.Bool
 }
 
 // NewRegistry builds the standard tool set rooted at dir.
@@ -191,6 +205,7 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	sub.EditorName = r.EditorName
 	sub.OnStatus = r.OnStatus
 	sub.scoped = true
+	sub.parent = r
 	sub.scope, sub.checks = append([]string(nil), scope...), checks
 	sub.maxOutput.Store(r.maxOutput.Load())
 	if r.Approve != nil {
@@ -330,14 +345,33 @@ func (r *Registry) MaxOutput() int { return int(r.maxOutput.Load()) }
 // the window changes, including from a model switch's own goroutine.
 func (r *Registry) SetMaxOutput(n int) { r.maxOutput.Store(int64(n)) }
 
-// Close shuts down background resources (running processes).
-// Close stops background processes and shuts down attached MCP servers.
+// Close stops background processes, runs the tools' own teardown (the
+// browser's) and shuts down attached MCP servers.
 func (r *Registry) Close() {
 	r.procs.StopAll()
+	for _, fn := range r.onClose {
+		fn()
+	}
 	for _, c := range r.mcpClients {
 		c.Close()
 	}
 	r.mcpClients = nil
+}
+
+// MarkUntrustedWeb records that this request has read an untrusted page.
+func (r *Registry) MarkUntrustedWeb() { r.untrustedWeb.Store(true) }
+
+// UntrustedWeb reports whether this request has read an untrusted page.
+func (r *Registry) UntrustedWeb() bool { return r.untrustedWeb.Load() }
+
+// ClearUntrustedWeb puts the flag down. Agent.BeginTypedRequest is its one
+// caller: a request a person typed, never a hand-back.
+func (r *Registry) ClearUntrustedWeb() { r.untrustedWeb.Store(false) }
+
+// Browser is the registered browser tool, or nil when it is off.
+func (r *Registry) Browser() *BrowserTool {
+	bt, _ := r.byName["browser"].(*BrowserTool)
+	return bt
 }
 
 func (r *Registry) add(ts ...Tool) {

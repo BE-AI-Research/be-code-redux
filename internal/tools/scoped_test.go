@@ -261,3 +261,44 @@ func TestSetScopeWidensARunningRegistry(t *testing.T) {
 		t.Fatalf("refusal names a stale scope: %+v", res)
 	}
 }
+
+// Final review I3: once the parent's request has read an untrusted page, a
+// sub-agent's own check is a command like any other — deny globs first,
+// then it asks through the parent's seam as shell_after_web.
+func TestScopedCheckAfterAParentPageAsks(t *testing.T) {
+	var asked []string
+	answer := false
+	reg, err := NewRegistry(t.TempDir(), func(action, detail string) bool {
+		asked = append(asked, action+"\n"+detail)
+		return answer
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := reg.Scoped([]string{"internal"}, []string{"true", "false"}, "big (3.2)")
+	if res := sub.Dispatch(context.Background(), call("shell", `{"command":"true"}`)); res.IsError || len(asked) != 0 {
+		t.Fatalf("an unflagged check asked or failed: %+v %q", res, asked)
+	}
+	reg.MarkUntrustedWeb()
+	res := sub.Dispatch(context.Background(), call("shell", `{"command":"true"}`))
+	if !res.IsError {
+		t.Fatalf("a refused check ran: %+v", res)
+	}
+	if len(asked) != 1 || asked[0] != "shell_after_web\nsub-agent big (3.2):\ntrue" {
+		t.Fatalf("asked %q, want one shell_after_web through the parent's seam", asked)
+	}
+	answer = true
+	if res := sub.Dispatch(context.Background(), call("shell", `{"command":"true"}`)); res.IsError {
+		t.Fatalf("an approved check did not run: %+v", res)
+	}
+	// Deny globs still come first: a denied check never asks.
+	reg.ShellDeny = []string{"false"}
+	sub = reg.Scoped([]string{"internal"}, []string{"true", "false"}, "big (3.2)")
+	asked = nil
+	if res := sub.Dispatch(context.Background(), call("shell", `{"command":"false"}`)); !res.IsError || !strings.Contains(res.Content, "deny list") {
+		t.Fatalf("a denied check was not refused: %+v", res)
+	}
+	if len(asked) != 0 {
+		t.Fatalf("a denied check asked: %q", asked)
+	}
+}

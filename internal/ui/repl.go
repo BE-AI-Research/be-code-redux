@@ -195,10 +195,26 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	case "model_reload":
 		// Not this workspace: a server other people may be using.
 		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
+	case "browser":
+		if r.Cfg.AutoApproveBrowser {
+			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
+			return true
+		}
+		fmt.Printf("%s\n%s\n", yell("browser:"), detail)
+	case "browser_watch":
+		fmt.Printf("%s\n%s\n", yell("browser (watched site — every action asks):"), detail)
+	case "shell_after_web":
+		fmt.Printf("%s %s\n", yell("run shell (after reading a web page):"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	switch strings.ToLower(r.promptCtx(ctx, yell("approve? [y/N/a(lways)] "))) {
+	// browser_watch and shell_after_web have no "always" (browser spec
+	// §3.2, §3.6): the prompt must not advertise a key that does nothing.
+	prompt := "approve? [y/N/a(lways)] "
+	if action == "browser_watch" || action == "shell_after_web" {
+		prompt = "approve? [y/N] "
+	}
+	switch strings.ToLower(r.promptCtx(ctx, yell(prompt))) {
 	case "y", "yes":
 		return true
 	case "a", "always":
@@ -333,7 +349,7 @@ func (r *REPL) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		r.turn(ctx, input)
+		r.turn(ctx, input, true)
 		if r.quitAfter {
 			return nil
 		}
@@ -484,9 +500,14 @@ func (r *REPL) abandonAsk(ch chan string) {
 
 // turn runs one agent request. Input typed during the run is queued for
 // the model; Ctrl-C cancels; anything still queued when the run ends starts
-// another turn.
-func (r *REPL) turn(ctx context.Context, input string) {
+// another turn. typed says a person typed input; only then — or for a
+// leftover queue a person typed every line of — does the request clear the
+// untrusted-web flag (browser spec §3.6).
+func (r *REPL) turn(ctx context.Context, input string, typed bool) {
 	for {
+		if typed {
+			r.Agent.BeginTypedRequest()
+		}
 		var (
 			answer string
 			rep    *agent.ReviewedReport
@@ -494,11 +515,12 @@ func (r *REPL) turn(ctx context.Context, input string) {
 		)
 		r.runBusy(ctx, func(ctx context.Context) { answer, rep, err = r.Agent.RunFull(ctx, input) })
 		r.printOutcome(answer, rep, err)
-		left := r.Agent.DrainInbox()
-		if len(left) == 0 || err != nil {
+		items := r.Agent.DrainItems()
+		if len(items) == 0 || err != nil {
 			return
 		}
-		input = strings.Join(left, "\n")
+		typed = agent.TypedByPerson(items)
+		input = strings.Join(itemTexts(items), "\n")
 		fmt.Printf("%s %s\n", cyan("you>"), input)
 	}
 }
@@ -509,14 +531,23 @@ func (r *REPL) turn(ctx context.Context, input string) {
 // picks up a hand-back or an ask_main that arrived when no run was in
 // flight at all (spec §2.6). An empty queue means a run took it first.
 func (r *REPL) startQueuedTurn(ctx context.Context) bool {
-	left := r.Agent.DrainInbox()
-	if len(left) == 0 {
+	items := r.Agent.DrainItems()
+	if len(items) == 0 {
 		return false
 	}
-	queued := strings.Join(left, "\n")
+	queued := strings.Join(itemTexts(items), "\n")
 	fmt.Printf("%s %s\n", cyan("you>"), queued)
-	r.turn(ctx, queued)
+	r.turn(ctx, queued, agent.TypedByPerson(items))
 	return true
+}
+
+// itemTexts is the queued messages' texts, in order.
+func itemTexts(items []agent.InboxItem) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Text)
+	}
+	return out
 }
 
 // queueCommand implements /queue, /queue edit N, /queue drop N — usable
@@ -790,6 +821,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		for _, l := range AgentLines(r.Agent, fields[1:]) {
 			fmt.Println(l)
 		}
+	case "/browser":
+		for _, l := range BrowserLines(r.Agent.Tools, fields[1:]) {
+			fmt.Println(l)
+		}
 	case "/consult":
 		who, q := "", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))
 		// The first word is a co-worker name only when it names one that
@@ -969,7 +1004,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	default:
 		if c, ok := r.Custom[strings.TrimPrefix(fields[0], "/")]; ok {
 			args := strings.TrimSpace(strings.TrimPrefix(input, fields[0]))
-			r.turn(ctx, c.Expand(args))
+			r.turn(ctx, c.Expand(args), true)
 			break
 		}
 		fmt.Printf("unknown command %s (/help)\n", fields[0])
