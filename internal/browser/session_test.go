@@ -369,6 +369,24 @@ func TestSessionFallsBackWhenJSONListFails(t *testing.T) {
 	}
 }
 
+// TestSessionFallsBackWhenTheJSONListPickIsGone is fix round 2's item: the
+// tab GET /json/list names can have just closed — its Target.targetDestroyed
+// not yet processed, so isDestroyed does not yet know it — and attaching to
+// it fails. That must fall back to the getTargets pick (the same live call
+// the attach was always paired with before /json/list existed) rather than
+// surfacing the raw attach error out of Page.
+func TestSessionFallsBackWhenTheJSONListPickIsGone(t *testing.T) {
+	s, fb, _ := testSession(t)
+	fb.SetList([]browsertest.ListEntry{{ID: "T-ghost", Type: "page", Title: "Ghost", URL: "https://acme.test/ghost"}})
+	p, _, err := s.Page(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TargetID() != "T1" {
+		t.Fatalf("drove %s, want T1 (getTargets, after the /json/list pick turned out to be gone)", p.TargetID())
+	}
+}
+
 // TestSessionNotesWhenDownloadsCannotBeRefused is item 4: a failed
 // Browser.setDownloadBehavior must not be silently ignored.
 func TestSessionNotesWhenDownloadsCannotBeRefused(t *testing.T) {

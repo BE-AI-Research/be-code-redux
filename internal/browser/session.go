@@ -281,17 +281,25 @@ func fetchTargetList(ctx context.Context, addr string) ([]jsonListEntry, error) 
 
 // mostRecentPageLocked picks the tab a real user would consider "current":
 // the first page entry of GET /json/list when that succeeds and names one
-// still open, else the last live page target of Target.getTargets (the
-// order this package used before /json/list was consulted, and still the
-// fallback when a browser has no such endpoint or lists nothing usable).
-func (s *Session) mostRecentPageLocked(ctx context.Context) (string, error) {
-	if list, err := fetchTargetList(ctx, s.listAddr); err == nil {
+// still open (fromList true), else the last live page target of
+// Target.getTargets (fromList false — the order this package used before
+// /json/list was consulted, and still the fallback when a browser has no
+// such endpoint or lists nothing usable).
+func (s *Session) mostRecentPageLocked(ctx context.Context) (id string, fromList bool, err error) {
+	if list, lerr := fetchTargetList(ctx, s.listAddr); lerr == nil {
 		for _, e := range list {
 			if e.Type == "page" && !s.isDestroyed(e.ID) {
-				return e.ID, nil
+				return e.ID, true, nil
 			}
 		}
 	}
+	id, err = s.getTargetsPageLocked(ctx)
+	return id, false, err
+}
+
+// getTargetsPageLocked is the pre-/json/list rule on its own: the last live
+// page target of Target.getTargets, or "" when there is none.
+func (s *Session) getTargetsPageLocked(ctx context.Context) (string, error) {
 	var ts struct {
 		TargetInfos []targetInfo `json:"targetInfos"`
 	}
@@ -306,30 +314,57 @@ func (s *Session) mostRecentPageLocked(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// pickPageLocked attaches to the most recent open tab, or opens one.
+// createBlankTabLocked opens a fresh about:blank tab.
+func (s *Session) createBlankTabLocked(ctx context.Context) (string, error) {
+	var c struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := s.conn.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank"}, &c); err != nil {
+		return "", err
+	}
+	return c.TargetID, nil
+}
+
+// pickPageLocked attaches to the most recent open tab, or opens one. A
+// /json/list pick can name a tab that has just closed — its
+// Target.targetDestroyed not yet processed, so isDestroyed does not yet
+// know it — in which case the attach fails; that gets one retry against
+// the getTargets-only pick (the same live call the attach was always
+// paired with before /json/list existed), and only a failure of that
+// retry propagates.
 func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 	lost := s.page != nil
 	if s.page != nil {
 		s.page.release()
 		s.page = nil
 	}
-	id, err := s.mostRecentPageLocked(ctx)
+	id, fromList, err := s.mostRecentPageLocked(ctx)
 	if err != nil {
 		return "", err
 	}
 	opened := false
 	if id == "" {
-		var c struct {
-			TargetID string `json:"targetId"`
-		}
-		if err := s.conn.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank"}, &c); err != nil {
+		if id, err = s.createBlankTabLocked(ctx); err != nil {
 			return "", err
 		}
-		id, opened = c.TargetID, true
+		opened = true
 	}
-	p, err := attachPage(ctx, s.conn, id, s.opts)
-	if err != nil {
-		return "", err
+	p, attachErr := attachPage(ctx, s.conn, id, s.opts)
+	if attachErr != nil && fromList {
+		if gid, gerr := s.getTargetsPageLocked(ctx); gerr == nil {
+			id, opened = gid, false
+			if id == "" {
+				if id, gerr = s.createBlankTabLocked(ctx); gerr == nil {
+					opened = true
+				}
+			}
+			if gerr == nil {
+				p, attachErr = attachPage(ctx, s.conn, id, s.opts)
+			}
+		}
+	}
+	if attachErr != nil {
+		return "", attachErr
 	}
 	s.page = p
 	if !lost {
