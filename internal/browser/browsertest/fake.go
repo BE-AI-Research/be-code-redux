@@ -25,7 +25,9 @@ type Call struct {
 // WebSocket at /devtools/browser/fake answering each command from a handler
 // table. Commands with no handler succeed with an empty result, so the
 // enable calls and the like need no script. A new connection replaces the
-// previous one, which is how a reconnect is tested.
+// previous one, which is how a reconnect is tested. Commands on one
+// connection are answered one at a time, in order, so a handler must never
+// wait on another command of the same connection.
 type Browser struct {
 	t   testing.TB
 	Srv *httptest.Server
@@ -34,6 +36,10 @@ type Browser struct {
 	handlers map[string]Handler
 	calls    []Call
 	conn     *WSConn
+	closing  bool // set by New's own cleanup, before its own Drop: no
+	// connection is ever coming again, so waitForConn must not sit out its
+	// full bound finding that out — every other caller still gets the
+	// full wait, since only a test's very last Drop can know this.
 }
 
 // New starts a fake browser, closed when the test ends.
@@ -51,6 +57,9 @@ func New(t testing.TB) *Browser {
 	mux.HandleFunc("/devtools/browser/fake", b.serveWS)
 	b.Srv = httptest.NewServer(mux)
 	t.Cleanup(func() {
+		b.mu.Lock()
+		b.closing = true
+		b.mu.Unlock()
 		b.Drop()
 		b.Srv.Close()
 	})
@@ -83,12 +92,40 @@ func (b *Browser) Calls(method string) []Call {
 	return out
 }
 
-// Emit pushes an event to the connected client now.
+// connWait bounds how long Emit and Drop wait for a live connection: a
+// client that has just Dial-ed has not necessarily reached the point where
+// serveWS has recorded it yet (b.conn is set only after the 101 response is
+// written), so calling either right after Dial must not silently race that.
+const connWait = 2 * time.Second
+
+// waitForConn polls (bounded by connWait) for a live connection, returning
+// it, or nil if none ever arrives — at once if the browser is already
+// closing, since New's own cleanup has already said no connection is ever
+// coming again.
+func (b *Browser) waitForConn() *WSConn {
+	deadline := time.Now().Add(connWait)
+	for {
+		b.mu.Lock()
+		sc, closing := b.conn, b.closing
+		b.mu.Unlock()
+		if sc != nil {
+			return sc
+		}
+		if closing || time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// Emit pushes an event to the connected client now, waiting for a
+// connection if one has not been recorded yet. A test that calls Emit with
+// no connection ever arriving gets an error, not a silent no-op that looks
+// like the event was delivered.
 func (b *Browser) Emit(sessionID, method string, params any) {
-	b.mu.Lock()
-	sc := b.conn
-	b.mu.Unlock()
+	sc := b.waitForConn()
 	if sc == nil {
+		b.t.Errorf("browsertest: Emit(%s) with no connection", method)
 		return
 	}
 	m := map[string]any{"method": method, "params": params}
@@ -108,15 +145,21 @@ func (b *Browser) EmitSoon(sessionID, method string, params any) {
 	}()
 }
 
-// Drop closes the current connection the way a killed browser does.
+// Drop closes the current connection the way a killed browser does, waiting
+// for one to exist first (the same race Emit waits out). Unlike Emit,
+// dropping nothing is a legitimate no-op: it is not an error to call Drop
+// when the browser was never connected to, or has already disconnected.
 func (b *Browser) Drop() {
-	b.mu.Lock()
-	sc := b.conn
-	b.conn = nil
-	b.mu.Unlock()
-	if sc != nil {
-		sc.Close()
+	sc := b.waitForConn()
+	if sc == nil {
+		return
 	}
+	b.mu.Lock()
+	if b.conn == sc {
+		b.conn = nil
+	}
+	b.mu.Unlock()
+	sc.Close()
 }
 
 func (b *Browser) serveWS(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +171,14 @@ func (b *Browser) serveWS(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	b.conn = sc
 	b.mu.Unlock()
-	defer sc.Close()
+	defer func() {
+		sc.Close()
+		b.mu.Lock()
+		if b.conn == sc {
+			b.conn = nil
+		}
+		b.mu.Unlock()
+	}()
 	for {
 		msg, err := sc.ReadMessage()
 		if err != nil {

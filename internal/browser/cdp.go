@@ -18,8 +18,9 @@ type Event struct {
 	Params    json.RawMessage
 }
 
-// ErrClosed is what every call returns once the connection has gone —
-// the browser was closed, killed or disconnected.
+// ErrClosed is wrapped into the error every call returns once the
+// connection has gone — the browser was closed, killed or disconnected —
+// so callers can test the reason with errors.Is(err, ErrClosed).
 var ErrClosed = errors.New("browser connection closed")
 
 type cdpError struct {
@@ -119,11 +120,20 @@ func (c *Conn) readLoop() {
 }
 
 // fail ends the connection once: records why, closes Done, drops the
-// socket and fails every call still waiting.
+// socket and fails every call still waiting. The recorded error always
+// wraps ErrClosed (nil or io.EOF collapse to ErrClosed itself; a cause that
+// already wraps it, such as Close's own, is kept as is; anything else is
+// wrapped as ErrClosed: cause), so errors.Is(err, ErrClosed) holds for
+// every error this connection ever hands back once it has ended.
 func (c *Conn) fail(err error) {
 	c.once.Do(func() {
-		if err == nil || errors.Is(err, io.EOF) {
+		switch {
+		case err == nil || errors.Is(err, io.EOF):
 			err = ErrClosed
+		case errors.Is(err, ErrClosed):
+			// already carries ErrClosed; keep it as is.
+		default:
+			err = fmt.Errorf("%w: %v", ErrClosed, err)
 		}
 		c.mu.Lock()
 		c.err = err
@@ -133,7 +143,7 @@ func (c *Conn) fail(err error) {
 		close(c.done)
 		c.ws.c.Close()
 		for _, ch := range pending {
-			ch <- response{err: ErrClosed}
+			ch <- response{err: c.err}
 		}
 	})
 }
@@ -145,7 +155,7 @@ func (c *Conn) fail(err error) {
 func (c *Conn) Call(ctx context.Context, sessionID, method string, params, result any) error {
 	select {
 	case <-c.done:
-		return c.Err()
+		return fmt.Errorf("%s: %w", method, c.Err())
 	default:
 	}
 	if params == nil {
@@ -166,27 +176,48 @@ func (c *Conn) Call(ctx context.Context, sessionID, method string, params, resul
 	c.mu.Unlock()
 	if err := c.ws.WriteMessage(b); err != nil {
 		c.fail(err)
-		return ErrClosed
+		return fmt.Errorf("%s: %w", method, c.Err())
 	}
+	return c.finishCall(ctx, id, ch, method, result)
+}
+
+// finishCall waits for ch, ctx, or the end of the connection. A browser can
+// answer a command and disconnect right after, so by the time this select
+// runs, ch and Done may both already be ready, and select picks between
+// ready cases at random: the done-branch must not simply trust Done over an
+// already-delivered reply, so it peeks ch once more, non-blockingly, before
+// reporting the connection closed.
+func (c *Conn) finishCall(ctx context.Context, id int64, ch chan response, method string, result any) error {
 	select {
 	case r := <-ch:
-		if r.err != nil {
-			return fmt.Errorf("%s: %w", method, r.err)
-		}
-		if result != nil && len(r.result) > 0 {
-			if err := json.Unmarshal(r.result, result); err != nil {
-				return fmt.Errorf("%s: decoding the result: %w", method, err)
-			}
-		}
-		return nil
+		return decodeResponse(method, result, r)
 	case <-ctx.Done():
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return ctx.Err()
 	case <-c.done:
-		return c.Err()
+		select {
+		case r := <-ch:
+			return decodeResponse(method, result, r)
+		default:
+		}
+		return fmt.Errorf("%s: %w", method, c.Err())
 	}
+}
+
+// decodeResponse turns one reply into a Call result: a protocol error named
+// after the method, a decoding error, or the decoded result.
+func decodeResponse(method string, result any, r response) error {
+	if r.err != nil {
+		return fmt.Errorf("%s: %w", method, r.err)
+	}
+	if result != nil && len(r.result) > 0 {
+		if err := json.Unmarshal(r.result, result); err != nil {
+			return fmt.Errorf("%s: decoding the result: %w", method, err)
+		}
+	}
+	return nil
 }
 
 // Subscribe adds an event handler. It runs on the reader goroutine: it must

@@ -89,6 +89,7 @@ func TestConnUnsubscribe(t *testing.T) {
 	n := 0
 	cancel := c.Subscribe(func(Event) { mu.Lock(); n++; mu.Unlock() })
 	cancel()
+	c.Call(context.Background(), "", "Target.setDiscoverTargets", nil, nil) // the connection is live
 	fb.Emit("", "Target.targetCreated", map[string]any{})
 	c.Call(context.Background(), "", "Target.setDiscoverTargets", nil, nil) // after the event, in order
 	mu.Lock()
@@ -152,6 +153,12 @@ func TestConnDropFailsPendingCallsAndMarksDone(t *testing.T) {
 		if err == nil {
 			t.Fatal("a pending call succeeded on a dropped connection")
 		}
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("pending call error %v does not wrap ErrClosed", err)
+		}
+		if !strings.Contains(err.Error(), "Hang") {
+			t.Fatalf("pending call error %v does not name the method", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the pending call never returned")
 	}
@@ -163,8 +170,82 @@ func TestConnDropFailsPendingCallsAndMarksDone(t *testing.T) {
 	if c.Err() == nil {
 		t.Fatal("Err is nil on a dead connection")
 	}
-	if err := c.Call(context.Background(), "", "Browser.getVersion", nil, nil); err == nil {
+	err := c.Call(context.Background(), "", "Browser.getVersion", nil, nil)
+	if err == nil {
 		t.Fatal("a call on a dead connection succeeded")
+	}
+	if !errors.Is(err, ErrClosed) {
+		t.Fatalf("dead-connection call error %v does not wrap ErrClosed", err)
+	}
+	if !strings.Contains(err.Error(), "Browser.getVersion") {
+		t.Fatalf("dead-connection call error %v does not name the method", err)
+	}
+}
+
+// TestConnCloseReleasesEverything checks Close's own path through fail:
+// a pending call fails wrapping ErrClosed, Done closes, Err wraps ErrClosed,
+// and a second Close is a harmless no-op (fail is idempotent).
+func TestConnCloseReleasesEverything(t *testing.T) {
+	fb := browsertest.New(t)
+	release := make(chan struct{})
+	fb.Handle("Hang", func(string, json.RawMessage) (any, error) {
+		<-release
+		return nil, nil
+	})
+	defer close(release)
+	c := dialFake(t, fb)
+	errc := make(chan error, 1)
+	go func() { errc <- c.Call(context.Background(), "", "Hang", nil, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("pending call error %v does not wrap ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the pending call never returned")
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done never closed")
+	}
+	if !errors.Is(c.Err(), ErrClosed) {
+		t.Fatalf("Err() %v does not wrap ErrClosed", c.Err())
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestConnFinishCallPrefersAReadyReplyOverDone pins the fix for a genuine
+// race: a browser can answer a command and disconnect right after, so by
+// the time a call's select runs, its reply channel and Done can both
+// already be ready — and Go's select then picks between ready cases at
+// random. finishCall's done-branch must peek the reply channel first rather
+// than trust Done alone. Both channels are made ready before finishCall is
+// ever invoked, so each iteration's select genuinely has both ready at its
+// first evaluation (no goroutine parking to bias the outcome); repeating it
+// gives overwhelming confidence an unfixed done-branch is caught (each
+// iteration independently has about even odds of hitting it) and that the
+// fixed one never fails.
+func TestConnFinishCallPrefersAReadyReplyOverDone(t *testing.T) {
+	fb := browsertest.New(t)
+	c := dialFake(t, fb)
+	c.fail(errors.New("simulated drop"))
+	for i := 0; i < 200; i++ {
+		ch := make(chan response, 1)
+		ch <- response{result: json.RawMessage(`{"N":42}`)}
+		var v struct{ N int }
+		if err := c.finishCall(context.Background(), int64(i), ch, "Echo", &v); err != nil {
+			t.Fatalf("iteration %d: finishCall returned %v though the reply had already arrived", i, err)
+		}
+		if v.N != 42 {
+			t.Fatalf("iteration %d: N = %d", i, v.N)
+		}
 	}
 }
 
