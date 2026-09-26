@@ -93,7 +93,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/inbox", "your DMs from every session on this machine", false},
 	{"/dm", "message a person directly: /dm [name]", true},
 	{"/back", "return to the transcript", false},
-	{"/whoami", "your chat name and how it was decided", false},
+	{"/whoami", "your chat name and how it was decided; /whoami set chooses a new one", false},
 	{"/clear", "start a fresh session", false},
 	{"/quit", "exit (writes the resume briefing)", false},
 }

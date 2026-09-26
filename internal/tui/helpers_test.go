@@ -10,6 +10,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
@@ -38,6 +39,13 @@ func newTestSession(t *testing.T, prep ...func(*agent.Agent)) *Session {
 	// unless a test wires resolveFn/bindFn or sets its own temp inboxDir.
 	s.usersPath = ""
 	s.inboxDir = ""
+	// A fixture terminal already has a chat name, as a returning user's
+	// terminal does: otherwise every attached terminal would open on the
+	// startup naming prompt (offerNameAtAttach) instead of the transcript a
+	// test means to drive. Tests about identity wire their own resolveFn.
+	s.resolveFn = func(inbox.Terminal) (inbox.Resolution, error) {
+		return inbox.Resolution{ID: "tester", How: "ip"}, nil
+	}
 	return s
 }
 

@@ -12,8 +12,9 @@ import (
 )
 
 // Who each terminal is, for chat and DMs (spec §3). The session resolves an
-// identity when a terminal attaches; a terminal that needs a prompt gets it
-// the first time it opens /chat, /inbox or /dm, never before.
+// identity when a terminal attaches; a terminal left with no name is asked
+// for one as soon as it is idle (offerNameAtAttach), and may skip it — then
+// /chat, /inbox and /dm ask the first time they are opened.
 
 type identity struct {
 	ID      string
@@ -112,6 +113,28 @@ func (s *Session) bindCmdLocked(client int, name string) (tea.Cmd, error) {
 	}, nil
 }
 
+// rebindCmdLocked is bindCmdLocked for /whoami set: the terminal's address
+// moves from old to the new name rather than gaining a second one — which
+// would make its next attach ask it to choose between the two. Off the lock
+// for the same reason. The caller holds mu.
+func (s *Session) rebindCmdLocked(client int, old, name string) (tea.Cmd, error) {
+	id, err := inbox.ValidID(name)
+	if err != nil {
+		return nil, err
+	}
+	tm, ok := s.terminalFor(client)
+	if !ok {
+		return nil, errors.New("no terminal to bind")
+	}
+	rebind, path := s.rebindFn, s.usersPath
+	if rebind == nil {
+		rebind = func(o, n string, tm inbox.Terminal) error { return inbox.Rebind(path, o, n, tm) }
+	}
+	return func() tea.Msg {
+		return nameBoundMsg{client: client, id: id, err: rebind(old, id, tm)}
+	}, nil
+}
+
 // recordBoundLocked records a name a bind has just written. Caller holds mu.
 func (s *Session) recordBoundLocked(client int, id string) {
 	s.ids[client] = identity{ID: id, How: "asked"}
@@ -156,20 +179,77 @@ func (m *View) needName(then func(*View) (tea.Model, tea.Cmd)) (tea.Model, tea.C
 	if m.userID() != "" {
 		return then(m)
 	}
+	m.openNamePrompt(then, "")
+	return m, nil
+}
+
+// openNamePrompt shows the naming prompt. renaming is the name /whoami set
+// is replacing, "" for a first naming.
+func (m *View) openNamePrompt(then func(*View) (tea.Model, tea.Cmd), renaming string) {
 	m.afterName = then
+	m.nameAtAttach = false // offerNameAtAttach sets it back when it is the caller
+	m.nameRename = renaming
 	m.nameChoices = m.identityOf(m.id).Choices
 	m.nameSel, m.nameErr, m.nameShared = 0, "", ""
 	m.clearSelection() // the transcript this prompt covers is not selectable from here
 	m.mode = modeName
 	m.input.Reset()
 	m.input.Placeholder = "your name for chat and DMs"
-	return m, nil
+}
+
+// setName is /whoami set: the naming prompt even for a terminal that has a
+// name, to choose a new one. A name from chat.name is the config's to
+// change — the next attach would put it straight back.
+func (m *View) setName() {
+	if m.chatOff() {
+		return
+	}
+	id := m.identityOf(m.id)
+	if id.How == "config" {
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "your name " + id.ID + " comes from chat.name in your config; change it there"})
+		return
+	}
+	m.openNamePrompt(nil, id.ID)
+}
+
+// closeNamePrompt returns to the transcript without binding anything.
+func (m *View) closeNamePrompt() {
+	m.afterName, m.nameRename = nil, ""
+	m.nameErr, m.nameShared = "", ""
+	m.input.Reset()
+	m.input.Placeholder = inputPlaceholder
+	m.mode = m.idleMode()
+}
+
+// offerNameAtAttach is the startup naming prompt: a terminal that attached
+// with no name is asked for one as soon as it can be without getting in the
+// way — nothing else open, no run in progress, and nothing typed in its input
+// line (opening the prompt resets the input, and a draft typed during the
+// few seconds resolution can take must not be lost). A terminal named by
+// config, IP or MAC is never asked; nor is one with chat off, nor one whose
+// identity has not been resolved yet — the first update after it lands asks.
+// Once per attachment: Esc is a skip, and /chat, /inbox and /dm still ask.
+// View.Update calls it after every update, under mu.
+func (m *View) offerNameAtAttach() {
+	if m.nameOffered || m.mode != modeInput || m.running || !m.cfg.Chat.Enabled || m.input.Value() != "" {
+		return
+	}
+	id, resolved := m.ids[m.id]
+	if !resolved {
+		return
+	}
+	m.nameOffered = true
+	if id.ID != "" {
+		return
+	}
+	m.needName(nil)
+	m.nameAtAttach = true
 }
 
 func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.Type {
 	case tea.KeyEsc:
-		m.afterName = nil
+		m.afterName, m.nameRename = nil, ""
 		return m.leaveMode()
 	case tea.KeyUp:
 		if m.nameSel > 0 {
@@ -191,6 +271,11 @@ func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.nameErr = err.Error()
 			return m, nil
 		}
+		if m.nameRename != "" && id == m.nameRename {
+			m.appendEntryLocked(entry{Kind: entryDim, Text: "you are already " + id})
+			m.closeNamePrompt()
+			return m, nil
+		}
 		// Spec §9: a name already used from another address is shared only
 		// deliberately. The warning is shown once for that name; the same
 		// name entered again goes through, a different one is checked afresh.
@@ -201,7 +286,12 @@ func (m *View) handleNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		cmd, err := m.bindCmdLocked(m.id, id)
+		var cmd tea.Cmd
+		if m.nameRename != "" {
+			cmd, err = m.rebindCmdLocked(m.id, m.nameRename, id)
+		} else {
+			cmd, err = m.bindCmdLocked(m.id, id)
+		}
 		if err != nil {
 			m.nameErr = err.Error()
 			return m, nil
@@ -234,6 +324,10 @@ func (m *View) nameBound(msg nameBoundMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.recordBoundLocked(msg.client, msg.id)
+	if old := m.nameRename; old != "" {
+		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("you are now %s (was %s)", msg.id, old)})
+		m.nameRename = ""
+	}
 	m.input.Reset()
 	m.input.Placeholder = inputPlaceholder
 	m.nameErr, m.nameShared = "", ""
@@ -249,6 +343,9 @@ func (m *View) nameBound(msg nameBoundMsg) (tea.Model, tea.Cmd) {
 func (m *View) viewName() string {
 	var b strings.Builder
 	b.WriteString(m.st.ModalTi.Render("Your name for chat and DMs") + "\n\n")
+	if m.nameRename != "" {
+		b.WriteString("you are " + m.nameRename + "; choose a new name for this device\n\n")
+	}
 	for i, c := range m.nameChoices {
 		cur := "  "
 		if i == m.nameSel {
@@ -265,21 +362,33 @@ func (m *View) viewName() string {
 		b.WriteString("\n" + m.st.Err.Render(m.nameErr) + "\n")
 	}
 	body := m.st.Border.Width(m.width - 4).Render(b.String())
-	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(" Enter choose · Esc cancel")
+	hint := " Enter choose · Esc cancel"
+	if m.nameAtAttach {
+		hint = " Enter choose · Esc skip for now (/chat, /inbox and /dm ask later)"
+	}
+	return body + "\n" + m.inputView() + "\n" + m.st.Dim.Render(hint)
 }
 
-// whoami is /whoami.
-func (m *View) whoami() {
+// whoami is /whoami, and /whoami set to choose a new name.
+func (m *View) whoami(args []string) {
+	if len(args) > 0 && args[0] == "set" {
+		m.setName()
+		return
+	}
 	if m.chatOff() {
 		return
 	}
 	id := m.identityOf(m.id)
 	if id.ID == "" {
-		m.appendEntryLocked(entry{Kind: entryDim, Text: "no name yet; /chat, /inbox or /dm will ask"})
+		m.appendEntryLocked(entry{Kind: entryDim, Text: "no name yet; /whoami set chooses one (/chat, /inbox and /dm also ask)"})
 		return
 	}
 	how := map[string]string{"config": "from config", "ip": "bound to " + m.clientIP(), "mac": "recognised by MAC", "asked": "asked this session"}[id.How]
-	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("you are %s (%s)", id.ID, how)})
+	change := "/whoami set changes it"
+	if id.How == "config" {
+		change = "change chat.name in your config to change it"
+	}
+	m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("you are %s (%s); %s", id.ID, how, change)})
 }
 
 func (m *View) clientIP() string {

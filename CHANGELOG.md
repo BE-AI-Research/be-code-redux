@@ -31,6 +31,18 @@ release before it is tagged.
 - **A hostile page is bounded.** Background notes are capped at 20; after five alerts
   auto-accepted within a second, dialogs wait in the snapshot until the model acts again.
 - **`/browser`**, `/browser forget <host>`, `/browser close`; `doctor` reports the browser.
+- **A new terminal is asked for its UserID when it attaches.** A terminal whose chat
+  identity resolves with no name — not in `chat.name`, not bound to its address — gets the
+  naming prompt straight away instead of at its first `/chat`, `/inbox` or `/dm`: the names
+  already seen from its address, or a new one typed in. It waits until the terminal is idle,
+  so it never covers another question (the sub-agent resume, a model reload), a running
+  request, or a line already being typed. `Esc` skips it for that attachment, and the three
+  commands still ask later. A named terminal, and a session with chat off, are never asked.
+- **`/whoami set` chooses a new UserID.** The same prompt, for a terminal that already has a
+  name: the new name takes over this device's address (`inbox.Rebind`), where before a second
+  name was only ever added beside the first and the next attach asked which to use. The old
+  name keeps its other devices and its DMs, and is freed if no device is left using it. A name
+  from `chat.name` says to change it in config.
 
 ## v1.1.1 — ask before a sub-agent resumes
 

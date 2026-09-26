@@ -242,6 +242,16 @@ type View struct {
 	nameSel     int
 	nameErr     string
 	nameShared  string
+	// nameOffered: this attachment has had its startup naming prompt (or
+	// needed none), so offerNameAtAttach never asks it again — an Esc is a
+	// skip for the whole attachment. nameAtAttach: the prompt now open is
+	// that startup one, which changes only its Esc hint.
+	nameOffered  bool
+	nameAtAttach bool
+	// nameRename is the name /whoami set is replacing ("" for a first
+	// naming): the prompt then moves this terminal's address to the new
+	// name (inbox.Rebind) instead of adding one beside it.
+	nameRename string
 
 	// quitSeen records that this view handled a quitMsg. Test-only: in
 	// production the tea.Quit it returns is the observable effect.
@@ -327,6 +337,9 @@ func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	model, cmd := m.update(msg)
+	// After every update, so the startup naming prompt opens on the first
+	// one that finds this terminal idle — whatever message that was.
+	m.offerNameAtAttach()
 	// Render this view's own broadcasts before the frame Bubble Tea draws
 	// from this return: everything update just appended went out as an
 	// entryMsg, and waiting for the mailbox goroutine to bring it back round
@@ -1539,7 +1552,7 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/whoami":
-		m.whoami()
+		m.whoami(fields[1:])
 		return m, nil
 	case "/theme":
 		// This terminal's own theme, never a shared one: bare opens the

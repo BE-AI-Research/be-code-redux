@@ -126,6 +126,10 @@ type Session struct {
 	resolveFn  func(inbox.Terminal) (inbox.Resolution, error)
 	bindFn     func(id string, tm inbox.Terminal) error
 	usedFromFn func(id string) string
+	// rebindFn is the seam for inbox.Rebind (/whoami set moving this
+	// terminal's address from its old name to a new one); nil means the
+	// real thing.
+	rebindFn func(oldID, newID string, tm inbox.Terminal) error
 	// inboxDir is ~/.be-code/inbox (dm.go): "" disables /inbox and /dm outright
 	// (a test session that wants no mailbox on disk at all — newTestSession
 	// clears it the same way it clears usersPath, and a DM test sets its own
