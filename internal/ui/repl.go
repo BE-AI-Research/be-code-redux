@@ -564,10 +564,22 @@ func (r *REPL) startQueuedTurn(ctx context.Context) bool {
 // queued lines under "you>".
 func (r *REPL) echoQueued(items []agent.InboxItem, joined string) {
 	if len(items) == 1 && items[0].Scheduled != "" {
-		fmt.Printf("%s %s\n", cyan("⏰ "+items[0].ScheduleName), dim(firstLineOf(items[0].Text)))
+		fmt.Printf("%s %s\n", cyan("⏰ "+items[0].ScheduleName), dim(firstLineOf(scheduleBody(items[0].Text))))
 		return
 	}
 	fmt.Printf("%s %s\n", cyan("you>"), joined)
+}
+
+// scheduleBody strips the "[Scheduled event ...]" header a fired event's
+// text carries for the model, leaving what a person should read: the
+// instruction itself. Without this, the header line printed under the
+// "⏰ <name>" prefix named the schedule a second time (the TUI's
+// entrySchedule rendering strips the same header for the same reason).
+func scheduleBody(text string) string {
+	if i := strings.IndexByte(text, '\n'); i >= 0 && strings.HasPrefix(text, "[Scheduled event") {
+		return text[i+1:]
+	}
+	return text
 }
 
 func firstLineOf(s string) string {
@@ -862,6 +874,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/browser":
 		for _, l := range BrowserLines(r.Agent.Tools, fields[1:]) {
+			fmt.Println(l)
+		}
+	case "/schedule":
+		for _, l := range ScheduleCommandLines(r.Agent, strings.TrimPrefix(strings.TrimSpace(input), fields[0])) {
 			fmt.Println(l)
 		}
 	case "/consult":

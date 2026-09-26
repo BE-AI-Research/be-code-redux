@@ -234,6 +234,39 @@ func TestScheduleLinesAndNext(t *testing.T) {
 	}
 }
 
+// TestNextScheduleDoesNotBlockOnSchedulerMutex is the Task 8 review ruling:
+// bottomLine calls NextSchedule on every render, and the scheduler's mutex
+// is held across schedules.md/session saves — a slow disk write must not
+// stall every terminal's render. NextSchedule must read a published
+// snapshot instead of taking sched.mu.
+func TestNextScheduleDoesNotBlockOnSchedulerMutex(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	if _, err := ag.AddSchedule(schedule.Request{Name: "soon", When: "in 5m", Instruction: "x"}, "person"); err != nil {
+		t.Fatal(err)
+	}
+
+	ag.sched.mu.Lock()
+	defer ag.sched.mu.Unlock()
+	var name string
+	var at time.Time
+	var ok bool
+	done := make(chan struct{})
+	go func() {
+		name, at, ok = ag.NextSchedule()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NextSchedule blocked while the scheduler mutex was held")
+	}
+	if !ok || name != "soon" || !at.Equal(t0.Add(5*time.Minute)) {
+		t.Fatalf("next %q %v %v", name, at, ok)
+	}
+}
+
 func TestRunOnAlreadyQueuedQueuesNothing(t *testing.T) {
 	ag, _, _ := schedAgent(t, &scriptedProvider{})
 	var log []string

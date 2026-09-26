@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -36,6 +37,13 @@ type pendingEvent struct {
 	manual   bool
 }
 
+// nextSnap is the soonest active schedule with no event already waiting, as
+// last published by publishNextLocked. A zero value (name "") means none.
+type nextSnap struct {
+	name string
+	at   time.Time
+}
+
 type scheduler struct {
 	a             *Agent
 	clock         schedule.Clock
@@ -52,6 +60,12 @@ type scheduler struct {
 	// taken: begin runs only an event found here, so a queued event never
 	// outlives a pause, an edit or a removal of its schedule.
 	pending map[string]pendingEvent
+	// next is the status line's view of the soonest due schedule,
+	// republished (unlock, below) after every locked section that might
+	// have changed the answer. Reading it (NextSchedule) never takes mu: a
+	// slow schedules.md/session write must not stall every terminal's
+	// render (schedules spec, controller ruling on Task 8's review).
+	next atomic.Pointer[nextSnap]
 	// floor is the latest LastRun this process set per schedule. A run
 	// whose LastRun could not be saved would otherwise be due again on the
 	// next reread of the file, and fire back to back.
@@ -104,14 +118,38 @@ func (s *scheduler) noteLocked(format string, args ...any) {
 }
 
 // unlock releases mu and then delivers the notices raised under it. Every
-// caller that took mu to use a *Locked method unlocks through here.
+// caller that took mu to use a *Locked method unlocks through here — which
+// is also why it is the one place that republishes the next-due snapshot:
+// every locked section that could change the answer ends by calling this.
 func (s *scheduler) unlock() {
+	s.publishNextLocked()
 	notes := s.notes
 	s.notes = nil
 	s.mu.Unlock()
 	for _, n := range notes {
 		s.a.notice("%s", n)
 	}
+}
+
+// publishNextLocked recomputes the soonest active schedule with no event
+// already waiting and stores it lock-free in s.next. Call only while mu is
+// held; it does not reload schedules.md itself (the status line is redrawn
+// often — the same reasoning NextSchedule used to carry directly).
+func (s *scheduler) publishNextLocked() {
+	all := s.allLocked()
+	waiting := map[string]bool{}
+	for _, sc := range all {
+		if s.waitingLocked(sc.ID) {
+			waiting[sc.ID] = true
+		}
+	}
+	var snap nextSnap
+	for _, sc := range all {
+		if n, ok := sc.NextDue(); ok && !waiting[sc.ID] && (snap.name == "" || n.Before(snap.at)) {
+			snap = nextSnap{name: sc.Name, at: n}
+		}
+	}
+	s.next.Store(&snap)
 }
 
 // loadTimers replaces the one-off timers with a newly installed session's

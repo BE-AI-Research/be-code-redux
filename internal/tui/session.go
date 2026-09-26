@@ -1080,10 +1080,20 @@ func (s *Session) startQueuedLocked() {
 // onScheduleFire is Events.OnScheduleFire: a due event was queued. An idle
 // session starts its turn now; a busy one picks it up when its run ends
 // (finishTurnLocked's leftover-queue drain), never mid-run.
+//
+// It hops to its own goroutine before taking s.mu: /schedule run (the first
+// UI path that can reach fireNow, and so this callback, synchronously) runs
+// from a View's Update, which already holds the session lock — taking it
+// again here, inline, would deadlock every attached terminal. Handing the
+// lock-take to a fresh goroutine is safe because startQueuedLocked is
+// idempotent (it checks s.running) and this callback owns no state of its
+// own to lose by running later.
 func (s *Session) onScheduleFire(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.startQueuedLocked()
+	go func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.startQueuedLocked()
+	}()
 }
 
 // finishInit ends the /init flow on its own goroutine, the way finishTurn

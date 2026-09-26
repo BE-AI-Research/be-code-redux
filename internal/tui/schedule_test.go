@@ -69,6 +69,68 @@ func TestScheduleAskHasNoAlways(t *testing.T) {
 	}
 }
 
+// TestOnScheduleFireDoesNotDeadlockUnderSessionLock is the Task 8 review
+// ruling: /schedule run reaches fireNow (and so onScheduleFire) from a
+// View's Update, which already holds the session lock. onScheduleFire must
+// hop to its own goroutine before taking it, or every attached terminal
+// deadlocks the moment a person runs a schedule by hand.
+func TestOnScheduleFireDoesNotDeadlockUnderSessionLock(t *testing.T) {
+	s := newTestSession(t)
+	var ran string
+	s.startTurnHook = func(text string) { ran = text }
+	s.ag.EnqueueScheduled("id1", "nightly", "[Scheduled event \"nightly\" — daily 09:00, set by you 2026-09-26]\nrun tests")
+
+	s.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		s.onScheduleFire("nightly") // must return promptly even with s.mu held here
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		s.mu.Unlock()
+		t.Fatal("onScheduleFire blocked while the session lock was held")
+	}
+	s.mu.Unlock()
+
+	// Once the lock is free, onScheduleFire's own goroutine takes it and
+	// starts the queued turn (startQueuedLocked is idempotent, same as the
+	// existing startTurnHook tests use).
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return ran != ""
+	})
+	if !strings.Contains(ran, "run tests") {
+		t.Fatalf("idle session did not start the queued turn: %q", ran)
+	}
+}
+
+// TestOnScheduleFireNoOpWhileRunning is the other half of the same ruling:
+// a busy session must not start a second turn — finishTurnLocked's own
+// leftover-queue drain picks the event up when the run ends instead.
+func TestOnScheduleFireNoOpWhileRunning(t *testing.T) {
+	s := newTestSession(t)
+	var ran string
+	s.startTurnHook = func(text string) { ran = text }
+	s.ag.EnqueueScheduled("id1", "nightly", "scheduled")
+	s.mu.Lock()
+	s.running = true
+	s.mu.Unlock()
+
+	s.onScheduleFire("nightly")
+	time.Sleep(50 * time.Millisecond) // let the callback's own goroutine run
+
+	s.mu.Lock()
+	got, pending := ran, s.ag.Pending()
+	s.running = false
+	s.mu.Unlock()
+	if got != "" || pending == 0 {
+		t.Fatalf("a running session must not start a second turn: ran=%q pending=%d", got, pending)
+	}
+}
+
 func TestBottomLineShowsNextSchedule(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, a, _ := twoViews(t)

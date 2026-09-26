@@ -328,6 +328,15 @@ func (m *View) agentsCmd(args []string) tea.Cmd {
 	}
 }
 
+// scheduleCmd runs a /schedule subcommand that can raise a prompt off the
+// Update goroutine: Session.Ask may not be waited on under the session lock.
+// It reuses agentsMsg (already rendered locally as a lines slice) since the
+// two need exactly the same handling on the way back.
+func (m *View) scheduleCmd(args string) tea.Cmd {
+	ag := m.ag
+	return func() tea.Msg { return agentsMsg{lines: ui.ScheduleCommandLines(ag, args)} }
+}
+
 // Update runs this terminal's program. It holds the session lock for its
 // whole body, so everything it reaches — the transcript, the run state, the
 // queue, the roster — is read and written under the one lock the agent
@@ -1890,6 +1899,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// A listing or a non-blocking close: safe inline (BrowserLines never
 		// waits on the browser).
 		m.renderLocalLines(ui.BrowserLines(m.ag.Tools, fields[1:]))
+		return m, nil
+	case "/schedule":
+		rest := strings.TrimPrefix(strings.TrimSpace(text), fields[0])
+		if ui.IsScheduleBlocking(fields[1:]) {
+			// Never inline: add/pause/resume/cancel/run can raise the
+			// "schedule" approval, which Session.Ask must not wait on under
+			// the session lock Update is already holding.
+			return m, m.scheduleCmd(rest)
+		}
+		m.renderLocalLines(ui.ScheduleCommandLines(m.ag, rest))
 		return m, nil
 	case "/agents":
 		var args []string

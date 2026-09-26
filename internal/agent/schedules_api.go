@@ -430,29 +430,20 @@ func (a *Agent) ScheduleShow(name string) ([]string, error) {
 }
 
 // NextSchedule is the soonest active schedule with no event already
-// waiting, for the status line.
+// waiting, for the status line. It reads a snapshot published lock-free by
+// the scheduler (publishNextLocked) rather than taking its mutex, which is
+// held across schedules.md/session saves — a slow disk write must not
+// stall every terminal's render.
 func (a *Agent) NextSchedule() (string, time.Time, bool) {
 	s := a.sched
 	if s == nil {
 		return "", time.Time{}, false
 	}
-	s.mu.Lock()
-	all := s.allLocked() // no reload: the status line is redrawn often
-	waiting := map[string]bool{}
-	for _, sc := range all {
-		if s.waitingLocked(sc.ID) {
-			waiting[sc.ID] = true
-		}
+	snap := s.next.Load()
+	if snap == nil || snap.name == "" {
+		return "", time.Time{}, false
 	}
-	s.unlock()
-	var name string
-	var at time.Time
-	for _, sc := range all {
-		if n, ok := sc.NextDue(); ok && !waiting[sc.ID] && (name == "" || n.Before(at)) {
-			name, at = sc.Name, n
-		}
-	}
-	return name, at, name != ""
+	return snap.name, snap.at, true
 }
 
 // StartSchedules raises the startup prompt, when anything is active, and
