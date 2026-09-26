@@ -761,6 +761,9 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		r.Agent.Resume(s)
 		r.printResume(s)
+		// Here, on the REPL goroutine: the answer is read from r.lines,
+		// which only one goroutine may read.
+		r.Agent.ConfirmHeldTimers()
 	case "/theme":
 		if len(fields) < 2 {
 			fmt.Println("themes: dark, light, mono, dracula, nord, gruvbox, monokai, one-dark, solarized-dark, solarized-light, tokyo-night, catppuccin, github-light")
@@ -934,6 +937,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		r.Agent.ClearHistory()
 		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
+		r.Agent.ConfirmHeldTimers() // a fresh session has none: a no-op today
 	case "/undo":
 		restored, err := r.Agent.Undo()
 		if err != nil {

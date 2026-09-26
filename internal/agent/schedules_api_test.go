@@ -590,6 +590,17 @@ func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
 		ag.SetSession(&store.Session{ID: "s0"})
 		clock.Advance(2 * time.Minute) // due
 		ag.SetSession(&store.Session{ID: "s2", Timers: []schedule.Schedule{tm}})
+		ag.sched.kickLoop()
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case d := <-asked:
+			t.Fatalf("loadTimers never asks: %s", d)
+		default:
+		}
+		if ag.Pending() != 0 {
+			t.Fatal("held: nothing queued")
+		}
+		go ag.ConfirmHeldTimers()
 		var detail string
 		select {
 		case detail = <-asked:
@@ -629,5 +640,105 @@ func TestSwitchedInTimersAreHeldUntilConfirmed(t *testing.T) {
 		default:
 		}
 		ag.StopSchedules()
+	}
+}
+
+func TestConfirmHeldTimersNoopWithNothingHeld(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	ag.StartSchedules()
+	ag.ConfirmHeldTimers()
+	ag.SetSession(&store.Session{ID: "s2"})
+	ag.ConfirmHeldTimers()
+	if len(log) != 0 {
+		t.Fatalf("nothing held, nothing asked: %v", log)
+	}
+}
+
+func TestStaleHoldPromptAppliesToNothing(t *testing.T) {
+	ag, clock, _ := schedAgent(t, &scriptedProvider{})
+	notes := noteSink(ag)
+	asked := make(chan string, 4)
+	reply := make(chan bool)
+	ag.Tools.Approve = func(_, detail string) bool { asked <- detail; return <-reply }
+	ag.StartSchedules()
+	tm := mk("t", "in 1m")
+	seed(t, ag, tm, false)
+	ag.SetSession(&store.Session{ID: "s0"})
+	clock.Advance(2 * time.Minute)
+	sessA := &store.Session{ID: "a", Timers: []schedule.Schedule{tm}}
+	ag.SetSession(sessA) // A: held under generation 1
+	done := make(chan struct{})
+	go func() { ag.ConfirmHeldTimers(); close(done) }()
+	<-asked
+	ag.SetSession(&store.Session{ID: "b"})                                  // B
+	ag.SetSession(&store.Session{ID: "a", Timers: []schedule.Schedule{tm}}) // A again: generation 2
+	reply <- false                                                          // the stale prompt's no
+	<-done
+	if sc, _, _ := ag.sched.lookup("t"); sc.State != schedule.Active {
+		t.Fatalf("a stale answer pauses nothing: %+v", sc)
+	}
+	if strings.Contains(notes(), "paused") {
+		t.Fatalf("no notice for what it did not pause: %q", notes())
+	}
+	if ag.Pending() != 0 {
+		t.Fatal("still held under the newer prompt")
+	}
+	go func() { ag.ConfirmHeldTimers() }()
+	<-asked
+	reply <- true
+	waitQueued(t, ag, 1)
+}
+
+func TestAddNeverTouchesDoneProjectSections(t *testing.T) {
+	ag, _, _ := schedAgent(t, &scriptedProvider{})
+	var log []string
+	ag.Tools.Approve = approver(true, &log)
+	old := mk("x", "every 30m")
+	old.State = schedule.Done // a hand edit
+	seed(t, ag, old, true)
+	if _, err := ag.AddSchedule(schedule.Request{Name: "x", When: "in 5m", Instruction: "new"}, "person"); err != nil {
+		t.Fatal(err)
+	}
+	s := ag.sched
+	s.mu.Lock()
+	s.reloadLocked()
+	var inFile []schedule.Schedule
+	for _, sc := range s.doc.Schedules() {
+		if sc.Name == "x" {
+			inFile = append(inFile, sc)
+		}
+	}
+	s.unlock()
+	if len(inFile) != 1 || inFile[0].ID != old.ID {
+		t.Fatalf("schedules.md keeps its done section: %+v", inFile)
+	}
+	if sc, _, _ := ag.sched.lookup("x"); sc.Instruction != "new" {
+		t.Fatalf("the name means the live one: %+v", sc)
+	}
+}
+
+func TestBeginRefusesHeldUnlessManual(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		calls := 0
+		ag, _, _ := schedAgent(t, countingProvider(&calls))
+		notes := noteSink(ag)
+		tm := mk("t", "in 1m")
+		seed(t, ag, tm, false)
+		ag.sched.mu.Lock()
+		ag.sched.held[tm.ID] = 1
+		ag.sched.unlock()
+		ag.fireNow(tm, manual)
+		ag.RunFull(context.Background(), ag.DrainForTurn()[0].Text)
+		if manual {
+			if calls == 0 {
+				t.Fatal("a person's /schedule run is consent")
+			}
+			continue
+		}
+		if calls != 0 || !strings.Contains(notes(), "it is waiting for a person to confirm it") {
+			t.Fatalf("held: not run (calls %d) %q", calls, notes())
+		}
 	}
 }

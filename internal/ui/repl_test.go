@@ -17,6 +17,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -729,5 +730,46 @@ func TestNextLineStillReadsTypedLines(t *testing.T) {
 	ev, ok := r.nextLine()
 	if !ok || ev.wake || ev.line != "hello" {
 		t.Fatalf("typed line: %+v %v", ev, ok)
+	}
+}
+
+// A plain-mode /resume confirms the resumed session's timers on the REPL
+// goroutine itself: the answer is taken off r.lines exactly once, by that
+// prompt, and never by a second reader racing the main loop.
+func TestResumeConfirmsHeldTimersOnTheREPLGoroutine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	r := newTestREPL(t)
+	r.Agent.Tools.Approve = r.approve
+	t0 := time.Date(2026, 9, 26, 10, 0, 0, 0, time.Local)
+	clock := schedule.NewFakeClock(t0)
+	r.Agent.SetSession(store.NewSession("null", "m", r.Agent.Tools.Root))
+	r.Agent.EnableSchedules(clock)
+	t.Cleanup(r.Agent.StopSchedules)
+	r.Agent.StartSchedules() // nothing active: no prompt, loop running
+
+	tm := schedule.Schedule{ID: schedule.NewID(), Name: "t", When: "in 1h", Instruction: "x",
+		State: schedule.Active, CreatedBy: "person", Created: t0}
+	saved := store.NewSession("null", "m", r.Agent.Tools.Root)
+	saved.ID = "20260926-100000-000"
+	saved.Timers = []schedule.Schedule{tm}
+	if err := saved.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	r.lines = make(chan lineEvent, 2)
+	r.lines <- lineEvent{line: "n"}
+	r.lines <- lineEvent{line: "the next request"}
+	out := capture(t, func() { r.command(context.Background(), "/resume "+saved.ResumeCode()) })
+	if !strings.Contains(out, "This session's timers will run") {
+		t.Fatalf("the hold prompt was not shown:\n%s", out)
+	}
+	if len(r.lines) != 1 {
+		t.Fatalf("the answer is read exactly once: %d lines left", len(r.lines))
+	}
+	if ev := <-r.lines; ev.line != "the next request" {
+		t.Fatalf("the person's next line is left for the main loop: %q", ev.line)
+	}
+	if !strings.Contains(strings.Join(r.Agent.ScheduleLines(), "\n"), "paused") {
+		t.Fatalf("no pauses the timer:\n%s", strings.Join(r.Agent.ScheduleLines(), "\n"))
 	}
 }

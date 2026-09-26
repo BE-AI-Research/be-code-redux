@@ -1598,6 +1598,8 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			// than beside a repaint.
 			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			// Session.Ask is safe from any goroutine; never under sess.mu.
+			go sess.ag.ConfirmHeldTimers()
 			// The room is the session's too: a fresh session starts with an
 			// empty one, not the last session's chat carried over — and
 			// every attached terminal's own copy follows, or a terminal
@@ -2028,6 +2030,9 @@ func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	sess := m.Session
 	go func() {
 		sess.ag.Resume(s)
+		// The resumed session's timers are held until someone confirms
+		// them; the prompt is a shared ask, so any terminal answers.
+		go sess.ag.ConfirmHeldTimers()
 		sess.mu.Lock()
 		sess.seedResumeLocked(s)
 		sess.finishTurnLocked(nil, nil)

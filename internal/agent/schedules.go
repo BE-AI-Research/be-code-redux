@@ -120,36 +120,27 @@ func (s *scheduler) unlock() {
 //
 // Once the startup prompt has begun, timers arriving this way (plain
 // mode's /resume, a picker switch) were never shown to anyone in this
-// process: their active ones are held — never queued — until a person
-// confirms them with a startup-style prompt of their own (spec §3.5, "starts
-// or resumes"), raised on its own goroutine.
+// process: their active ones are held — never queued — under a new
+// generation until a person confirms them (spec §3.5, "starts or
+// resumes"). loadTimers never asks: the caller that switched sessions calls
+// ConfirmHeldTimers on a goroutine that may read the terminal — in plain
+// mode the REPL's own, since a second reader of its input would take the
+// person's next line as the answer.
 func (s *scheduler) loadTimers(ts []schedule.Schedule) {
 	s.mu.Lock()
 	s.timers = append([]schedule.Schedule(nil), ts...)
 	s.saveTimersLocked()
 	s.held = map[string]int{}
-	gen := 0
 	if s.gateBegun {
 		s.holdGen++
 		for _, sc := range s.timers {
 			if sc.State == schedule.Active {
 				s.held[sc.ID] = s.holdGen
-				gen = s.holdGen
 			}
 		}
 	}
 	s.unlock()
 	s.kickLoop()
-	if gen != 0 {
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					s.a.notice("confirming this session's timers failed (%v); they stay held", r)
-				}
-			}()
-			s.a.gateSchedules(gen, "This session's timers will run while it is open:")
-		}()
-	}
 }
 
 // reloadLocked rereads schedules.md: the file wins over what we hold.
@@ -527,6 +518,8 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 		return sc, false, "it no longer exists"
 	case !isPending:
 		return sc, project, "it is no longer queued"
+	case s.held[id] != 0 && !pe.manual:
+		return sc, project, "it is waiting for a person to confirm it"
 	case !s.approvedLocked(sc):
 		sc.State = schedule.Paused
 		s.putLocked(sc, project)

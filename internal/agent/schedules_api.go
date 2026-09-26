@@ -218,10 +218,17 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 	if err = s.admitLocked(name); err == nil {
 		// A finished one-off keeps its name in the timers; the new
 		// schedule replaces it, so the name means one thing.
-		for _, o := range s.allLocked() {
-			if o.Name == name && o.State == schedule.Done {
-				s.removeLocked(o.ID)
+		// Timers only: a done section of schedules.md is the person's
+		// file to tidy, never ours.
+		kept := s.timers[:0]
+		for _, o := range s.timers {
+			if o.Name != name || o.State != schedule.Done {
+				kept = append(kept, o)
 			}
+		}
+		if len(kept) != len(s.timers) {
+			s.timers = kept
+			s.saveTimersLocked()
 		}
 		if err = s.putLocked(sc, sp.Recurring()); err == nil {
 			s.approveLocked(sc)
@@ -518,14 +525,21 @@ func (a *Agent) gateSchedules(gen int, head string) {
 		}
 	}
 	max := a.Cfg.Schedules.MaxActive
+	paused := 0
 	for _, sc := range shown {
 		cur, ok, project := s.findLocked(sc.ID)
 		if !ok || cur.State != schedule.Active {
 			continue
 		}
+		if gen != 0 && s.held[cur.ID] != gen {
+			// A later switch replaced these timers (or held them again
+			// under a newer prompt): this answer is stale for it.
+			continue
+		}
 		pause := func(why error) {
 			cur.State = schedule.Paused
 			s.putLocked(cur, project)
+			paused++
 			if why != nil {
 				s.noteLocked("schedule %q stays paused: %v", cur.Name, why)
 			}
@@ -553,10 +567,35 @@ func (a *Agent) gateSchedules(gen int, head string) {
 	}
 	s.releaseHeldLocked(gen)
 	s.unlock()
-	if !yes {
-		a.notice("%d scheduled events paused; /schedule resume <name> brings one back", len(shown))
+	if !yes && paused > 0 {
+		a.notice("%d scheduled events paused; /schedule resume <name> brings one back", paused)
 	}
 	s.kickLoop()
+}
+
+// ConfirmHeldTimers raises the prompt for the timers the latest session
+// switch held (loadTimers): yes approves what was shown, no pauses them.
+// A no-op when nothing is held. It asks through Tools.Approve and blocks
+// until answered, so the caller picks the goroutine: plain mode calls it on
+// the REPL goroutine right after the switch, the TUI on a goroutine of its
+// own.
+func (a *Agent) ConfirmHeldTimers() {
+	s := a.sched
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	gen, waiting := s.holdGen, false
+	for _, g := range s.held {
+		if g == gen {
+			waiting = true
+		}
+	}
+	s.unlock()
+	if gen == 0 || !waiting {
+		return
+	}
+	a.gateSchedules(gen, "This session's timers will run while it is open:")
 }
 
 // releaseHeld drops the holds of generation gen (0: none).
