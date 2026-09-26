@@ -2196,6 +2196,9 @@ func (s *Store) ObserveFor(pen string, ev Event) string {
 	if ev.Tool == "" {
 		return ""
 	}
+	if ev.Tool == "browser" {
+		ev = browserEvent(ev)
+	}
 	snap := snapFor(s.root, ev)
 	var hits []Hit
 	var hashes map[string]string
@@ -2235,10 +2238,25 @@ func (s *Store) ObserveFor(pen string, ev Event) string {
 // and must never be what opens an unfiled node.
 func recorded(tool string) bool {
 	switch tool {
-	case "read_file", "write_file", "edit_file", "shell", "process", "search", "lookup", "history":
+	case "read_file", "write_file", "edit_file", "shell", "process", "search", "lookup", "history", "browser":
 		return true
 	}
 	return false
+}
+
+// browserEvent is a browser call as working memory keeps it: the action and
+// the page URL, and nothing else — no title, outline, label or typed text,
+// since all of it is the page's or may be (browser spec §2.4). The call
+// still counts, so Calls and the step nudge see browsing.
+func browserEvent(ev Event) Event {
+	args := map[string]any{}
+	if v := argStr(ev.Args, "action"); v != "" {
+		args["action"] = v
+	}
+	if v := argStr(ev.Args, "url"); v != "" {
+		args["url"] = v
+	}
+	return Event{Tool: ev.Tool, Args: args, IsError: ev.IsError}
 }
 
 func isLookup(tool string) bool {

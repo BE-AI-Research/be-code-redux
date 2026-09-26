@@ -1493,6 +1493,16 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		// is observed exactly as it ran; arguments no tool could run are
 		// simply not observed.
 		if args, ok := tools.ParseArgs(call.Arguments); ok {
+			if call.Name == "browser" {
+				// Working memory keeps the action and the page's own URL,
+				// never the page's text (the engine drops the rest).
+				args = map[string]any{"action": args["action"], "url": args["url"]}
+				if bt := a.Tools.Browser(); bt != nil {
+					if u := bt.PageURL(); u != "" {
+						args["url"] = u
+					}
+				}
+			}
 			if footer := a.observe(engine.Event{Tool: call.Name, Args: args, Content: res.Content, IsError: res.IsError}); footer != "" {
 				res.Content = strings.TrimRight(res.Content, "\n") + "\n" + footer
 			}

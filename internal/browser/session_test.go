@@ -402,3 +402,34 @@ func TestSessionNotesWhenDownloadsCannotBeRefused(t *testing.T) {
 		t.Fatalf("notes %q", notes)
 	}
 }
+
+// Final review M8 (spec §5): a panicking reader marks the connection dead
+// with a notice saying so, not merely that the browser was closed; the next
+// call reconnects.
+func TestSessionReconnectsAfterTheReaderPanics(t *testing.T) {
+	s, fb, _ := testSession(t)
+	ctx := context.Background()
+	if _, _, err := s.Page(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	conn := s.conn
+	s.mu.Unlock()
+	conn.Subscribe(func(Event) { panic("boom") })
+	fb.Emit("", "Target.targetInfoChanged", map[string]any{})
+	waitFor(t, func() bool {
+		select {
+		case <-conn.Done():
+			return true
+		default:
+			return false
+		}
+	})
+	_, notes, err := s.Page(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || notes[0] != "the browser connection was marked dead (its reader panicked: boom); reconnected" {
+		t.Fatalf("notes %q", notes)
+	}
+}

@@ -50,7 +50,7 @@ func (e *UnknownRefError) Error() string {
 	return e.Ref + " is not an element on this page; take a snapshot and use a ref from it"
 }
 
-// SensitiveFieldError is Type refusing to write into a password,
+// SensitiveFieldError is Type (or Select) refusing to write into a password,
 // one-time-code or card field: signing in is the user's own act, never the
 // model's, however an earlier snapshot classified the field (spec §3.4).
 type SensitiveFieldError struct{ Ref string }
@@ -101,9 +101,9 @@ type Page struct {
 	// arrived yet: such a Closed belongs to them, never to a dialog held
 	// after them.
 	autoPending int
-	labels   map[string]string
-	loading  bool
-	unsub    func()
+	labels      map[string]string
+	loading     bool
+	unsub       func()
 	// cancelInput, while set, cancels the context of an input event
 	// currently being dispatched (Click, Press): real Chrome holds that
 	// command's reply while a dialog it opened is showing, and onEvent
@@ -261,6 +261,11 @@ func (p *Page) onEvent(ev Event) {
 		p.frameID, p.url = e.Frame.ID, e.Frame.URL
 		newDoc := e.Frame.LoaderID != p.loaderID
 		p.loaderID = e.Frame.LoaderID
+		if newDoc {
+			// The labels go with the refs they describe: an approval must
+			// never name an element of the document before.
+			p.labels = map[string]string{}
+		}
 		p.mu.Unlock()
 		if newDoc {
 			p.refs.Reset()
@@ -740,6 +745,18 @@ func (p *Page) callOn(ctx context.Context, backend int, fn string, args ...any) 
 	return r.Result.Value, nil
 }
 
+// Resolve says whether ref names something the model may act on now — a
+// live element of this document, or the pending dialog's accept or dismiss
+// — and, if not, why (UnknownRefError, StaleRefError). The tool calls it
+// before asking anyone about an action on that ref.
+func (p *Page) Resolve(ctx context.Context, ref string) error {
+	if _, ok := p.refs.DialogAction(ref); ok {
+		return nil
+	}
+	_, err := p.resolve(ctx, ref)
+	return err
+}
+
 // resolve turns a ref into a live element, or says why it cannot.
 func (p *Page) resolve(ctx context.Context, ref string) (int, error) {
 	r := NormalizeRef(ref)
@@ -906,6 +923,14 @@ func (p *Page) Select(ctx context.Context, ref, value string) error {
 	backend, err := p.resolve(ctx, ref)
 	if err != nil {
 		return err
+	}
+	// A sensitive <select> (a card's expiry month) is refused exactly as
+	// Type refuses a password, and before the option script runs, whose
+	// own error would list every option (spec §3.4). Fail closed.
+	if sens, sErr := p.sensitive(ctx); sErr != nil {
+		return &SensitiveFieldError{Ref: NormalizeRef(ref)}
+	} else if _, ok := sens[backend]; ok {
+		return &SensitiveFieldError{Ref: NormalizeRef(ref)}
 	}
 	v, err := p.callOn(ctx, backend, selectJS, value)
 	if err != nil {

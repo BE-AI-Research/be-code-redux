@@ -2,9 +2,9 @@ package browser
 
 import (
 	"context"
-	"fmt"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -761,5 +761,53 @@ func TestPageNotesAreCapped(t *testing.T) {
 	}
 	if len(p.TakeNotes()) != 0 {
 		t.Fatal("the dropped count survived TakeNotes")
+	}
+}
+
+// Final review M2: select refuses a sensitive field exactly as type does,
+// before the option script runs — so the refusal never lists options.
+func TestPageSelectRefusesASensitiveField(t *testing.T) {
+	p, ps, _ := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	b, ok := p.refs.Lookup("e1")
+	if !ok {
+		t.Fatal("no e1")
+	}
+	ps.Lock()
+	ps.Sensitive[b] = []string{"autocomplete", "cc-exp-month"}
+	ps.SelectResult = `no option "13"; the options are: 01, 02, 03`
+	ps.Unlock()
+	err := p.Select(ctx, "e1", "13")
+	var sfe *SensitiveFieldError
+	if !errors.As(err, &sfe) {
+		t.Fatalf("select on a card-expiry field: %v", err)
+	}
+	if strings.Contains(err.Error(), "options") {
+		t.Fatalf("the refusal lists options: %v", err)
+	}
+	if has(ps.Inputs(), `select "13"`) {
+		t.Fatal("the option script ran on a sensitive field")
+	}
+}
+
+// Final review M3: a new document forgets the old labels with the refs, so
+// an approval never names an element from the page before.
+func TestPageLabelsResetWithTheRefs(t *testing.T) {
+	p, _, _ := formPage(t)
+	ctx := context.Background()
+	p.Snapshot(ctx)
+	if d := p.Describe("e1"); d == "e1" {
+		t.Fatal("no label after a snapshot")
+	}
+	if err := p.Navigate(ctx, "https://acme.test/other"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { _, ok := p.refs.Lookup("e1"); return !ok })
+	if d := p.Describe("e1"); d != "e1" {
+		t.Fatalf("a stale label survived the navigation: %q", d)
+	}
+	if err := p.Resolve(ctx, "e1"); err == nil {
+		t.Fatal("a ref from the old document resolved")
 	}
 }

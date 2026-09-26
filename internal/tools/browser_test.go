@@ -631,3 +631,67 @@ func TestShellAfterUntrustedWebStillHonoursDeny(t *testing.T) {
 		t.Fatalf("result %q, %d asks", res.Content, log.count())
 	}
 }
+
+// Final review M2: the gate refuses select on a sensitive field before
+// asking anyone, exactly as it does type.
+func TestBrowserNeverSelectsInASensitiveField(t *testing.T) {
+	var log askLog
+	_, bt, ps, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(true))
+	do(bt, map[string]any{"action": "snapshot"})
+	ps.Lock()
+	ps.Sensitive[40] = []string{"autocomplete", "cc-exp-month"} // e1
+	ps.SelectResult = `no option "13"; the options are: 01, 02, 03`
+	ps.Unlock()
+	res := do(bt, map[string]any{"action": "select", "ref": "e1", "value": "13"})
+	if !res.IsError || res.Content != signInYours {
+		t.Fatalf("result %q", res.Content)
+	}
+	if log.count() != 0 {
+		t.Fatal("asked to approve selecting in a sensitive field")
+	}
+	for _, in := range ps.Inputs() {
+		if strings.HasPrefix(in, "select ") {
+			t.Fatal("selected in a sensitive field")
+		}
+	}
+}
+
+// Final review M3: a ref that is not on the page is refused before anyone
+// is asked about it.
+func TestBrowserUnknownRefAsksNobody(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(true))
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "click", "ref": "e99"})
+	if !res.IsError || !strings.Contains(res.Content, "e99 is not an element on this page") {
+		t.Fatalf("unknown ref:\n%s", res.Content)
+	}
+	if log.count() != 0 {
+		t.Fatalf("asked %d times about an element that is not there: %q", log.count(), log.details)
+	}
+}
+
+// Final review M4: /browser close during an action ends that action with
+// its error; the tool does not reconnect (or relaunch) to report it.
+func TestBrowserClosedMidActionDoesNotReconnect(t *testing.T) {
+	_, bt, _, fb := browserFixture(t, "http://localhost:3000/", nil, nil)
+	do(bt, map[string]any{"action": "snapshot"})
+	fb.Handle("Page.navigate", func(string, json.RawMessage) (any, error) {
+		// /browser close, and the browser going away under the action.
+		bt.CloseBrowser()
+		fb.Drop()
+		return nil, errors.New("gone")
+	})
+	attaches := len(fb.Calls("Target.attachToTarget"))
+	res := do(bt, map[string]any{"action": "open", "url": "http://localhost:3000/next"})
+	if !res.IsError {
+		t.Fatalf("an action the browser closed under succeeded:\n%s", res.Content)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(fb.Calls("Target.attachToTarget")); n != attaches {
+		t.Fatalf("the tool reconnected after the close (%d attaches, was %d):\n%s", n, attaches, res.Content)
+	}
+	if st := bt.session.Status(); st.Connected {
+		t.Fatal("the session is connected again")
+	}
+}

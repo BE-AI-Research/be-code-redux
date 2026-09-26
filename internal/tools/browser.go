@@ -28,6 +28,10 @@ var browserActions = map[string]bool{
 // browserInteractions are what consent gates (spec §3.1); the rest read.
 var browserInteractions = map[string]bool{"click": true, "type": true, "select": true, "press": true}
 
+// browserRefActions act on the element a ref names; the ref is resolved
+// before anyone is asked about the action (final review M3).
+var browserRefActions = map[string]bool{"click": true, "type": true, "select": true}
+
 // browserAliases forgive the verbs a small model reaches for.
 var browserAliases = map[string]string{
 	"navigate": "open", "goto": "open", "go": "open", "visit": "open", "load": "open",
@@ -127,7 +131,14 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 		return t.tabs(ctx, notes)
 	}
 	ref := browser.NormalizeRef(argString(args, "ref", "element", "id", "target"))
-	if browserInteractions[action] {
+	// An action on a ref is checked against the page before anyone is
+	// asked about it: an element that is not there is the ordinary
+	// stale-ref error, with the snapshot, and no prompt naming it.
+	var refErr error
+	if browserRefActions[action] {
+		refErr = page.Resolve(ctx, ref)
+	}
+	if browserInteractions[action] && refErr == nil {
 		refusal, judgedHost, judgedURL := t.gate(ctx, page, action, ref, args)
 		if refusal != "" {
 			return Result{IsError: true, Content: refusal}
@@ -151,6 +162,18 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 		}
 	}
 	since := time.Now()
+	actErr := refErr
+	switch {
+	case refErr != nil:
+		// not run: the ref named nothing on the page
+	default:
+		actErr = t.act(ctx, page, action, ref, tabN, args)
+	}
+	return t.finish(ctx, page, action, notes, since, actErr)
+}
+
+// act runs one browser action on page.
+func (t *BrowserTool) act(ctx context.Context, page *browser.Page, action, ref string, tabN int, args map[string]any) error {
 	var actErr error
 	switch action {
 	case "open":
@@ -170,6 +193,12 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	case "tabs":
 		actErr = t.session.SwitchTab(ctx, tabN)
 	}
+	return actErr
+}
+
+// finish reports an action: notes, the error if any, and the page as it
+// now stands.
+func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action string, notes []string, since time.Time, actErr error) Result {
 	if ctx.Err() != nil {
 		return Result{IsError: true, Content: "browser action cancelled"}
 	}
@@ -182,6 +211,13 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	var sfe *browser.SensitiveFieldError
 	if errors.As(actErr, &sfe) {
 		return Result{IsError: true, Content: actErr.Error()}
+	}
+	// The browser went away under the action — /browser close, or the
+	// browser itself exiting. Report that and stop: reading the page back
+	// would reconnect, or relaunch, the browser the user just closed
+	// (final review M4). The next browser call starts over as usual.
+	if errors.Is(actErr, browser.ErrClosed) {
+		return Result{IsError: true, Content: actErr.Error() + "; the next browser call reconnects"}
 	}
 	if note, err := t.session.AfterAction(ctx, since); err == nil && note != "" {
 		notes = append(notes, note)
@@ -235,7 +271,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 	judgedURL = page.URL()
 	judgedHost = browser.HostOf(judgedURL)
 	host := judgedHost
-	if action == "type" {
+	if action == "type" || action == "select" {
 		// Before any prompt: a password is refused whatever the tier, so
 		// asking the user first would only teach them to say yes to it.
 		if sens, err := page.IsSensitive(ctx, ref); err == nil && sens {
@@ -380,6 +416,10 @@ func (t *BrowserTool) StatusLines() []string {
 	}
 	return out
 }
+
+// PageURL is the address of the tab being driven, as last seen ("" when
+// not connected). It never waits on the browser.
+func (t *BrowserTool) PageURL() string { return t.session.Status().URL }
 
 // Forget revokes one host's session consent.
 func (t *BrowserTool) Forget(host string) bool { return t.consent.Forget(host) }

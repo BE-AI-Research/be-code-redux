@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,9 +100,11 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 	}
 	var notes []string
 	reconnect := false
+	var why error
 	if s.conn != nil {
 		select {
 		case <-s.conn.Done():
+			why = s.conn.Err()
 			s.dropLocked()
 			reconnect = true
 		default:
@@ -112,7 +115,10 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if reconnect {
+		if reconnect && errors.Is(why, errReaderPanicked) {
+			// Spec §5: the connection is marked dead with a notice.
+			notes = append(notes, "the browser connection was marked dead ("+panicCause(why)+"); reconnected")
+		} else if reconnect {
 			notes = append(notes, "the browser was closed; reconnected")
 		} else if note != "" {
 			notes = append(notes, note)
@@ -575,4 +581,14 @@ func (s *Session) killLocked() {
 		s.proc.Kill()
 		s.proc = nil
 	}
+}
+
+// panicCause is the "its reader panicked: <value>" tail of a panicked
+// connection's error, clipped.
+func panicCause(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, errReaderPanicked.Error()); i >= 0 {
+		msg = msg[i:]
+	}
+	return clip(msg, 200)
 }

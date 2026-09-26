@@ -23,6 +23,10 @@ type Event struct {
 // so callers can test the reason with errors.Is(err, ErrClosed).
 var ErrClosed = errors.New("browser connection closed")
 
+// errReaderPanicked is why a connection whose reader goroutine panicked
+// ended (spec §5): the session names it in its reconnect notice.
+var errReaderPanicked = errors.New("its reader panicked")
+
 type cdpError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -76,7 +80,7 @@ type envelope struct {
 func (c *Conn) readLoop() {
 	defer func() {
 		if r := recover(); r != nil {
-			c.fail(fmt.Errorf("browser connection reader panicked: %v", r))
+			c.fail(fmt.Errorf("browser connection reader panicked: %w: %v", errReaderPanicked, r))
 		}
 	}()
 	for {
@@ -133,7 +137,7 @@ func (c *Conn) fail(err error) {
 		case errors.Is(err, ErrClosed):
 			// already carries ErrClosed; keep it as is.
 		default:
-			err = fmt.Errorf("%w: %v", ErrClosed, err)
+			err = fmt.Errorf("%w: %w", ErrClosed, err)
 		}
 		c.mu.Lock()
 		c.err = err
