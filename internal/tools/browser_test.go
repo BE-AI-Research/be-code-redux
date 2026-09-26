@@ -64,6 +64,24 @@ func noMouse(ps *browsertest.PageScript) bool {
 	return true
 }
 
+// waitForPageURL polls (bounded to 2s) until bt's current page URL is no
+// longer from — used instead of a fixed sleep so a test that races an
+// approval against a navigation cannot flake under CPU contention (fix
+// round 2, item 3).
+func waitForPageURL(t *testing.T, bt *BrowserTool, from string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if page, _, err := bt.session.Page(context.Background()); err == nil && page.URL() != from {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the page's URL to change")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestBrowserEveryResultStartsWithTheHeader(t *testing.T) {
 	_, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, nil)
 	res := do(bt, map[string]any{"action": "snapshot"})
@@ -298,18 +316,19 @@ func TestBrowserBlankHostAlwaysAsksAsWatch(t *testing.T) {
 func TestBrowserRefusesWhenThePageMovedWhileWaitingForApproval(t *testing.T) {
 	fb := browsertest.New(t)
 	ps := browsertest.NewPage(fb, "https://acme.test/login", "Sign in — Acme", browsertest.FormTree)
+	var bt *BrowserTool
 	approve := func(action, detail string) bool {
 		fb.Emit("S-T1", "Page.frameNavigated", map[string]any{
 			"frame": map[string]any{"id": "F-T1", "loaderId": "L2", "url": "https://evil.test/"},
 		})
-		time.Sleep(50 * time.Millisecond) // let the event land before answering
+		waitForPageURL(t, bt, "https://acme.test/login") // let the event land before answering
 		return true
 	}
 	reg, err := NewRegistry(t.TempDir(), approve)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	bt = NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
 	reg.AddTool(bt)
 	t.Cleanup(reg.Close)
 	do(bt, map[string]any{"action": "snapshot"})
@@ -321,6 +340,89 @@ func TestBrowserRefusesWhenThePageMovedWhileWaitingForApproval(t *testing.T) {
 		if strings.HasPrefix(in, "key ") {
 			t.Fatal("a key was dispatched after the page moved out from under the approval")
 		}
+	}
+}
+
+// TestBrowserRefusesWhenABlankPageMovedToAnotherBlankHostWhileWaitingForApproval
+// (fix round 2, item 2): the host-only comparison misses a navigation
+// between two hostless pages (about:blank → a data: URL, "" == ""), so the
+// full judged URL is compared too when the judged host was blank.
+func TestBrowserRefusesWhenABlankPageMovedToAnotherBlankHostWhileWaitingForApproval(t *testing.T) {
+	fb := browsertest.New(t)
+	ps := browsertest.NewPage(fb, "about:blank", "", browsertest.FormTree)
+	var bt *BrowserTool
+	approve := func(action, detail string) bool {
+		fb.Emit("S-T1", "Page.frameNavigated", map[string]any{
+			"frame": map[string]any{"id": "F-T1", "loaderId": "L2", "url": "data:text/html,x"},
+		})
+		waitForPageURL(t, bt, "about:blank")
+		return true
+	}
+	reg, err := NewRegistry(t.TempDir(), approve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt = NewBrowser(BrowserConfig{Address: fb.Addr(), SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "press", "key": "Enter"})
+	if !res.IsError || !strings.Contains(res.Content, "the page moved to a page with no address (data:text/html,x) while waiting for approval; take a snapshot and try again") {
+		t.Fatalf("result %q", res.Content)
+	}
+	for _, in := range ps.Inputs() {
+		if strings.HasPrefix(in, "key ") {
+			t.Fatal("a key was dispatched after the page moved out from under the approval")
+		}
+	}
+}
+
+// TestBrowserBlankHostDenyRefusesWithoutAsking (fix round 2, item 1a): a
+// catch-all "*": "deny" rule matches a blank host too (path.Match("*", "")
+// is true) and must still refuse outright — never merely ask.
+func TestBrowserBlankHostDenyRefusesWithoutAsking(t *testing.T) {
+	var log askLog
+	fb := browsertest.New(t)
+	ps := browsertest.NewPage(fb, "about:blank", "", browsertest.FormTree)
+	reg, err := NewRegistry(t.TempDir(), log.approver(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), Sites: map[string]string{"*": "deny"},
+		SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "click", "ref": "e4"})
+	if !res.IsError || res.Content != "interacting with a page with no address (about:blank) is denied by browser.sites; you can still read it" {
+		t.Fatalf("result %q", res.Content)
+	}
+	if log.count() != 0 || !noMouse(ps) {
+		t.Fatal("a denied blank-host page asked or acted")
+	}
+}
+
+// TestBrowserBlankHostAllowGlobStillAsks (fix round 2, item 1b): a catch-all
+// "*": "allow" rule must never grant a blank host either — it still asks,
+// watch-style.
+func TestBrowserBlankHostAllowGlobStillAsks(t *testing.T) {
+	var log askLog
+	fb := browsertest.New(t)
+	browsertest.NewPage(fb, "about:blank", "", browsertest.FormTree)
+	reg, err := NewRegistry(t.TempDir(), log.approver(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{Address: fb.Addr(), Sites: map[string]string{"*": "allow"},
+		SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	do(bt, map[string]any{"action": "snapshot"})
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+		t.Fatalf("click: %s", res.Content)
+	}
+	if log.count() != 1 || log.actions[0] != "browser_watch" {
+		t.Fatalf("asks %v", log.actions)
 	}
 }
 

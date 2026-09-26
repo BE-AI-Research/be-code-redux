@@ -125,7 +125,7 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	ref := browser.NormalizeRef(argString(args, "ref", "element", "id", "target"))
 	if browserInteractions[action] {
-		refusal, judgedHost := t.gate(ctx, page, action, ref, args)
+		refusal, judgedHost, judgedURL := t.gate(ctx, page, action, ref, args)
 		if refusal != "" {
 			return Result{IsError: true, Content: refusal}
 		}
@@ -135,7 +135,13 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 		// which a new document invalidates, but press acts on whatever has
 		// focus with no ref at all — so the host is re-checked here,
 		// against the exact host gate judged, for every interaction alike.
-		if newHost := browser.HostOf(page.URL()); newHost != judgedHost {
+		// A judged host of "" never differs from another hostless page's
+		// "" by that comparison alone (about:blank → a data: URL), so the
+		// full judged URL is compared too in exactly that case (fix round
+		// 2, item 2).
+		newHost := browser.HostOf(page.URL())
+		moved := newHost != judgedHost || (judgedHost == "" && page.URL() != judgedURL)
+		if moved {
 			return Result{IsError: true, Content: fmt.Sprintf(
 				"the page moved to %s while waiting for approval; take a snapshot and try again",
 				t.hostDisplay(newHost, page))}
@@ -218,14 +224,19 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 }
 
 // gate is consent for one interaction (spec §3.1–3.4). It returns "" to
-// proceed, or the refusal the model reads.
-func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref string, args map[string]any) (string, string) {
-	host := browser.HostOf(page.URL())
+// proceed, or the refusal the model reads — and, either way, the host and
+// full URL it judged, so Run can catch the page moving out from under a
+// slow approval (fix round 1, item 2; fix round 2, item 2, for two hostless
+// pages, where the host alone never differs).
+func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref string, args map[string]any) (refusal, judgedHost, judgedURL string) {
+	judgedURL = page.URL()
+	judgedHost = browser.HostOf(judgedURL)
+	host := judgedHost
 	if action == "type" {
 		// Before any prompt: a password is refused whatever the tier, so
 		// asking the user first would only teach them to say yes to it.
 		if sens, err := page.IsSensitive(ctx, ref); err == nil && sens {
-			return signInYours, host
+			return signInYours, host, judgedURL
 		}
 	}
 	disp := t.hostDisplay(host, page)
@@ -233,32 +244,38 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 	if host == "" {
 		// A page with no address (about:blank, data:, a blob: URL) can be
 		// written into by any other page — the same worry HostOf's own
-		// doc comment names. It is never granted a session-wide "always":
-		// every interaction on it asks, watch-style (fix round 1, item 3).
-		if t.approve("browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
-			return "", host
+		// doc comment names. A catch-all glob ("*") still matches it, so a
+		// configured deny still wins outright, asking nothing (fix round
+		// 2, item 1) — but no other tier ever grants it a session-wide
+		// "always", even an "*": "allow" glob: every interaction on it
+		// asks, watch-style (fix round 1, item 3).
+		if t.consent.Tier(host) == browser.TierDeny {
+			return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
 		}
-		return fmt.Sprintf("the user declined: %s on %s", what, disp), host
+		if t.approve("browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
+			return "", host, judgedURL
+		}
+		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
 	}
 	switch t.consent.Tier(host) {
 	case browser.TierAllow:
-		return "", host
+		return "", host, judgedURL
 	case browser.TierDeny:
-		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host
+		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
 	case browser.TierWatch:
 		if t.approve("browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
-			return "", host
+			return "", host, judgedURL
 		}
 	default:
 		if t.consent.Granted(host) {
-			return "", host
+			return "", host, judgedURL
 		}
 		if t.approve("browser", fmt.Sprintf("act on %s?\n  %s\ny allows %s for the rest of this session", disp, what, disp)) {
 			t.consent.Grant(host)
-			return "", host
+			return "", host, judgedURL
 		}
 	}
-	return fmt.Sprintf("the user declined: %s on %s", what, disp), host
+	return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
 }
 
 // hostDisplay is host for every message gate prints, except that a page
