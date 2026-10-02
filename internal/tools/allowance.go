@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -22,6 +23,9 @@ import (
 type firedPolicy struct {
 	allow      schedule.Allowance
 	askTimeout time.Duration
+	// inherit is schedules.inherit_session_approvals: the session's
+	// shortcuts apply to this turn's questions again (SessionShortcuts).
+	inherit bool
 
 	mu       sync.Mutex
 	refused  string
@@ -31,7 +35,25 @@ type firedPolicy struct {
 // SetAllowance starts a fired turn's allowance; askTimeout bounds every
 // prompt raised during it (0: no bound).
 func (r *Registry) SetAllowance(al schedule.Allowance, askTimeout time.Duration) {
-	r.fired.Store(&firedPolicy{allow: al, askTimeout: askTimeout})
+	r.SetFiredPolicy(al, askTimeout, false)
+}
+
+// SetFiredPolicy is SetAllowance with schedules.inherit_session_approvals:
+// inherit lets the session's shortcuts — accept-all here, a browser host
+// grant, and the UIs' "a"/-y through SessionShortcuts — apply to the turn
+// again. It changes nothing else: the turn is still Fired, its questions
+// are still marked FiredAsk and bounded by askTimeout, a nil approver
+// still refuses, and deny globs, the browser's deny and watch tiers,
+// shell_after_web and protectedFromGrants are untouched.
+func (r *Registry) SetFiredPolicy(al schedule.Allowance, askTimeout time.Duration, inherit bool) {
+	r.fired.Store(&firedPolicy{allow: al, askTimeout: askTimeout, inherit: inherit})
+}
+
+// sessionShortcutsApply is false only during a fired turn that does not
+// inherit the session's approvals.
+func (r *Registry) sessionShortcutsApply() bool {
+	p := r.fired.Load()
+	return p == nil || p.inherit
 }
 
 // ClearAllowance ends it and reports the first action refused during the
@@ -56,6 +78,16 @@ func (r *Registry) Fired() bool { return r.fired.Load() != nil }
 
 type firedAskKey struct{}
 
+type inheritAskKey struct{}
+
+// noInheritKey marks a question whose action an inheriting fired turn
+// must still put to a person (a write no grant could cover).
+type noInheritKey struct{}
+
+func withoutInherit(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noInheritKey{}, true)
+}
+
 // FiredAsk reports whether ctx belongs to a question a fired turn raised.
 // The UIs' approvers consult it to skip their session-level shortcuts
 // (AutoApproveShell, !ApproveFileWrites, AutoApproveBrowser) for exactly
@@ -63,6 +95,19 @@ type firedAskKey struct{}
 // same time is not marked and keeps them.
 func FiredAsk(ctx context.Context) bool {
 	v, _ := ctx.Value(firedAskKey{}).(bool)
+	return v
+}
+
+// SessionShortcuts reports whether the UIs' session-level shortcuts
+// (AutoApproveShell, !ApproveFileWrites, AutoApproveBrowser) may answer the
+// question ctx belongs to: any question that is not a fired turn's, and a
+// fired turn's when schedules.inherit_session_approvals is on. The question
+// is still FiredAsk either way, and keeps its deadline.
+func SessionShortcuts(ctx context.Context) bool {
+	if !FiredAsk(ctx) {
+		return true
+	}
+	v, _ := ctx.Value(inheritAskKey{}).(bool)
 	return v
 }
 
@@ -92,6 +137,65 @@ func MarkWithdrawn(ctx context.Context) {
 // Withdrawn reports whether the question ended unanswered.
 func (o *AskOutcome) Withdrawn() bool { return o != nil && o.withdrawn.Load() }
 
+// GrantsCovered reports whether every grant in req is within standing
+// (schedules.allow), for schedules.auto_approve_create: a model-created
+// schedule may skip its prompt only when it asks for nothing the person has
+// not already granted every fired turn. Each check is the containment the
+// matching rule at run time gives, never a looser one:
+//
+//   - shell: the same glob, or a value classifyCommand would let a standing
+//     glob allow (simple, matched by it). A requested '*' is matched by a
+//     standing '*' as a literal character, so whatever the requested glob
+//     allows the standing one allows too; globMatch has no other wildcard.
+//   - write: the same prefix or one under a standing prefix (WriteAllowed).
+//   - browser: the same pattern; or a plain host a standing pattern matches;
+//     or, when both use '*' as their only wildcard, a requested pattern the
+//     standing one matches as text. A '?' or a class in either is not
+//     comparable that way ("?x.com" matches the text "*x.com" but not the
+//     host abcx.com), so it covers plain hosts only.
+//
+// An empty req is covered: it asks for nothing.
+func GrantsCovered(req, standing schedule.Allowance) bool {
+	for _, g := range req {
+		if !grantCovered(g, standing) {
+			return false
+		}
+	}
+	return true
+}
+
+func grantCovered(g schedule.Grant, standing schedule.Allowance) bool {
+	switch g.Kind {
+	case "shell":
+		globs := standing.Values("shell")
+		for _, s := range globs {
+			if s == g.Value {
+				return true
+			}
+		}
+		return len(globs) > 0 && classifyCommand(g.Value, globs, nil) == cmdAllowed
+	case "write":
+		return standing.WriteAllowed(g.Value)
+	case "browser":
+		const meta = "*?[\\"
+		for _, s := range standing.Values("browser") {
+			switch {
+			case s == g.Value:
+				return true
+			case !strings.ContainsAny(g.Value, meta):
+				if (schedule.Allowance{{Kind: "browser", Value: s}}).HostAllowed(g.Value) {
+					return true
+				}
+			case !strings.ContainsAny(s, "?[\\") && !strings.ContainsAny(g.Value, "?[\\"):
+				if ok, _ := path.Match(s, g.Value); ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (r *Registry) allowShell(command string) bool {
 	p := r.fired.Load()
 	if p == nil {
@@ -114,9 +218,17 @@ func (r *Registry) allowWrite(absPath string) bool {
 	if p == nil {
 		return false
 	}
+	rel, ok := r.grantablePath(absPath)
+	return ok && p.allow.WriteAllowed(rel)
+}
+
+// grantablePath is absPath resolved (symlinks included) and relative to
+// Root, slash-separated, when a write grant could cover it at all: inside
+// Root and not protectedFromGrants.
+func (r *Registry) grantablePath(absPath string) (string, bool) {
 	real, err := realExistingPath(absPath)
 	if err != nil {
-		return false
+		return "", false
 	}
 	root := r.Root
 	if rr, err := filepath.EvalSymlinks(r.Root); err == nil {
@@ -124,12 +236,20 @@ func (r *Registry) allowWrite(absPath string) bool {
 	}
 	rel, err := filepath.Rel(root, real)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
+		return "", false
 	}
 	if protectedFromGrants(root, real) {
-		return false
+		return "", false
 	}
-	return p.allow.WriteAllowed(filepath.ToSlash(rel))
+	return filepath.ToSlash(rel), true
+}
+
+// protectedWrite reports a path no grant could cover (grantablePath
+// fails), which an inheriting fired turn's accept-all does not cover
+// either. Anything it cannot resolve counts as protected: fail closed.
+func (r *Registry) protectedWrite(absPath string) bool {
+	_, ok := r.grantablePath(absPath)
+	return !ok
 }
 
 // protectedFromGrants is what no write grant ever covers, whatever it says
@@ -195,6 +315,9 @@ func (r *Registry) ask(ctx context.Context, action, detail string, nilApproves b
 	switch {
 	case r.ApproveCtx != nil:
 		actx := context.WithValue(ctx, firedAskKey{}, true)
+		if p.inherit && ctx.Value(noInheritKey{}) == nil {
+			actx = context.WithValue(actx, inheritAskKey{}, true)
+		}
 		cancel := func() {}
 		if p.askTimeout > 0 {
 			actx, cancel = context.WithTimeout(actx, p.askTimeout)

@@ -328,3 +328,165 @@ func TestAllowanceNeverCoversSchedulesOrDotdir(t *testing.T) {
 		t.Fatalf("the rest of the project .be-code is still under the grant: %+v", res)
 	}
 }
+
+// --- schedule settings (2026-10-01) -----------------------------------------
+
+// TestInheritSessionApprovalsLiftsAcceptAll: with
+// schedules.inherit_session_approvals the fired turn takes the session's
+// accept-all again; without it (TestFiredTurnIgnoresSessionWriteShortcut)
+// it asks.
+func TestInheritSessionApprovalsLiftsAcceptAll(t *testing.T) {
+	r, log := allowReg(t, false)
+	r.ApproveWrites = false
+	r.SetFiredPolicy(nil, time.Minute, true)
+	res := dispatchCall(r, "write_file", `{"path":"src/b.go","content":"x"}`)
+	if res.IsError || len(log.asked()) != 0 {
+		t.Fatalf("accept-all applies to a fired turn that inherits: %+v asked=%v", res, log.asked())
+	}
+	if refused, _ := r.ClearAllowance(); refused != "" {
+		t.Fatalf("nothing refused: %q", refused)
+	}
+	// Off again: the same write asks.
+	r.SetFiredPolicy(nil, time.Minute, false)
+	if res := dispatchCall(r, "write_file", `{"path":"src/c.go","content":"x"}`); !res.IsError || strings.Join(log.asked(), ",") != "file_write" {
+		t.Fatalf("without inherit it asks: %+v asked=%v", res, log.asked())
+	}
+	r.ClearAllowance()
+}
+
+// TestInheritedAskIsStillMarked: inheriting never drops the fired marker or
+// the deadline — it adds a second mark the UIs read through SessionShortcuts.
+func TestInheritedAskIsStillMarked(t *testing.T) {
+	for _, inherit := range []bool{false, true} {
+		r, _ := allowReg(t, false)
+		var fired, shortcuts []bool
+		var deadline []bool
+		r.ApproveCtx = func(ctx context.Context, action, detail string) bool {
+			fired = append(fired, FiredAsk(ctx))
+			shortcuts = append(shortcuts, SessionShortcuts(ctx))
+			_, ok := ctx.Deadline()
+			deadline = append(deadline, ok)
+			return false
+		}
+		r.SetFiredPolicy(nil, time.Minute, inherit)
+		dispatchCall(r, "shell", `{"command":"ls"}`)
+		r.ClearAllowance()
+		if len(fired) != 1 || !fired[0] || shortcuts[0] != inherit || !deadline[0] {
+			t.Fatalf("inherit=%v: fired=%v shortcuts=%v deadline=%v", inherit, fired, shortcuts, deadline)
+		}
+	}
+	if !SessionShortcuts(context.Background()) {
+		t.Fatal("an ordinary question takes the session's shortcuts")
+	}
+}
+
+// TestInheritWithNoApproverStillRefuses: inheriting the session's approvals
+// is not "no approver means yes".
+func TestInheritWithNoApproverStillRefuses(t *testing.T) {
+	r, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetFiredPolicy(nil, time.Minute, true)
+	defer r.ClearAllowance()
+	if res := dispatchCall(r, "shell", `{"command":"echo hi"}`); !res.IsError {
+		t.Fatalf("refused: %+v", res)
+	}
+	if res := dispatchCall(r, "write_file", `{"path":"a.txt","content":"x"}`); !res.IsError {
+		t.Fatalf("refused: %+v", res)
+	}
+}
+
+// TestInheritKeepsDenyAndProtectedPaths: a denied command never runs, and
+// a covered write grant never reaches schedules.md, with inherit on.
+func TestInheritKeepsDenyAndProtectedPaths(t *testing.T) {
+	r, log := allowReg(t, true)
+	home := filepath.Join(r.Root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	r.ShellDeny = []string{"rm *"}
+	r.ApproveWrites = true
+	r.SetFiredPolicy(grants(t, "write: .", "shell: rm *"), time.Minute, true)
+	defer r.ClearAllowance()
+	if res := dispatchCall(r, "shell", `{"command":"rm -rf x"}`); !res.IsError || len(log.asked()) != 0 {
+		t.Fatalf("deny wins without asking: %+v asked=%v", res, log.asked())
+	}
+	dispatchCall(r, "write_file", `{"path":".be-code/schedules.md","content":"x"}`)
+	if strings.Join(log.asked(), ",") != "file_write" {
+		t.Fatalf("schedules.md is never covered by a grant: asked=%v", log.asked())
+	}
+}
+
+func TestGrantsCovered(t *testing.T) {
+	standing := grants(t, "shell: go test*", "shell: make lint", "write: docs", "browser: *.example.com", "browser: localhost")
+	cases := []struct {
+		req  []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"shell: go test*"}, true},
+		{[]string{"shell: go test ./..."}, true},
+		{[]string{"shell: go test ./... -run X*"}, true},
+		{[]string{"shell: make lint"}, true},
+		{[]string{"shell: make *"}, false},
+		{[]string{"shell: go test ./... && rm -rf x"}, false},
+		{[]string{"shell: go vet ./..."}, false},
+		{[]string{"write: docs"}, true},
+		{[]string{"write: docs/api"}, true},
+		{[]string{"write: ."}, false},
+		{[]string{"write: docsx"}, false},
+		{[]string{"write: src"}, false},
+		{[]string{"browser: *.example.com"}, true},
+		{[]string{"browser: api.example.com"}, true},
+		{[]string{"browser: *.api.example.com"}, true},
+		{[]string{"browser: example.com"}, false},
+		{[]string{"browser: localhost"}, true},
+		{[]string{"browser: *host"}, false},
+		{[]string{"shell: go test ./...", "write: src"}, false},
+		{[]string{"shell: go test ./...", "write: docs/x", "browser: a.example.com"}, true},
+	}
+	for _, c := range cases {
+		if got := GrantsCovered(grants(t, c.req...), standing); got != c.want {
+			t.Errorf("%v: covered=%v, want %v", c.req, got, c.want)
+		}
+	}
+	// A standing host glob with '?' or a class only covers a plain host: a
+	// requested glob could otherwise be wider than it (`?x.com` matches the
+	// text `*x.com` but not abcx.com).
+	odd := grants(t, "browser: ?x.com")
+	if GrantsCovered(grants(t, "browser: *x.com"), odd) || !GrantsCovered(grants(t, "browser: ax.com"), odd) {
+		t.Fatal("a '?' standing pattern covers plain hosts only")
+	}
+	if GrantsCovered(grants(t, "write: docs"), nil) {
+		t.Fatal("nothing standing covers no grant")
+	}
+}
+
+// TestInheritedAcceptAllNeverCoversProtectedPaths: what no grant covers,
+// an inheriting fired turn's accept-all does not cover either — the write
+// asks, and the question withholds the session's shortcuts.
+func TestInheritedAcceptAllNeverCoversProtectedPaths(t *testing.T) {
+	r, _ := allowReg(t, false)
+	home := filepath.Join(r.Root, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	r.ApproveWrites = false
+	var shortcuts []bool
+	r.ApproveCtx = func(ctx context.Context, action, detail string) bool {
+		shortcuts = append(shortcuts, SessionShortcuts(ctx))
+		return false
+	}
+	r.SetFiredPolicy(nil, time.Minute, true)
+	defer r.ClearAllowance()
+	for _, p := range []string{".be-code/schedules.md", "home/.be-code/config.json"} {
+		if res := dispatchCall(r, "write_file", `{"path":"`+p+`","content":"x"}`); !res.IsError {
+			t.Fatalf("%s: written unasked: %+v", p, res)
+		}
+	}
+	if len(shortcuts) != 2 || shortcuts[0] || shortcuts[1] {
+		t.Fatalf("both asked with the shortcuts withheld: %v", shortcuts)
+	}
+	if res := dispatchCall(r, "write_file", `{"path":"src/ok.go","content":"x"}`); res.IsError || len(shortcuts) != 2 {
+		t.Fatalf("an ordinary path takes accept-all: %+v %v", res, shortcuts)
+	}
+}

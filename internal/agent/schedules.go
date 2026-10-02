@@ -93,6 +93,13 @@ type scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// standing is schedules.allow, parsed once when the scheduler is
+	// created (an unusable entry dropped; cmd warns about it): merged into
+	// every fired turn's allowance, and what auto_approve_create measures a
+	// model-created schedule's grants against. Never written after
+	// EnableSchedules, so it is read without mu.
+	standing schedule.Allowance
+
 	// passStarts and passDone count the loop's passes: one starts when
 	// queueDue begins, and is done once its timer is armed. Tests wait on
 	// them (a pass that began after the thing they did has completed)
@@ -126,6 +133,7 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 		floor:         map[string]time.Time{},
 		kick:          make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.standing, _ = schedule.ParseStanding(a.Cfg.Schedules.Allow)
 	s.approvals = schedule.LoadApprovals(s.approvalsPath)
 	a.sessionMu.Lock()
 	if a.Session != nil {
@@ -823,7 +831,11 @@ func (a *Agent) prepareFiredRun(sc schedule.Schedule, saveSession bool, askT tim
 	if saveSession && a.History != nil && len(a.History.Messages) > 0 {
 		a.autosave(a.lastUserInput)
 	}
-	a.Tools.SetAllowance(sc.Allow, askT)
+	// schedules.allow rides with the schedule's own grants; the merged
+	// allowance is checked by the same rules (protectedFromGrants among
+	// them) and cleared with it.
+	allow := append(append(schedule.Allowance(nil), sc.Allow...), a.sched.standing...)
+	a.Tools.SetFiredPolicy(allow, askT, a.Cfg.Schedules.InheritSessionApprovals)
 }
 
 func firedOutcome(parent context.Context, timedOut bool, err error, rep *ReviewedReport, refused string, askTimedOut bool) string {

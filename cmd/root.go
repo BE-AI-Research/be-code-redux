@@ -295,6 +295,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		// Scheduled events: interactive sessions only — a one-shot run has
 		// no "later" (schedules spec §1.3). The scheduler is created here but
 		// started by the UI once its approvals and events are wired.
+		warnScheduleAllow(cfg)
 		ag.EnableSchedules(schedule.RealClock{})
 		reg.AddTool(tools.NewScheduleTool(ag))
 		ag.RefreshSystem()
@@ -829,4 +830,15 @@ func secondaryLoad(ctx context.Context, c *config.Config, prov provider.Provider
 	defer cancel()
 	n, _ := l.Apply(ctx, model)
 	return n
+}
+
+// warnScheduleAllow names each schedules.allow entry the scheduler will
+// drop (schedule.ParseStanding: the same refusals a schedule's own grants
+// get, such as a bare "shell: *" or a path outside the workspace), once, at
+// wiring. A bad entry is never fatal: the rest still apply.
+func warnScheduleAllow(cfg *config.Config) {
+	_, errs := schedule.ParseStanding(cfg.Schedules.Allow)
+	for _, err := range errs {
+		fmt.Fprintf(os.Stderr, "warn: schedules.allow %v; dropped\n", err)
+	}
 }

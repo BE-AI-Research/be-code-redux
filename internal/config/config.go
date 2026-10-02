@@ -68,6 +68,24 @@ type SchedulesConfig struct {
 	AskTimeout         string `json:"ask_timeout"`
 	MaxRuntime         string `json:"max_runtime"`
 	PauseAfterFailures int    `json:"pause_after_failures"`
+
+	// The four settings below each turn one prompt off; the defaults keep
+	// every prompt (schedule settings, 2026-10-01).
+	//
+	// ConfirmOnStart false starts schedules whose approval still matches
+	// without the "these will run" prompt (startup, and a session switch's
+	// held timers); new, hand-edited and never-approved ones still ask.
+	ConfirmOnStart bool `json:"confirm_on_start"`
+	// InheritSessionApprovals true lets a fired turn take the session's
+	// shortcuts ("a", accept-all, -y, a browser host grant) again.
+	InheritSessionApprovals bool `json:"inherit_session_approvals"`
+	// Allow is a standing allowance ("shell: …", "write: …", "browser: …")
+	// merged into every fired turn's own. An unusable entry warns and is
+	// dropped.
+	Allow []string `json:"allow"`
+	// AutoApproveCreate true lets the model add a schedule without the
+	// prompt when every grant it asks for is within Allow.
+	AutoApproveCreate bool `json:"auto_approve_create"`
 }
 
 // Durations parses the three duration keys, each falling back to its default.
@@ -421,7 +439,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10},
-		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3},
+		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3, ConfirmOnStart: true, Allow: []string{}},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",
 		CompactWithModel: true,

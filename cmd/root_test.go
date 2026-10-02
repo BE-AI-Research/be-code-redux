@@ -835,3 +835,20 @@ func TestScheduleToolOnlyInInteractiveSessions(t *testing.T) {
 		t.Fatal("schedules.enabled false turns both off")
 	}
 }
+
+// An unusable schedules.allow entry warns once at wiring and is dropped;
+// the usable ones are not mentioned.
+func TestWarnScheduleAllow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Schedules.Allow = []string{"shell: go test*", "shell: *", "write: /etc"}
+	out := captureStderr(t, func() { warnScheduleAllow(cfg) })
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], `warn: schedules.allow "shell: *": `) ||
+		!strings.HasSuffix(lines[0], "; dropped") || !strings.HasPrefix(lines[1], `warn: schedules.allow "write: /etc": `) {
+		t.Fatalf("warnings: %q", out)
+	}
+	cfg.Schedules.Allow = []string{"write: docs"}
+	if out := captureStderr(t, func() { warnScheduleAllow(cfg) }); out != "" {
+		t.Fatalf("nothing to warn about: %q", out)
+	}
+}

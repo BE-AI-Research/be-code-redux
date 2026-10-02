@@ -308,9 +308,10 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 	default:
 		// A session grant ("y allows <host> for the rest of this session")
 		// was given by someone watching: a fired turn does not take it
-		// (final review C1). The allow tier above is standing config and
-		// still applies.
-		if t.consent.Granted(host) && (t.r == nil || !t.r.Fired()) {
+		// (final review C1), unless schedules.inherit_session_approvals
+		// says it does. The allow tier above is standing config and still
+		// applies.
+		if t.consent.Granted(host) && (t.r == nil || t.r.sessionShortcutsApply()) {
 			return "", host, judgedURL
 		}
 		if t.r != nil && t.r.allowHost(host) {

@@ -188,10 +188,12 @@ func (r *REPL) approve(action, detail string) bool {
 //
 // A question a scheduled event's turn raised (tools.FiredAsk) never takes
 // the session-level shortcuts (final review C1): "a", -y and accept-all were
-// given by someone watching. A prompt that ends with nobody answering (EOF,
-// Ctrl-C, its context ended) is marked withdrawn on ctx (tools.MarkWithdrawn).
+// given by someone watching — unless schedules.inherit_session_approvals
+// says they apply (tools.SessionShortcuts). A prompt that ends with nobody
+// answering (EOF, Ctrl-C, its context ended) is marked withdrawn on ctx
+// (tools.MarkWithdrawn).
 func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
-	fired := tools.FiredAsk(ctx)
+	fired := !tools.SessionShortcuts(ctx)
 	switch action {
 	case "shell":
 		if r.Cfg.AutoApproveShell && !fired {

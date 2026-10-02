@@ -30,9 +30,18 @@ func (r *Registry) approveWrite(ctx context.Context, absPath, newContent string)
 	// During a fired turn "accept all" (ApproveWrites off) and "no
 	// approver" never let a write through unasked: only the allowance does,
 	// and anything it does not cover asks under the deadline (final review
-	// C1) — or, with nobody to ask, is refused (r.ask).
+	// C1) — or, with nobody to ask, is refused (r.ask). With
+	// schedules.inherit_session_approvals the turn takes accept-all again,
+	// except for what no grant covers either (protectedFromGrants:
+	// schedules.md, the dotdir), which asks a person with the session's
+	// shortcuts withheld; a nil approver still refuses.
 	fired := r.Fired()
-	if !fired && (!r.ApproveWrites || r.Approve == nil) {
+	if !fired && r.Approve == nil {
+		return Result{}, true
+	}
+	if fired && r.protectedWrite(absPath) {
+		ctx = withoutInherit(ctx)
+	} else if !r.ApproveWrites && r.Approve != nil && r.sessionShortcutsApply() {
 		return Result{}, true
 	}
 	oldContent := ""

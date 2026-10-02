@@ -68,6 +68,27 @@ func ParseAllowance(lines []string) (Allowance, error) {
 	return a, nil
 }
 
+// ParseStanding reads a standing allowance (config schedules.allow) one
+// entry at a time: an entry ParseGrant refuses is reported, with the entry
+// named, and left out, while the rest still apply. A config file must never
+// stop a session from starting over one bad line.
+func ParseStanding(lines []string) (Allowance, []error) {
+	var a Allowance
+	var errs []error
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		g, err := ParseGrant(l)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%q: %v", l, err))
+			continue
+		}
+		a = append(a, g)
+	}
+	return a, errs
+}
+
 func (a Allowance) Values(kind string) []string {
 	var out []string
 	for _, g := range a {
