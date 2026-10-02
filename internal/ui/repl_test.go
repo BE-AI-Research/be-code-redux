@@ -877,3 +877,42 @@ func TestWithdrawnPromptIsNotAnAnswerREPL(t *testing.T) {
 		t.Fatal("a cancelled question is withdrawn")
 	}
 }
+
+// TestFiredTurnInheritsSessionApprovalsREPL: with
+// schedules.inherit_session_approvals the fired turn's questions take the
+// session's shortcuts again — but the prompts that have no shortcut
+// (schedule, shell_after_web, browser_watch) still ask.
+func TestFiredTurnInheritsSessionApprovalsREPL(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.AutoApproveShell = true
+	r.Cfg.AutoApproveBrowser = true
+	r.Cfg.ApproveFileWrites = false
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+	r.Agent.Tools.SetFiredPolicy(nil, time.Minute, true)
+	defer r.Agent.Tools.ClearAllowance()
+	r.lines = make(chan lineEvent, 1)
+	var shell, write tools.Result
+	capture(t, func() {
+		shell = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "1", Name: "shell", Arguments: `{"command":"echo hi"}`})
+		write = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "2", Name: "write_file", Arguments: `{"path":"x.txt","content":"x"}`})
+	})
+	if shell.IsError || write.IsError {
+		t.Fatalf("the session's shortcuts answered: shell=%+v write=%+v", shell, write)
+	}
+	for _, action := range []string{"schedule", "shell_after_web", "browser_watch"} {
+		r.lines <- lineEvent{line: "n"}
+		var marked bool
+		r.Agent.Tools.ApproveCtx = func(ctx context.Context, _, _ string) bool {
+			marked = tools.FiredAsk(ctx) && tools.SessionShortcuts(ctx)
+			return r.approveCtx(ctx, action, "x")
+		}
+		var res tools.Result
+		capture(t, func() {
+			res = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "3", Name: "shell", Arguments: `{"command":"ls"}`})
+		})
+		if !marked || !res.IsError || len(r.lines) != 0 {
+			t.Fatalf("%s still asks a person: marked=%v res=%+v unread=%d", action, marked, res, len(r.lines))
+		}
+	}
+}

@@ -235,3 +235,28 @@ func TestWithdrawnAskIsNotAnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// TestFiredTurnInheritsSessionApprovals: with
+// schedules.inherit_session_approvals the session's "a" and accept-all
+// answer a fired turn's questions again, with no modal raised.
+func TestFiredTurnInheritsSessionApprovals(t *testing.T) {
+	s, a, _ := twoViews(t)
+	s.cfg.AutoApproveShell = true
+	s.cfg.ApproveFileWrites = false
+	s.ag.Tools.ApproveWrites = true // reach the approver: it is the shortcut under test
+	s.ag.Tools.SetFiredPolicy(nil, time.Minute, true)
+	defer s.ag.Tools.ClearAllowance()
+	for _, c := range []struct{ tool, args string }{
+		{"shell", `{"command":"echo hi"}`},
+		{"write_file", `{"path":"x.txt","content":"x"}`},
+	} {
+		res := s.ag.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "1", Name: c.tool, Arguments: c.args})
+		if res.IsError {
+			t.Fatalf("%s: the session's shortcut answers an inheriting fired turn: %+v", c.tool, res)
+		}
+		flush(a)
+		if a.mode == modeAsk {
+			t.Fatalf("%s raised a modal", c.tool)
+		}
+	}
+}

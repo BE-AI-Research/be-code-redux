@@ -23,6 +23,17 @@
   share the approvals file without overwriting each other's. An unanswered startup prompt
   changes nothing rather than pausing everything. The loop wakes at least once a minute, so a
   suspend no longer delays an event by hours.
+- **Schedule settings**, each off by default: `schedules.confirm_on_start: false` starts
+  already-approved, unchanged schedules without the startup prompt (only new or edited ones are
+  asked about); `schedules.inherit_session_approvals: true` lets a fired event use the session's
+  shortcuts; `schedules.allow` is a standing allowance merged into every fired event's; and
+  `schedules.auto_approve_create: true` lets the model add a schedule unasked when its grants are
+  all within `schedules.allow` (none at all counts), never while `inherit_session_approvals` is
+  on. `schedules.allow` is read at session start; an unusable entry is warned about in the
+  transcript and dropped. The safety rules hold with all four on: deny lists, the browser's
+  watch tier, shell-after-web, no model-created schedule after an untrusted page or during a
+  fired event, no sub-agents during one, edits pause, resume asks, and `-y` never approves a
+  schedule.
 - Dropping a queued scheduled event from the queue popup skips that occurrence rather than
   wedging the schedule: a one-off is marked done, a recurring one fires again at its next time.
 - A session picker or `/resume` switch that loads new timers into an already-running session

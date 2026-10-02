@@ -473,6 +473,25 @@ there is no background daemon.
   paused even after `yes`, with a notice saying why. Timers a session picker or `/resume` loads
   into an already-running session are held the same way, until you confirm them in a prompt of
   their own.
+- **Fewer prompts, if you want them.** Four `schedules` settings each turn one prompt off, and
+  all are off by default. `confirm_on_start: false` skips the startup prompt (and the held-timer
+  one) for schedules whose approval still matches; only new, edited or never-approved ones are
+  listed, and with none of those nothing is asked. `inherit_session_approvals: true` lets a
+  fired event take the session's shortcuts again (except a write to `.be-code/schedules.md` or
+  under `~/.be-code`, which still asks). `allow` is a standing allowance merged into
+  every fired event's own, read when the session starts, with the same refusals (no bare
+  `shell: *`, nothing outside the workspace, never `.be-code/schedules.md` or `~/.be-code`).
+  `auto_approve_create: true` lets the model add a schedule without the prompt when every grant
+  it asks for is within `allow` (the same glob, a command one matches, a path under one, a host
+  one matches; a schedule asking for no grants counts as within it) — but never while
+  `inherit_session_approvals` is on, since such a schedule would also run with the session's
+  shortcuts. Anything wider asks as before, and your own `/schedule add` still confirms. With
+  `confirm_on_start: false`, an approved schedule that `max_active` or `min_interval` would now
+  refuse stays paused with a notice, as after a "yes". None of them changes the rest:
+  the deny list, the browser's deny and watch tiers, the shell-after-a-web-page rule, the
+  model being unable to create or resume a schedule after an untrusted page or during a fired
+  event, no sub-agents and no online co-worker during one, an edited schedule pausing until
+  re-approved, resume always asking, and `-y` never approving a schedule.
 - A fired event is queued like a message and runs as its own turn (`⏰ name`), never interrupting
   a turn in progress; what you type while it runs waits for it to finish and then runs as a turn
   of its own. The loop wakes at least once a minute, so a laptop that slept through an event's
@@ -1185,7 +1204,17 @@ hand; `/config` prints what the running session actually resolved.
   `schedules.ask_timeout` ("10m") — how long a fired event's prompt waits for a person before it
   is withdrawn and refused; `schedules.max_runtime` ("30m") — a fired event's turn is cancelled
   after this long; `schedules.pause_after_failures` (3) — a recurring schedule that fails this
-  many runs in a row pauses itself; see "Scheduled events"
+  many runs in a row pauses itself; `schedules.confirm_on_start` (true) — `false` starts
+  schedules you already approved, unchanged since, without the startup prompt (new, edited or
+  never-approved ones still ask); `schedules.inherit_session_approvals` (false) — `true` lets a
+  fired event use the session's shortcuts (an earlier `a`, `-y`, accepting all file changes, a
+  site allowed for the session); `schedules.allow` ([]) — standing grants (`shell: …`,
+  `write: …`, `browser: …`) added to every fired event's allowance, read at session start, an
+  unusable one warned about and dropped; `schedules.auto_approve_create` (false) — `true` lets
+  the model add a schedule without asking when every grant it requests is within
+  `schedules.allow` (a request with no grants counts), never while
+  `schedules.inherit_session_approvals` is on; see
+  "Scheduled events"
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an

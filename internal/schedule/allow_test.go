@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,5 +143,24 @@ func TestValidTask(t *testing.T) {
 		if ValidTask(bad) {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// ParseStanding reads schedules.allow: each entry on its own, so one bad
+// entry is reported and dropped while the rest still apply.
+func TestParseStanding(t *testing.T) {
+	a, errs := ParseStanding([]string{"shell: go test*", "shell: *", "", "write: ../x", "write: docs/", "browser: *.example.com"})
+	if len(errs) != 2 {
+		t.Fatalf("two refused entries: %v", errs)
+	}
+	if !strings.Contains(errs[0].Error(), "shell: *") || !strings.Contains(errs[1].Error(), "outside the workspace") {
+		t.Fatalf("errors name the entry: %v", errs)
+	}
+	got := []string{}
+	for _, g := range a {
+		got = append(got, g.String())
+	}
+	if strings.Join(got, ",") != "shell: go test*,write: docs,browser: *.example.com" {
+		t.Fatalf("kept: %v", got)
 	}
 }

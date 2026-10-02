@@ -509,3 +509,29 @@ func TestSchedulesAbsentKeyKeepsDefaults(t *testing.T) {
 		t.Fatalf("an older config file keeps the defaults: %+v", c.Schedules)
 	}
 }
+
+// The four schedule settings (2026-10-01) are off by default: every prompt
+// a scheduled event raises today still appears unless a key turns it off.
+func TestScheduleSettingsDefaultOff(t *testing.T) {
+	s := Default().Schedules
+	if !s.ConfirmOnStart || s.InheritSessionApprovals || len(s.Allow) != 0 || s.AutoApproveCreate {
+		t.Fatalf("defaults: %+v", s)
+	}
+	c := Default()
+	// An older schedules block without the new keys keeps their defaults.
+	if err := json.Unmarshal([]byte(`{"schedules":{"enabled":true,"max_active":5}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedules.ConfirmOnStart || c.Schedules.InheritSessionApprovals || c.Schedules.AutoApproveCreate ||
+		len(c.Schedules.Allow) != 0 || c.Schedules.MaxActive != 5 {
+		t.Fatalf("absent keys keep their defaults: %+v", c.Schedules)
+	}
+	if err := json.Unmarshal([]byte(`{"schedules":{"confirm_on_start":false,"inherit_session_approvals":true,
+		"allow":["shell: go test*"],"auto_approve_create":true}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedules.ConfirmOnStart || !c.Schedules.InheritSessionApprovals || !c.Schedules.AutoApproveCreate ||
+		len(c.Schedules.Allow) != 1 || c.Schedules.Allow[0] != "shell: go test*" || !c.Schedules.Enabled {
+		t.Fatalf("set keys decode: %+v", c.Schedules)
+	}
+}

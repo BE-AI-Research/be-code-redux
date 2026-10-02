@@ -302,14 +302,15 @@ func (s *Session) approveFromAgent(action, detail string) bool {
 //
 // A question a scheduled event's turn raised (tools.FiredAsk) never takes
 // the session-level shortcuts — "a", -y, accept-all were given by someone
-// watching, and nobody is watching a fired turn (final review C1). A
+// watching, and nobody is watching a fired turn (final review C1) — unless
+// schedules.inherit_session_approvals says they do (tools.SessionShortcuts). A
 // question that closes with nobody answering is marked withdrawn on ctx
 // (tools.MarkWithdrawn) so an asker that must tell that from a "no" can.
 func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !tools.FiredAsk(ctx) {
+	if tools.SessionShortcuts(ctx) {
 		if action == "shell" && s.cfg.AutoApproveShell {
 			return true
 		}

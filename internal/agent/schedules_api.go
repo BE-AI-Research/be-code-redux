@@ -242,7 +242,17 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 	if by == "agent" {
 		head = "The model wants to schedule:"
 	}
-	if !a.askedYes(head + "\n\n" + describe(sc, sp, now)) {
+	// schedules.auto_approve_create: the model's schedule skips the prompt
+	// only when it asks for nothing beyond schedules.allow — a grant the
+	// person already gives every fired turn (no grants at all counts). A person's own add still
+	// confirms (it is the person), and the refusals above (a fired turn, an
+	// untrusted page, min_interval, max_active) have all applied already.
+	// Never with inherit_session_approvals on (owner's ruling, 2026-10-01):
+	// a schedule added unasked would then also run with the session's
+	// shortcuts, which is more than schedules.allow ever granted.
+	auto := by == "agent" && a.Cfg.Schedules.AutoApproveCreate && !a.Cfg.Schedules.InheritSessionApprovals &&
+		tools.GrantsCovered(allow, s.standing)
+	if !auto && !a.askedYes(head+"\n\n"+describe(sc, sp, now)) {
 		return "", errors.New("the schedule was not approved")
 	}
 	s.locked(func() {
@@ -272,6 +282,9 @@ func (a *Agent) AddSchedule(req schedule.Request, by string) (string, error) {
 		return "", err
 	}
 	s.kickLoop()
+	if auto {
+		a.notice("the model added schedule %q without asking (schedules.auto_approve_create: its grants are within schedules.allow)", name)
+	}
 	n, _ := sp.Next(now)
 	return fmt.Sprintf("scheduled %q (%s); next %s", name, sp.String(), n.Format("Mon 15:04")), nil
 }
@@ -526,6 +539,8 @@ func (a *Agent) gateSchedules(gen int, head string) {
 	s := a.sched
 	var shown []schedule.Schedule
 	var b strings.Builder
+	confirm := a.Cfg.Schedules.ConfirmOnStart
+	silent := 0
 	s.locked(func() {
 		if gen == 0 {
 			s.gateBegun = true
@@ -533,12 +548,60 @@ func (a *Agent) gateSchedules(gen int, head string) {
 		s.reloadLocked()
 		now := s.clock.Now()
 		b.WriteString(head + "\n")
+		var cands []schedule.Schedule
+		isCand := map[string]bool{}
 		for _, sc := range s.allLocked() {
 			if sc.State != schedule.Active || (gen == 0) != (s.held[sc.ID] == 0) ||
 				(gen != 0 && s.held[sc.ID] != gen) {
 				continue
 			}
+			cands = append(cands, sc)
+			isCand[sc.ID] = true
+		}
+		// count is what is already armed outside this prompt: active, not a
+		// candidate here, not held for a prompt of its own — the same base
+		// the "yes" path counts from, so the silent path below enforces
+		// schedules.max_active exactly as a "yes" would.
+		count := 0
+		for _, o := range s.allLocked() {
+			if o.State == schedule.Active && !isCand[o.ID] && s.held[o.ID] == 0 {
+				count++
+			}
+		}
+		max := a.Cfg.Schedules.MaxActive
+		for _, sc := range cands {
+			if !confirm && s.approvedLocked(sc) {
+				// schedules.confirm_on_start false: what a person approved,
+				// unchanged since, starts without being shown again —
+				// unless add would refuse it now (min_interval raised
+				// since, or max_active lowered or already reached), which
+				// pauses it exactly as a "yes" would. A held timer of this
+				// kind is released here, before the prompt for the rest, so
+				// a withdrawn prompt never keeps it held.
+				_, _, project := s.findLocked(sc.ID)
+				if sp, err := sc.Spec(); err == nil {
+					if ferr := a.tooFrequent(sp, now); ferr != nil {
+						s.pauseLocked(sc, project)
+						s.noteLocked("schedule %q stays paused: %v", sc.Name, ferr)
+						continue
+					}
+				}
+				if max > 0 && count >= max {
+					s.pauseLocked(sc, project)
+					s.noteLocked("schedule %q stays paused: %v", sc.Name, maxActiveErr(count))
+					continue
+				}
+				count++
+				silent++
+				delete(s.held, sc.ID)
+				continue
+			}
 			shown = append(shown, sc)
+			if gen == 0 {
+				// Not queued while it is being asked about: the loop may
+				// already be running for what was let through silently.
+				s.asking[sc.ID] = true
+			}
 			mark := ""
 			if !s.approvedLocked(sc) {
 				mark = "   (changed since approved)"
@@ -552,8 +615,26 @@ func (a *Agent) gateSchedules(gen int, head string) {
 	})
 	if len(shown) == 0 {
 		a.releaseHeld(gen)
+		s.kickLoop() // a held timer released above is due now
 		return
 	}
+	if gen == 0 && silent > 0 {
+		// What was let through silently need not wait on a prompt about
+		// the others, which may stay open as long as nobody answers; the
+		// others are held out of the loop by s.asking until it is.
+		s.startLoop()
+	}
+	defer func() {
+		if gen == 0 {
+			s.locked(func() {
+				for _, sc := range shown {
+					delete(s.asking, sc.ID)
+				}
+			})
+			s.kickLoop()
+		}
+	}()
+	s.kickLoop()
 	yes, withdrawn := a.askSchedule(b.String())
 	if withdrawn {
 		if gen == 0 {

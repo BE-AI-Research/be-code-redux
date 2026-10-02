@@ -87,11 +87,23 @@ type scheduler struct {
 	// unasked in this process — the next start asks again, and a person's
 	// /schedule resume confirms one now.
 	unconfirmed map[string]bool
+	// asking marks what the startup prompt is showing while it is open:
+	// with confirm_on_start off the loop may already run for what was let
+	// through silently, and must not queue (or pause, at its time) a
+	// schedule a person is being asked about.
+	asking map[string]bool
 
 	// ctx lives as long as the scheduler: StopSchedules cancels it, which
 	// withdraws a schedule prompt still open when the session ends.
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// standing is schedules.allow, parsed once when the scheduler is
+	// created (an unusable entry dropped; cmd warns about it): merged into
+	// every fired turn's allowance, and what auto_approve_create measures a
+	// model-created schedule's grants against. Never written after
+	// EnableSchedules, so it is read without mu.
+	standing schedule.Allowance
 
 	// passStarts and passDone count the loop's passes: one starts when
 	// queueDue begins, and is done once its timer is armed. Tests wait on
@@ -123,9 +135,11 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 		pending:       map[string]pendingEvent{},
 		held:          map[string]int{},
 		unconfirmed:   map[string]bool{},
+		asking:        map[string]bool{},
 		floor:         map[string]time.Time{},
 		kick:          make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.standing, _ = schedule.ParseStanding(a.Cfg.Schedules.Allow)
 	s.approvals = schedule.LoadApprovals(s.approvalsPath)
 	a.sessionMu.Lock()
 	if a.Session != nil {
@@ -492,7 +506,7 @@ func (s *scheduler) queueDue() (time.Time, bool) {
 			if !ok {
 				continue
 			}
-			if s.held[sc.ID] != 0 || s.unconfirmed[sc.ID] {
+			if s.held[sc.ID] != 0 || s.unconfirmed[sc.ID] || s.asking[sc.ID] {
 				continue // awaiting a person's confirmation (loadTimers, gateSchedules)
 			}
 			if _, waiting := s.pending[sc.ID]; waiting {
@@ -621,7 +635,7 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 		return sc, false, "it no longer exists"
 	case !isPending:
 		return sc, project, "it is no longer queued"
-	case (s.held[id] != 0 || s.unconfirmed[id]) && !pe.manual:
+	case (s.held[id] != 0 || s.unconfirmed[id] || s.asking[id]) && !pe.manual:
 		return sc, project, "it is waiting for a person to confirm it"
 	case !s.approvedLocked(sc):
 		s.pauseLocked(sc, project)
@@ -823,7 +837,11 @@ func (a *Agent) prepareFiredRun(sc schedule.Schedule, saveSession bool, askT tim
 	if saveSession && a.History != nil && len(a.History.Messages) > 0 {
 		a.autosave(a.lastUserInput)
 	}
-	a.Tools.SetAllowance(sc.Allow, askT)
+	// schedules.allow rides with the schedule's own grants; the merged
+	// allowance is checked by the same rules (protectedFromGrants among
+	// them) and cleared with it.
+	allow := append(append(schedule.Allowance(nil), sc.Allow...), a.sched.standing...)
+	a.Tools.SetFiredPolicy(allow, askT, a.Cfg.Schedules.InheritSessionApprovals)
 }
 
 func firedOutcome(parent context.Context, timedOut bool, err error, rep *ReviewedReport, refused string, askTimedOut bool) string {
