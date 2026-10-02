@@ -36,7 +36,7 @@ func (t *scheduleTool) Description() string {
 		"never to put off work the current request asks for now. A person approves every schedule and its " +
 		"allowance before it exists, unless config lets you add one within schedules.allow; ask for the narrowest allowance that does the job. " +
 		"when: in 20m · at 09:00 · at 2026-09-27 09:00 · every 30m · daily 09:00 · weekdays 09:00 · mon,thu 14:30 · cron. " +
-		"allow: grants like \"shell: go test ./...\", \"write: docs\", \"browser: example.com\"; anything else asks a person when it fires."
+		"allow: grants like \"shell: go test ./...\", \"write: docs\", \"browser: example.com\", \"tool: mcp_github_*\" (an MCP, editor or web tool by name); anything else asks a person when it fires."
 }
 
 func (t *scheduleTool) Schema() json.RawMessage {

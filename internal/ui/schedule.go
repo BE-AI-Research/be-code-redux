@@ -22,7 +22,8 @@ func ParseScheduleAdd(rest string) (schedule.Request, error) {
 	r := schedule.Request{Name: f[0], When: strings.Join(f[1:], " ")}
 	for i := strings.LastIndex(instr, " allow "); i >= 0; i = strings.LastIndex(instr[:i], " allow ") {
 		tail := strings.TrimSpace(instr[i+len(" allow "):])
-		if strings.HasPrefix(tail, "shell:") || strings.HasPrefix(tail, "write:") || strings.HasPrefix(tail, "browser:") {
+		if strings.HasPrefix(tail, "shell:") || strings.HasPrefix(tail, "write:") || strings.HasPrefix(tail, "browser:") ||
+			strings.HasPrefix(tail, "tool:") {
 			for _, g := range strings.Split(tail, ";") {
 				if g = strings.TrimSpace(g); g != "" {
 					r.Allow = append(r.Allow, g)

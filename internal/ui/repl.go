@@ -222,14 +222,17 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s %s\n", yell("run shell (after reading a web page):"), detail)
 	case "schedule":
 		fmt.Printf("%s\n%s\n", yell("schedule:"), detail)
+	case "tool_call":
+		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	// browser_watch, shell_after_web and schedule have no "always" (browser
-	// spec §3.2, §3.6; schedules spec §3.1): the prompt must not advertise a
-	// key that does nothing.
+	// browser_watch, shell_after_web, schedule and tool_call have no
+	// "always" (browser spec §3.2, §3.6; schedules spec §3.1): the prompt
+	// must not advertise a key that does nothing.
 	prompt := "approve? [y/N/a(lways)] "
-	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule"
+	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule" ||
+		action == "tool_call"
 	if noAlways {
 		prompt = "approve? [y/N] "
 	}

@@ -104,6 +104,9 @@ func describe(sc schedule.Schedule, sp schedule.Spec, now time.Time) string {
 			if g.Kind == "write" && g.Value == "." {
 				line += "   ← anywhere in the workspace"
 			}
+			if g.Kind == "tool" && strings.ContainsAny(g.Value, "*?[") {
+				line += "   ← every tool whose name matches"
+			}
 			fmt.Fprintf(&b, "    %s\n", line)
 		}
 	}

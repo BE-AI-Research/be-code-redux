@@ -776,7 +776,8 @@ func (m *View) showAsk(a *ask) {
 	switch a.Kind {
 	case askApproval:
 		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
-			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" {
+			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" ||
+			a.Action == "tool_call" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -885,8 +886,10 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// The default tier's yes already means "this site for the rest of
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
-		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" {
-			// No "always" to grant (browser spec §3.2, §3.6; schedules spec §3.1).
+		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
+			a.Action == "tool_call" {
+			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
+			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
 			decided = false
 		} else if a.Action == "sub_agent_resume" {
@@ -1371,6 +1374,10 @@ func (m *View) viewAsk() string {
 	case "schedule":
 		title = "Scheduled event"
 		hint = "y approve · n refuse · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "tool_call":
+		title = "Tool call during a scheduled event"
+		hint = "y run it · n refuse · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	}
 	if m.compact() {
