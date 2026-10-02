@@ -1317,6 +1317,11 @@ Built for four platforms from one Go module. 25 of the 28 Go packages carry test
 editor extensions have their own suites, and a scripted-model end-to-end run (repair loop, MCP
 attach, undo, JSON mode, bench harness, task record) drives the real binary.
 
+## Authors
+
+- BE AI Research — https://github.com/BE-AI-Research/be-code-redux
+- Shayne G. Brown — helper — https://github.com/BE-AI-Research/be-code-redux
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 BE AI Research.

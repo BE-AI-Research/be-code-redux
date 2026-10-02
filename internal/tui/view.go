@@ -1221,7 +1221,13 @@ func (m *View) headerView() string {
 		}
 		lines[1] += strings.Repeat(" ", gap) + logo
 	}
-	attribution := m.st.Dim.Render("  2026 BE AI Research · https://github.com/BE-AI-Research - " + PublicVersion)
+	// The credit line drops the author's name rather than wrap on a narrow
+	// terminal, which would push every row below it down by one.
+	credit := "  2026 BE AI Research · Shayne G. Brown · https://github.com/BE-AI-Research - " + PublicVersion
+	if lipgloss.Width(credit) > m.width {
+		credit = "  2026 BE AI Research · https://github.com/BE-AI-Research - " + PublicVersion
+	}
+	attribution := m.st.Dim.Render(credit)
 	rule := m.st.Dim.Render(strings.Repeat("- ", m.width/2))
 	return strings.Join(lines, "\n") + "\n" + attribution + "\n" + rule
 }

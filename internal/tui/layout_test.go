@@ -36,7 +36,7 @@ func TestHeaderHiddenOnShortTerminals(t *testing.T) {
 	}
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	v := m.View()
-	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research", "https://github.com/BE-AI-Research - v1.0"} {
+	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research", "Shayne G. Brown", "https://github.com/BE-AI-Research - v1.0"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("header lacks %q on a 40-row terminal:\n%s", want, v)
 		}
@@ -123,5 +123,19 @@ func TestMenuOpensAndEscReturns(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.mode != modeInput {
 		t.Fatalf("Esc did not return to input: %v", m.mode)
+	}
+}
+
+// The credit line never wraps: on a terminal too narrow for the author's
+// name it falls back to the shorter attribution.
+func TestHeaderCreditFitsNarrowTerminals(t *testing.T) {
+	m := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 72, Height: 40})
+	v := m.View()
+	if strings.Contains(v, "Shayne G. Brown") {
+		t.Fatalf("credit with the name shown on a 72-column terminal:\n%s", v)
+	}
+	if !strings.Contains(v, "2026 BE AI Research · https://github.com/BE-AI-Research - v1.0") {
+		t.Fatalf("short credit missing on a 72-column terminal:\n%s", v)
 	}
 }
