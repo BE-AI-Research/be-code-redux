@@ -1046,3 +1046,49 @@ func TestBrowserMyChromeDenyTextDropsTheReadingClause(t *testing.T) {
 		t.Fatalf("other modes: %q", got)
 	}
 }
+
+// The snapshot-error path re-checks too: a navigation landing during a
+// snapshot that then fails must not show the earlier alert's text as if
+// it were the approved page's.
+func TestBrowserMyChromeFailedSnapshotAfterANavigationIsWithheld(t *testing.T) {
+	var log askLog
+	var fb *browsertest.Browser
+	alert := false
+	approve := func(action, detail string) bool {
+		log.approver(true)(action, detail)
+		if alert && strings.HasPrefix(detail, "look at the page") {
+			fb.Emit("S-T101", "Page.javascriptDialogOpening", map[string]any{"type": "alert", "message": "SECRET ALERT"})
+			time.Sleep(20 * time.Millisecond)
+		}
+		return true
+	}
+	_, bt, ps, b := myChromeFixture(t, nil, approve)
+	fb = b
+	do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"})
+	b.Handle("Accessibility.getFullAXTree", func(string, json.RawMessage) (any, error) { return nil, errors.New("boom") })
+	ps.NavigateOn("Accessibility.getFullAXTree", "https://mail.test/inbox")
+	alert = true
+	res := do(bt, map[string]any{"action": "snapshot"})
+	if strings.Contains(res.Content, "SECRET ALERT") || !strings.Contains(res.Content, "the page on mail.test is not shown") ||
+		!strings.Contains(res.Content, "(1 page notes withheld)") {
+		t.Fatalf("result:\n%s", res.Content)
+	}
+}
+
+func TestBrowserMyChromePageURLIsTheHostUnlessAllowed(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := myChromeFixture(t, map[string]string{"localhost": "allow"}, log.approver(true))
+	do(bt, map[string]any{"action": "open", "url": "https://acme.test/login?token=SECRET"})
+	if got := bt.PageURL(); got != "acme.test" {
+		t.Fatalf("watched page: %q", got)
+	}
+	do(bt, map[string]any{"action": "open", "url": "http://localhost:8080/"})
+	if got := bt.PageURL(); got != "http://localhost:8080/" {
+		t.Fatalf("allowed page: %q", got)
+	}
+	_, other, _, _ := browserFixture(t, "https://acme.test/login", nil, nil)
+	do(other, map[string]any{"action": "snapshot"})
+	if got := other.PageURL(); got != "https://acme.test/login" {
+		t.Fatalf("other modes: %q", got)
+	}
+}

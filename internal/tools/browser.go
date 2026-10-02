@@ -398,6 +398,18 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	}
 	pageNotes := page.TakeNotes()
 	doc := page.DocumentID()
+	// stillSeen re-checks, after content was fetched, that the page is
+	// still the one approved: the check above read the URL before the
+	// fetch, and the page may have moved since (a redirect, an SSO bounce,
+	// the person clicking in a handed tab). Always true outside my-Chrome
+	// mode.
+	stillSeen := func() bool {
+		if seen == nil {
+			return true
+		}
+		page.Info(ctx)
+		return page.DocumentID() == doc && t.mayShow(page, *seen)
+	}
 	body := ""
 	if action == "read" && actErr == nil {
 		if text, err := page.Read(ctx); err != nil {
@@ -413,20 +425,17 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			// This can still carry page-controlled notes (an alert's own
 			// text): headed and marked exactly like any other result that
 			// shows something about the page (spec §3.6).
+			if !stillSeen() {
+				return withhold(len(pageNotes))
+			}
 			t.markIfUntrusted(page.URL())
 			notes = append(notes, pageNotes...)
 			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
 		}
 		body = snap
 	}
-	if seen != nil {
-		// The check above read the URL before the content was fetched: the
-		// page may have moved since. Ask again where it is now, and that
-		// the read saw the document that was checked.
-		page.Info(ctx)
-		if page.DocumentID() != doc || !t.mayShow(page, *seen) {
-			return withhold(len(pageNotes))
-		}
+	if !stillSeen() {
+		return withhold(len(pageNotes))
 	}
 	notes = append(notes, pageNotes...)
 	t.session.Record()
@@ -723,8 +732,25 @@ func (t *BrowserTool) Untab(ref string) string {
 }
 
 // PageURL is the address of the tab being driven, as last seen ("" when
-// not connected). It never waits on the browser.
-func (t *BrowserTool) PageURL() string { return t.session.Status().URL }
+// not connected), for working memory — which the model reads back and the
+// task documents keep. In the person's own Chrome it is the host alone
+// unless the host is in the allow tier: a path and a query are page
+// content, and a page withheld from the model (never an allow-tier one)
+// must not reach it this way either. It never waits on the browser.
+func (t *BrowserTool) PageURL() string {
+	u := t.session.Status().URL
+	if u == "" || !t.session.MyChrome() {
+		return u
+	}
+	h := browser.HostOf(u)
+	switch {
+	case h == "":
+		return browser.ShortURL(u)
+	case t.consent.Tier(h) == browser.TierAllow:
+		return u
+	}
+	return h
+}
 
 // Forget revokes one host's session consent.
 func (t *BrowserTool) Forget(host string) bool { return t.consent.Forget(host) }
