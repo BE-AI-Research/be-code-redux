@@ -445,7 +445,8 @@ attached:
   link that went elsewhere — is not shown; it has to ask to read it. `allow` sites never ask; a
   `deny` site is refused outright, reading included; the password-field refusal works as above.
 - **Your tabs stay private.** The model works only in tabs it opened itself (it opens one on its
-  first call) and never reads, lists or acts on any other; its tab list shows only its own.
+  first call) and never reads, lists or acts on any other; its tab list shows only its own, and
+  only the site of each unless that site is in `allow`.
   `/browser tabs` lists all of them to you with a short id each (`[t3]`), `/browser tab <id>`
   hands one over to the model (a number works only while it still names the tab you were shown),
   and `/browser untab <id|all>` takes it back. A handed-over tab's earlier history is reachable

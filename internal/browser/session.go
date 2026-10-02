@@ -114,6 +114,7 @@ type Session struct {
 	// Close, CloseAsync and a second attach call it before taking mu.
 	attachMu     sync.Mutex
 	attachCancel context.CancelFunc
+	attachGen    int
 
 	stMu sync.Mutex // Status reads only this, never mu
 	st   Status
@@ -149,7 +150,13 @@ func (s *Session) resetTargetsLocked() {
 	s.pages, s.info = nil, map[string]targetInfo{}
 	s.opened, s.handed = map[string]bool{}, map[string]bool{}
 	s.handTo, s.curID = "", ""
-	s.handles, s.nextHdl, s.listed = map[string]string{}, 0, nil
+	// handles and nextHdl are kept for the life of the session: target ids
+	// hold for a Chrome run, so t3 names one tab across a reconnect, and a
+	// number is never handed out twice.
+	if s.handles == nil {
+		s.handles = map[string]string{}
+	}
+	s.listed = nil
 	s.evMu.Unlock()
 }
 
@@ -346,8 +353,10 @@ func (s *Session) onEvent(ev Event) {
 func (s *Session) seeLocked(t targetInfo) {
 	if _, ok := s.info[t.TargetID]; !ok {
 		s.pages = append(s.pages, t.TargetID)
-		s.nextHdl++
-		s.handles[t.TargetID] = "t" + strconv.Itoa(s.nextHdl)
+		if _, ok := s.handles[t.TargetID]; !ok {
+			s.nextHdl++
+			s.handles[t.TargetID] = "t" + strconv.Itoa(s.nextHdl)
+		}
 	}
 	s.info[t.TargetID] = t
 }
@@ -488,8 +497,7 @@ func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 	if opened {
 		return "the tab being driven was closed; opened a new one", nil
 	}
-	title, _ := p.Info(ctx)
-	return "the tab being driven was closed; now driving: " + title, nil
+	return "the tab being driven was closed; now driving: " + s.tabName(ctx, p), nil
 }
 
 // AfterAction follows a tab the last action opened (a target=_blank link,
@@ -528,9 +536,9 @@ func (s *Session) AfterAction(ctx context.Context, since time.Time) (string, err
 	s.page = p
 	s.conn.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": pick}, nil)
 	p.settle(ctx)
-	title, _ := p.Info(ctx)
+	name := s.tabName(ctx, p)
 	s.recordLocked()
-	return "switched to the new tab: " + title, nil
+	return "switched to the new tab: " + name, nil
 }
 
 // Tabs lists the open tabs, marking the one being driven.

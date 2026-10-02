@@ -94,7 +94,8 @@ func NewBrowser(cfg BrowserConfig) *BrowserTool {
 		SettleTimeout: time.Duration(cfg.SettleTimeout) * time.Second,
 		ForceHeadless: cfg.ForceHeadless, QuietWindow: cfg.QuietWindow,
 		MyChrome: cfg.UseMyChrome, ChromeDir: dir, ChromeLabel: label, ConsentWait: cfg.ConsentWait,
-		Notify: t.status,
+		Notify:  t.status,
+		TitleOK: func(host string) bool { return consent.Tier(host) == browser.TierAllow },
 	})
 	return t
 }
@@ -269,7 +270,7 @@ func (t *BrowserTool) mineGate(ctx context.Context, page *browser.Page, action s
 	var what, question string
 	disp := func(h, u string) string {
 		if h == "" {
-			return fmt.Sprintf("a page with no address (%s)", u)
+			return fmt.Sprintf("a page with no address (%s)", browser.ShortURL(u))
 		}
 		return h
 	}
@@ -371,17 +372,18 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 		return Result{IsError: true, Content: err.Error()}
 	}
 	notes = append(notes, more...)
-	if seen != nil && !t.mayShow(page, *seen) {
-		// The person's own Chrome, a page nobody approved reading in this
-		// call (a redirect, a link, a stale ref): nothing of it is shown,
-		// not even its alerts' text.
+	// withhold is the result for the person's own Chrome when the page on
+	// screen is not one this call was approved to read (a redirect, a link,
+	// a stale ref, a navigation that landed mid-read): nothing of it is
+	// shown, not even its alerts' text.
+	withhold := func(pageNotes int) Result {
 		t.session.Record()
 		var b strings.Builder
 		b.WriteString(WebHeader + "\n")
 		for _, n := range notes {
 			b.WriteString(n + "\n")
 		}
-		if k := len(page.TakeNotes()); k > 0 {
+		if k := pageNotes + len(page.TakeNotes()); k > 0 {
 			fmt.Fprintf(&b, "(%d page notes withheld)\n", k)
 		}
 		if actErr != nil {
@@ -391,7 +393,11 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			t.hostDisplay(browser.HostOf(page.URL()), page))
 		return Result{Content: t.clip(b.String()), IsError: actErr != nil}
 	}
-	notes = append(notes, page.TakeNotes()...)
+	if seen != nil && !t.mayShow(page, *seen) {
+		return withhold(0)
+	}
+	pageNotes := page.TakeNotes()
+	doc := page.DocumentID()
 	body := ""
 	if action == "read" && actErr == nil {
 		if text, err := page.Read(ctx); err != nil {
@@ -408,10 +414,21 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			// text): headed and marked exactly like any other result that
 			// shows something about the page (spec §3.6).
 			t.markIfUntrusted(page.URL())
+			notes = append(notes, pageNotes...)
 			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
 		}
 		body = snap
 	}
+	if seen != nil {
+		// The check above read the URL before the content was fetched: the
+		// page may have moved since. Ask again where it is now, and that
+		// the read saw the document that was checked.
+		page.Info(ctx)
+		if page.DocumentID() != doc || !t.mayShow(page, *seen) {
+			return withhold(len(pageNotes))
+		}
+	}
+	notes = append(notes, pageNotes...)
 	t.session.Record()
 	t.markIfUntrusted(page.URL())
 	var b strings.Builder
@@ -424,6 +441,15 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	}
 	b.WriteString(body)
 	return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+}
+
+// denied is the deny tier's refusal of an interaction. Outside the
+// person's own Chrome the site can still be read; in it, it cannot.
+func (t *BrowserTool) denied(disp string) string {
+	if t.session.MyChrome() {
+		return fmt.Sprintf("interacting with %s is denied by browser.sites", disp)
+	}
+	return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp)
 }
 
 // mayShow says whether, in my-Chrome mode, the page now on screen may be
@@ -467,7 +493,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		// "always", even an "*": "allow" glob: every interaction on it
 		// asks, watch-style (fix round 1, item 3).
 		if t.consent.Tier(host) == browser.TierDeny {
-			return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
+			return t.denied(disp), host, judgedURL
 		}
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
@@ -487,7 +513,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 	case browser.TierAllow:
 		return "", host, judgedURL
 	case browser.TierDeny:
-		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
+		return t.denied(disp), host, judgedURL
 	case browser.TierWatch:
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
@@ -521,7 +547,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 // still keys on the empty host as usual; this only changes what is shown.
 func (t *BrowserTool) hostDisplay(host string, page *browser.Page) string {
 	if host == "" {
-		return fmt.Sprintf("a page with no address (%s)", page.URL())
+		return fmt.Sprintf("a page with no address (%s)", browser.ShortURL(page.URL()))
 	}
 	return host
 }
@@ -566,11 +592,15 @@ func (t *BrowserTool) tabs(ctx context.Context, notes []string) Result {
 	b.WriteString("tabs:")
 	mine := t.session.MyChrome()
 	for _, tab := range tabs {
-		title := tab.Title
-		if mine && t.consent.Tier(browser.HostOf(tab.URL)) != browser.TierAllow {
-			title = "" // a title is page content; in your own Chrome reading it asks
+		line := strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: ")
+		if h := browser.HostOf(tab.URL); mine && (h == "" || t.consent.Tier(h) != browser.TierAllow) {
+			// A title, a path and a query are page content; in your own
+			// Chrome reading them asks, so only the host is listed.
+			line = h
+			if h == "" {
+				line = "a page with no address (" + browser.ShortURL(tab.URL) + ")"
+			}
 		}
-		line := strings.TrimPrefix(browser.PageLine(title, tab.URL), "page: ")
 		if tab.Current {
 			line += " (current)"
 		}

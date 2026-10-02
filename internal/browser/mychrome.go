@@ -274,8 +274,7 @@ func (s *Session) pickMineLocked(ctx context.Context) (string, error) {
 		if p, err := s.attachLocked(ctx, hand); err == nil {
 			s.page = p
 			s.conn.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": hand}, nil)
-			title, _ := p.Info(ctx)
-			return "now driving the tab you handed over: " + title, nil
+			return "now driving the tab you handed over: " + s.tabName(ctx, p), nil
 		}
 	}
 	s.evMu.Lock()
@@ -310,8 +309,44 @@ func (s *Session) pickMineLocked(ctx context.Context) (string, error) {
 	case created:
 		return "the tab being driven was closed; opened a new one", nil
 	}
-	title, _ := p.Info(ctx)
-	return "the tab being driven was closed; now driving: " + title, nil
+	return "the tab being driven was closed; now driving: " + s.tabName(ctx, p), nil
+}
+
+// tabName is how a note the model reads names a tab: its title, except in
+// my-Chrome mode, where a title is page content and only an allow-tier
+// host's is shown — any other tab is named by its host.
+func (s *Session) tabName(ctx context.Context, p *Page) string {
+	title, u := p.Info(ctx)
+	if !s.connMine {
+		return title
+	}
+	h := HostOf(u)
+	if h != "" && s.opts.TitleOK != nil && s.opts.TitleOK(h) {
+		return title
+	}
+	if h == "" {
+		return "a page with no address (" + ShortURL(u) + ")"
+	}
+	return h
+}
+
+// ShortURL is a URL short enough to name a page with no address: a data:
+// or blob: URL is cut after its media type ("data:text/html…").
+func ShortURL(u string) string {
+	const max = 24
+	cut := len(u)
+	if i := strings.IndexByte(u, ':'); i >= 0 {
+		if j := strings.IndexAny(u[i+1:], ",;"); j >= 0 {
+			cut = i + 1 + j
+		}
+	}
+	if cut > max {
+		cut = max
+	}
+	if cut >= len(u) {
+		return u
+	}
+	return u[:cut] + "…"
 }
 
 // closeOwnTabsLocked closes, best effort and bounded, every tab this
@@ -341,7 +376,11 @@ func (s *Session) closeTabsLocked(ctx context.Context, ids []string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	for _, id := range ids {
-		s.conn.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": id}, nil)
+		if s.conn.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": id}, nil) == nil {
+			s.evMu.Lock()
+			s.destroyed[id] = true
+			s.evMu.Unlock()
+		}
 	}
 }
 
@@ -502,10 +541,21 @@ func (s *Session) AttachMyChromeAsync(report func(string)) {
 	s.cancelAttach()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.attachMu.Lock()
+	s.attachGen++
+	gen := s.attachGen
 	s.attachCancel = cancel
 	s.attachMu.Unlock()
 	go func() {
-		defer cancel()
+		defer func() {
+			// Finished: nothing is left to cancel, unless a newer attach
+			// has taken its place.
+			s.attachMu.Lock()
+			if s.attachGen == gen {
+				s.attachCancel = nil
+			}
+			s.attachMu.Unlock()
+			cancel()
+		}()
 		s.mu.Lock()
 		if s.conn != nil && !s.connMine && ctx.Err() == nil {
 			s.disconnectLocked()

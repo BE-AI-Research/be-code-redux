@@ -483,3 +483,35 @@ func (s *PageScript) emitNav(sid string, t *Target, loader string) {
 		s.B.Emit(sid, "Page.loadEventFired", map[string]any{"timestamp": 1})
 	}()
 }
+
+// NavigateOn makes the next call of method navigate the calling tab to url
+// before it is answered — a redirect, or a click by the person, landing in
+// the middle of a read. The navigation's events reach the client ahead of
+// the reply, as they would from Chrome.
+func (s *PageScript) NavigateOn(method, url string) {
+	b := s.B
+	b.mu.Lock()
+	prev := b.handlers[method]
+	b.mu.Unlock()
+	var once sync.Once
+	b.Handle(method, func(sid string, p json.RawMessage) (any, error) {
+		once.Do(func() {
+			s.mu.Lock()
+			t := s.bySessionLocked(sid)
+			loader := ""
+			if t != nil {
+				t.history = append(t.history[:t.index+1], url)
+				t.index = len(t.history) - 1
+				loader = s.showLocked(t, url)
+			}
+			s.mu.Unlock()
+			if t != nil {
+				s.emitNav(sid, t, loader)
+			}
+		})
+		if prev == nil {
+			return map[string]any{}, nil
+		}
+		return prev(sid, p)
+	})
+}

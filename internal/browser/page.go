@@ -38,6 +38,9 @@ type Options struct {
 	// Notify receives a live notice while a connection waits on the
 	// person ("" clears it). It may be called from a timer goroutine.
 	Notify func(string)
+	// TitleOK says whether a tab's title may appear in a note the model
+	// reads, in my-Chrome mode (the allow tier); nil means never there.
+	TitleOK func(host string) bool
 }
 
 // sensitiveAutocompleteTokens are the autocomplete tokens (spec §3.4,
@@ -1172,6 +1175,14 @@ func startsWithDigit(s string) bool { return s != "" && s[0] >= '0' && s[0] <= '
 // Read returns the page's main text — main, else article, else the body —
 // from an isolated world, so the page's own scripts cannot rewrite what is
 // read. Form field values are never part of innerText.
+// DocumentID is the main frame's current loader id: it changes with every
+// new document, so a read bracketed by two equal values saw one document.
+func (p *Page) DocumentID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.loaderID
+}
+
 func (p *Page) Read(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	frame := p.frameID

@@ -410,7 +410,7 @@ func TestBrowserRefusesWhenABlankPageMovedToAnotherBlankHostWhileWaitingForAppro
 	t.Cleanup(reg.Close)
 	do(bt, map[string]any{"action": "snapshot"})
 	res := do(bt, map[string]any{"action": "press", "key": "Enter"})
-	if !res.IsError || !strings.Contains(res.Content, "the page moved to a page with no address (data:text/html,x) while waiting for approval; take a snapshot and try again") {
+	if !res.IsError || !strings.Contains(res.Content, "the page moved to a page with no address (data:text/html…) while waiting for approval; take a snapshot and try again") {
 		t.Fatalf("result %q", res.Content)
 	}
 	for _, in := range ps.Inputs() {
@@ -911,7 +911,7 @@ func TestBrowserMyChromeUnapprovedPageIsWithheld(t *testing.T) {
 		t.Fatalf("result:\n%s", res.Content)
 	}
 	tabs := do(bt, map[string]any{"action": "tabs"})
-	if strings.Contains(tabs.Content, "Sign in") || !strings.Contains(tabs.Content, "acme.test/login") {
+	if strings.Contains(tabs.Content, "Sign in") || strings.Contains(tabs.Content, "/login") || !strings.Contains(tabs.Content, "1. acme.test") {
 		t.Fatalf("the model's tab list shows a title it was not approved to read:\n%s", tabs.Content)
 	}
 }
@@ -1008,5 +1008,41 @@ func TestBrowserStatusNotesReachTheStatusLineOrStderr(t *testing.T) {
 	bt.status("")
 	if len(got) != 2 || got[0] != "Chrome is asking" || got[1] != "" || buf.Len() != len("Chrome is asking\n") {
 		t.Fatalf("status line %q, stderr %q", got, buf.String())
+	}
+}
+
+// A navigation landing between the approval check and the content fetch
+// (a redirect, an SSO bounce, the person clicking in a handed tab) must
+// not carry the new host's content to the model.
+func TestBrowserMyChromeNavigationMidReadIsWithheld(t *testing.T) {
+	for _, c := range []struct{ action, method string }{
+		{"read", "Runtime.evaluate"}, {"snapshot", "Accessibility.getFullAXTree"},
+	} {
+		t.Run(c.action, func(t *testing.T) {
+			var log askLog
+			_, bt, ps, _ := myChromeFixture(t, nil, log.approver(true))
+			do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"})
+			ps.Lock()
+			ps.ReadText = "SECRET MAIL"
+			ps.Pages["https://mail.test/"] = [2]string{"Inbox — SECRET", browsertest.FormTree}
+			ps.Unlock()
+			ps.NavigateOn(c.method, "https://mail.test/")
+			res := do(bt, map[string]any{"action": c.action})
+			if strings.Contains(res.Content, "SECRET") || strings.Contains(res.Content, "Email") ||
+				!strings.Contains(res.Content, "the page on mail.test is not shown") {
+				t.Fatalf("result:\n%s", res.Content)
+			}
+		})
+	}
+}
+
+func TestBrowserMyChromeDenyTextDropsTheReadingClause(t *testing.T) {
+	_, mine, _, _ := myChromeFixture(t, nil, nil)
+	if got := mine.denied("x.test"); got != "interacting with x.test is denied by browser.sites" {
+		t.Fatalf("my-Chrome: %q", got)
+	}
+	_, other, _, _ := browserFixture(t, "https://acme.test/", nil, nil)
+	if got := other.denied("x.test"); got != "interacting with x.test is denied by browser.sites; you can still read it" {
+		t.Fatalf("other modes: %q", got)
 	}
 }

@@ -205,7 +205,7 @@ func TestMyChromeHandOverIsThePersonsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.targetID != "T1" || len(notes) != 1 || notes[0] != "now driving the tab you handed over: My accounts — Bank" {
+	if p.targetID != "T1" || len(notes) != 1 || notes[0] != "now driving the tab you handed over: bank.test" {
 		t.Fatalf("after hand-over: %s %q", p.targetID, notes)
 	}
 	tabs, _ := s.Tabs(context.Background())
@@ -241,7 +241,7 @@ func TestMyChromeCloseClosesOnlyItsOwnTabsAndNeverTheBrowser(t *testing.T) {
 	fb.Emit("", "Target.targetCreated", map[string]any{"targetInfo": map[string]any{
 		"targetId": "T8", "type": "page", "url": "https://bank.test/statement", "openerId": "T1"}})
 	waitFor(t, func() bool { return len(s.PersonTabs()) == 4 })
-	if note, err := s.AfterAction(context.Background(), since); err != nil || note != "switched to the new tab: Shop" {
+	if note, err := s.AfterAction(context.Background(), since); err != nil || note != "switched to the new tab: shop.test" {
 		t.Fatalf("after action: %q %v", note, err)
 	}
 	s.Close()
@@ -581,5 +581,87 @@ func TestMyChromeReconnectClosesTheLostConnectionsTabs(t *testing.T) {
 	closed := fb.Calls("Target.closeTarget")
 	if len(closed) != 1 || !strings.Contains(string(closed[0].Params), `"`+old+`"`) {
 		t.Fatalf("closed %+v", closed)
+	}
+}
+
+func TestMyChromeHandlesSurviveAReconnect(t *testing.T) {
+	s, fb, ps, _ := myChromeFixture(t)
+	ps.AddTarget("T2", "https://mail.test/", "Mail", browsertest.EmptyTree, "")
+	p, _, err := s.Page(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ours := p.targetID
+	before := map[string]string{}
+	for _, tab := range s.ListForPerson() {
+		before[tab.id] = tab.Handle
+	}
+	fb.Drop()
+	waitFor(t, func() bool {
+		_, n, err := s.Page(context.Background())
+		return err == nil && len(n) > 0
+	})
+	after := s.ListForPerson()
+	seen := map[string]bool{}
+	for _, tab := range after {
+		if h, ok := before[tab.id]; ok && h != tab.Handle {
+			t.Fatalf("%s was %s, now %s", tab.id, h, tab.Handle)
+		}
+		if seen[tab.Handle] {
+			t.Fatalf("handle %s reused: %+v", tab.Handle, after)
+		}
+		seen[tab.Handle] = true
+		if tab.id == ours {
+			t.Fatal("the lost connection's tab is still listed")
+		}
+	}
+	got, err := s.HandOver(before["T2"])
+	if err != nil || got.URL != "https://mail.test/" {
+		t.Fatalf("hand over by an old id: %+v %v", got, err)
+	}
+	if _, err := s.HandOver(before[ours]); err == nil || err.Error() != "no open tab is "+before[ours]+"; /browser tabs lists them" {
+		t.Fatalf("a closed tab's old id: %v", err)
+	}
+}
+
+func TestMyChromeNotesNameTabsByHostUnlessAllowed(t *testing.T) {
+	s, _, _, _ := myChromeFixture(t)
+	s.opts.TitleOK = func(h string) bool { return h == "bank.test" }
+	if _, _, err := s.Page(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.ListForPerson()
+	s.HandOver("t1")
+	if _, notes, _ := s.Page(context.Background()); len(notes) != 1 || notes[0] != "now driving the tab you handed over: My accounts — Bank" {
+		t.Fatalf("allow-tier title: %q", notes)
+	}
+}
+
+func TestShortURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"about:blank":                         "about:blank",
+		"data:text/html,<h1>secret</h1>":      "data:text/html…",
+		"data:text/html;base64,PGgxPg==":      "data:text/html…",
+		"blob:https://evil.test/0b6a-11ee-be": "blob:https://evil.test/0…",
+		"":                                    "",
+	} {
+		if got := ShortURL(in); got != want {
+			t.Errorf("ShortURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestAttachFinishedLeavesNothingToCancel(t *testing.T) {
+	s, _, _, _ := myChromeFixture(t)
+	var reports noticeLog
+	s.AttachMyChromeAsync(reports.add)
+	waitFor(t, func() bool { return len(reports.all()) == 1 })
+	waitFor(t, func() bool {
+		s.attachMu.Lock()
+		defer s.attachMu.Unlock()
+		return s.attachCancel == nil
+	})
+	if s.CancelAttach() {
+		t.Fatal("a finished attach was still cancellable")
 	}
 }
