@@ -234,11 +234,24 @@ func (l fencedLedger) ShowText(id string) (out string) {
 //
 // pinned is always false: the pin is the operator's mark, and the model may
 // not set it (nor change one that is set — SetOwner refuses that).
+//
+// During a scheduled event's turn both are refused outright, never asked:
+// a sub-agent's registry asks through the session's own shortcuts with no
+// deadline, and nobody may be watching. This is the model's path only — a
+// person's /task assign and /task scope call AssignOwner/SetScope directly
+// and are not refused; what they make ready waits for the turn to end
+// (scheduleSubAgentsDispatched holds every dispatch while Tools.Fired).
 func (l fencedLedger) SetOwner(id, owner string, _ bool) error {
+	if l.a.firedTurn() {
+		return errFiredSubAgents
+	}
 	return l.a.AssignOwner(id, owner, false)
 }
 
 func (l fencedLedger) SetScope(id string, scope []string) error {
+	if l.a.firedTurn() {
+		return errFiredSubAgents
+	}
 	return l.a.SetScope(id, scope)
 }
 

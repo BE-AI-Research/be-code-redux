@@ -142,6 +142,9 @@ func runSessionHost(code string) error {
 	// moves the gate and the first schedule to a goroutine of their own; see
 	// runInteractive's own comment on this same call in cmd/root.go.
 	ag.StartSubAgentsAsync()
+	// Scheduled events start under the same rule: their startup prompt is a
+	// shared ask, so it waits on a goroutine of its own for a terminal.
+	ag.StartSchedulesAsync()
 
 	// The hosted case is the one that most needed this. Here stdio is the
 	// host's log file, so a loader notice printed at startup is written

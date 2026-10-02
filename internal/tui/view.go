@@ -328,6 +328,15 @@ func (m *View) agentsCmd(args []string) tea.Cmd {
 	}
 }
 
+// scheduleCmd runs a /schedule subcommand that can raise a prompt off the
+// Update goroutine: Session.Ask may not be waited on under the session lock.
+// It reuses agentsMsg (already rendered locally as a lines slice) since the
+// two need exactly the same handling on the way back.
+func (m *View) scheduleCmd(args string) tea.Cmd {
+	ag := m.ag
+	return func() tea.Msg { return agentsMsg{lines: ui.ScheduleCommandLines(ag, args)} }
+}
+
 // Update runs this terminal's program. It holds the session lock for its
 // whole body, so everything it reaches — the transcript, the run state, the
 // queue, the roster — is read and written under the one lock the agent
@@ -767,7 +776,7 @@ func (m *View) showAsk(a *ask) {
 	switch a.Kind {
 	case askApproval:
 		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
-			a.Action == "browser" || a.Action == "browser_watch" {
+			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -876,9 +885,8 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// The default tier's yes already means "this site for the rest of
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
-		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" {
-			// No "always" to grant: a watched site and a shell command after
-			// an untrusted page ask every time (browser spec §3.2, §3.6).
+		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" {
+			// No "always" to grant (browser spec §3.2, §3.6; schedules spec §3.1).
 			// Falling through would disable file-write previews.
 			decided = false
 		} else if a.Action == "sub_agent_resume" {
@@ -1239,6 +1247,9 @@ func (m *View) bottomLine() string {
 			line += m.st.Accent.Render(fmt.Sprintf(" ⚙ %d lanes", len(subs)))
 		}
 	}
+	if name, at, ok := m.ag.NextSchedule(); ok {
+		line += m.st.Dim.Render(" · next: " + name + " " + at.Format("15:04"))
+	}
 	if n := len(m.clients); n > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {
@@ -1356,6 +1367,10 @@ func (m *View) viewAsk() string {
 	case "shell_after_web":
 		title = "Shell command after reading a web page"
 		hint = "y run it · n deny · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "schedule":
+		title = "Scheduled event"
+		hint = "y approve · n refuse · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	}
 	if m.compact() {
@@ -1598,6 +1613,8 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			// than beside a repaint.
 			sess.mu.Lock()
 			sess.ag.SetSession(store.NewSession(name, model, sess.ag.Tools.Root))
+			// Session.Ask is safe from any goroutine; never under sess.mu.
+			go sess.ag.ConfirmHeldTimers()
 			// The room is the session's too: a fresh session starts with an
 			// empty one, not the last session's chat carried over — and
 			// every attached terminal's own copy follows, or a terminal
@@ -1883,6 +1900,16 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// waits on the browser).
 		m.renderLocalLines(ui.BrowserLines(m.ag.Tools, fields[1:]))
 		return m, nil
+	case "/schedule":
+		rest := strings.TrimPrefix(strings.TrimSpace(text), fields[0])
+		if ui.IsScheduleBlocking(fields[1:]) {
+			// Never inline: add/pause/resume/cancel/run can raise the
+			// "schedule" approval, which Session.Ask must not wait on under
+			// the session lock Update is already holding.
+			return m, m.scheduleCmd(rest)
+		}
+		m.renderLocalLines(ui.ScheduleCommandLines(m.ag, rest))
+		return m, nil
 	case "/agents":
 		var args []string
 		if len(fields) > 1 {
@@ -2028,6 +2055,9 @@ func (m *View) resumeFrom(id string, from int) (tea.Model, tea.Cmd) {
 	sess := m.Session
 	go func() {
 		sess.ag.Resume(s)
+		// The resumed session's timers are held until someone confirms
+		// them; the prompt is a shared ask, so any terminal answers.
+		go sess.ag.ConfirmHeldTimers()
 		sess.mu.Lock()
 		sess.seedResumeLocked(s)
 		sess.finishTurnLocked(nil, nil)

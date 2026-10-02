@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // MCPServer configures one stdio MCP tool server.
@@ -56,6 +57,28 @@ type CoworkConfig struct {
 	// ConsultTimeout bounds one consultation, in seconds. A co-worker whose
 	// backend has stopped answering must not park the primary's run forever.
 	ConsultTimeout int `json:"consult_timeout"`
+}
+
+// SchedulesConfig tunes scheduled events (schedules spec §4.4). Durations
+// are Go duration strings; an unusable one falls back to its default.
+type SchedulesConfig struct {
+	Enabled            bool   `json:"enabled"`
+	MinInterval        string `json:"min_interval"`
+	MaxActive          int    `json:"max_active"`
+	AskTimeout         string `json:"ask_timeout"`
+	MaxRuntime         string `json:"max_runtime"`
+	PauseAfterFailures int    `json:"pause_after_failures"`
+}
+
+// Durations parses the three duration keys, each falling back to its default.
+func (s SchedulesConfig) Durations() (minInterval, askTimeout, maxRuntime time.Duration) {
+	parse := func(v string, def time.Duration) time.Duration {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		return def
+	}
+	return parse(s.MinInterval, 5*time.Minute), parse(s.AskTimeout, 10*time.Minute), parse(s.MaxRuntime, 30*time.Minute)
 }
 
 // EngineConfig tunes the working-memory engine (internal/engine).
@@ -285,6 +308,10 @@ type Config struct {
 	// (docs/superpowers/specs/2026-09-25-browser-design.md). Off by default.
 	Browser BrowserConfig `json:"browser"`
 
+	// Schedules tunes scheduled events: timed requests a running session
+	// queues for the model under an allowance a person approved.
+	Schedules SchedulesConfig `json:"schedules"`
+
 	// KeepAlive is how long the backend should keep the model resident after
 	// each request (Ollama keep_alive; Go duration, "0" disables). Refreshed
 	// after every request so idle expiry does not evict the model between
@@ -394,6 +421,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10},
+		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",
 		CompactWithModel: true,

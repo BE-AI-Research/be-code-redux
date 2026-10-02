@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -43,6 +44,9 @@ type subAgentGlyph struct{ Name, At string }
 // from either side — nothing under mu may block on a channel that the Update
 // goroutine is the one draining.
 type Session struct {
+	// fireHandled counts finished onScheduleFire callbacks (tests wait on it).
+	fireHandled atomic.Int64
+
 	mu sync.Mutex // guards every field below except viewsMu/views and the test seams
 
 	cfg      *config.Config
@@ -307,6 +311,7 @@ func wireEvents(s *Session) {
 		OnSubAgentStart:   s.onSubAgentStart,
 		OnSubAgentAsk:     s.onSubAgentAsk,
 		OnSubAgentEnd:     s.onSubAgentEnd,
+		OnScheduleFire:    s.onScheduleFire,
 	}
 	ag.Tools.OnStatus = s.setStatus
 }
@@ -1029,6 +1034,9 @@ func (s *Session) finishTurnLocked(rep *agent.ReviewedReport, err error) {
 		// model call; the typist still sees their line land, as they would
 		// have on any other path.
 		for _, it := range s.ag.PeekItems() {
+			if it.Scheduled != "" {
+				continue // not delivered into the turn; it waits for one of its own
+			}
 			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
 		}
 		return
@@ -1052,7 +1060,7 @@ func (s *Session) startQueuedLocked() {
 	if s.running {
 		return
 	}
-	left := s.ag.DrainItems()
+	left := s.ag.DrainForTurn()
 	if len(left) == 0 {
 		return
 	}
@@ -1063,10 +1071,37 @@ func (s *Session) startQueuedLocked() {
 	}
 	texts := make([]string, 0, len(left))
 	for _, it := range left {
-		s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		if it.Scheduled != "" {
+			s.appendEntryLocked(entry{Kind: entrySchedule, Label: it.ScheduleName, Text: it.Text})
+		} else {
+			s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(it.From), Text: it.Text})
+		}
 		texts = append(texts, it.Text)
 	}
 	s.startTurnLocked(strings.Join(texts, "\n"))
+}
+
+// onScheduleFire is Events.OnScheduleFire: a due event was queued. An idle
+// session starts its turn now; a busy one picks it up when its run ends
+// (finishTurnLocked's leftover-queue drain), never mid-run.
+//
+// It hops to its own goroutine before taking s.mu: /schedule run (the first
+// UI path that can reach fireNow, and so this callback, synchronously) runs
+// from a View's Update, which already holds the session lock — taking it
+// again here, inline, would deadlock every attached terminal. Handing the
+// lock-take to a fresh goroutine is safe because startQueuedLocked is
+// idempotent (it checks s.running) and this callback owns no state of its
+// own to lose by running later.
+//
+// fireHandled counts the callbacks that have finished, so a test can wait
+// for one instead of sleeping and asserting that nothing happened.
+func (s *Session) onScheduleFire(name string) {
+	go func() {
+		defer s.fireHandled.Add(1)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.startQueuedLocked()
+	}()
 }
 
 // finishInit ends the /init flow on its own goroutine, the way finishTurn

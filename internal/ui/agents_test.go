@@ -225,3 +225,19 @@ func TestIsTaskVerbAgreesWithTaskVerb(t *testing.T) {
 		}
 	}
 }
+
+// /agents start during a scheduled event's turn is held, and says so; a
+// person's /task assign is not refused there (only the model's is).
+func TestAgentsStartDuringFiredTurnIsHeld(t *testing.T) {
+	r, id := withAssignedSubAgent(t)
+	r.Agent.Tools.SetAllowance(nil, time.Minute)
+	defer r.Agent.Tools.ClearAllowance()
+	got := strings.Join(AgentLines(r.Agent, []string{"start"}), "\n")
+	if !strings.Contains(got, "a scheduled event is running; any waiting sub-agent work starts when it ends") {
+		t.Fatalf("/agents start during a fired turn: %q", got)
+	}
+	lines, _ := TaskVerb(r.Agent, []string{"assign", id, "main"})
+	if strings.Contains(strings.Join(lines, "\n"), "scheduled event") {
+		t.Fatalf("a person's /task assign was refused: %v", lines)
+	}
+}

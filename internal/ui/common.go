@@ -84,6 +84,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
 	{"/browser", "the browser: status, /browser forget <host>, /browser close", true},
 	{"/task", "task record: /task [show <id>|open|clear|assign <id> <owner>|scope <id> <paths>|reply <id> <text>]", true},
+	{"/schedule", "scheduled events: /schedule [add <name> <when> -- <instruction> [allow …]|show|pause|resume|cancel|run <name>]", true},
 	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},
 	{"/queue", "list, edit or drop messages queued for the agent: /queue [edit N|drop N]", true},
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
@@ -125,6 +126,9 @@ var busySafe = map[string]bool{
 	"/browser": true,
 	// Listings and edits of the store; the agent reads it under its own lock.
 	"/task": true, "/notes": true,
+	// Scheduled events live in their own store; a fired one queues, never
+	// interrupts, so managing them mid-run is safe.
+	"/schedule": true,
 	// The room is never the model's own history: entering it, posting to it
 	// or leaving it never touches the turn in progress.
 	"/chat": true, "/back": true,

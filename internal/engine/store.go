@@ -1638,6 +1638,18 @@ func touchedUnder(n *Node) []string {
 // was already written).
 const InterruptedNote = "interrupted "
 
+// NodeStatus is one node's status, and false when there is no such node:
+// the read a caller needs before SetStatus, which would reopen a closed one.
+func (s *Store) NodeStatus(id string) (Status, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.tree.Find(id)
+	if n == nil {
+		return "", false
+	}
+	return n.Status, true
+}
+
 // DoingUnderID is the id of the doing node inside a dispatched subtree,
 // or "" — the bottom line's "⚙ big 3.2.2".
 func (s *Store) DoingUnderID(rootID string) string {
@@ -2126,7 +2138,10 @@ func firstLine(text string, max int) string {
 // to do. A plan the model is part-way through keeps its own task line, so
 // the block does not start describing a side question as the task.
 func (s *Store) StartTask(text string) {
-	line := firstLine(text, 200)
+	// Collapsed exactly as Tree.Add does, so a retitle can never carry a
+	// field into the document and the in-memory text equals its parsed
+	// form (state.Times restores by matching text).
+	line := oneSpaced(firstLine(text, 200))
 	if line == "" {
 		return
 	}

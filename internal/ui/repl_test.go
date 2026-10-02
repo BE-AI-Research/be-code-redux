@@ -17,6 +17,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -729,5 +730,150 @@ func TestNextLineStillReadsTypedLines(t *testing.T) {
 	ev, ok := r.nextLine()
 	if !ok || ev.wake || ev.line != "hello" {
 		t.Fatalf("typed line: %+v %v", ev, ok)
+	}
+}
+
+// A plain-mode /resume confirms the resumed session's timers on the REPL
+// goroutine itself: the answer is taken off r.lines exactly once, by that
+// prompt, and never by a second reader racing the main loop.
+func TestResumeConfirmsHeldTimersOnTheREPLGoroutine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	r := newTestREPL(t)
+	r.Agent.Tools.Approve = r.approve
+	t0 := time.Date(2026, 9, 26, 10, 0, 0, 0, time.Local)
+	clock := schedule.NewFakeClock(t0)
+	r.Agent.SetSession(store.NewSession("null", "m", r.Agent.Tools.Root))
+	r.Agent.EnableSchedules(clock)
+	t.Cleanup(r.Agent.StopSchedules)
+	r.Agent.StartSchedules() // nothing active: no prompt, loop running
+
+	tm := schedule.Schedule{ID: schedule.NewID(), Name: "t", When: "in 1h", Instruction: "x",
+		State: schedule.Active, CreatedBy: "person", Created: t0}
+	saved := store.NewSession("null", "m", r.Agent.Tools.Root)
+	saved.ID = "20260926-100000-000"
+	saved.Timers = []schedule.Schedule{tm}
+	if err := saved.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	r.lines = make(chan lineEvent, 2)
+	r.lines <- lineEvent{line: "n"}
+	r.lines <- lineEvent{line: "the next request"}
+	out := capture(t, func() { r.command(context.Background(), "/resume "+saved.ResumeCode()) })
+	if !strings.Contains(out, "This session's timers will run") {
+		t.Fatalf("the hold prompt was not shown:\n%s", out)
+	}
+	if len(r.lines) != 1 {
+		t.Fatalf("the answer is read exactly once: %d lines left", len(r.lines))
+	}
+	if ev := <-r.lines; ev.line != "the next request" {
+		t.Fatalf("the person's next line is left for the main loop: %q", ev.line)
+	}
+	if !strings.Contains(strings.Join(r.Agent.ScheduleLines(), "\n"), "paused") {
+		t.Fatalf("no pauses the timer:\n%s", strings.Join(r.Agent.ScheduleLines(), "\n"))
+	}
+}
+
+func TestREPLScheduledTurnEchoesSchedule(t *testing.T) {
+	r := newTestREPL(t)
+	r.Agent.EnqueueScheduled("id1", "nightly", "[Scheduled event \"nightly\" — daily 09:00, set by you 2026-09-26]\nrun tests")
+	out := capture(t, func() {
+		if !r.startQueuedTurn(context.Background()) {
+			t.Error("the scheduled event did not start a turn")
+		}
+	})
+	if !strings.Contains(out, "⏰ nightly") || strings.Contains(out, "you>") {
+		t.Fatalf("echo:\n%s", out)
+	}
+}
+
+func TestREPLScheduleApprovalHasNoAlways(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{line: "a"}
+	beforeShell, beforeWrites := r.Cfg.AutoApproveShell, r.Cfg.ApproveFileWrites
+	var ok bool
+	out := capture(t, func() { ok = r.approveCtx(context.Background(), "schedule", "Add this schedule?") })
+	if ok {
+		t.Fatal(`"a" is not an answer to a schedule prompt`)
+	}
+	if r.Cfg.AutoApproveShell != beforeShell || r.Cfg.ApproveFileWrites != beforeWrites {
+		t.Fatal(`"a" changed a standing approval`)
+	}
+	if !strings.Contains(out, "schedule:") {
+		t.Fatalf("header:\n%s", out)
+	}
+}
+
+// A scheduled event queued while a run fails stays queued: the failed run
+// must not drain (and so arm and lose) it.
+func TestREPLFailedRunLeavesScheduledEventQueued(t *testing.T) {
+	r := newTestREPL(t)
+	r.Agent.EnqueueScheduled("id1", "nightly", "scheduled")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	capture(t, func() { r.turn(ctx, "typed", true) })
+	if r.Agent.Pending() != 1 {
+		t.Fatalf("the scheduled event was drained by a failed run: pending=%d", r.Agent.Pending())
+	}
+}
+
+// TestFiredTurnIgnoresSessionAutoApprovalsREPL is final review C1's plain
+// mode half: AutoApproveShell and accept-all do not answer a question a
+// fired turn raised; the person is asked.
+func TestFiredTurnIgnoresSessionAutoApprovalsREPL(t *testing.T) {
+	r := newTestREPL(t)
+	r.Cfg.AutoApproveShell = true
+	r.Cfg.ApproveFileWrites = false
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+	r.Agent.Tools.SetAllowance(nil, time.Minute)
+	defer r.Agent.Tools.ClearAllowance()
+	r.lines = make(chan lineEvent, 2)
+	r.lines <- lineEvent{line: "n"}
+	r.lines <- lineEvent{line: "n"}
+	var shell, write tools.Result
+	capture(t, func() {
+		shell = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "1", Name: "shell", Arguments: `{"command":"echo hi"}`})
+		write = r.Agent.Tools.Dispatch(context.Background(), provider.ToolCall{ID: "2", Name: "write_file", Arguments: `{"path":"x.txt","content":"x"}`})
+	})
+	if !shell.IsError || !write.IsError || len(r.lines) != 0 {
+		t.Fatalf("both asked and refused: shell=%+v write=%+v unread=%d", shell, write, len(r.lines))
+	}
+	// Outside a fired turn the shortcut still applies.
+	r.Agent.Tools.ClearAllowance()
+	var ok bool
+	capture(t, func() { ok = r.approve("shell", "echo hi") })
+	if !ok {
+		t.Fatal("AutoApproveShell still answers an ordinary question")
+	}
+}
+
+// TestWithdrawnPromptIsNotAnAnswerREPL is final review I2's plain-mode
+// half: a prompt that ends on EOF or a cancelled context is withdrawn, an
+// answered "n" is not.
+func TestWithdrawnPromptIsNotAnAnswerREPL(t *testing.T) {
+	for _, c := range []struct {
+		ev       lineEvent
+		withdraw bool
+	}{{lineEvent{err: io.EOF}, true}, {lineEvent{line: "n"}, false}, {lineEvent{line: ""}, false}} {
+		r := newTestREPL(t)
+		r.lines = make(chan lineEvent, 1)
+		r.lines <- c.ev
+		ctx, out := tools.WithAskOutcome(context.Background())
+		var ok bool
+		capture(t, func() { ok = r.approveCtx(ctx, "schedule", "These scheduled events will run") })
+		if ok || out.Withdrawn() != c.withdraw {
+			t.Fatalf("%+v: ok=%v withdrawn=%v", c.ev, ok, out.Withdrawn())
+		}
+	}
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx, out := tools.WithAskOutcome(ctx)
+	capture(t, func() { r.approveCtx(ctx, "schedule", "x") })
+	if !out.Withdrawn() {
+		t.Fatal("a cancelled question is withdrawn")
 	}
 }

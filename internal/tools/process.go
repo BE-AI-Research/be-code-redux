@@ -171,7 +171,7 @@ func (t *processTool) Schema() json.RawMessage {
 		"tail":{"type":"integer","description":"Bytes of log tail (default 4096)"}},
 		"required":["action"]}`)
 }
-func (t *processTool) Run(_ context.Context, args map[string]any) Result {
+func (t *processTool) Run(ctx context.Context, args map[string]any) Result {
 	switch argString(args, "action") {
 	case "start":
 		command := strings.TrimSpace(argString(args, "command", "cmd"))
@@ -190,13 +190,15 @@ func (t *processTool) Run(_ context.Context, args map[string]any) Result {
 		case class == cmdDenied:
 			return Result{IsError: true, Content: "this command matches the deny list"}
 		case t.r.UntrustedWeb():
-			if t.r.Approve == nil || !t.r.Approve("shell_after_web", command+"  (background)") {
+			if !t.r.ask(ctx, "shell_after_web", command+"  (background)", false) {
 				return Result{IsError: true, Content: "shell is not auto-approved after reading an untrusted web page in this request, and this command was not approved; say what you wanted to run and why"}
 			}
 		case class == cmdAllowed:
 			// pre-approved by allowlist; no prompt
+		case t.r.allowShell(command):
+			// covered by the scheduled event's allowance (schedules spec §2.3)
 		default:
-			if t.r.Approve != nil && !t.r.Approve("shell", command+"  (background)") {
+			if !t.r.ask(ctx, "shell", command+"  (background)", true) {
 				return Result{IsError: true, Content: "user denied this background command"}
 			}
 		}

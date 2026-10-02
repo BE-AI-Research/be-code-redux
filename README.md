@@ -2,7 +2,7 @@
 
 **Offline-first agentic coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.1.5-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.2.0-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -37,8 +37,8 @@ what the model has read and decided lives in your project as Markdown you can ed
 [Working memory](#working-memory) · [Task record](#task-record) · [Project memory](#project-memory)
 
 **Integrations** — [VS Code](#vs-code) · [Visual Studio](#visual-studio) · [Browser](#browser) ·
-[MCP servers](#mcp-servers) · [Web search](#web-search-optional-google-programmable-search) ·
-[Scripting](#scripting)
+[Scheduled events](#scheduled-events) · [MCP servers](#mcp-servers) ·
+[Web search](#web-search-optional-google-programmable-search) · [Scripting](#scripting)
 
 **Reference** — [Commands](#command-reference) · [Config](#config-reference) · [Safety model](#safety-model) ·
 [Shell safety](#shell-safety--background-processes) · [Layout](#layout) ·
@@ -423,6 +423,63 @@ to.
 `/browser` shows what is connected, the tab being driven and the sites allowed this session;
 `/browser forget <host>` revokes one; `/browser close` disconnects. `be-code doctor` reports what
 answers at the address, or what a launch would use.
+
+## Scheduled events
+
+A running session can wake the model later to do a pre-decided piece of work — a follow-up
+("check the build in 20 minutes") or recurring upkeep ("every weekday at 09:00, pull, run the
+tests and summarise what broke"). Schedules run only while a session for the workspace is open;
+there is no background daemon.
+
+- **You** add one with `/schedule add nightly weekdays 09:00 -- pull, run the tests and
+  summarise allow shell: git pull; shell: go test ./...`
+- **The model** can ask for one with its `schedule` tool; you approve it in one prompt that
+  shows the time, the instruction and everything it may do without asking. It cannot create or
+  resume a schedule while a web page read this request is still untrusted (`shell_after_web`);
+  it has to say what it wanted and let you add it with `/schedule add`. Nor can it create,
+  resume, or pause one of yours while a scheduled event is running.
+- **Times:** `in 20m`, `at 09:00`, `at 2026-09-27 09:00`, `every 30m`, `daily 09:00`,
+  `weekdays 09:00`, `mon,thu 14:30`, or five-field cron. Local time; a spring-forward gap runs
+  once at the gap's end rather than twice or not at all.
+- **Allowance.** `shell: <glob>`, `write: <path>`, `browser: <host>`. Inside it the event runs
+  unasked; anything else — including a write reached through a symlink that a `write:` grant
+  does not itself cover — is asked in the terminal, on the same prompt a file write always uses
+  (never as a VS Code diff, even with the editor bridge attached), and a question nobody answers
+  within `schedules.ask_timeout` is withdrawn and refused. The shortcuts you gave the session
+  while watching it — an earlier `a` on a prompt, `-y`, accepting all file changes, a site or
+  co-worker allowed for the session — do not apply to a fired event; only its allowance and
+  your standing config (`shell_allow`, the browser's `allow` sites) do, and an online co-worker
+  is not consulted during one. Nor does a fired event assign or start sub-agents: the model's
+  `task` owner and scope changes are refused for its duration, and sub-agent work that becomes
+  ready (or that you assign, or `/agents start`) waits until the event's turn ends; sub-agents
+  already running carry on. No grant ever covers `.be-code/schedules.md` or anything under
+  `~/.be-code`. The deny list, the browser's watch tier and the shell-after-a-web-page rule still
+  apply inside the allowance. `-y` never approves a schedule, and the approval has no "always".
+- **Checked again when it fires, not just when it is queued.** A fired event only runs if its
+  schedule is still active and unchanged from what was approved; one edited, paused or cancelled
+  after it queued does not run (`scheduled event "<name>" was not run: <reason>`), and an edit
+  found at fire time pauses the schedule instead ("changed since approved").
+- **Where they live:** recurring schedules in `.be-code/schedules.md` (readable, editable — a
+  schedule whose time, instruction, task, allowance or limits were edited is asked about again);
+  one-off timers in the session. Pausing a schedule (by hand, from the startup prompt, or after
+  repeated failures) withdraws its approval: only `/schedule resume` brings it back, and writing
+  `state: active` into the file just gets it paused again at its time.
+- **Two sessions on one workspace** run each occurrence once: the first to start it claims it,
+  and the other reports `it already ran in another session`.
+- **When a session starts** with saved schedules, one prompt lists them; `no` pauses them all;
+  leaving it unanswered (quitting with it open) changes nothing, but none of them runs in that
+  session unless you `/schedule resume` it — the next session asks again. A
+  schedule past `schedules.max_active` or running more often than `schedules.min_interval` stays
+  paused even after `yes`, with a notice saying why. Timers a session picker or `/resume` loads
+  into an already-running session are held the same way, until you confirm them in a prompt of
+  their own.
+- A fired event is queued like a message and runs as its own turn (`⏰ name`), never interrupting
+  a turn in progress; what you type while it runs waits for it to finish and then runs as a turn
+  of its own. The loop wakes at least once a minute, so a laptop that slept through an event's
+  time runs it within a minute of waking.
+- **Dropping a queued event** from the queue popup skips that occurrence: a one-off is marked
+  done ("dropped from the queue"); a recurring one simply fires again at its next time.
+- `/schedule` lists them; `/schedule show|pause|resume|cancel|run <name>` manages them.
 
 ## Web search (optional, Google Programmable Search)
 
@@ -1122,6 +1179,13 @@ hand; `/config` prints what the running session actually resolved.
   `browser.allow_remote` (false) — permit an address off this machine; `browser.sites` ({}) —
   host glob → `allow` | `watch` | `deny`; `browser.snapshot_chars` (12000) — the snapshot
   budget; `browser.settle_timeout` (10, seconds) — how long to wait for a page to settle
+- `schedules.enabled` (true) — scheduled events: `/schedule` and the model's `schedule` tool;
+  `schedules.min_interval` ("5m") — a recurring schedule may not run more often than this;
+  `schedules.max_active` (20) — active schedules and timers across the project and the session;
+  `schedules.ask_timeout` ("10m") — how long a fired event's prompt waits for a person before it
+  is withdrawn and refused; `schedules.max_runtime` ("30m") — a fired event's turn is cancelled
+  after this long; `schedules.pause_after_failures` (3) — a recurring schedule that fails this
+  many runs in a row pauses itself; see "Scheduled events"
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an
@@ -1173,11 +1237,13 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.1.5 (in development)** — a browser the model can drive, with per-site consent, and a UserID prompt when a terminal attaches; the
-general-purpose task engine follows before release.
+**v1.2.0 (in development)** — scheduled events: a running session can wake the model later, for
+a one-off follow-up or a project's recurring upkeep, under an allowance approved up front.
 
 Recent releases:
 
+- **v1.1.5** — a browser the model can drive, with per-site consent, and a UserID prompt when a
+  terminal attaches.
 - **v1.1.1** — a sub-agent no longer resumes behind your back: if a previous session
   left work assigned, BE-Code asks once at startup, names every pending step with its owner and
   scope, and dispatches nothing until you answer. `/agents start` runs what a decline left

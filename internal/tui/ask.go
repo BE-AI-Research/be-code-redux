@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brown-enterprises/be-code/internal/review"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // An ask is one question the session puts to every attached terminal at
@@ -55,6 +56,10 @@ type askAnswer struct {
 	// already on screen. It is not a verdict, and a caller that reads OK as
 	// a decision must not treat it as one silently.
 	Refused bool
+	// Withdrawn says the question closed with nobody answering it: the
+	// session quit, its asker's context ended, or it was cancelled. Also
+	// not a verdict (see tools.AskOutcome).
+	Withdrawn bool
 }
 
 // askMsg is broadcast when an ask opens, askResolvedMsg when it is answered
@@ -98,7 +103,7 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 			s.ask = nil
 			s.releaseAskLocked()
 			select {
-			case old.reply <- askAnswer{}:
+			case old.reply <- askAnswer{Withdrawn: true}:
 			default:
 			}
 			s.broadcast(askResolvedMsg{gen: old.Gen, by: "withdrawn", from: noClient})
@@ -148,7 +153,7 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 		case ans := <-a.reply:
 			return ans
 		default:
-			return askAnswer{}
+			return askAnswer{Withdrawn: true}
 		}
 	case <-ctx.Done():
 		// A deadline means nobody answered, and the people looking at the
@@ -167,7 +172,7 @@ func (s *Session) Ask(ctx context.Context, a *ask) askAnswer {
 		case ans := <-a.reply:
 			return ans
 		default:
-			return askAnswer{}
+			return askAnswer{Withdrawn: true}
 		}
 	}
 }
@@ -237,7 +242,7 @@ func (s *Session) CancelAsk(gen int, by string) {
 	s.ask = nil
 	s.releaseAskLocked()
 	select {
-	case a.reply <- askAnswer{}:
+	case a.reply <- askAnswer{Withdrawn: true}:
 	default:
 	}
 	s.broadcast(askResolvedMsg{gen: gen, by: by, from: noClient})
@@ -294,20 +299,32 @@ func (s *Session) approveFromAgent(action, detail string) bool {
 // already withdraws on ctx (CancelAsk, broadcast to every view), so the
 // prompt closes everywhere rather than outliving the goroutine waiting for
 // it. See tools.ApproveCtxFunc.
+//
+// A question a scheduled event's turn raised (tools.FiredAsk) never takes
+// the session-level shortcuts — "a", -y, accept-all were given by someone
+// watching, and nobody is watching a fired turn (final review C1). A
+// question that closes with nobody answering is marked withdrawn on ctx
+// (tools.MarkWithdrawn) so an asker that must tell that from a "no" can.
 func (s *Session) approveFromAgentCtx(ctx context.Context, action, detail string) bool {
-	if action == "shell" && s.cfg.AutoApproveShell {
-		return true
-	}
-	if action == "file_write" && !s.cfg.ApproveFileWrites {
-		return true
-	}
-	if action == "browser" && s.cfg.AutoApproveBrowser {
-		return true
-	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return s.Ask(ctx, &ask{Kind: askApproval, Action: action, Detail: detail}).OK
+	if !tools.FiredAsk(ctx) {
+		if action == "shell" && s.cfg.AutoApproveShell {
+			return true
+		}
+		if action == "file_write" && !s.cfg.ApproveFileWrites {
+			return true
+		}
+		if action == "browser" && s.cfg.AutoApproveBrowser {
+			return true
+		}
+	}
+	ans := s.Ask(ctx, &ask{Kind: askApproval, Action: action, Detail: detail})
+	if !ans.OK && (ans.Withdrawn || ans.Refused) {
+		tools.MarkWithdrawn(ctx)
+	}
+	return ans.OK
 }
 
 // noAnswerNote is what every terminal is shown when a question is withdrawn

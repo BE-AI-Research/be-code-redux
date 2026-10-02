@@ -105,6 +105,9 @@ func AgentLines(ag *agent.Agent, args []string) []string {
 	}
 	if len(args) == 1 && args[0] == "start" {
 		started := ag.AllowSubAgentStart()
+		if len(started) == 0 && ag.SubAgentsHeld() {
+			return []string{"a scheduled event is running; any waiting sub-agent work starts when it ends"}
+		}
 		if len(started) == 0 {
 			return []string{"no sub-agent work is waiting"}
 		}

@@ -31,6 +31,11 @@ type InboxItem struct {
 	// question. A drain holding one is not a person's request, so it never
 	// clears the untrusted-web flag (browser spec §3.6).
 	Harness bool
+	// Scheduled is the ID of the schedule that queued this line (schedules
+	// spec §2.1); empty for everything else. Such a line is never delivered
+	// into a running turn and always runs as a turn of its own.
+	Scheduled    string
+	ScheduleName string
 }
 
 // Enqueue queues a user message typed at the local terminal.
@@ -96,16 +101,132 @@ func (a *Agent) Pending() int {
 	return len(a.inbox.items)
 }
 
-// DrainInbox removes and returns every queued message.
+// DrainInbox removes and returns every queued message except scheduled
+// events (DrainItems) — the mid-run delivery path.
 func (a *Agent) DrainInbox() []string { return texts(a.DrainItems()) }
 
-// DrainItems removes and returns every queued message with its sender.
+// DrainItems removes and returns every queued message, with its sender,
+// except scheduled events, which wait for a turn of their own
+// (DrainForTurn).
+//
+// It clears any arm DrainForTurn left behind, so a stale arm can never match
+// a later request that happens to carry the same text. An arm a fired turn
+// has already taken is left alone (runFired clears it after begin), since
+// deliverInbox drains mid-run.
 func (a *Agent) DrainItems() []InboxItem {
+	a.clearUntakenArm()
 	a.inbox.mu.Lock()
 	defer a.inbox.mu.Unlock()
-	out := a.inbox.items
-	a.inbox.items = nil
+	var out, keep []InboxItem
+	for _, it := range a.inbox.items {
+		if it.Scheduled != "" {
+			keep = append(keep, it)
+		} else {
+			out = append(out, it)
+		}
+	}
+	a.inbox.items = keep
 	return out
+}
+
+// DrainForTurn is the leftover-queue rule's drain: every line that is not a
+// scheduled event, as before — or, when there are none, exactly one
+// scheduled event, armed so that the RunFull it starts runs under that
+// schedule's allowance. A person's words and a scheduled event never share
+// a turn, so exactly one set of rules governs each (schedules spec §2.1).
+func (a *Agent) DrainForTurn() []InboxItem {
+	if out := a.DrainItems(); len(out) > 0 {
+		return out
+	}
+	a.inbox.mu.Lock()
+	if len(a.inbox.items) == 0 {
+		a.inbox.mu.Unlock()
+		return nil
+	}
+	it := a.inbox.items[0]
+	a.inbox.items = a.inbox.items[1:]
+	// Armed before the inbox lock is released (inbox.mu, then fireMu): a
+	// scheduler pass that reads the queue and then the arm sees the event
+	// in one place or the other, never in neither — which would read as a
+	// person having dropped it.
+	a.fireMu.Lock()
+	a.armed = &firing{id: it.Scheduled, name: it.ScheduleName, text: it.Text}
+	a.fireMu.Unlock()
+	a.inbox.mu.Unlock()
+	return []InboxItem{it}
+}
+
+// EnqueueScheduled queues a due event (harness-written: never a person's).
+// Exported for the UIs' tests; production code reaches it through fireNow.
+func (a *Agent) EnqueueScheduled(id, name, text string) {
+	a.inbox.mu.Lock()
+	a.inbox.items = append(a.inbox.items, InboxItem{Text: text, Harness: true, Scheduled: id, ScheduleName: name})
+	a.inbox.mu.Unlock()
+}
+
+// scheduledQueued is the set of schedule IDs with an event still waiting.
+func (a *Agent) scheduledQueued() map[string]bool {
+	a.inbox.mu.Lock()
+	defer a.inbox.mu.Unlock()
+	m := map[string]bool{}
+	for _, it := range a.inbox.items {
+		if it.Scheduled != "" {
+			m[it.Scheduled] = true
+		}
+	}
+	return m
+}
+
+// firing is the arm DrainForTurn sets for the scheduled event it handed
+// out. taken marks an arm RunFull has claimed: it stays in place (so the
+// scheduler still counts the event as waiting) until runFired has called
+// begin, which is what closes the drain→begin window against a re-queue.
+type firing struct {
+	id, name, text string
+	taken          bool
+}
+
+// takeFiring claims the arm DrainForTurn set, returning it only when this
+// request is the text it armed; any other request clears it. A stale arm
+// never leaks into a later request.
+func (a *Agent) takeFiring(input string) *firing {
+	a.fireMu.Lock()
+	defer a.fireMu.Unlock()
+	f := a.armed
+	if f == nil || f.taken || strings.TrimSpace(f.text) != strings.TrimSpace(input) {
+		a.armed = nil
+		return nil
+	}
+	f.taken = true
+	return f
+}
+
+// releaseFiring clears f's arm once begin has decided about it.
+func (a *Agent) releaseFiring(f *firing) {
+	a.fireMu.Lock()
+	if a.armed == f {
+		a.armed = nil
+	}
+	a.fireMu.Unlock()
+}
+
+// clearUntakenArm drops an arm nobody has claimed.
+func (a *Agent) clearUntakenArm() {
+	a.fireMu.Lock()
+	if a.armed != nil && !a.armed.taken {
+		a.armed = nil
+	}
+	a.fireMu.Unlock()
+}
+
+// armedID is the schedule whose event is armed or in flight to begin, or "".
+func (a *Agent) armedID() string {
+	a.fireMu.Lock()
+	defer a.fireMu.Unlock()
+	if a.armed == nil {
+		return ""
+	}
+	return a.armed.id
 }
 
 // Peek returns a copy of the queued messages in delivery order.
@@ -186,8 +307,12 @@ func (a *Agent) Held() bool {
 
 // deliverInbox appends queued messages to the history as user turns,
 // tagged so the model knows they arrived mid-task.
+//
+// Nothing is delivered into a scheduled event's turn (final review I1): a
+// person's words and a scheduled event never share a turn, so one set of
+// rules governs each — the lines wait for the leftover drain after it.
 func (a *Agent) deliverInbox() {
-	if a.Held() {
+	if a.Held() || a.Tools.Fired() {
 		return
 	}
 	msgs := a.DrainInbox()

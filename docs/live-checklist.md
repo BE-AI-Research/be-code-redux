@@ -147,3 +147,43 @@ socket, workspace, model, auth token).
 32. `be-code run -y "open https://example.com and then run ls"`: `ls` is refused with
     `shell is not auto-approved after reading an untrusted web page in this request`.
     Interactively, the same request asks before `ls` even though `ls*` is on `shell_allow`.
+
+## Scheduled events
+
+The scheduler is a real goroutine racing real wall-clock time against whatever a person
+does in the terminal (drop a queued event, hand-edit `schedules.md`, walk away for the
+`ask_timeout` window) — exactly the timing a fake clock in unit tests cannot stand in for.
+Walk this once per release, or after touching `internal/schedule`, `internal/agent/
+schedules.go`, `internal/agent/schedules_api.go`, `internal/tools/allowance.go` or
+`internal/tools/schedule.go`.
+
+33. **Overnight schedule, nobody attached.** In a hosted session: `/schedule add check every
+    1h -- run the tests and write a one-line result to docs/check.md allow shell: go test
+    ./...; write: docs`, approve, then detach. Next morning, attach: the transcript shows
+    the `⏰ check` turns, `docs/check.md` exists, and `/schedule` shows `last … ok`.
+34. **Prompt with nobody there.** A schedule with no `write:` grant whose instruction writes
+    a file: after `schedules.ask_timeout` the prompt is withdrawn, and `/schedule show
+    <name>` reads `refused: file_write (nobody answered)`.
+35. **Startup prompt.** Quit, `be-code --resume <code>`: one prompt lists the schedules;
+    answer `n`; `/schedule` shows them all paused; `/schedule resume check` asks again and,
+    once approved, `/schedule` shows it active.
+36. **Hand edit.** Add an `allow:` line to `.be-code/schedules.md` by hand while the session
+    is open; at the next due time the schedule pauses with a notice ending "changed since
+    approved" rather than running with the new grant.
+37. **Dropped from the queue.** `/schedule add drop-me every 1m -- say hello`, approve, and
+    while its `⏰ drop-me` line is waiting in the queue popup (Ctrl+Q — catch it quickly, a
+    minute apart), drop it (`d`). Expect a dim `dropped queued message: …` line; within the
+    next minute or two `⏰ drop-me` fires again on schedule rather than sitting stuck as
+    "already queued". Repeat with a one-off (`/schedule add once-drop in 2m -- say hello`):
+    dropping it leaves `/schedule show once-drop` reading `dropped from the queue` and
+    `state: done`, and it never fires.
+38. **The model schedules a follow-up.** Ask "check again in 5 minutes whether the tests
+    pass"; approve the prompt naming the time, the instruction and the allowance; five
+    minutes later a `⏰` turn runs on its own, without interrupting anything typed meanwhile.
+39. **Held timer on an in-process session switch.** Ask the model for a follow-up ("check
+    again in 5 minutes") so the session has an active one-off timer, then, in that same
+    running session (already past its own startup prompt), `/resume <other-code>` (or
+    `/menu` → Resume) into a *different* saved session that also carries an active timer.
+    Expect a prompt of its own ("This session's timers will run while it is open") naming
+    the switched-in timer before it can queue; `n` leaves it paused, `/schedule resume
+    <name>` afterwards asks again and arms it.

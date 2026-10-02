@@ -145,6 +145,13 @@ func (r *REPL) wireQueueWake() {
 		}
 		r.wakeQueue()
 	}
+	fire := ag.Events.OnScheduleFire
+	ag.Events.OnScheduleFire = func(name string) {
+		if fire != nil {
+			fire(name)
+		}
+		r.wakeQueue()
+	}
 }
 
 // wakeQueue pokes the main loop, never blocking and never waiting on a
@@ -178,16 +185,22 @@ func (r *REPL) approve(action, detail string) bool {
 
 // approveCtx is approve for an asker that can give up on its own question,
 // which waits on that asker's context instead. See tools.ApproveCtxFunc.
+//
+// A question a scheduled event's turn raised (tools.FiredAsk) never takes
+// the session-level shortcuts (final review C1): "a", -y and accept-all were
+// given by someone watching. A prompt that ends with nobody answering (EOF,
+// Ctrl-C, its context ended) is marked withdrawn on ctx (tools.MarkWithdrawn).
 func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
+	fired := tools.FiredAsk(ctx)
 	switch action {
 	case "shell":
-		if r.Cfg.AutoApproveShell {
+		if r.Cfg.AutoApproveShell && !fired {
 			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
 			return true
 		}
 		fmt.Printf("%s %s\n", yell("run shell:"), detail)
 	case "file_write":
-		if !r.Cfg.ApproveFileWrites {
+		if !r.Cfg.ApproveFileWrites && !fired {
 			return true
 		}
 		fmt.Println(yell("file change:"))
@@ -196,7 +209,7 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		// Not this workspace: a server other people may be using.
 		fmt.Printf("%s %s\n", yell("reload the model on the server:"), detail)
 	case "browser":
-		if r.Cfg.AutoApproveBrowser {
+		if r.Cfg.AutoApproveBrowser && !fired {
 			fmt.Printf("%s %s\n", yell("auto-approved:"), detail)
 			return true
 		}
@@ -205,19 +218,31 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("browser (watched site — every action asks):"), detail)
 	case "shell_after_web":
 		fmt.Printf("%s %s\n", yell("run shell (after reading a web page):"), detail)
+	case "schedule":
+		fmt.Printf("%s\n%s\n", yell("schedule:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
-	// browser_watch and shell_after_web have no "always" (browser spec
-	// §3.2, §3.6): the prompt must not advertise a key that does nothing.
+	// browser_watch, shell_after_web and schedule have no "always" (browser
+	// spec §3.2, §3.6; schedules spec §3.1): the prompt must not advertise a
+	// key that does nothing.
 	prompt := "approve? [y/N/a(lways)] "
-	if action == "browser_watch" || action == "shell_after_web" {
+	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule"
+	if noAlways {
 		prompt = "approve? [y/N] "
 	}
-	switch strings.ToLower(r.promptCtx(ctx, yell(prompt))) {
+	answer, answered := r.promptAnswer(ctx, yell(prompt))
+	if !answered {
+		tools.MarkWithdrawn(ctx)
+		return false
+	}
+	switch strings.ToLower(answer) {
 	case "y", "yes":
 		return true
 	case "a", "always":
+		if noAlways {
+			return false
+		}
 		switch action {
 		case "shell":
 			r.Cfg.AutoApproveShell = true
@@ -434,6 +459,14 @@ func (r *REPL) nextLine() (lineEvent, bool) {
 // then the answer is no longer wanted. An empty string is the result either
 // way, which reads as "no".
 func (r *REPL) promptCtx(ctx context.Context, q string) string {
+	line, _ := r.promptAnswer(ctx, q)
+	return line
+}
+
+// promptAnswer is promptCtx that also says whether anybody answered: false
+// when the input ended, Ctrl-C was pressed or ctx ended — a question
+// withdrawn, not a "no".
+func (r *REPL) promptAnswer(ctx context.Context, q string) (string, bool) {
 	r.setPrompt(q)
 	defer r.setPrompt(cyan("be-code> "))
 	r.mu.Lock()
@@ -455,20 +488,20 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 					r.inputEnded = true
 					r.mu.Unlock()
 				}
-				return ""
+				return "", false
 			}
-			return strings.TrimSpace(ev.line)
+			return strings.TrimSpace(ev.line), true
 		case <-ctx.Done():
-			return ""
+			return "", false
 		}
 	}
 	defer func() { r.mu.Lock(); r.ask = nil; r.mu.Unlock() }()
 	select {
 	case line := <-ch:
-		return strings.TrimSpace(line)
+		return strings.TrimSpace(line), true
 	case <-ctx.Done():
 		r.abandonAsk(ch)
-		return ""
+		return "", false
 	}
 }
 
@@ -515,13 +548,18 @@ func (r *REPL) turn(ctx context.Context, input string, typed bool) {
 		)
 		r.runBusy(ctx, func(ctx context.Context) { answer, rep, err = r.Agent.RunFull(ctx, input) })
 		r.printOutcome(answer, rep, err)
-		items := r.Agent.DrainItems()
-		if len(items) == 0 || err != nil {
+		// A failed run drains nothing: a scheduled event DrainForTurn
+		// handed out here would be armed and then dropped with the run.
+		if err != nil {
+			return
+		}
+		items := r.Agent.DrainForTurn()
+		if len(items) == 0 {
 			return
 		}
 		typed = agent.TypedByPerson(items)
 		input = strings.Join(itemTexts(items), "\n")
-		fmt.Printf("%s %s\n", cyan("you>"), input)
+		r.echoQueued(items, input)
 	}
 }
 
@@ -531,14 +569,43 @@ func (r *REPL) turn(ctx context.Context, input string, typed bool) {
 // picks up a hand-back or an ask_main that arrived when no run was in
 // flight at all (spec §2.6). An empty queue means a run took it first.
 func (r *REPL) startQueuedTurn(ctx context.Context) bool {
-	items := r.Agent.DrainItems()
+	items := r.Agent.DrainForTurn()
 	if len(items) == 0 {
 		return false
 	}
 	queued := strings.Join(itemTexts(items), "\n")
-	fmt.Printf("%s %s\n", cyan("you>"), queued)
+	r.echoQueued(items, queued)
 	r.turn(ctx, queued, agent.TypedByPerson(items))
 	return true
+}
+
+// echoQueued shows what the next turn is: a scheduled event by name, or the
+// queued lines under "you>".
+func (r *REPL) echoQueued(items []agent.InboxItem, joined string) {
+	if len(items) == 1 && items[0].Scheduled != "" {
+		fmt.Printf("%s %s\n", cyan("⏰ "+items[0].ScheduleName), dim(firstLineOf(scheduleBody(items[0].Text))))
+		return
+	}
+	fmt.Printf("%s %s\n", cyan("you>"), joined)
+}
+
+// scheduleBody strips the "[Scheduled event ...]" header a fired event's
+// text carries for the model, leaving what a person should read: the
+// instruction itself. Without this, the header line printed under the
+// "⏰ <name>" prefix named the schedule a second time (the TUI's
+// entrySchedule rendering strips the same header for the same reason).
+func scheduleBody(text string) string {
+	if i := strings.IndexByte(text, '\n'); i >= 0 && strings.HasPrefix(text, "[Scheduled event") {
+		return text[i+1:]
+	}
+	return text
+}
+
+func firstLineOf(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // itemTexts is the queued messages' texts, in order.
@@ -761,6 +828,9 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 		r.Agent.Resume(s)
 		r.printResume(s)
+		// Here, on the REPL goroutine: the answer is read from r.lines,
+		// which only one goroutine may read.
+		r.Agent.ConfirmHeldTimers()
 	case "/theme":
 		if len(fields) < 2 {
 			fmt.Println("themes: dark, light, mono, dracula, nord, gruvbox, monokai, one-dark, solarized-dark, solarized-light, tokyo-night, catppuccin, github-light")
@@ -823,6 +893,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/browser":
 		for _, l := range BrowserLines(r.Agent.Tools, fields[1:]) {
+			fmt.Println(l)
+		}
+	case "/schedule":
+		for _, l := range ScheduleCommandLines(r.Agent, strings.TrimPrefix(strings.TrimSpace(input), fields[0])) {
 			fmt.Println(l)
 		}
 	case "/consult":
@@ -934,6 +1008,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		r.Agent.ClearHistory()
 		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
+		r.Agent.ConfirmHeldTimers() // a fresh session has none: a no-op today
 	case "/undo":
 		restored, err := r.Agent.Undo()
 		if err != nil {

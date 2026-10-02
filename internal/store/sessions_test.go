@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/schedule"
 )
 
 func TestSaveLoadListResume(t *testing.T) {
@@ -179,5 +180,26 @@ func TestSessionHostPIDRoundTrip(t *testing.T) {
 	}
 	if got, err = Load(s.ID); err != nil || got.HostPID != 0 {
 		t.Fatalf("unstamped session: %v %d", err, got.HostPID)
+	}
+}
+
+func TestSessionTimersRoundTrip(t *testing.T) {
+	s := Session{ID: "x", Timers: []schedule.Schedule{{ID: "a", Name: "check", When: "in 20m",
+		Instruction: "look", State: schedule.Active, CreatedBy: "agent",
+		Created: time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)}}}
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"timers":[`) {
+		t.Fatalf("json: %s", b)
+	}
+	var back Session
+	if err := json.Unmarshal(b, &back); err != nil || len(back.Timers) != 1 || back.Timers[0].Name != "check" {
+		t.Fatalf("back: %+v %v", back.Timers, err)
+	}
+	empty, _ := json.Marshal(Session{ID: "y"})
+	if strings.Contains(string(empty), "timers") {
+		t.Fatal("omitted when empty")
 	}
 }
