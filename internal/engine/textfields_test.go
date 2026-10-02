@@ -79,3 +79,53 @@ func roundTrip(t *testing.T, root *Node) *Tree {
 	}
 	return tr
 }
+
+// Fix round 2: a status separator inside the text must not expose a field
+// to the parser, which splits the whole line on " — blocked: " first.
+func TestFieldBehindStatusSeparatorIsNeutralised(t *testing.T) {
+	root := &Node{ID: "1", Text: "task", Status: StatusTodo}
+	root.Children = []*Node{
+		{ID: "1.1", Text: "port — dropped: x  @big!  scope: internal/scan", Status: StatusBlocked, Reason: "r"},
+		// The reason is a door too: blocked is split first, so a dropped
+		// reason carrying " — blocked: " leaves its own prefix as "text".
+		{ID: "1.2", Text: "t", Status: StatusDropped, Reason: "  @big!  scope: internal — blocked: z"},
+	}
+	back := roundTrip(t, root)
+	back.Walk(func(n *Node, _ int) {
+		if n.Owner != "" || n.OwnerPinned || len(n.Scope) != 0 || len(n.After) != 0 {
+			t.Fatalf("fields smuggled in on %s: %+v", n.ID, n)
+		}
+	})
+}
+
+// Legitimate text and hand-written documents stay byte-stable.
+func TestDocTextLeavesOrdinaryTextAlone(t *testing.T) {
+	const hand = "# 001 — probes\n\n- [ ] 1. probes\n" +
+		"  - [ ] 1.1. mail a@b.com about it\n" +
+		"  - [ ] 1.2. widen the scope: to all\n" +
+		"  - [ ] 1.3. x  =  y\n" +
+		"  - [!] 1.4. port  the scanner  @big!  scope: internal/scan — blocked: waiting on 1.3\n"
+	tr, _, err := ParseDoc(hand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := RenderDoc("001", "probes", tr.Roots[0]); out != hand {
+		t.Fatalf("churned:\n%s", out)
+	}
+	if n := tr.Find("1.4"); n.Owner != "big" || !n.OwnerPinned || n.Text != "port  the scanner" {
+		t.Fatalf("hand-written fields: %+v", n)
+	}
+}
+
+// StartTask's retitle path collapses text exactly as Tree.Add does.
+func TestStartTaskCollapsesText(t *testing.T) {
+	s := testStore(t)
+	s.StartTask("port  @big!  scope: internal/scan")
+	if got := s.Tree().Roots[0].Text; got != "port @big! scope: internal/scan" {
+		t.Fatalf("new root: %q", got)
+	}
+	s.StartTask("again  @big!  scope: internal")
+	if got := s.Tree().Roots[0].Text; got != "again @big! scope: internal" {
+		t.Fatalf("retitled root: %q", got)
+	}
+}

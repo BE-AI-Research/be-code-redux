@@ -127,7 +127,7 @@ func (t *Tree) Add(parent, text string) *Node {
 	// node line of its own. Collapsing here means the text that is stored,
 	// shown and rendered can never become an owner, a pin or a scope on
 	// the next parse (renderNode guards the same way for every other path).
-	n := &Node{Text: strings.Join(strings.Fields(text), " "), Status: StatusTodo, Opened: time.Now()}
+	n := &Node{Text: oneSpaced(text), Status: StatusTodo, Opened: time.Now()}
 	var p *Node
 	if parent != "" {
 		p = t.Find(parent)
@@ -142,6 +142,10 @@ func (t *Tree) Add(parent, text string) *Node {
 	p.Children = append(p.Children, n)
 	return n
 }
+
+// oneSpaced is node text as the engine stores it: one line, single spaces.
+// Tree.Add and Store.StartTask both go through it.
+func oneSpaced(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // nextIndex is one past the highest index this generation has ever handed
 // out, not one past its current size. They are the same until a node is

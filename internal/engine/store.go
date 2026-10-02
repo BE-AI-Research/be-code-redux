@@ -2138,7 +2138,10 @@ func firstLine(text string, max int) string {
 // to do. A plan the model is part-way through keeps its own task line, so
 // the block does not start describing a side question as the task.
 func (s *Store) StartTask(text string) {
-	line := firstLine(text, 200)
+	// Collapsed exactly as Tree.Add does, so a retitle can never carry a
+	// field into the document and the in-memory text equals its parsed
+	// form (state.Times restores by matching text).
+	line := oneSpaced(firstLine(text, 200))
 	if line == "" {
 		return
 	}

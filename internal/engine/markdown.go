@@ -191,11 +191,7 @@ func renderNode(b *strings.Builder, n *Node, depth int) {
 	if !ok {
 		mark = " "
 	}
-	fmt.Fprintf(b, "%s- [%s] %s. %s%s", ind, mark, n.ID, docText(n.Text), renderFields(n))
-	if n.Reason != "" && (n.Status == StatusBlocked || n.Status == StatusDropped) {
-		fmt.Fprintf(b, " — %s: %s", n.Status, docLine(n.Reason))
-	}
-	b.WriteByte('\n')
+	fmt.Fprintf(b, "%s- [%s] %s. %s\n", ind, mark, n.ID, nodeLineBody(n))
 
 	ev := ind + strings.Repeat(" ", indentStep)
 	for _, f := range n.Evidence.Files {
@@ -239,20 +235,35 @@ func docLine(s string) string {
 	return strings.TrimSpace(lineBreaks.ReplaceAllString(s, " "))
 }
 
-// docText is a node's text as the document carries it: one line, and
-// single-spaced whenever the parser would otherwise peel a trailing
-// "@owner", "scope:" or "after:" off it — text set by any path (Tree.Add
-// already collapses) can never become an owner, a pin or a scope on the
-// next parse. A person's own text, whose real fields the parser has
-// already peeled, is left exactly as written, so a hand-edited document
-// never churns.
-func docText(s string) string {
-	s = docLine(s)
-	t, _ := splitReason(s)
-	if rest, _ := splitFields(t); rest != t {
-		s = strings.Join(strings.Fields(s), " ")
+// nodeLineBody is what follows "- [x] id. " on a node's line: text,
+// fields, then the reason. The text and reason are put on one line
+// (docLine); then the line is read back the way ParseDoc reads it — the
+// whole line split on a status separator (" — blocked: " first), then
+// trailing fields peeled — and if that yields any field other than the
+// node's own, the text and reason are written single-spaced, which no
+// field pattern ("  @owner", "  scope:", "  after:") survives. So text and
+// reasons set by any path (the model's, StartTask's, a command's) can
+// never become an owner, a pin or a scope on the next parse, while a
+// person's own text, already parsed into exactly these fields, renders
+// byte-for-byte as written ("email  @bob about the release" included).
+func nodeLineBody(n *Node) string {
+	text, reason := docLine(n.Text), docLine(n.Reason)
+	withReason := n.Reason != "" && (n.Status == StatusBlocked || n.Status == StatusDropped)
+	build := func() string {
+		l := text + renderFields(n)
+		if withReason {
+			l += fmt.Sprintf(" — %s: %s", n.Status, reason)
+		}
+		return l
 	}
-	return s
+	line := build()
+	t, _ := splitReason(strings.TrimSpace(line))
+	_, f := splitFields(t)
+	if renderFields(&Node{Owner: f.owner, OwnerPinned: f.pinned, Scope: f.scope, After: f.after}) != renderFields(n) {
+		text, reason = oneSpaced(text), oneSpaced(reason)
+		line = build()
+	}
+	return line
 }
 
 func okWord(ok bool) string {
