@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/schedule"
 	"github.com/brown-enterprises/be-code/internal/store"
@@ -91,15 +92,15 @@ func TestSubConsentDeclinesDuringFiredTurn(t *testing.T) {
 		d: subagent.Dispatch{Node: "1.1", Owner: "big", Scope: []string{"internal/scan"}}}
 
 	f.ag.Tools.SetAllowance(nil, time.Minute)
-	if f.ag.subConsent(run) {
-		t.Fatal("an online sub-agent is declined during a fired turn")
+	if ok, held := f.ag.subConsent(run); ok || !held {
+		t.Fatalf("an online sub-agent is held during a fired turn: ok %v held %v", ok, held)
 	}
 	if asked.Load() != 0 {
 		t.Fatal("subConsent asked during a fired turn")
 	}
 	f.ag.Tools.ClearAllowance()
 	f.ag.Cfg.AutoApproveConsult = false
-	if !f.ag.subConsent(run) || asked.Load() != 1 {
+	if ok, held := f.ag.subConsent(run); !ok || held || asked.Load() != 1 {
 		t.Fatalf("after the turn the person is asked (asked %d)", asked.Load())
 	}
 }
@@ -192,5 +193,62 @@ func TestHeldSubAgentWorkDispatchesAfterPanickedFiredTurn(t *testing.T) {
 	}
 	if d := wait(t, f.start, "dispatch after the panicked turn"); d.Node != id {
 		t.Fatalf("dispatch: %+v", d)
+	}
+}
+
+// A run installed just before a scheduled event began, which reaches its
+// consent during the event, is given back un-dispatched — not closed as
+// "blocked: consent refused", which would blame the person and never run
+// again — and the closing schedule dispatches it after the event.
+func TestRunHeldAtConsentReturnsUndispatched(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "ported"}}},
+		func(c *config.Config) { c.Coworkers[0].Online = true })
+	var asked atomic.Int32
+	f.ag.Tools.Approve = func(string, string) bool { asked.Add(1); return true }
+	id := f.assign(t)
+	notes := noteSink(f.ag)
+
+	// What dispatchPicked installs, with the event's turn already begun by
+	// the time runSub reaches consent.
+	s := f.ag.subs
+	ctx, cancel := context.WithCancel(s.root)
+	run := &subRun{d: subagent.Dispatch{Node: id, Owner: "big", Scope: []string{"internal/scan"}},
+		cw: s.cws["big"], ctx: ctx, cancel: cancel, started: time.Now(),
+		reply: make(chan string, 1), done: make(chan struct{})}
+	s.mu.Lock()
+	s.runs[id] = run
+	s.wg.Add(1)
+	s.mu.Unlock()
+	f.st.SetDispatched(id, true)
+	f.ag.Tools.SetAllowance(nil, time.Minute)
+	f.ag.runSub(run)
+
+	if asked.Load() != 0 {
+		t.Fatal("asked during a fired turn")
+	}
+	select {
+	case hb := <-f.ends:
+		t.Fatalf("closed instead of given back: %+v", hb)
+	default:
+	}
+	if f.ag.Pending() != 0 {
+		t.Fatalf("a hand-back was queued: %v", f.ag.DrainInbox())
+	}
+	if n := f.st.Tree().Find(id); n == nil || n.Status != engine.StatusTodo {
+		t.Fatalf("node: %+v", n)
+	}
+	if len(f.st.Dispatched()) != 0 || f.ag.subAgentsBusy() {
+		t.Fatal("still marked dispatched")
+	}
+	if !strings.Contains(notes(), "waits for the scheduled event") {
+		t.Fatalf("notice: %q", notes())
+	}
+	f.ag.Tools.ClearAllowance()
+	f.ag.scheduleAfterFired()
+	if d := wait(t, f.start, "dispatch after the event"); d.Node != id {
+		t.Fatalf("dispatch: %+v", d)
+	}
+	if asked.Load() != 1 {
+		t.Fatalf("the person is asked once the event is over (asked %d)", asked.Load())
 	}
 }

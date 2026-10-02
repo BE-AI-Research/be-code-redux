@@ -752,13 +752,19 @@ func (a *Agent) runSub(run *subRun) {
 	var hb subagent.HandBack
 	var answer string
 	var err error
+	held := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("internal error: %v", r)
 			}
 		}()
-		if !a.subConsent(run) {
+		ok, firedHeld := a.subConsent(run)
+		if firedHeld {
+			held = true
+			return
+		}
+		if !ok {
 			err = errors.New("consent refused")
 			return
 		}
@@ -791,6 +797,10 @@ func (a *Agent) runSub(run *subRun) {
 		}
 		answer, err = scratch.Run(run.ctx, "Begin your step.")
 	}()
+	if held {
+		a.unDispatch(run)
+		return
+	}
 	hb = a.settleSub(run, answer, err)
 	s.mu.Lock()
 	delete(s.runs, run.d.Node)
@@ -812,6 +822,26 @@ func (a *Agent) runSub(run *subRun) {
 	// does nothing. done and wg are released last, after that schedule, so
 	// StopAllSubAgents' wait and AssignOwner's wait both mean "nothing of
 	// this run is still in flight".
+	a.ScheduleSubAgents()
+	close(run.done)
+	s.wg.Done()
+}
+
+// unDispatch gives back a run that never started because a scheduled
+// event's turn began between its dispatch and its consent: nobody refused
+// anything, so the node is not closed — it stays todo, its dispatched mark
+// is cleared, and no hand-back is queued. The schedule that follows is
+// held while the turn runs; if the turn has already ended (its closing
+// schedule saw this run still installed and skipped it), it dispatches the
+// step again now.
+func (a *Agent) unDispatch(run *subRun) {
+	s := a.subs
+	run.cancel()
+	a.engineDo("sub-agent held", func(st *engine.Store) { st.SetDispatched(run.d.Node, false) })
+	s.mu.Lock()
+	delete(s.runs, run.d.Node)
+	s.mu.Unlock()
+	a.notice("%s waits for the scheduled event to end before %s starts", run.d.Node, run.d.Owner)
 	a.ScheduleSubAgents()
 	close(run.done)
 	s.wg.Done()
@@ -862,47 +892,49 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 
 // subConsent asks once per session before an online sub-agent sees any
 // code (spec §2.3); the detail's first line keeps the "coworker: name (…)"
-// shape ConsentCoworker parses for the modal's "a".
-func (a *Agent) subConsent(run *subRun) bool {
+// shape ConsentCoworker parses for the modal's "a". held reports a run
+// turned back because a scheduled event's turn is running — not a refusal:
+// runSub returns it un-dispatched (unDispatch) rather than closing it.
+func (a *Agent) subConsent(run *subRun) (ok, held bool) {
 	cw := run.cw
 	s := a.subs
 	if !cw.Online {
-		return true
+		return true, false
 	}
 	if a.firedTurn() {
 		// Defensive: no dispatch starts during a scheduled event's turn, but
-		// one built just before it may reach here. Never a prompt nobody may
-		// answer, and no session-wide yes or -y for an unwatched turn (the
-		// same rule as consent). Not latched as the person's refusal.
-		return false
+		// one installed just before it may reach here. Never a prompt nobody
+		// may answer, and no session-wide yes or -y for an unwatched turn
+		// (the same rule as consent). Not latched as the person's refusal.
+		return false, true
 	}
 	if a.allowedFor(cw.Name) {
-		return true
+		return true, false
 	}
 	s.mu.Lock()
 	refused := s.refused[cw.Name]
 	s.mu.Unlock()
 	if refused {
-		return false
+		return false, false
 	}
 	if a.Cfg.AutoApproveConsult {
 		a.allow(cw.Name)
-		return true
+		return true, false
 	}
 	if a.Tools.Approve == nil {
-		return false
+		return false, false
 	}
 	detail := fmt.Sprintf("coworker: %s (%s/%s)\norigin: sub-agent %s\nscope: %s\nstep: %s\nit will read the repository and write files under the scope; the step's text, the project notes and the task notes go with it",
 		cw.Name, cw.Provider, cw.Model, run.d.Node, strings.Join(run.d.Scope, ", "), run.d.Text)
 	if a.Tools.Approve("consult", detail) {
-		return true
+		return true, false
 	}
 	if run.ctx.Err() == nil {
 		s.mu.Lock()
 		s.refused[cw.Name] = true
 		s.mu.Unlock()
 	}
-	return false
+	return false, false
 }
 
 // subAgent builds the scratch agent for one dispatch: consultAgent's

@@ -121,7 +121,13 @@ func (t *Tree) DoingUnder(rootID string) *Node {
 // are positional, so a node's id never changes while it exists: adding to
 // one branch cannot renumber another.
 func (t *Tree) Add(parent, text string) *Node {
-	n := &Node{Text: strings.TrimSpace(text), Status: StatusTodo, Opened: time.Now()}
+	// One line, single-spaced: a node's text is the model's (or a
+	// command's) words, and in the document two spaces before "@name",
+	// "scope:" or "after:" make a trailing field, and a line break starts a
+	// node line of its own. Collapsing here means the text that is stored,
+	// shown and rendered can never become an owner, a pin or a scope on
+	// the next parse (renderNode guards the same way for every other path).
+	n := &Node{Text: strings.Join(strings.Fields(text), " "), Status: StatusTodo, Opened: time.Now()}
 	var p *Node
 	if parent != "" {
 		p = t.Find(parent)

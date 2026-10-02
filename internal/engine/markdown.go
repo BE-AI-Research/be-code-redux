@@ -173,7 +173,7 @@ func RenderDoc(num, title string, root *Node) string {
 // round trip through the engine.
 func RenderDocWithExtra(num, title string, root *Node, extra []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s — %s\n\n", num, title)
+	fmt.Fprintf(&b, "# %s — %s\n\n", num, docLine(title))
 	if root != nil {
 		renderNode(&b, root, 0)
 	}
@@ -191,21 +191,21 @@ func renderNode(b *strings.Builder, n *Node, depth int) {
 	if !ok {
 		mark = " "
 	}
-	fmt.Fprintf(b, "%s- [%s] %s. %s%s", ind, mark, n.ID, n.Text, renderFields(n))
+	fmt.Fprintf(b, "%s- [%s] %s. %s%s", ind, mark, n.ID, docText(n.Text), renderFields(n))
 	if n.Reason != "" && (n.Status == StatusBlocked || n.Status == StatusDropped) {
-		fmt.Fprintf(b, " — %s: %s", n.Status, n.Reason)
+		fmt.Fprintf(b, " — %s: %s", n.Status, docLine(n.Reason))
 	}
 	b.WriteByte('\n')
 
 	ev := ind + strings.Repeat(" ", indentStep)
 	for _, f := range n.Evidence.Files {
-		fmt.Fprintf(b, "%s- files: %s\n", ev, renderFile(f))
+		fmt.Fprintf(b, "%s- files: %s\n", ev, docLine(renderFile(f)))
 	}
 	for _, c := range n.Evidence.Cmds {
-		fmt.Fprintf(b, "%s- cmds: %s — %s\n", ev, c.Cmd, okWord(c.OK))
+		fmt.Fprintf(b, "%s- cmds: %s — %s\n", ev, docLine(c.Cmd), okWord(c.OK))
 	}
 	for _, l := range n.Evidence.Lookups {
-		fmt.Fprintf(b, "%s- lookups: %s\n", ev, renderLookup(l))
+		fmt.Fprintf(b, "%s- lookups: %s\n", ev, docLine(renderLookup(l)))
 	}
 	for _, nt := range n.Evidence.Notes {
 		key := "note"
@@ -216,14 +216,43 @@ func renderNode(b *strings.Builder, n *Node, depth int) {
 		if nt.File != "" {
 			line += " [file: " + nt.File + "]"
 		}
-		fmt.Fprintf(b, "%s- %s: %s\n", ev, key, line)
+		fmt.Fprintf(b, "%s- %s: %s\n", ev, key, docLine(line))
 	}
 	for _, e := range n.Evidence.Errors {
-		fmt.Fprintf(b, "%s- error: %s\n", ev, e)
+		fmt.Fprintf(b, "%s- error: %s\n", ev, docLine(e))
 	}
 	for _, c := range n.Children {
 		renderNode(b, c, depth+1)
 	}
+}
+
+// lineBreaks is a line break and the whitespace around it.
+var lineBreaks = regexp.MustCompile(`[ \t]*[\r\n]+[ \t]*`)
+
+// docLine keeps a rendered value on its own line: a break inside it would
+// otherwise start a line the parser reads as a node of its own — fields
+// and all.
+func docLine(s string) string {
+	if !strings.ContainsAny(s, "\r\n") {
+		return s
+	}
+	return strings.TrimSpace(lineBreaks.ReplaceAllString(s, " "))
+}
+
+// docText is a node's text as the document carries it: one line, and
+// single-spaced whenever the parser would otherwise peel a trailing
+// "@owner", "scope:" or "after:" off it — text set by any path (Tree.Add
+// already collapses) can never become an owner, a pin or a scope on the
+// next parse. A person's own text, whose real fields the parser has
+// already peeled, is left exactly as written, so a hand-edited document
+// never churns.
+func docText(s string) string {
+	s = docLine(s)
+	t, _ := splitReason(s)
+	if rest, _ := splitFields(t); rest != t {
+		s = strings.Join(strings.Fields(s), " ")
+	}
+	return s
 }
 
 func okWord(ok bool) string {

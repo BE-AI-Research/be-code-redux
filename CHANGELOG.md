@@ -31,6 +31,10 @@
 - Resuming a schedule refuses past `schedules.max_active` or under `schedules.min_interval`, the
   same as adding one; the startup prompt's "yes" leaves such a schedule paused with a notice
   instead of arming it anyway.
+- Fixed: step text the model writes can no longer become a sub-agent owner, the operator's pin
+  or a scope when the task document is read back (by another session, say): two spaces before
+  `@name`/`scope:`/`after:`, or a line break, in model-supplied text are collapsed. Fields a person
+  writes in the document work as before.
 - Fixed: the plain REPL's `a` (always) no longer approves `browser_watch` or `shell_after_web` —
   those actions, and now `schedule`, have no "always" and re-ask every time.
 - Fixed: a plain-mode run that fails no longer discards the lines you typed while it was running;
