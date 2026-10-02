@@ -1,6 +1,6 @@
 # BE-Code Redux (Be-Code)
 
-**Offline-first polymorphic runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
+**Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
 [![version](https://img.shields.io/badge/version-1.1.1-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
