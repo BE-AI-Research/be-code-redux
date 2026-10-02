@@ -805,11 +805,12 @@ func TestBrowserMyChromeEveryInteractionAsksByDefault(t *testing.T) {
 			t.Fatalf("click: %s", res.Content)
 		}
 	}
-	if log.count() != 2 || log.actions[0] != "browser_watch" || log.actions[1] != "browser_watch" {
+	// The open, then each click: every one asks, none says "always".
+	if log.count() != 3 || log.actions[0] != "browser_watch" || log.actions[1] != "browser_watch" || log.actions[2] != "browser_watch" {
 		t.Fatalf("asks %v", log.actions)
 	}
-	if strings.Contains(log.details[0], "for the rest of this session") || !strings.Contains(log.details[0], "your Chrome") {
-		t.Fatalf("prompt:\n%s", log.details[0])
+	if strings.Contains(log.details[1], "for the rest of this session") || !strings.Contains(log.details[1], "your Chrome") {
+		t.Fatalf("prompt:\n%s", log.details[1])
 	}
 	if g := bt.consent.Grants(); len(g) != 0 {
 		t.Fatalf("granted %v for the session", g)
@@ -821,17 +822,97 @@ func TestBrowserMyChromeEveryInteractionAsksByDefault(t *testing.T) {
 
 func TestBrowserMyChromeAllowAndDenyTiersStillApply(t *testing.T) {
 	var log askLog
-	_, bt, _, _ := myChromeFixture(t, map[string]string{"acme.test": "deny"}, log.approver(true))
+	_, bt, _, fb := myChromeFixture(t, map[string]string{"acme.test": "deny"}, log.approver(true))
 	do(bt, map[string]any{"action": "open", "url": "http://localhost:8080/"})
 	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
 		t.Fatalf("loopback (allow) click: %s", res.Content)
 	}
-	do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"})
-	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); !res.IsError || !strings.Contains(res.Content, "denied by browser.sites") {
+	if res := do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"}); !res.IsError ||
+		res.Content != "acme.test is denied by browser.sites (in your own Chrome that covers reading too)" {
 		t.Fatalf("deny: %s", res.Content)
 	}
 	if log.count() != 0 {
 		t.Fatalf("asked %v", log.actions)
+	}
+	for _, c := range fb.Calls("Page.navigate") {
+		if strings.Contains(string(c.Params), "acme.test") {
+			t.Fatal("navigated to a denied site")
+		}
+	}
+}
+
+// TestBrowserMyChromeEveryActionAsks is the owner's ruling: in the person's
+// own Chrome, outside the allow tier, open (judged on the destination),
+// read, snapshot, scroll and back (judged on the destination) all ask as
+// browser_watch, each saying what is about to happen.
+func TestBrowserMyChromeEveryActionAsks(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := myChromeFixture(t, nil, log.approver(true))
+	steps := []struct {
+		args map[string]any
+		want string
+	}{
+		{map[string]any{"action": "open", "url": "https://acme.test/login"}, "open acme.test in your Chrome? (every action in your own Chrome asks)\n  open https://acme.test/login"},
+		{map[string]any{"action": "snapshot"}, "look at the page on acme.test in your Chrome?"},
+		{map[string]any{"action": "read"}, "read the page on acme.test in your Chrome?"},
+		{map[string]any{"action": "scroll", "direction": "down"}, "scroll the page on acme.test in your Chrome?"},
+		{map[string]any{"action": "open", "url": "mail.test/inbox"}, "open mail.test in your Chrome?"},
+		{map[string]any{"action": "back"}, "go back to acme.test in your Chrome?"},
+	}
+	for i, st := range steps {
+		res := do(bt, st.args)
+		if log.count() != i+1 || log.actions[i] != "browser_watch" || !strings.Contains(log.details[i], st.want) {
+			t.Fatalf("%v: asks %v %q\nresult %s", st.args, log.actions, log.details, res.Content)
+		}
+	}
+	if g := bt.consent.Grants(); len(g) != 0 {
+		t.Fatalf("granted %v", g)
+	}
+}
+
+func TestBrowserMyChromeDeclinedOpenNeverNavigates(t *testing.T) {
+	var log askLog
+	_, bt, _, fb := myChromeFixture(t, nil, log.approver(false))
+	res := do(bt, map[string]any{"action": "open", "url": "https://mail.test/"})
+	if !res.IsError || res.Content != "the user declined: open https://mail.test/ on mail.test" {
+		t.Fatalf("result %q", res.Content)
+	}
+	if len(fb.Calls("Page.navigate")) != 0 {
+		t.Fatal("navigated after a decline")
+	}
+}
+
+func TestBrowserMyChromeAllowTierNeverAsks(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := myChromeFixture(t, map[string]string{"acme.test": "allow"}, log.approver(false))
+	for _, args := range []map[string]any{
+		{"action": "open", "url": "https://acme.test/login"}, {"action": "snapshot"}, {"action": "read"},
+		{"action": "scroll", "direction": "down"}, {"action": "open", "url": "http://localhost:8080/"}, {"action": "back"},
+	} {
+		if res := do(bt, args); res.IsError {
+			t.Fatalf("%v: %s", args, res.Content)
+		}
+	}
+	if log.count() != 0 {
+		t.Fatalf("asked %v", log.actions)
+	}
+}
+
+// A page nobody approved reading in this call is never shown: here a
+// stale ref on a watched page comes back without the page's content.
+func TestBrowserMyChromeUnapprovedPageIsWithheld(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := myChromeFixture(t, nil, log.approver(true))
+	if res := do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"}); !strings.Contains(res.Content, `textbox "Email"`) {
+		t.Fatalf("the approved open does not show its page:\n%s", res.Content)
+	}
+	res := do(bt, map[string]any{"action": "click", "ref": "e99"})
+	if strings.Contains(res.Content, "Email") || !strings.Contains(res.Content, "the page on acme.test is not shown") {
+		t.Fatalf("result:\n%s", res.Content)
+	}
+	tabs := do(bt, map[string]any{"action": "tabs"})
+	if strings.Contains(tabs.Content, "Sign in") || !strings.Contains(tabs.Content, "acme.test/login") {
+		t.Fatalf("the model's tab list shows a title it was not approved to read:\n%s", tabs.Content)
 	}
 }
 
@@ -897,6 +978,8 @@ func TestBrowserOrdinaryModeUnchangedByMyChromeKeys(t *testing.T) {
 		t.Fatal("my-Chrome mode on by default")
 	}
 	do(bt, map[string]any{"action": "snapshot"})
+	do(bt, map[string]any{"action": "read"})
+	do(bt, map[string]any{"action": "scroll", "direction": "down"})
 	do(bt, map[string]any{"action": "click", "ref": "e4"})
 	if log.count() != 1 || log.actions[0] != "browser" {
 		t.Fatalf("asks %v", log.actions)

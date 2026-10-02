@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,7 +54,10 @@ type Tab struct {
 	// Agent marks, in the person's own list (PersonTabs), a tab the agent
 	// may work in: one it opened, or one handed over with /browser tab.
 	Agent bool
-	id    string
+	// Handle is the person's stable name for the tab ("t3"), for
+	// /browser tab and /browser untab; my-Chrome mode only.
+	Handle string
+	id     string
 }
 
 // Status is what /browser shows. Reading it never waits on the browser.
@@ -98,6 +102,18 @@ type Session struct {
 	handed map[string]bool       // tabs the person handed over (never closed)
 	handTo string                // a handed-over tab to drive from the next Page
 	curID  string                // the tab being driven, as last recorded
+	// handles are the person's stable names for tabs ("t3"), assigned when
+	// a tab is first seen and never reused within a connection; listed is
+	// the order of the person's last /browser tabs, so a number typed
+	// after it still means the tab that was listed under it.
+	handles map[string]string
+	nextHdl int
+	listed  []string
+
+	// attachCancel ends a /browser attach still waiting (Chrome's prompt):
+	// Close, CloseAsync and a second attach call it before taking mu.
+	attachMu     sync.Mutex
+	attachCancel context.CancelFunc
 
 	stMu sync.Mutex // Status reads only this, never mu
 	st   Status
@@ -133,6 +149,7 @@ func (s *Session) resetTargetsLocked() {
 	s.pages, s.info = nil, map[string]targetInfo{}
 	s.opened, s.handed = map[string]bool{}, map[string]bool{}
 	s.handTo, s.curID = "", ""
+	s.handles, s.nextHdl, s.listed = map[string]string{}, 0, nil
 	s.evMu.Unlock()
 }
 
@@ -147,10 +164,14 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 	var notes []string
 	reconnect := false
 	var why error
+	var orphans []string // the lost connection's own tabs, in the person's Chrome
 	if s.conn != nil {
 		select {
 		case <-s.conn.Done():
 			why = s.conn.Err()
+			if s.connMine {
+				orphans = s.ownTabsLocked()
+			}
 			s.dropLocked()
 			reconnect = true
 		default:
@@ -161,7 +182,14 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if reconnect && errors.Is(why, errReaderPanicked) {
+		if s.connMine && len(orphans) > 0 {
+			// Target ids hold for the life of a Chrome: the tabs the lost
+			// connection opened are closed now, if they are still there.
+			s.closeTabsLocked(ctx, orphans)
+		}
+		if reconnect && s.connMine {
+			notes = append(notes, "the connection to your Chrome was lost; reconnected")
+		} else if reconnect && errors.Is(why, errReaderPanicked) {
 			// Spec §5: the connection is marked dead with a notice.
 			notes = append(notes, "the browser connection was marked dead ("+panicCause(why)+"); reconnected")
 		} else if reconnect {
@@ -171,7 +199,7 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 		}
 	}
 	if s.connMine {
-		if s.page == nil || s.isDestroyed(s.page.targetID) || s.handOverPending() {
+		if s.page == nil || s.isDestroyed(s.page.targetID) || s.handOverPending() || !s.agentMayUse(s.page.targetID) {
 			note, err := s.pickMineLocked(ctx)
 			if err != nil {
 				return nil, nil, err
@@ -318,6 +346,8 @@ func (s *Session) onEvent(ev Event) {
 func (s *Session) seeLocked(t targetInfo) {
 	if _, ok := s.info[t.TargetID]; !ok {
 		s.pages = append(s.pages, t.TargetID)
+		s.nextHdl++
+		s.handles[t.TargetID] = "t" + strconv.Itoa(s.nextHdl)
 	}
 	s.info[t.TargetID] = t
 }
@@ -610,6 +640,7 @@ func (s *Session) Status() Status {
 // killed only if it does not exit on its own); one it attached to is left
 // running.
 func (s *Session) Close() {
+	s.cancelAttach()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.disconnectLocked()
@@ -623,6 +654,7 @@ func (s *Session) Close() {
 func (s *Session) CloseAsync() { go s.disconnect() }
 
 func (s *Session) disconnect() {
+	s.cancelAttach()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.disconnectLocked()

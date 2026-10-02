@@ -181,7 +181,7 @@ func TestMyChromeHandOverIsThePersonsOnly(t *testing.T) {
 	if _, _, err := s.Page(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	all := s.PersonTabs()
+	all := s.ListForPerson()
 	if len(all) != 2 {
 		t.Fatalf("the person's own list %+v", all)
 	}
@@ -197,7 +197,7 @@ func TestMyChromeHandOverIsThePersonsOnly(t *testing.T) {
 	if n == 0 {
 		t.Fatalf("the person's tab is missing from their own list %+v", all)
 	}
-	got, err := s.HandOver(n)
+	got, err := s.HandOver(strconv.Itoa(n))
 	if err != nil || got.Title != "My accounts — Bank" {
 		t.Fatalf("hand over: %+v %v", got, err)
 	}
@@ -212,7 +212,7 @@ func TestMyChromeHandOverIsThePersonsOnly(t *testing.T) {
 	if len(tabs) != 2 {
 		t.Fatalf("model's tab list after the hand-over %+v", tabs)
 	}
-	if _, err := s.HandOver(9); err == nil {
+	if _, err := s.HandOver("9"); err == nil {
 		t.Fatal("handed over a tab that does not exist")
 	}
 	// Closing leaves the handed-over tab open: only what the agent opened
@@ -409,7 +409,7 @@ func TestAttachMyChromeSwitchesAnOrdinarySession(t *testing.T) {
 	if s.MyChrome() {
 		t.Fatal("my-Chrome mode on before it was asked for")
 	}
-	s.AttachMyChromeAsync()
+	s.AttachMyChromeAsync(log.add)
 	if !s.MyChrome() {
 		t.Fatal("the mode did not switch at once")
 	}
@@ -419,7 +419,7 @@ func TestAttachMyChromeSwitchesAnOrdinarySession(t *testing.T) {
 	}
 	waitFor(t, func() bool {
 		for _, m := range log.all() {
-			if strings.HasPrefix(m, "attached to your Chrome (stable)") {
+			if strings.HasPrefix(m, "browser: attached to your Chrome (stable)") {
 				return true
 			}
 		}
@@ -429,7 +429,157 @@ func TestAttachMyChromeSwitchesAnOrdinarySession(t *testing.T) {
 
 func TestHandOverOutsideMyChromeMode(t *testing.T) {
 	s, _, _ := testSession(t)
-	if _, err := s.HandOver(1); err == nil {
+	if _, err := s.HandOver("1"); err == nil {
 		t.Fatal("handed over a tab outside my-Chrome mode")
+	}
+}
+
+// The person lists 1 bank, 2 news, 3 mail; bank closes; "/browser tab 2"
+// must not hand over mail.
+func TestMyChromeHandOverAfterATabCloses(t *testing.T) {
+	s, fb, ps, _ := myChromeFixture(t)
+	ps.AddTarget("T2", "https://news.test/", "News", browsertest.EmptyTree, "")
+	ps.AddTarget("T3", "https://mail.test/", "Mail", browsertest.EmptyTree, "")
+	if _, _, err := s.Page(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	listed := s.ListForPerson()
+	if len(listed) != 4 || listed[0].Handle != "t1" || listed[1].Handle != "t2" || listed[2].Handle != "t3" {
+		t.Fatalf("listing %+v", listed)
+	}
+	fb.Emit("", "Target.targetDestroyed", map[string]any{"targetId": "T1"})
+	waitFor(t, func() bool { return len(s.PersonTabs()) == 3 })
+	if _, err := s.HandOver("1"); err == nil || err.Error() != "the tab list changed; run /browser tabs again" {
+		t.Fatalf("number of a closed tab: %v", err)
+	}
+	got, err := s.HandOver("2")
+	if err != nil || got.URL != "https://news.test/" {
+		t.Fatalf("number 2 still means news: %+v %v", got, err)
+	}
+	got, err = s.HandOver("T3")
+	if err != nil || got.URL != "https://mail.test/" || got.Handle != "t3" {
+		t.Fatalf("by id: %+v %v", got, err)
+	}
+	if _, err := s.HandOver("t1"); err == nil {
+		t.Fatal("handed over a closed tab by id")
+	}
+	// Ids are never reused: a new tab gets a new one.
+	ps.AddTarget("T4", "https://new.test/", "New", browsertest.EmptyTree, "")
+	fb.Emit("", "Target.targetCreated", map[string]any{"targetInfo": map[string]any{"targetId": "T4", "type": "page", "url": "https://new.test/"}})
+	waitFor(t, func() bool { return len(s.PersonTabs()) == 4 })
+	for _, tab := range s.PersonTabs() {
+		if tab.URL == "https://new.test/" && tab.Handle != "t5" {
+			t.Fatalf("new tab handle %q", tab.Handle)
+		}
+	}
+}
+
+func TestMyChromeUntabTakesAHandOverBack(t *testing.T) {
+	s, _, _, _ := myChromeFixture(t)
+	if _, _, err := s.Page(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HandOver("t1"); err != nil {
+		t.Fatal(err)
+	}
+	p, _, _ := s.Page(context.Background())
+	if p.targetID != "T1" {
+		t.Fatalf("driving %s", p.targetID)
+	}
+	if _, err := s.Unhand("t2"); err == nil {
+		t.Fatal("took back a tab that was never handed over")
+	}
+	back, err := s.Unhand("t1")
+	if err != nil || len(back) != 1 || back[0].Handle != "t1" {
+		t.Fatalf("untab: %+v %v", back, err)
+	}
+	p, _, _ = s.Page(context.Background())
+	if p.targetID == "T1" {
+		t.Fatal("still driving a tab taken back")
+	}
+	if tabs, _ := s.Tabs(context.Background()); len(tabs) != 1 {
+		t.Fatalf("model's tabs %+v", tabs)
+	}
+	s.HandOver("t1")
+	if back, err := s.Unhand("all"); err != nil || len(back) != 1 {
+		t.Fatalf("untab all: %+v %v", back, err)
+	}
+}
+
+func TestMyChromeCloseCancelsAnAttachWaitingForConsent(t *testing.T) {
+	withNoticeAfter(t, 10*time.Millisecond)
+	fb := browsertest.New(t)
+	fb.SetWSOnly(true)
+	browsertest.NewPage(fb, "https://bank.test/", "Bank", browsertest.EmptyTree)
+	fb.SetConsentDelay(0, 30*time.Second)
+	dir := t.TempDir()
+	fb.WritePortFile(dir)
+	var log noticeLog
+	o := testOptions()
+	o.ChromeDir, o.ChromeLabel, o.Notify = dir, "stable", log.add
+	s := NewSession(o)
+	var reports noticeLog
+	s.AttachMyChromeAsync(reports.add)
+	waitFor(t, func() bool { return len(log.all()) > 0 }) // waiting on the prompt
+	start := time.Now()
+	s.Close()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Close waited %s for the attach", d)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(fb.Calls("Target.createTarget")); n != 0 {
+		t.Fatalf("opened %d tabs after Close", n)
+	}
+	if got := reports.all(); len(got) != 0 {
+		t.Fatalf("a cancelled attach reported %q", got)
+	}
+}
+
+func TestMyChromeCancelAttachThenAttachAgain(t *testing.T) {
+	withNoticeAfter(t, 10*time.Millisecond)
+	fb := browsertest.New(t)
+	browsertest.NewPage(fb, "https://bank.test/", "Bank", browsertest.EmptyTree)
+	fb.SetConsentDelay(0, 30*time.Second)
+	dir := t.TempDir()
+	fb.WritePortFile(dir)
+	var log noticeLog
+	o := testOptions()
+	o.ChromeDir, o.ChromeLabel, o.Notify = dir, "stable", log.add
+	s := NewSession(o)
+	defer s.Close()
+	s.AttachMyChromeAsync(nil)
+	waitFor(t, func() bool { return len(log.all()) > 0 })
+	if !s.CancelAttach() || s.CancelAttach() {
+		t.Fatal("CancelAttach")
+	}
+	fb.SetConsentDelay(0, 0)
+	var reports noticeLog
+	s.AttachMyChromeAsync(reports.add)
+	waitFor(t, func() bool { return len(reports.all()) == 1 })
+	if r := reports.all()[0]; !strings.HasPrefix(r, "browser: attached to your Chrome (stable)") {
+		t.Fatalf("report %q", r)
+	}
+}
+
+func TestMyChromeReconnectClosesTheLostConnectionsTabs(t *testing.T) {
+	s, fb, _, _ := myChromeFixture(t)
+	p, _, err := s.Page(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := p.targetID
+	fb.Drop()
+	var notes []string
+	waitFor(t, func() bool {
+		_, n, err := s.Page(context.Background())
+		notes = n
+		return err == nil && len(n) > 0
+	})
+	if len(notes) != 1 || notes[0] != "the connection to your Chrome was lost; reconnected" {
+		t.Fatalf("notes %q", notes)
+	}
+	closed := fb.Calls("Target.closeTarget")
+	if len(closed) != 1 || !strings.Contains(string(closed[0].Params), `"`+old+`"`) {
+		t.Fatalf("closed %+v", closed)
 	}
 }

@@ -1056,19 +1056,36 @@ func (p *Page) Scroll(ctx context.Context, direction, ref string) error {
 
 // Back goes one step back in this tab's history.
 func (p *Page) Back(ctx context.Context) error {
+	id, _, err := p.BackTarget(ctx)
+	if err != nil {
+		return err
+	}
+	return p.BackTo(ctx, id)
+}
+
+// BackTarget is the history entry back would go to: its id and URL, so a
+// caller can judge the destination before going there.
+func (p *Page) BackTarget(ctx context.Context) (id int, url string, err error) {
 	var h struct {
 		CurrentIndex int `json:"currentIndex"`
 		Entries      []struct {
-			ID int `json:"id"`
+			ID  int    `json:"id"`
+			URL string `json:"url"`
 		} `json:"entries"`
 	}
 	if err := p.call(ctx, "Page.getNavigationHistory", nil, &h); err != nil {
-		return err
+		return 0, "", err
 	}
 	if h.CurrentIndex <= 0 || h.CurrentIndex > len(h.Entries) {
-		return errors.New("there is no earlier page in this tab's history")
+		return 0, "", errors.New("there is no earlier page in this tab's history")
 	}
-	if err := p.call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": h.Entries[h.CurrentIndex-1].ID}, nil); err != nil {
+	e := h.Entries[h.CurrentIndex-1]
+	return e.ID, e.URL, nil
+}
+
+// BackTo goes to history entry id (from BackTarget) and settles.
+func (p *Page) BackTo(ctx context.Context, id int) error {
+	if err := p.call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": id}, nil); err != nil {
 		return err
 	}
 	p.settle(ctx)

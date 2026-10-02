@@ -437,15 +437,23 @@ anything in this mode: no port file, an unreadable one, or a stale one left by a
 exited is reported with the directory it looked in and the `chrome://inspect` toggle. While
 attached:
 
-- **Every action asks.** A site with no rule is treated as `watch` — each click or keystroke
-  asks, with no "always" — and `-y` does not answer it; `allow` and `deny` rules and the
-  password-field refusal work as above.
+- **Every action asks — reading too.** On any site not in the `allow` tier, every browser
+  action asks as a watched site, with no "always", and `-y` does not answer it: `open` (judged on
+  the address it is about to open, before going there — "open mail.example in your Chrome?"),
+  `snapshot`, `read`, `scroll`, `back` (judged on the page it goes back to), and every click,
+  keystroke and selection. A page the model was not approved to see in that call — a redirect, a
+  link that went elsewhere — is not shown; it has to ask to read it. `allow` sites never ask; a
+  `deny` site is refused outright, reading included; the password-field refusal works as above.
 - **Your tabs stay private.** The model works only in tabs it opened itself (it opens one on its
   first call) and never reads, lists or acts on any other; its tab list shows only its own.
-  `/browser tabs` lists all of them to you, and `/browser tab <n>` hands one over to the model.
+  `/browser tabs` lists all of them to you with a short id each (`[t3]`), `/browser tab <id>`
+  hands one over to the model (a number works only while it still names the tab you were shown),
+  and `/browser untab <id|all>` takes it back. A handed-over tab's earlier history is reachable
+  with `back`, which asks like everything else.
 - **Only its own tabs close.** `/browser close` and the end of the session close the tabs the
-  model opened — never one you handed over, never the browser. Downloads are refused in its tabs
-  only, not across your browser.
+  model opened — never one you handed over, never the browser — and drop every hand-over.
+  `/browser close` also cancels an attach still waiting on Chrome's prompt. Downloads are
+  refused in its tabs only, not across your browser.
 
 `/browser` reads `attached to your Chrome (stable)`; `be-code doctor` reports whether the port
 file exists and which port it names, without connecting (a connection would raise Chrome's
@@ -1119,7 +1127,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 
 | | |
 | --- | --- |
-| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <n>]` |
+| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
 | **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |

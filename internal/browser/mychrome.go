@@ -317,22 +317,43 @@ func (s *Session) pickMineLocked(ctx context.Context) (string, error) {
 // closeOwnTabsLocked closes, best effort and bounded, every tab this
 // connection opened — never a tab of the person's, never the browser.
 func (s *Session) closeOwnTabsLocked() {
+	s.closeTabsLocked(context.Background(), s.ownTabsLocked())
+}
+
+// ownTabsLocked lists the tabs this connection opened that are still open.
+func (s *Session) ownTabsLocked() []string {
 	s.evMu.Lock()
+	defer s.evMu.Unlock()
 	var ids []string
 	for _, id := range s.pages {
 		if s.opened[id] && !s.destroyed[id] {
 			ids = append(ids, id)
 		}
 	}
-	s.evMu.Unlock()
-	if len(ids) == 0 {
+	return ids
+}
+
+// closeTabsLocked closes ids on the live connection, bounded to 2 s.
+func (s *Session) closeTabsLocked(ctx context.Context, ids []string) {
+	if len(ids) == 0 || s.conn == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	for _, id := range ids {
 		s.conn.Call(ctx, "", "Target.closeTarget", map[string]any{"targetId": id}, nil)
 	}
+}
+
+// agentMayUse reports whether the agent may drive tab id: one it opened,
+// or one handed over and not taken back. Always true outside my-Chrome mode.
+func (s *Session) agentMayUse(id string) bool {
+	if !s.connMine {
+		return true
+	}
+	s.evMu.Lock()
+	defer s.evMu.Unlock()
+	return s.opened[id] || s.handed[id]
 }
 
 // PersonTabs is every open tab of the person's Chrome, for the person's
@@ -342,65 +363,183 @@ func (s *Session) closeOwnTabsLocked() {
 func (s *Session) PersonTabs() []Tab {
 	s.evMu.Lock()
 	defer s.evMu.Unlock()
+	return s.personTabsLocked()
+}
+
+func (s *Session) personTabsLocked() []Tab {
 	var out []Tab
 	for _, id := range s.pages {
 		if s.destroyed[id] {
 			continue
 		}
 		t := s.info[id]
-		out = append(out, Tab{Index: len(out) + 1, Title: t.Title, URL: t.URL, id: id,
+		out = append(out, Tab{Index: len(out) + 1, Title: t.Title, URL: t.URL, id: id, Handle: s.handles[id],
 			Current: id == s.curID, Agent: s.opened[id] || s.handed[id]})
 	}
 	return out
 }
 
-// HandOver gives the agent tab n of PersonTabs: it may work in it from
-// its next browser call (and it is driven then), but it is never closed
-// on the person's behalf. Only a person's command calls it; it never waits.
-func (s *Session) HandOver(n int) (Tab, error) {
-	if !s.myChrome.Load() {
-		return Tab{}, errors.New("/browser tab hands over a tab of your own Chrome (/browser attach); otherwise the model already sees every tab")
+// ListForPerson is PersonTabs for /browser tabs itself: it also remembers
+// the listing, so a number typed after it means the tab listed under it.
+func (s *Session) ListForPerson() []Tab {
+	s.evMu.Lock()
+	defer s.evMu.Unlock()
+	tabs := s.personTabsLocked()
+	s.listed = s.listed[:0]
+	for _, t := range tabs {
+		s.listed = append(s.listed, t.id)
 	}
-	tabs := s.PersonTabs()
-	if len(tabs) == 0 {
+	return tabs
+}
+
+// errTabsChanged refuses a number whose tab is no longer the one listed.
+var errTabsChanged = errors.New("the tab list changed; run /browser tabs again")
+
+// resolveTabLocked finds the tab a person named: a handle ("t3"), or a
+// number from their last /browser tabs that still names the same open tab.
+func (s *Session) resolveTabLocked(ref string) (Tab, error) {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	tabs := s.personTabsLocked()
+	if n, err := strconv.Atoi(ref); err == nil {
+		if n < 1 || n > len(s.listed) {
+			if len(s.listed) == 0 {
+				return Tab{}, errors.New("run /browser tabs first, then name a tab by its number or id")
+			}
+			return Tab{}, fmt.Errorf("there is no tab %d; /browser tabs listed %d", n, len(s.listed))
+		}
+		id := s.listed[n-1]
+		for _, t := range tabs {
+			if t.id == id {
+				return t, nil
+			}
+		}
+		return Tab{}, errTabsChanged
+	}
+	for _, t := range tabs {
+		if t.Handle == ref {
+			return t, nil
+		}
+	}
+	return Tab{}, fmt.Errorf("no open tab is %s; /browser tabs lists them", ref)
+}
+
+func (s *Session) personGate() error {
+	if !s.myChrome.Load() {
+		return errors.New("/browser tab hands over a tab of your own Chrome (/browser attach); otherwise the model already sees every tab")
+	}
+	return nil
+}
+
+// HandOver gives the agent the tab ref names (a handle like "t3", or a
+// number from the person's last /browser tabs): it may work in it from its
+// next browser call (and it is driven then), but it is never closed on the
+// person's behalf. Only a person's command calls it; it never waits.
+func (s *Session) HandOver(ref string) (Tab, error) {
+	if err := s.personGate(); err != nil {
+		return Tab{}, err
+	}
+	s.evMu.Lock()
+	defer s.evMu.Unlock()
+	if len(s.pages) == 0 {
 		return Tab{}, errors.New("not attached to your Chrome yet — its tabs are listed once it is (the model's first browser call, or /browser attach)")
 	}
-	if n < 1 || n > len(tabs) {
-		return Tab{}, fmt.Errorf("there is no tab %d; /browser tabs lists %d", n, len(tabs))
+	t, err := s.resolveTabLocked(ref)
+	if err != nil {
+		return Tab{}, err
 	}
-	t := tabs[n-1]
-	s.evMu.Lock()
 	s.handed[t.id] = true
 	s.handTo = t.id
-	s.evMu.Unlock()
 	t.Agent = true
 	return t, nil
+}
+
+// Unhand takes hand-overs back: the tab ref names, or every one for "all".
+// The agent stops driving a tab taken back from its next browser call. It
+// never waits; it reports the tabs taken back.
+func (s *Session) Unhand(ref string) ([]Tab, error) {
+	if err := s.personGate(); err != nil {
+		return nil, err
+	}
+	s.evMu.Lock()
+	defer s.evMu.Unlock()
+	var out []Tab
+	if strings.EqualFold(strings.TrimSpace(ref), "all") {
+		for _, t := range s.personTabsLocked() {
+			if s.handed[t.id] {
+				out = append(out, t)
+			}
+		}
+		s.handed, s.handTo = map[string]bool{}, ""
+		return out, nil
+	}
+	t, err := s.resolveTabLocked(ref)
+	if err != nil {
+		return nil, err
+	}
+	if !s.handed[t.id] {
+		return nil, fmt.Errorf("%s was not handed over", t.Handle)
+	}
+	delete(s.handed, t.id)
+	if s.handTo == t.id {
+		s.handTo = ""
+	}
+	return []Tab{t}, nil
 }
 
 // AttachMyChromeAsync is /browser attach: the session switches to the
 // person's own Chrome for the rest of its life (the config is unchanged),
 // dropping any other connection — closing a browser it launched — and
-// connects on a goroutine of its own, reporting through Notify. It never
-// waits.
-func (s *Session) AttachMyChromeAsync() {
+// connects on a goroutine of its own, handing report the outcome (nothing
+// when it was cancelled). It never waits. Close, CloseAsync, CancelAttach
+// and a second attach cancel one still waiting on Chrome's prompt.
+func (s *Session) AttachMyChromeAsync(report func(string)) {
 	s.myChrome.Store(true)
 	s.stMu.Lock()
 	if !s.st.Connected {
 		s.st.MyChrome, s.st.Label = true, s.opts.ChromeLabel
 	}
 	s.stMu.Unlock()
+	s.cancelAttach()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.attachMu.Lock()
+	s.attachCancel = cancel
+	s.attachMu.Unlock()
 	go func() {
+		defer cancel()
 		s.mu.Lock()
-		if s.conn != nil && !s.connMine {
+		if s.conn != nil && !s.connMine && ctx.Err() == nil {
 			s.disconnectLocked()
 		}
 		s.mu.Unlock()
-		_, notes, err := s.Page(context.Background())
+		if ctx.Err() != nil {
+			return
+		}
+		_, notes, err := s.Page(ctx)
+		if ctx.Err() != nil || report == nil {
+			return
+		}
 		switch {
 		case err != nil:
-			s.notify("browser: " + err.Error())
+			report("browser: " + err.Error())
 		case len(notes) > 0:
-			s.notify(strings.Join(notes, "; "))
+			report("browser: " + strings.Join(notes, "; "))
+		default:
+			report("browser: attached to your Chrome (" + s.opts.ChromeLabel + ")")
 		}
 	}()
+}
+
+// CancelAttach ends a /browser attach still waiting on Chrome's prompt,
+// reporting whether there was one. It never waits.
+func (s *Session) CancelAttach() bool { return s.cancelAttach() }
+
+func (s *Session) cancelAttach() bool {
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if s.attachCancel == nil {
+		return false
+	}
+	s.attachCancel()
+	s.attachCancel = nil
+	return true
 }

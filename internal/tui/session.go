@@ -314,6 +314,7 @@ func wireEvents(s *Session) {
 		OnScheduleFire:    s.onScheduleFire,
 	}
 	ag.Tools.OnStatus = s.setStatus
+	ag.Tools.OnNotice = s.notice
 }
 
 // themeFor resolves the theme for a client label: a remembered per-device

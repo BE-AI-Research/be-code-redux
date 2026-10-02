@@ -208,10 +208,14 @@ or the browser tool's gate.
     Chrome actually does in each case (closed socket, held handshake, held first reply).
 42. **Private tabs.** With a few of your own tabs open, ask for `tabs`: only the model's tab is
     listed, and nothing from your tabs' titles or addresses is anywhere in the transcript.
-    `/browser tabs` lists them all to you; `/browser tab <n>` on one of yours, then ask for a
-    snapshot: the model now works in that tab.
-43. **Every action asks.** A click on a site with no rule asks as watched, every time; `a` grants
-    nothing; `be-code run -y` with the same request is refused. A `deny` rule still refuses.
+    `/browser tabs` lists them all to you with ids; close one of them, then `/browser tab <its old
+    number>`: refused, "the tab list changed". `/browser tab <id>` on one of yours, then ask for a
+    snapshot (it asks): the model now works in that tab. `/browser untab all` takes it back.
+43. **Every action asks.** On a site with no rule, opening it ("open … in your Chrome?"), a
+    snapshot, reading, scrolling, going back and each click all ask as watched, every time; `a`
+    grants nothing; `be-code run -y` with the same request is refused. A `deny` site cannot even
+    be opened. An `allow` site asks nothing. `/browser attach`, then `/browser close` while Chrome's
+    prompt is up: the attach is cancelled at once, and `/quit` during the prompt does not hang.
 44. **Detach.** `/quit` (and separately `/browser close`): the model's tabs close, the tab you
     handed over and your own stay open, and Chrome keeps running. Downloads you start yourself
     while attached still work.
