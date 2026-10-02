@@ -27,6 +27,17 @@ type Options struct {
 	SettleTimeout time.Duration // bound on waiting for a page to settle; 0 means 10s
 	ForceHeadless bool          // launch headless whatever the display; tests use it
 	QuietWindow   time.Duration // network idle that counts as settled; 0 means 500ms
+
+	// My-Chrome mode (mychrome.go): attach to the person's own running
+	// Chrome through the DevToolsActivePort in ChromeDir, never Address,
+	// never a launch.
+	MyChrome    bool
+	ChromeDir   string        // the user-data dir holding DevToolsActivePort
+	ChromeLabel string        // what /browser calls it: the channel, or the dir
+	ConsentWait time.Duration // bound on Chrome's "Allow remote debugging?" prompt; 0 means 60s
+	// Notify receives a live notice while a connection waits on the
+	// person ("" clears it). It may be called from a timer goroutine.
+	Notify func(string)
 }
 
 // sensitiveAutocompleteTokens are the autocomplete tokens (spec §3.4,

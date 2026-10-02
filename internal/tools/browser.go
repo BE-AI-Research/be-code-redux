@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +57,16 @@ type BrowserConfig struct {
 	SettleTimeout int           // seconds
 	ForceHeadless bool          // tests only
 	QuietWindow   time.Duration // tests only; zero means the default
+	// The person's own Chrome (browser.use_my_chrome): which channel's
+	// user-data dir holds its DevToolsActivePort, or the dir outright.
+	UseMyChrome       bool
+	ChromeChannel     string
+	ChromeUserDataDir string
+	ConsentWait       time.Duration // tests only; zero means 60s
 }
+
+// statusOut is where status notes go with no status line; a var for tests.
+var statusOut io.Writer = os.Stderr
 
 // BrowserTool is the one flat browser tool (spec §2.1).
 type BrowserTool struct {
@@ -71,15 +82,34 @@ type BrowserTool struct {
 // browser call.
 func NewBrowser(cfg BrowserConfig) *BrowserTool {
 	consent, warns := browser.NewConsent(cfg.Sites)
-	return &BrowserTool{
-		session: browser.NewSession(browser.Options{
-			Address: cfg.Address, Launch: cfg.Launch, Executable: cfg.Executable, Profile: cfg.Profile,
-			AllowRemote: cfg.AllowRemote, SnapshotChars: cfg.SnapshotChars,
-			SettleTimeout: time.Duration(cfg.SettleTimeout) * time.Second,
-			ForceHeadless: cfg.ForceHeadless, QuietWindow: cfg.QuietWindow,
-		}),
-		consent:  consent,
-		Warnings: warns,
+	// Resolved whether or not use_my_chrome is on: /browser attach uses it.
+	dir, label, warn := browser.ResolveChromeDir(cfg.ChromeChannel, cfg.ChromeUserDataDir)
+	if warn != "" {
+		warns = append(warns, warn)
+	}
+	t := &BrowserTool{consent: consent, Warnings: warns}
+	t.session = browser.NewSession(browser.Options{
+		Address: cfg.Address, Launch: cfg.Launch, Executable: cfg.Executable, Profile: cfg.Profile,
+		AllowRemote: cfg.AllowRemote, SnapshotChars: cfg.SnapshotChars,
+		SettleTimeout: time.Duration(cfg.SettleTimeout) * time.Second,
+		ForceHeadless: cfg.ForceHeadless, QuietWindow: cfg.QuietWindow,
+		MyChrome: cfg.UseMyChrome, ChromeDir: dir, ChromeLabel: label, ConsentWait: cfg.ConsentWait,
+		Notify: t.status,
+	})
+	return t
+}
+
+// status puts a live note on the UI's status line ("" clears it): Chrome's
+// consent prompt, or how /browser attach went. It may run on a goroutine
+// of its own. With no status line (plain and headless runs), a note is a
+// line on stderr instead, so the person still hears that Chrome is asking.
+func (t *BrowserTool) status(msg string) {
+	if t.r != nil && t.r.OnStatus != nil {
+		t.r.OnStatus(msg)
+		return
+	}
+	if msg != "" {
+		fmt.Fprintln(statusOut, msg)
 	}
 }
 
@@ -296,7 +326,16 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		}
 		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
 	}
-	switch t.consent.Tier(host) {
+	tier := t.consent.Tier(host)
+	if tier == browser.TierAsk && t.session.MyChrome() {
+		// The person's own Chrome, signed in to everything they use: every
+		// interaction outside the allow tier asks, with no "always".
+		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s in your Chrome? (every action in your own Chrome asks)\n  %s", disp, what)) {
+			return "", host, judgedURL
+		}
+		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
+	}
+	switch tier {
 	case browser.TierAllow:
 		return "", host, judgedURL
 	case browser.TierDeny:
@@ -409,8 +448,12 @@ func (t *BrowserTool) StatusLines() []string {
 	st := t.session.Status()
 	var out []string
 	switch {
+	case !st.Connected && st.MyChrome:
+		out = append(out, "browser: not connected (it attaches to your Chrome ("+st.Label+") on the model's first browser call)")
 	case !st.Connected:
 		out = append(out, "browser: not connected (it starts on the model's first browser call)")
+	case st.MyChrome:
+		out = append(out, "browser: attached to your Chrome ("+st.Label+")")
 	case st.Launched:
 		out = append(out, fmt.Sprintf("browser: launched %s (%s)", st.Product, st.Exe))
 	default:
@@ -425,6 +468,49 @@ func (t *BrowserTool) StatusLines() []string {
 		out = append(out, "allowed this session: none")
 	}
 	return out
+}
+
+// AttachMyChrome is /browser attach: this session switches to the
+// person's own Chrome (the config is unchanged) and connects on a
+// goroutine of its own. It never waits.
+func (t *BrowserTool) AttachMyChrome() string {
+	t.session.AttachMyChromeAsync()
+	return "browser: attaching to your Chrome (" + t.session.Status().Label + ") for this session — if Chrome asks \"Allow remote debugging?\", click Allow"
+}
+
+// PersonTabLines is /browser tabs: every tab of the person's Chrome, for
+// the person — never shown to the model. It never waits.
+func (t *BrowserTool) PersonTabLines() []string {
+	if !t.session.MyChrome() {
+		return []string{"/browser tabs lists your own Chrome's tabs once attached to it (/browser attach)"}
+	}
+	tabs := t.session.PersonTabs()
+	if len(tabs) == 0 {
+		return []string{"not attached to your Chrome yet (the model's first browser call, or /browser attach)"}
+	}
+	out := []string{"your Chrome's tabs (the agent works only in those marked agent):"}
+	for _, tab := range tabs {
+		line := fmt.Sprintf("  %d. %s", tab.Index, strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: "))
+		if tab.Agent {
+			line += " (agent)"
+		}
+		if tab.Current {
+			line += " (current)"
+		}
+		out = append(out, line)
+	}
+	return append(out, "/browser tab <n> hands one over to the agent")
+}
+
+// HandOver is /browser tab <n>: the person gives the agent one of their
+// own tabs. It never waits.
+func (t *BrowserTool) HandOver(n int) string {
+	tab, err := t.session.HandOver(n)
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("handed over tab %d: %s — the agent works in it from its next browser call, and never closes it",
+		n, strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: "))
 }
 
 // PageURL is the address of the tab being driven, as last seen ("" when

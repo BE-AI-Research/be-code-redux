@@ -767,3 +767,163 @@ func TestBrowserSessionGrantUsedWhenFiredTurnInherits(t *testing.T) {
 		t.Fatalf("the watch tier still asks: %v", log2.actions)
 	}
 }
+
+// myChromeFixture is the browser tool attached to the person's own Chrome:
+// WebSocket only, their own tab (T1, a bank) open, the sign-in fixture
+// reachable by navigation in the agent's own tab.
+func myChromeFixture(t *testing.T, sites map[string]string, approve ApproveFunc) (*Registry, *BrowserTool, *browsertest.PageScript, *browsertest.Browser) {
+	t.Helper()
+	fb := browsertest.New(t)
+	fb.SetWSOnly(true)
+	ps := browsertest.NewPage(fb, "https://bank.test/accounts", "My accounts — Bank", browsertest.FormTree)
+	ps.Lock()
+	ps.Pages["https://acme.test/login"] = [2]string{"Sign in — Acme", browsertest.FormTree}
+	ps.Pages["http://localhost:8080/"] = [2]string{"Dev server", browsertest.FormTree}
+	ps.Sensitive = map[int][]string{60: {"type", "password"}}
+	ps.Unlock()
+	dir := t.TempDir()
+	fb.WritePortFile(dir)
+	reg, err := NewRegistry(t.TempDir(), approve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{UseMyChrome: true, ChromeUserDataDir: dir, Launch: true, Sites: sites,
+		SnapshotChars: 12000, SettleTimeout: 2, QuietWindow: 20 * time.Millisecond})
+	reg.AddTool(bt)
+	t.Cleanup(reg.Close)
+	return reg, bt, ps, fb
+}
+
+func TestBrowserMyChromeEveryInteractionAsksByDefault(t *testing.T) {
+	var log askLog
+	_, bt, ps, _ := myChromeFixture(t, nil, log.approver(true))
+	if res := do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"}); res.IsError {
+		t.Fatalf("open: %s", res.Content)
+	}
+	for i := 0; i < 2; i++ {
+		if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+			t.Fatalf("click: %s", res.Content)
+		}
+	}
+	if log.count() != 2 || log.actions[0] != "browser_watch" || log.actions[1] != "browser_watch" {
+		t.Fatalf("asks %v", log.actions)
+	}
+	if strings.Contains(log.details[0], "for the rest of this session") || !strings.Contains(log.details[0], "your Chrome") {
+		t.Fatalf("prompt:\n%s", log.details[0])
+	}
+	if g := bt.consent.Grants(); len(g) != 0 {
+		t.Fatalf("granted %v for the session", g)
+	}
+	if noMouse(ps) {
+		t.Fatal("approved clicks were not clicked")
+	}
+}
+
+func TestBrowserMyChromeAllowAndDenyTiersStillApply(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := myChromeFixture(t, map[string]string{"acme.test": "deny"}, log.approver(true))
+	do(bt, map[string]any{"action": "open", "url": "http://localhost:8080/"})
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); res.IsError {
+		t.Fatalf("loopback (allow) click: %s", res.Content)
+	}
+	do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"})
+	if res := do(bt, map[string]any{"action": "click", "ref": "e4"}); !res.IsError || !strings.Contains(res.Content, "denied by browser.sites") {
+		t.Fatalf("deny: %s", res.Content)
+	}
+	if log.count() != 0 {
+		t.Fatalf("asked %v", log.actions)
+	}
+}
+
+func TestBrowserMyChromeStillRefusesPasswords(t *testing.T) {
+	var log askLog
+	_, bt, ps, _ := myChromeFixture(t, map[string]string{"acme.test": "allow"}, log.approver(true))
+	do(bt, map[string]any{"action": "open", "url": "https://acme.test/login"})
+	res := do(bt, map[string]any{"action": "type", "ref": "e2", "text": "hunter2"})
+	if !res.IsError || res.Content != signInYours || log.count() != 0 {
+		t.Fatalf("result %q, asks %v", res.Content, log.actions)
+	}
+	for _, in := range ps.Inputs() {
+		if strings.Contains(in, "hunter2") {
+			t.Fatal("typed a password")
+		}
+	}
+}
+
+func TestBrowserMyChromeTabsNeverShowThePersonsTabs(t *testing.T) {
+	reg, bt, _, _ := myChromeFixture(t, nil, nil)
+	for _, args := range []map[string]any{{"action": "snapshot"}, {"action": "tabs"}, {"action": "read"}} {
+		res := do(bt, args)
+		if strings.Contains(res.Content, "bank.test") || strings.Contains(res.Content, "My accounts") {
+			t.Fatalf("%v leaked the person's tab:\n%s", args, res.Content)
+		}
+	}
+	if res := do(bt, map[string]any{"action": "tabs", "switch": 2}); !res.IsError {
+		t.Fatalf("switched to a tab of the person's:\n%s", res.Content)
+	}
+	_ = reg
+}
+
+func TestBrowserMyChromeStatusAndWarnings(t *testing.T) {
+	_, bt, _, fb := myChromeFixture(t, nil, nil)
+	if got := bt.StatusLines(); got[0] != "browser: not connected (it attaches to your Chrome ("+bt.session.Status().Label+") on the model's first browser call)" {
+		t.Fatalf("before: %q", got)
+	}
+	do(bt, map[string]any{"action": "snapshot"})
+	label := bt.session.Status().Label
+	if got := bt.StatusLines(); got[0] != "browser: attached to your Chrome ("+label+")" {
+		t.Fatalf("after: %q", got)
+	}
+	if fb.HTTPHits() != 0 {
+		t.Fatal("asked HTTP")
+	}
+	w := NewBrowser(BrowserConfig{UseMyChrome: true, ChromeChannel: "nightly"})
+	if len(w.Warnings) != 1 || !strings.Contains(w.Warnings[0], `"nightly" is not one of stable|beta|dev|canary`) {
+		t.Fatalf("warnings %q", w.Warnings)
+	}
+	// /browser attach uses the channel too, so a bad one is said either way.
+	if len(NewBrowser(BrowserConfig{ChromeChannel: "nightly"}).Warnings) != 1 {
+		t.Fatal("no warning about chrome_channel with my-Chrome mode off")
+	}
+	if NewBrowser(BrowserConfig{ChromeChannel: "beta"}).Warnings != nil {
+		t.Fatal("warned about a good channel")
+	}
+}
+
+func TestBrowserOrdinaryModeUnchangedByMyChromeKeys(t *testing.T) {
+	var log askLog
+	_, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(true))
+	if bt.session.MyChrome() {
+		t.Fatal("my-Chrome mode on by default")
+	}
+	do(bt, map[string]any{"action": "snapshot"})
+	do(bt, map[string]any{"action": "click", "ref": "e4"})
+	if log.count() != 1 || log.actions[0] != "browser" {
+		t.Fatalf("asks %v", log.actions)
+	}
+}
+
+func TestBrowserStatusNotesReachTheStatusLineOrStderr(t *testing.T) {
+	reg, err := NewRegistry(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bt := NewBrowser(BrowserConfig{UseMyChrome: true})
+	reg.AddTool(bt)
+	var buf strings.Builder
+	old := statusOut
+	statusOut = &buf
+	defer func() { statusOut = old }()
+	bt.status("Chrome is asking")
+	bt.status("")
+	if buf.String() != "Chrome is asking\n" {
+		t.Fatalf("stderr %q", buf.String())
+	}
+	var got []string
+	reg.OnStatus = func(m string) { got = append(got, m) }
+	bt.status("Chrome is asking")
+	bt.status("")
+	if len(got) != 2 || got[0] != "Chrome is asking" || got[1] != "" || buf.Len() != len("Chrome is asking\n") {
+		t.Fatalf("status line %q, stderr %q", got, buf.String())
+	}
+}

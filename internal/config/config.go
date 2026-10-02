@@ -438,7 +438,7 @@ func Default() *Config {
 		WebSearch: WebSearchConfig{
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
-		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10},
+		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10, ChromeChannel: "stable"},
 		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3, ConfirmOnStart: true, Allow: []string{}},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",
@@ -481,6 +481,33 @@ type BrowserConfig struct {
 	Sites         map[string]string `json:"sites"`
 	SnapshotChars int               `json:"snapshot_chars"`
 	SettleTimeout int               `json:"settle_timeout"`
+	// UseMyChrome attaches to the person's own running Chrome (remote
+	// debugging turned on at chrome://inspect/#remote-debugging) instead of
+	// browser.address or a launched browser. ChromeChannel picks which
+	// Chrome's user-data dir holds its DevToolsActivePort (stable, beta,
+	// dev, canary); ChromeUserDataDir, when set, is that dir outright.
+	UseMyChrome       bool   `json:"use_my_chrome"`
+	ChromeChannel     string `json:"chrome_channel"`
+	ChromeUserDataDir string `json:"chrome_user_data_dir"`
+}
+
+// ChromeDir is chrome_user_data_dir with a leading "~" expanded (both
+// "~/" and Windows' `~\`); "" when unset, meaning the channel decides.
+func (b BrowserConfig) ChromeDir() string {
+	return expandHome(strings.TrimSpace(b.ChromeUserDataDir))
+}
+
+// expandHome expands a leading "~", "~/" or `~\` to the home directory.
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	rest := strings.ReplaceAll(p[1:], `\`, "/")
+	return filepath.Join(home, filepath.FromSlash(rest))
 }
 
 // ProfileDir is the launched browser's profile directory: the configured
@@ -488,9 +515,7 @@ type BrowserConfig struct {
 func (b BrowserConfig) ProfileDir() string {
 	p := strings.TrimSpace(b.Profile)
 	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
-		}
+		p = expandHome(p)
 	}
 	if p != "" {
 		return p

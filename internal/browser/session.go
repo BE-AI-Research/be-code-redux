@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,7 +50,10 @@ type Tab struct {
 	Index      int
 	Title, URL string
 	Current    bool
-	id         string
+	// Agent marks, in the person's own list (PersonTabs), a tab the agent
+	// may work in: one it opened, or one handed over with /browser tab.
+	Agent bool
+	id    string
 }
 
 // Status is what /browser shows. Reading it never waits on the browser.
@@ -57,6 +61,10 @@ type Status struct {
 	Connected, Launched   bool
 	Product, Address, Exe string
 	Title, URL            string
+	// MyChrome: attached (or, not yet connected, set to attach) to the
+	// person's own Chrome; Label is its channel or user-data dir.
+	MyChrome bool
+	Label    string
 }
 
 // Session owns the connection to the browser for one BE-Code session. It
@@ -73,10 +81,23 @@ type Session struct {
 	unsub    func()
 	ended    bool   // Close has run; never reconnect or launch again
 	listAddr string // where GET /json/list is asked: opts.Address when attached, the launched browser's own host:port otherwise
+	connMine bool   // the live connection is to the person's own Chrome
+
+	// myChrome is the mode the next connection uses: Options.MyChrome, or
+	// /browser attach (AttachMyChromeAsync). Read without waiting.
+	myChrome atomic.Bool
 
 	evMu      sync.Mutex // written from the connection's reader goroutine
 	created   []createdTarget
 	destroyed map[string]bool
+	// The tab cache and ownership, kept current from target events so the
+	// person's /browser tabs and /browser tab never wait on the browser.
+	pages  []string              // page targets, in the order first seen
+	info   map[string]targetInfo // their last known title and URL
+	opened map[string]bool       // tabs this connection opened (closed on disconnect)
+	handed map[string]bool       // tabs the person handed over (never closed)
+	handTo string                // a handed-over tab to drive from the next Page
+	curID  string                // the tab being driven, as last recorded
 
 	stMu sync.Mutex // Status reads only this, never mu
 	st   Status
@@ -87,7 +108,32 @@ func NewSession(opts Options) *Session {
 	if opts.Address == "" {
 		opts.Address = "127.0.0.1:9222"
 	}
-	return &Session{opts: opts, destroyed: map[string]bool{}, st: Status{Address: opts.Address}}
+	s := &Session{opts: opts}
+	s.myChrome.Store(opts.MyChrome)
+	s.resetTargetsLocked()
+	s.st = s.idleStatus()
+	return s
+}
+
+// MyChrome reports whether the session attaches to the person's own
+// Chrome. It never waits.
+func (s *Session) MyChrome() bool { return s.myChrome.Load() }
+
+// idleStatus is Status with nothing connected.
+func (s *Session) idleStatus() Status {
+	return Status{Address: s.opts.Address, MyChrome: s.myChrome.Load(), Label: s.opts.ChromeLabel}
+}
+
+// resetTargetsLocked forgets every target, tab and ownership record: each
+// connection starts afresh (the agent's tabs are the ones it opened in
+// this connection).
+func (s *Session) resetTargetsLocked() {
+	s.evMu.Lock()
+	s.created, s.destroyed = nil, map[string]bool{}
+	s.pages, s.info = nil, map[string]targetInfo{}
+	s.opened, s.handed = map[string]bool{}, map[string]bool{}
+	s.handTo, s.curID = "", ""
+	s.evMu.Unlock()
 }
 
 // Page returns the page being driven, connecting first — or reconnecting,
@@ -124,7 +170,17 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 			notes = append(notes, note)
 		}
 	}
-	if s.page == nil || s.isDestroyed(s.page.targetID) {
+	if s.connMine {
+		if s.page == nil || s.isDestroyed(s.page.targetID) || s.handOverPending() {
+			note, err := s.pickMineLocked(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if note != "" {
+				notes = append(notes, note)
+			}
+		}
+	} else if s.page == nil || s.isDestroyed(s.page.targetID) {
 		note, err := s.pickPageLocked(ctx)
 		if err != nil {
 			return nil, nil, err
@@ -138,6 +194,9 @@ func (s *Session) Page(ctx context.Context) (*Page, []string, error) {
 }
 
 func (s *Session) connectLocked(ctx context.Context) (string, error) {
+	if s.myChrome.Load() {
+		return s.connectMineLocked(ctx)
+	}
 	addr := s.opts.Address
 	if !s.opts.AllowRemote && !IsLoopbackAddr(addr) {
 		return "", fmt.Errorf("browser.address %s is not on this machine; set browser.allow_remote to use it", addr)
@@ -185,9 +244,7 @@ func (s *Session) connectLocked(ctx context.Context) (string, error) {
 		note += "; downloads could not be refused by this browser"
 	}
 	s.listAddr = listAddr
-	s.evMu.Lock()
-	s.created, s.destroyed = nil, map[string]bool{}
-	s.evMu.Unlock()
+	s.resetTargetsLocked()
 	unsub := conn.Subscribe(s.onEvent)
 	if err := conn.Call(ctx, "", "Target.setDiscoverTargets", map[string]any{"discover": true}, nil); err != nil {
 		unsub()
@@ -229,6 +286,20 @@ func (s *Session) onEvent(ev Event) {
 		if json.Unmarshal(ev.Params, &e) == nil && e.TargetInfo.Type == "page" {
 			s.evMu.Lock()
 			s.created = append(s.created, createdTarget{id: e.TargetInfo.TargetID, opener: e.TargetInfo.OpenerID, at: time.Now()})
+			s.seeLocked(e.TargetInfo)
+			// A tab one of the agent's own tabs opened is the agent's too.
+			if s.opened[e.TargetInfo.OpenerID] {
+				s.opened[e.TargetInfo.TargetID] = true
+			}
+			s.evMu.Unlock()
+		}
+	case "Target.targetInfoChanged":
+		var e struct {
+			TargetInfo targetInfo `json:"targetInfo"`
+		}
+		if json.Unmarshal(ev.Params, &e) == nil && e.TargetInfo.Type == "page" {
+			s.evMu.Lock()
+			s.seeLocked(e.TargetInfo)
 			s.evMu.Unlock()
 		}
 	case "Target.targetDestroyed":
@@ -241,6 +312,14 @@ func (s *Session) onEvent(ev Event) {
 			s.evMu.Unlock()
 		}
 	}
+}
+
+// seeLocked records a page target's title and URL (under evMu).
+func (s *Session) seeLocked(t targetInfo) {
+	if _, ok := s.info[t.TargetID]; !ok {
+		s.pages = append(s.pages, t.TargetID)
+	}
+	s.info[t.TargetID] = t
 }
 
 func (s *Session) isDestroyed(id string) bool {
@@ -355,7 +434,7 @@ func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 		}
 		opened = true
 	}
-	p, attachErr := attachPage(ctx, s.conn, id, s.opts)
+	p, attachErr := s.attachLocked(ctx, id)
 	if attachErr != nil && fromList {
 		if gid, gerr := s.getTargetsPageLocked(ctx); gerr == nil {
 			id, opened = gid, false
@@ -365,7 +444,7 @@ func (s *Session) pickPageLocked(ctx context.Context) (string, error) {
 				}
 			}
 			if gerr == nil {
-				p, attachErr = attachPage(ctx, s.conn, id, s.opts)
+				p, attachErr = s.attachLocked(ctx, id)
 			}
 		}
 	}
@@ -402,11 +481,16 @@ func (s *Session) AfterAction(ctx context.Context, since time.Time) (string, err
 		}
 	}
 	s.created = nil
+	if pick != "" && s.connMine {
+		// The agent's own action opened it: it is the agent's to drive
+		// and to close.
+		s.opened[pick] = true
+	}
 	s.evMu.Unlock()
 	if pick == "" {
 		return "", nil
 	}
-	p, err := attachPage(ctx, s.conn, pick, s.opts)
+	p, err := s.attachLocked(ctx, pick)
 	if err != nil {
 		return "", err
 	}
@@ -444,6 +528,17 @@ func (s *Session) tabsLocked(ctx context.Context) ([]Tab, error) {
 		if t.Type != "page" || s.isDestroyed(t.TargetID) {
 			continue
 		}
+		if s.connMine {
+			// The person's own tabs are never listed to the model, not
+			// even by title: only the agent's own and handed-over ones.
+			s.evMu.Lock()
+			s.seeLocked(t)
+			mine := s.opened[t.TargetID] || s.handed[t.TargetID]
+			s.evMu.Unlock()
+			if !mine {
+				continue
+			}
+		}
 		out = append(out, Tab{Index: len(out) + 1, Title: t.Title, URL: t.URL, id: t.TargetID,
 			Current: s.page != nil && t.TargetID == s.page.targetID})
 	}
@@ -467,7 +562,7 @@ func (s *Session) SwitchTab(ctx context.Context, n int) error {
 	if tabs[n-1].Current {
 		return nil
 	}
-	p, err := attachPage(ctx, s.conn, tabs[n-1].id, s.opts)
+	p, err := s.attachLocked(ctx, tabs[n-1].id)
 	if err != nil {
 		return err
 	}
@@ -493,6 +588,9 @@ func (s *Session) recordLocked() {
 	if s.page == nil {
 		return
 	}
+	s.evMu.Lock()
+	s.curID = s.page.targetID
+	s.evMu.Unlock()
 	t, u := s.page.Title(), s.page.URL()
 	s.stMu.Lock()
 	s.st.Title, s.st.URL = t, u
@@ -535,6 +633,9 @@ func (s *Session) disconnectLocked() {
 		if s.page != nil {
 			s.page.release()
 		}
+		if s.connMine {
+			s.closeOwnTabsLocked()
+		}
 		if s.proc != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			err := s.conn.Call(ctx, "", "Browser.close", nil, nil)
@@ -557,9 +658,11 @@ func (s *Session) disconnectLocked() {
 		s.conn = nil
 	}
 	s.page = nil
+	s.connMine = false
+	s.resetTargetsLocked()
 	s.killLocked()
 	s.stMu.Lock()
-	s.st = Status{Address: s.opts.Address}
+	s.st = s.idleStatus()
 	s.stMu.Unlock()
 }
 
@@ -570,9 +673,11 @@ func (s *Session) dropLocked() {
 		s.unsub = nil
 	}
 	s.conn, s.page = nil, nil
+	s.connMine = false
+	s.resetTargetsLocked()
 	s.killLocked()
 	s.stMu.Lock()
-	s.st = Status{Address: s.opts.Address}
+	s.st = s.idleStatus()
 	s.stMu.Unlock()
 }
 

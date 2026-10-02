@@ -184,6 +184,20 @@ func (s *PageScript) install() {
 		s.targets = append(s.targets, &Target{ID: id, URL: "about:blank", Tree: EmptyTree, history: []string{"about:blank"}})
 		return map[string]any{"targetId": id}, nil
 	})
+	b.Handle("Target.closeTarget", func(_ string, p json.RawMessage) (any, error) {
+		a := arg[struct {
+			TargetID string `json:"targetId"`
+		}](p)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, t := range s.targets {
+			if t.ID == a.TargetID {
+				s.targets = append(s.targets[:i], s.targets[i+1:]...)
+				return map[string]any{"success": true}, nil
+			}
+		}
+		return nil, errors.New("No target with given id found")
+	})
 	b.Handle("Page.getFrameTree", func(sid string, _ json.RawMessage) (any, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()

@@ -193,6 +193,8 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			Address: cfg.Browser.Address, Launch: cfg.Browser.Launch, Executable: cfg.Browser.Executable,
 			Profile: cfg.Browser.ProfileDir(), AllowRemote: cfg.Browser.AllowRemote, Sites: cfg.Browser.Sites,
 			SnapshotChars: cfg.Browser.SnapshotChars, SettleTimeout: cfg.Browser.SettleTimeout,
+			UseMyChrome: cfg.Browser.UseMyChrome, ChromeChannel: cfg.Browser.ChromeChannel,
+			ChromeUserDataDir: cfg.Browser.ChromeDir(),
 		})
 		for _, w := range bt.Warnings {
 			fmt.Fprintln(os.Stderr, "warn: "+w)
