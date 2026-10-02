@@ -87,6 +87,11 @@ type scheduler struct {
 	// unasked in this process — the next start asks again, and a person's
 	// /schedule resume confirms one now.
 	unconfirmed map[string]bool
+	// asking marks what the startup prompt is showing while it is open:
+	// with confirm_on_start off the loop may already run for what was let
+	// through silently, and must not queue (or pause, at its time) a
+	// schedule a person is being asked about.
+	asking map[string]bool
 
 	// ctx lives as long as the scheduler: StopSchedules cancels it, which
 	// withdraws a schedule prompt still open when the session ends.
@@ -130,6 +135,7 @@ func (a *Agent) EnableSchedules(clock schedule.Clock) {
 		pending:       map[string]pendingEvent{},
 		held:          map[string]int{},
 		unconfirmed:   map[string]bool{},
+		asking:        map[string]bool{},
 		floor:         map[string]time.Time{},
 		kick:          make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -500,7 +506,7 @@ func (s *scheduler) queueDue() (time.Time, bool) {
 			if !ok {
 				continue
 			}
-			if s.held[sc.ID] != 0 || s.unconfirmed[sc.ID] {
+			if s.held[sc.ID] != 0 || s.unconfirmed[sc.ID] || s.asking[sc.ID] {
 				continue // awaiting a person's confirmation (loadTimers, gateSchedules)
 			}
 			if _, waiting := s.pending[sc.ID]; waiting {
@@ -629,7 +635,7 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 		return sc, false, "it no longer exists"
 	case !isPending:
 		return sc, project, "it is no longer queued"
-	case (s.held[id] != 0 || s.unconfirmed[id]) && !pe.manual:
+	case (s.held[id] != 0 || s.unconfirmed[id] || s.asking[id]) && !pe.manual:
 		return sc, project, "it is waiting for a person to confirm it"
 	case !s.approvedLocked(sc):
 		s.pauseLocked(sc, project)

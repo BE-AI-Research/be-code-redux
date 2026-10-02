@@ -479,11 +479,15 @@ there is no background daemon.
   listed, and with none of those nothing is asked. `inherit_session_approvals: true` lets a
   fired event take the session's shortcuts again (except a write to `.be-code/schedules.md` or
   under `~/.be-code`, which still asks). `allow` is a standing allowance merged into
-  every fired event's own, with the same refusals (no bare `shell: *`, nothing outside the
-  workspace, never `.be-code/schedules.md` or `~/.be-code`). `auto_approve_create: true` lets
-  the model add a schedule without the prompt when every grant it asks for is within `allow`
-  (the same glob, a command one matches, a path under one, a host one matches); anything wider
-  asks as before, and your own `/schedule add` still confirms. None of them changes the rest:
+  every fired event's own, read when the session starts, with the same refusals (no bare
+  `shell: *`, nothing outside the workspace, never `.be-code/schedules.md` or `~/.be-code`).
+  `auto_approve_create: true` lets the model add a schedule without the prompt when every grant
+  it asks for is within `allow` (the same glob, a command one matches, a path under one, a host
+  one matches; a schedule asking for no grants counts as within it) — but never while
+  `inherit_session_approvals` is on, since such a schedule would also run with the session's
+  shortcuts. Anything wider asks as before, and your own `/schedule add` still confirms. With
+  `confirm_on_start: false`, an approved schedule that `max_active` or `min_interval` would now
+  refuse stays paused with a notice, as after a "yes". None of them changes the rest:
   the deny list, the browser's deny and watch tiers, the shell-after-a-web-page rule, the
   model being unable to create or resume a schedule after an untrusted page or during a fired
   event, no sub-agents and no online co-worker during one, an edited schedule pausing until
@@ -1205,9 +1209,11 @@ hand; `/config` prints what the running session actually resolved.
   never-approved ones still ask); `schedules.inherit_session_approvals` (false) — `true` lets a
   fired event use the session's shortcuts (an earlier `a`, `-y`, accepting all file changes, a
   site allowed for the session); `schedules.allow` ([]) — standing grants (`shell: …`,
-  `write: …`, `browser: …`) added to every fired event's allowance, an unusable one warned
-  about and dropped; `schedules.auto_approve_create` (false) — `true` lets the model add a
-  schedule without asking when every grant it requests is within `schedules.allow`; see
+  `write: …`, `browser: …`) added to every fired event's allowance, read at session start, an
+  unusable one warned about and dropped; `schedules.auto_approve_create` (false) — `true` lets
+  the model add a schedule without asking when every grant it requests is within
+  `schedules.allow` (a request with no grants counts), never while
+  `schedules.inherit_session_approvals` is on; see
   "Scheduled events"
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;

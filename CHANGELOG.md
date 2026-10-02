@@ -28,7 +28,9 @@
   asked about); `schedules.inherit_session_approvals: true` lets a fired event use the session's
   shortcuts; `schedules.allow` is a standing allowance merged into every fired event's; and
   `schedules.auto_approve_create: true` lets the model add a schedule unasked when its grants are
-  all within `schedules.allow`. The safety rules hold with all four on: deny lists, the browser's
+  all within `schedules.allow` (none at all counts), never while `inherit_session_approvals` is
+  on. `schedules.allow` is read at session start; an unusable entry is warned about in the
+  transcript and dropped. The safety rules hold with all four on: deny lists, the browser's
   watch tier, shell-after-web, no model-created schedule after an untrusted page or during a
   fired event, no sub-agents during one, edits pause, resume asks, and `-y` never approves a
   schedule.

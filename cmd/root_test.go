@@ -841,14 +841,22 @@ func TestScheduleToolOnlyInInteractiveSessions(t *testing.T) {
 func TestWarnScheduleAllow(t *testing.T) {
 	cfg := config.Default()
 	cfg.Schedules.Allow = []string{"shell: go test*", "shell: *", "write: /etc"}
-	out := captureStderr(t, func() { warnScheduleAllow(cfg) })
+	reg, _ := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
+	ag := agent.New(cfg, nil, "test-model", reg, "")
+	out := captureStderr(t, func() { warnScheduleAllow(cfg, ag) })
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 2 || !strings.HasPrefix(lines[0], `warn: schedules.allow "shell: *": `) ||
 		!strings.HasSuffix(lines[0], "; dropped") || !strings.HasPrefix(lines[1], `warn: schedules.allow "write: /etc": `) {
 		t.Fatalf("warnings: %q", out)
 	}
+	var shown []string
+	ag.Events.OnNotice = func(m string) { shown = append(shown, m) }
+	ag.FlushQueuedNotices()
+	if len(shown) != 2 || !strings.HasPrefix(shown[0], `schedules.allow "shell: *": `) {
+		t.Fatalf("queued for the transcript too: %q", shown)
+	}
 	cfg.Schedules.Allow = []string{"write: docs"}
-	if out := captureStderr(t, func() { warnScheduleAllow(cfg) }); out != "" {
+	if out := captureStderr(t, func() { warnScheduleAllow(cfg, nil) }); out != "" {
 		t.Fatalf("nothing to warn about: %q", out)
 	}
 }

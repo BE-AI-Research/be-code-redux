@@ -34,7 +34,7 @@ func (t *scheduleTool) Description() string {
 	return "Schedule a request for yourself later in this session, or keep a recurring one for the project. " +
 		"Use it for follow-ups (\"check the build again in 20m\") and recurring upkeep a person asked for — " +
 		"never to put off work the current request asks for now. A person approves every schedule and its " +
-		"allowance before it exists; ask for the narrowest allowance that does the job. " +
+		"allowance before it exists, unless config lets you add one within schedules.allow; ask for the narrowest allowance that does the job. " +
 		"when: in 20m · at 09:00 · at 2026-09-27 09:00 · every 30m · daily 09:00 · weekdays 09:00 · mon,thu 14:30 · cron. " +
 		"allow: grants like \"shell: go test ./...\", \"write: docs\", \"browser: example.com\"; anything else asks a person when it fires."
 }
