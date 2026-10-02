@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -10,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/schedule"
@@ -153,6 +156,7 @@ func (o *AskOutcome) Withdrawn() bool { return o != nil && o.withdrawn.Load() }
 //     standing one matches as text. A '?' or a class in either is not
 //     comparable that way ("?x.com" matches the text "*x.com" but not the
 //     host abcx.com), so it covers plain hosts only.
+//   - tool: the same rule as browser, over tool names (ToolAllowed).
 //
 // An empty req is covered: it asks for nothing.
 func GrantsCovered(req, standing schedule.Allowance) bool {
@@ -176,6 +180,21 @@ func grantCovered(g schedule.Grant, standing schedule.Allowance) bool {
 		return len(globs) > 0 && classifyCommand(g.Value, globs, nil) == cmdAllowed
 	case "write":
 		return standing.WriteAllowed(g.Value)
+	case "tool":
+		for _, s := range standing.Values("tool") {
+			switch {
+			case s == g.Value:
+				return true
+			case !strings.ContainsAny(g.Value, "*?[\\"):
+				if (schedule.Allowance{{Kind: "tool", Value: s}}).ToolAllowed(g.Value) {
+					return true
+				}
+			case !strings.ContainsAny(s, "?[\\") && !strings.ContainsAny(g.Value, "?[\\"):
+				if ok, _ := path.Match(s, g.Value); ok {
+					return true
+				}
+			}
+		}
 	case "browser":
 		const meta = "*?[\\"
 		for _, s := range standing.Values("browser") {
@@ -288,6 +307,69 @@ func within(dir, p string) bool {
 		dir, p = strings.ToLower(dir), strings.ToLower(p)
 	}
 	return strings.HasPrefix(p, dir+string(filepath.Separator))
+}
+
+// firedSelfGated names the tools a fired turn runs without a tool_call
+// question, because each already decides for itself: the file and shell
+// tools and the browser ask through r.ask under the event's allowance,
+// consult and schedule refuse or ask what a fired turn may not do
+// unattended, and the rest (task, the git lookups, list_dir, read_file,
+// search) only read or record. Every other tool — MCP servers, the ide_
+// editor bridge, web_search, web_fetch, ask_main, anything AddTool adds —
+// asks "tool_call" during a fired turn unless a tool: grant covers it.
+// TestEveryBuiltinToolIsClassified fails when NewRegistry gains a tool
+// that is in neither this list nor firedGatedBuiltins.
+var firedSelfGated = map[string]bool{
+	"read_file": true, "write_file": true, "edit_file": true, "list_dir": true,
+	"search": true, "shell": true, "process": true, "browser": true,
+	"consult": true, "schedule": true, "task": true,
+	"lookup": true, "history": true, "show": true, "changes": true,
+}
+
+// firedGatedBuiltins are NewRegistry's own tools that deliberately ask
+// tool_call during a fired turn. None today.
+var firedGatedBuiltins = map[string]bool{}
+
+// firedExempt reports a tool in firedSelfGated — by name and by its own
+// type, so a tool AddTool registers under a built-in's name (an MCP server
+// cannot, it is prefixed, but anything else could) is still gated.
+func firedExempt(t Tool) bool {
+	if !firedSelfGated[t.Name()] {
+		return false
+	}
+	switch t.(type) {
+	case *readFileTool, *writeFileTool, *editFileTool, *listDirTool, *searchTool,
+		*shellTool, *processTool, *BrowserTool, *consultTool, *scheduleTool,
+		*taskTool, *lookupTool, *historyTool, *showTool, *changesTool:
+		return true
+	}
+	return false
+}
+
+// toolCallDetailCap bounds the arguments a tool_call question shows.
+const toolCallDetailCap = 2048
+
+// toolCallDetail is the tool_call question: the tool's name and its
+// arguments as indented JSON, capped.
+func toolCallDetail(name string, args map[string]any) string {
+	b, err := json.MarshalIndent(args, "", "  ")
+	if err != nil || len(args) == 0 {
+		b = []byte("{}")
+	}
+	body := string(b)
+	if len(body) > toolCallDetailCap {
+		cut := toolCallDetailCap
+		for cut > 0 && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut] + fmt.Sprintf("\n… (truncated; %d bytes in all)", len(b))
+	}
+	return "A scheduled event wants to call " + name + " with:\n" + body
+}
+
+func (r *Registry) allowTool(name string) bool {
+	p := r.fired.Load()
+	return p != nil && p.allow.ToolAllowed(name)
 }
 
 func (r *Registry) allowHost(host string) bool {

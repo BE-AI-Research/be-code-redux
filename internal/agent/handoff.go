@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -216,11 +217,12 @@ func (a *Agent) Resume(s *store.Session) {
 	// schedules are reread on every wake.
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
-	// A saved history that shows the model a page starts this session with
-	// the shell suspended, as the request that read it did (browser spec
-	// §3.6); a person's next typed request clears it as usual.
+	// A saved history that shows the model a page — the browser's, or
+	// web_fetch's or web_search's text — starts this session with the shell
+	// suspended, as the request that read it did (browser spec §3.6); a
+	// person's next typed request clears it as usual.
 	for _, m := range a.History.Messages {
-		if browserResult(m, a.History.Messages) {
+		if webResult(m, a.History.Messages) {
 			a.Tools.MarkUntrustedWeb()
 			break
 		}
@@ -365,19 +367,38 @@ func (a *Agent) capToolOutput(limit int) {
 // An embedded message is judged whole — a page can print its own
 // </tool_result>, so its blocks are never split apart.
 func browserResult(m provider.Message, msgs []provider.Message) bool {
+	return resultFrom(m, msgs, "browser")
+}
+
+// webResult is browserResult widened to every tool that shows the model
+// text from the web — the browser, web_fetch and web_search — for Resume,
+// which cannot tell any more which host a fetched page came from, so it
+// treats every one as untrusted.
+func webResult(m provider.Message, msgs []provider.Message) bool {
+	return resultFrom(m, msgs, "browser", "web_fetch", "web_search")
+}
+
+// resultFrom reports whether m is a tool result produced by one of names,
+// by the rules browserResult describes.
+func resultFrom(m provider.Message, msgs []provider.Message, names ...string) bool {
 	if !isToolResult(m) {
 		return false
 	}
 	if m.Role != provider.RoleTool {
-		return strings.Contains(m.Content, `<tool_result name="browser"`)
+		for _, n := range names {
+			if strings.Contains(m.Content, `<tool_result name="`+n+`"`) {
+				return true
+			}
+		}
+		return false
 	}
 	if m.Name != "" {
-		return m.Name == "browser"
+		return slices.Contains(names, m.Name)
 	}
 	for _, prev := range msgs {
 		for _, tc := range prev.ToolCalls {
 			if tc.ID == m.ToolCallID && m.ToolCallID != "" {
-				return tc.Name == "browser"
+				return slices.Contains(names, tc.Name)
 			}
 		}
 	}

@@ -10,8 +10,8 @@ import (
 
 // Grant is one thing a fired event may do without asking.
 type Grant struct {
-	Kind  string `json:"kind"`  // shell | write | browser
-	Value string `json:"value"` // a shell glob, a workspace path prefix, a host glob
+	Kind  string `json:"kind"`  // shell | write | browser | tool
+	Value string `json:"value"` // a shell glob, a workspace path prefix, a host glob, a tool-name glob
 }
 
 func (g Grant) String() string { return g.Kind + ": " + g.Value }
@@ -43,8 +43,18 @@ func ParseGrant(s string) (Grant, error) {
 		if strings.Trim(v, "*. ") == "" {
 			return Grant{}, fmt.Errorf("browser: %s would allow every site; name the host", v)
 		}
+	case "tool":
+		// A tool-name glob (path.Match): what a fired turn may call unasked
+		// among the tools that have no gate of their own — MCP and editor
+		// tools, web_search, web_fetch. Names are case-sensitive.
+		if strings.Trim(v, "*? ") == "" {
+			return Grant{}, fmt.Errorf("tool: %s would allow every tool; name the tool", v)
+		}
+		if _, err := path.Match(v, ""); err != nil {
+			return Grant{}, fmt.Errorf("tool: %s is not a valid name pattern", v)
+		}
 	default:
-		return Grant{}, fmt.Errorf("unknown grant kind %q (use shell, write or browser)", k)
+		return Grant{}, fmt.Errorf("unknown grant kind %q (use shell, write, browser or tool)", k)
 	}
 	return Grant{Kind: k, Value: v}, nil
 }
@@ -118,6 +128,20 @@ func (a Allowance) HostAllowed(host string) bool {
 	}
 	for _, h := range a.Values("browser") {
 		if ok, _ := path.Match(h, host); ok || h == host {
+			return true
+		}
+	}
+	return false
+}
+
+// ToolAllowed reports whether a tool name matches a tool grant (path.Match
+// globs, case-sensitive).
+func (a Allowance) ToolAllowed(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, g := range a.Values("tool") {
+		if ok, _ := path.Match(g, name); ok || g == name {
 			return true
 		}
 	}

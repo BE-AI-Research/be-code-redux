@@ -260,3 +260,34 @@ func TestFiredTurnInheritsSessionApprovals(t *testing.T) {
 		}
 	}
 }
+
+// TestToolCallAskHasNoAlways: a fired turn's tool_call question has no
+// "always" — "a" must not fall through to the file-write branch — and it
+// is titled for what it is, not coloured as a diff.
+func TestToolCallAskHasNoAlways(t *testing.T) {
+	s, a, _ := twoViews(t)
+	beforeCfg, beforeReg, beforeShell := s.cfg.ApproveFileWrites, s.ag.Tools.ApproveWrites, s.cfg.AutoApproveShell
+	decided := make(chan bool, 1)
+	go func() {
+		decided <- s.approveFromAgent("tool_call", "A scheduled event wants to call ide_diagnostics with:\n{}")
+	}()
+	waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+	view := a.View()
+	if !strings.Contains(view, "Tool call during a scheduled event") || !strings.Contains(view, "y run it · n refuse") {
+		t.Fatalf("title/hint:\n%s", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	flush(a)
+	if a.mode != modeAsk || s.cfg.ApproveFileWrites != beforeCfg || s.ag.Tools.ApproveWrites != beforeReg || s.cfg.AutoApproveShell != beforeShell {
+		t.Fatal(`"a" must do nothing on a tool_call prompt`)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	select {
+	case ok := <-decided:
+		if ok {
+			t.Fatal("n refuses")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("n never answered")
+	}
+}

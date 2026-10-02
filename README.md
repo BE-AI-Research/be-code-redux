@@ -441,8 +441,8 @@ there is no background daemon.
 - **Times:** `in 20m`, `at 09:00`, `at 2026-09-27 09:00`, `every 30m`, `daily 09:00`,
   `weekdays 09:00`, `mon,thu 14:30`, or five-field cron. Local time; a spring-forward gap runs
   once at the gap's end rather than twice or not at all.
-- **Allowance.** `shell: <glob>`, `write: <path>`, `browser: <host>`. Inside it the event runs
-  unasked; anything else — including a write reached through a symlink that a `write:` grant
+- **Allowance.** `shell: <glob>`, `write: <path>`, `browser: <host>`, `tool: <name glob>`.
+  Inside it the event runs unasked; anything else — including a write reached through a symlink that a `write:` grant
   does not itself cover — is asked in the terminal, on the same prompt a file write always uses
   (never as a VS Code diff, even with the editor bridge attached), and a question nobody answers
   within `schedules.ask_timeout` is withdrawn and refused. The shortcuts you gave the session
@@ -455,6 +455,14 @@ there is no background daemon.
   already running carry on. No grant ever covers `.be-code/schedules.md` or anything under
   `~/.be-code`. The deny list, the browser's watch tier and the shell-after-a-web-page rule still
   apply inside the allowance. `-y` never approves a schedule, and the approval has no "always".
+- **Tools with no gate of their own ask too.** During a fired event, a call to an MCP server's
+  tool, an editor-bridge `ide_*` tool, `web_search`, `web_fetch` or any other added tool is
+  asked first ("Tool call during a scheduled event", showing the tool and its arguments; `y`
+  runs it, `n` refuses, there is no "always"), unless a `tool:` grant names it —
+  `tool: mcp_github_*`, `tool: web_fetch` (a bare `tool: *` is refused). A refusal, or nobody
+  answering within `schedules.ask_timeout`, refuses that one call and the turn carries on. The
+  built-in file, shell, process, browser, consult, schedule, task and git tools are unaffected:
+  they already ask, or only read. Outside a fired event nothing changes.
 - **Checked again when it fires, not just when it is queued.** A fired event only runs if its
   schedule is still active and unchanged from what was approved; one edited, paused or cancelled
   after it queued does not run (`scheduled event "<name>" was not run: <reason>`), and an edit
@@ -480,10 +488,10 @@ there is no background daemon.
   fired event take the session's shortcuts again (except a write to `.be-code/schedules.md` or
   under `~/.be-code`, which still asks). `allow` is a standing allowance merged into
   every fired event's own, read when the session starts, with the same refusals (no bare
-  `shell: *`, nothing outside the workspace, never `.be-code/schedules.md` or `~/.be-code`).
+  `shell: *` or `tool: *`, nothing outside the workspace, never `.be-code/schedules.md` or `~/.be-code`).
   `auto_approve_create: true` lets the model add a schedule without the prompt when every grant
   it asks for is within `allow` (the same glob, a command one matches, a path under one, a host
-  one matches; a schedule asking for no grants counts as within it) — but never while
+  or tool name one matches; a schedule asking for no grants counts as within it) — but never while
   `inherit_session_approvals` is on, since such a schedule would also run with the session's
   shortcuts. Anything wider asks as before, and your own `/schedule add` still confirms. With
   `confirm_on_start: false`, an approved schedule that `max_active` or `min_interval` would now
@@ -522,6 +530,12 @@ export GOOGLE_PSE_API_KEY=...        # the key never goes in the config file
 
 `be-code doctor` shows whether search is on and the key is present. The free tier is
 100 queries/day. Set `allow_fetch` to false to allow searching without page fetches.
+
+Search results and fetched pages are third-party text, so they count as an untrusted web
+page, exactly as the browser's do: after a `web_search`, or a `web_fetch` from a host not in
+`browser.sites`' `allow` tier (loopback is), every shell command in that request asks as
+`shell_after_web` until you type your next request, and a resumed session whose history holds
+either result starts that way too.
 
 ## Sessions
 
@@ -1209,7 +1223,7 @@ hand; `/config` prints what the running session actually resolved.
   never-approved ones still ask); `schedules.inherit_session_approvals` (false) — `true` lets a
   fired event use the session's shortcuts (an earlier `a`, `-y`, accepting all file changes, a
   site allowed for the session); `schedules.allow` ([]) — standing grants (`shell: …`,
-  `write: …`, `browser: …`) added to every fired event's allowance, read at session start, an
+  `write: …`, `browser: …`, `tool: …`) added to every fired event's allowance, read at session start, an
   unusable one warned about and dropped; `schedules.auto_approve_create` (false) — `true` lets
   the model add a schedule without asking when every grant it requests is within
   `schedules.allow` (a request with no grants counts), never while

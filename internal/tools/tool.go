@@ -454,6 +454,12 @@ func (r *Registry) Dispatch(ctx context.Context, call provider.ToolCall) Result 
 	if err != nil {
 		return badArgs(call.Name, err)
 	}
+	if r.Fired() && !firedExempt(t) && !r.allowTool(call.Name) {
+		if !r.ask(withoutInherit(ctx), "tool_call", toolCallDetail(call.Name, args), false) {
+			return Result{IsError: true, Content: fmt.Sprintf(
+				"%s needs a person's approval during a scheduled event, and none was given", call.Name)}
+		}
+	}
 	return t.Run(ctx, args)
 }
 

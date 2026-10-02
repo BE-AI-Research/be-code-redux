@@ -133,3 +133,22 @@ func TestHeadlessApproverBrowserWatchMessageWithoutDashY(t *testing.T) {
 		}
 	}
 }
+
+func TestHeadlessApproverRefusesToolCall(t *testing.T) {
+	cfg := config.Default()
+	cfg.AutoApproveBrowser, cfg.AutoApproveShell = true, true
+	if headlessApprover(cfg)("tool_call", "A scheduled event wants to call web_fetch") {
+		t.Fatal("-y approved a tool_call")
+	}
+	oldTTY := stdinIsTTY
+	stdinIsTTY = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTY = oldTTY })
+	out := captureStderr(t, func() {
+		if headlessApprover(config.Default())("tool_call", "x") {
+			t.Error("non-interactive approved a tool_call")
+		}
+	})
+	if !strings.Contains(out, "this action always asks a person") {
+		t.Fatalf("message:\n%s", out)
+	}
+}

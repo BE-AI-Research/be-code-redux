@@ -916,3 +916,23 @@ func TestFiredTurnInheritsSessionApprovalsREPL(t *testing.T) {
 		}
 	}
 }
+
+func TestREPLToolCallApprovalHasNoAlways(t *testing.T) {
+	r := newTestREPL(t)
+	r.lines = make(chan lineEvent, 1)
+	r.lines <- lineEvent{line: "a"}
+	beforeShell, beforeWrites := r.Cfg.AutoApproveShell, r.Cfg.ApproveFileWrites
+	var ok bool
+	out := capture(t, func() {
+		ok = r.approveCtx(context.Background(), "tool_call", "A scheduled event wants to call ide_diagnostics with:\n{}")
+	})
+	if ok {
+		t.Fatal(`"a" is not an answer to a tool_call prompt`)
+	}
+	if r.Cfg.AutoApproveShell != beforeShell || r.Cfg.ApproveFileWrites != beforeWrites {
+		t.Fatal(`"a" changed a standing approval`)
+	}
+	if !strings.Contains(out, "tool call:") {
+		t.Fatalf("header/prompt:\n%s", out)
+	}
+}

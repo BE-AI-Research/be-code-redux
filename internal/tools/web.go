@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/browser"
 )
 
 // Web access is opt-in (config web_search.cx) and is the one deliberate
@@ -112,6 +114,11 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if err := json.Unmarshal(body, &out); err != nil {
 		return Result{IsError: true, Content: "web_search: bad response: " + err.Error()}
 	}
+	// Results are third parties' titles and snippets: whatever host they
+	// name, the request has read untrusted text (browser spec §3.6).
+	if t.r != nil {
+		t.r.MarkUntrustedWeb()
+	}
 	if len(out.Items) == 0 {
 		return Result{Content: "no results for: " + q}
 	}
@@ -133,13 +140,18 @@ func (t *webSearchTool) maxOut() int {
 // ---- web_fetch ---------------------------------------------------------------
 
 type webFetchTool struct {
-	client *http.Client
-	r      *Registry
+	client  *http.Client
+	r       *Registry
+	consent *browser.Consent
 }
 
 // NewWebFetch builds the web_fetch tool (GET a URL, return readable text).
-func NewWebFetch() Tool {
-	return &webFetchTool{client: &http.Client{Timeout: 30 * time.Second}}
+// sites is browser.sites: a page fetched from a host in its allow tier
+// (or loopback) leaves the request trusted; any other marks it untrusted,
+// as a browser page from that host would (browser spec §3.6).
+func NewWebFetch(sites map[string]string) Tool {
+	consent, _ := browser.NewConsent(sites)
+	return &webFetchTool{client: &http.Client{Timeout: 30 * time.Second}, consent: consent}
 }
 
 func (t *webFetchTool) attach(r *Registry) { t.r = r }
@@ -176,6 +188,16 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, webFetchMaxBody))
 	if resp.StatusCode != http.StatusOK {
 		return Result{IsError: true, Content: fmt.Sprintf("web_fetch: HTTP %d for %s", resp.StatusCode, u)}
+	}
+	// The model is about to read this page: unless both the host asked
+	// for and the one that answered (after any redirect) are in the allow
+	// tier, every shell command this request runs asks shell_after_web.
+	final := u
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL
+	}
+	if t.r != nil && (t.consent.Tier(u.Host) != browser.TierAllow || t.consent.Tier(final.Host) != browser.TierAllow) {
+		t.r.MarkUntrustedWeb()
 	}
 	text := string(body)
 	ct := resp.Header.Get("Content-Type")

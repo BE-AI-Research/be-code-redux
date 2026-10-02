@@ -164,3 +164,35 @@ func TestParseStanding(t *testing.T) {
 		t.Fatalf("kept: %v", got)
 	}
 }
+
+func TestToolGrant(t *testing.T) {
+	for in, want := range map[string]string{
+		"tool: ide_diagnostics": "tool: ide_diagnostics",
+		"TOOL: mcp_github_*":    "tool: mcp_github_*",
+		"tool: web_fetch":       "tool: web_fetch",
+	} {
+		g, err := ParseGrant(in)
+		if err != nil || g.String() != want {
+			t.Errorf("%q → %q, %v; want %q", in, g.String(), err, want)
+		}
+	}
+	for _, in := range []string{"tool: *", "tool: **", "tool: ?", "tool: *?*", "tool:", "tool: [", "tool: a\x00b"} {
+		if _, err := ParseGrant(in); err == nil {
+			t.Errorf("%q: want error", in)
+		}
+	}
+	a, err := ParseAllowance([]string{"tool: mcp_github_*", "tool: web_fetch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{
+		"mcp_github_issues": true, "web_fetch": true, "web_search": false, "ide_diagnostics": false, "": false,
+	} {
+		if a.ToolAllowed(name) != want {
+			t.Errorf("tool %q: want %v", name, want)
+		}
+	}
+	if (Allowance{{Kind: "shell", Value: "web_fetch"}}).ToolAllowed("web_fetch") {
+		t.Fatal("only a tool grant covers a tool")
+	}
+}

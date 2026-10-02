@@ -48,3 +48,13 @@ func TestScheduleInSlashTableAndBusySafe(t *testing.T) {
 		t.Fatal("/schedule is listed and busy-safe")
 	}
 }
+
+func TestParseScheduleAddToolGrant(t *testing.T) {
+	r, err := ParseScheduleAdd("triage daily 09:00 -- read the open issues allow tool: mcp_github_*; shell: go test ./...")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Instruction != "read the open issues" || len(r.Allow) != 2 || r.Allow[0] != "tool: mcp_github_*" {
+		t.Fatalf("%+v", r)
+	}
+}

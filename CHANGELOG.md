@@ -5,7 +5,7 @@
 - **Scheduled events.** A running session can wake the model at a chosen time — one-off
   follow-ups the model sets for itself ("check the build again in 20 minutes"), recurring
   upkeep a person sets for the project ("every weekday at 09:00, pull, test, summarise what
-  broke"). Each schedule carries an allowance (`shell:`, `write:`, `browser:` grants) approved
+  broke"). Each schedule carries an allowance (`shell:`, `write:`, `browser:`, `tool:` grants) approved
   up front; anything outside it is asked in the terminal when the event fires, never as a VS
   Code diff, under its own `ask_timeout`. A fired event queues as a turn of its own (`⏰ name`),
   never interrupting one in progress, and is checked again against its schedule when it actually
@@ -34,6 +34,16 @@
   watch tier, shell-after-web, no model-created schedule after an untrusted page or during a
   fired event, no sub-agents during one, edits pause, resume asks, and `-y` never approves a
   schedule.
+- **Tools with no gate of their own ask during a fired event.** MCP tools, the editor bridge's
+  `ide_*` tools, `web_search`, `web_fetch` and anything else added at run time ask a person
+  first ("Tool call during a scheduled event", no "always", `-y` never approves it) unless a new
+  `tool: <name glob>` grant covers them (per schedule or in `schedules.allow`; a bare `tool: *`
+  is refused, and `auto_approve_create` compares tool grants like browser ones). A refusal or
+  an `ask_timeout` refuses that one call and the turn carries on. The built-in tools, which
+  already ask or only read, are unchanged, and nothing changes outside a fired event.
+- Fixed: text from `web_search`, and a `web_fetch` page from a host outside `browser.sites`'
+  `allow` tier, now marks the request untrusted as a browser page does, so the shell asks
+  `shell_after_web` afterwards; a resumed history holding either result starts flagged.
 - Dropping a queued scheduled event from the queue popup skips that occurrence rather than
   wedging the schedule: a one-off is marked done, a recurring one fires again at its next time.
 - A session picker or `/resume` switch that loads new timers into an already-running session

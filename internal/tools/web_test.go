@@ -53,7 +53,7 @@ func TestWebFetchStripsHTMLAndCaps(t *testing.T) {
 	defer srv.Close()
 	reg, _ := NewRegistry(t.TempDir(), nil)
 	reg.SetMaxOutput(2000)
-	reg.AddTool(NewWebFetch())
+	reg.AddTool(NewWebFetch(nil))
 	res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "web_fetch", Arguments: `{"url":"` + srv.URL + `/page"}`})
 	if res.IsError {
 		t.Fatal(res.Content)
@@ -75,7 +75,7 @@ func TestWebFetchPrefersMainContent(t *testing.T) {
 	}))
 	defer srv.Close()
 	reg, _ := NewRegistry(t.TempDir(), nil)
-	reg.AddTool(NewWebFetch())
+	reg.AddTool(NewWebFetch(nil))
 	res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "web_fetch", Arguments: `{"url":"` + srv.URL + `"}`})
 	body := res.Content[strings.Index(res.Content, "\n")+1:]
 	if !strings.HasPrefix(body, "Effective Go") {

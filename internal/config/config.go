@@ -79,8 +79,8 @@ type SchedulesConfig struct {
 	// InheritSessionApprovals true lets a fired turn take the session's
 	// shortcuts ("a", accept-all, -y, a browser host grant) again.
 	InheritSessionApprovals bool `json:"inherit_session_approvals"`
-	// Allow is a standing allowance ("shell: …", "write: …", "browser: …")
-	// merged into every fired turn's own. An unusable entry warns and is
+	// Allow is a standing allowance ("shell: …", "write: …", "browser: …",
+	// "tool: …") merged into every fired turn's own. An unusable entry warns and is
 	// dropped.
 	Allow []string `json:"allow"`
 	// AutoApproveCreate true lets the model add a schedule without the
