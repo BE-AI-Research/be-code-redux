@@ -776,6 +776,10 @@ func (a *Agent) runFired(ctx context.Context, f *firing, input string) (answer s
 		refused, askTimedOut := a.Tools.ClearAllowance()
 		timedOut := errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
+		// Sub-agent work held during the turn dispatches now, under a
+		// watched session — on every exit path, a panic's included. Fenced
+		// so a failure here can never mask the turn's own panic.
+		a.scheduleAfterFired()
 		if r := recover(); r != nil {
 			a.sched.finish(sc.ID, "error: "+firstLine(fmt.Sprint(r), 120))
 			panic(r)
@@ -789,6 +793,20 @@ func (a *Agent) runFired(ctx context.Context, f *firing, input string) (answer s
 		a.sched.finish(sc.ID, firedOutcome(ctx, timedOut, err, rep, refused, askTimedOut))
 	}()
 	return a.runFull(rctx, input)
+}
+
+// scheduleAfterFired runs the one ScheduleSubAgents a fired turn owes on
+// its way out (Tools.Fired is already false), never panicking.
+func (a *Agent) scheduleAfterFired() {
+	if a.subs == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			a.notice("sub-agent schedule after a scheduled event failed (%v); held work starts at the next schedule", r)
+		}
+	}()
+	a.ScheduleSubAgents()
 }
 
 // prepareFiredRun installs the event's allowance, and for a one-off timer

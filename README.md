@@ -449,7 +449,10 @@ there is no background daemon.
   while watching it — an earlier `a` on a prompt, `-y`, accepting all file changes, a site or
   co-worker allowed for the session — do not apply to a fired event; only its allowance and
   your standing config (`shell_allow`, the browser's `allow` sites) do, and an online co-worker
-  is not consulted during one. No grant ever covers `.be-code/schedules.md` or anything under
+  is not consulted during one. Nor does a fired event assign or start sub-agents: the model's
+  `task` owner and scope changes are refused for its duration, and sub-agent work that becomes
+  ready (or that you assign, or `/agents start`) waits until the event's turn ends; sub-agents
+  already running carry on. No grant ever covers `.be-code/schedules.md` or anything under
   `~/.be-code`. The deny list, the browser's watch tier and the shell-after-a-web-page rule still
   apply inside the allowance. `-y` never approves a schedule, and the approval has no "always".
 - **Checked again when it fires, not just when it is queued.** A fired event only runs if its

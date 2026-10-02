@@ -432,6 +432,12 @@ func (a *Agent) AllowSubAgentStart() []string {
 	s.resumeDeclined = false
 	s.resumeAllowed = nil
 	s.mu.Unlock()
+	if a.firedTurn() {
+		// A scheduled event's turn is running: the person's go-ahead stands
+		// (the decline stays cleared) but nothing dispatches until the turn
+		// ends and runFired schedules. The UI says so (SubAgentsHeld).
+		return nil
+	}
 	started := a.scheduleSubAgentsDispatched()
 	if len(started) == 0 {
 		s.mu.Lock()
@@ -447,6 +453,15 @@ func (a *Agent) AllowSubAgentStart() []string {
 	sort.Strings(started)
 	return started
 }
+
+// SubAgentsHeld reports whether sub-agent dispatch is held because a
+// scheduled event's turn is running (Tools.Fired): nothing is dispatched
+// until it ends, and runFired schedules once on its way out.
+func (a *Agent) SubAgentsHeld() bool { return a.firedTurn() }
+
+// firedTurn reports whether a scheduled event's turn is running on the
+// primary registry.
+func (a *Agent) firedTurn() bool { return a.Tools != nil && a.Tools.Fired() }
 
 // SubAgentsEnabled reports whether any sub-agent is configured.
 func (a *Agent) SubAgentsEnabled() bool { return a.subs != nil }
@@ -610,7 +625,11 @@ func (a *Agent) scheduleSubAgentsDispatched() []string {
 	// a slot frees up.
 	reasserted := map[string]bool{}
 	s.mu.Lock()
-	if !s.stopping {
+	// Nothing is dispatched while a scheduled event's turn runs: the new
+	// sub-agent's registry would ask through the session's shortcuts with no
+	// deadline. Ready work waits; runFired schedules once on its way out.
+	// Runs already in flight are untouched.
+	if !s.stopping && !a.firedTurn() {
 		ready, _ := subagent.Ready(steps, s.cards, s.runningLocked())
 		for _, c := range ready {
 			if len(s.runs)+len(s.pending) >= a.Cfg.SubAgents.MaxConcurrent {
@@ -705,9 +724,11 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	}
 	s.mu.Lock()
 	delete(s.pending, c.ID)
-	if s.stopping || s.hold[c.ID] {
-		// The session stopped, or an operator claimed the node, while this
-		// dispatch was being built. Nothing was installed, so nothing to undo.
+	if s.stopping || s.hold[c.ID] || a.firedTurn() {
+		// The session stopped, an operator claimed the node, or a scheduled
+		// event's turn began while this dispatch was being built. Nothing was
+		// installed, so nothing to undo; in the last case runFired's closing
+		// schedule (after ClearAllowance, so after this check) picks it up.
 		s.mu.Unlock()
 		return false
 	}
@@ -845,7 +866,17 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 func (a *Agent) subConsent(run *subRun) bool {
 	cw := run.cw
 	s := a.subs
-	if !cw.Online || a.allowedFor(cw.Name) {
+	if !cw.Online {
+		return true
+	}
+	if a.firedTurn() {
+		// Defensive: no dispatch starts during a scheduled event's turn, but
+		// one built just before it may reach here. Never a prompt nobody may
+		// answer, and no session-wide yes or -y for an unwatched turn (the
+		// same rule as consent). Not latched as the person's refusal.
+		return false
+	}
+	if a.allowedFor(cw.Name) {
 		return true
 	}
 	s.mu.Lock()
@@ -1087,6 +1118,10 @@ func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
 // absent or has been detached by a panic: engineDo simply does not run the
 // closure, so without this they reported success having done nothing.
 var errEngineGone = errors.New("the task record is not available; the assignment was not made")
+
+// errFiredSubAgents is the model's answer to task owner/scope during a
+// scheduled event's turn.
+var errFiredSubAgents = errors.New("sub-agents cannot be assigned or scoped during a scheduled event; ask the person to do it after this event")
 
 // SetScope is the UI's and the model's scope path (spec §2.7): it widens a
 // running sub-agent's confinement for real and answers its parked ask.

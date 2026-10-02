@@ -14,7 +14,10 @@
 - A fired event runs only under its own allowance: the session's shortcuts (an earlier `a`,
   `-y`, accepting all file changes, a site or co-worker allowed for the session) do not apply
   to it, no grant covers `.be-code/schedules.md` or `~/.be-code`, lines typed meanwhile wait
-  for its turn to end, and the model cannot add, resume or pause a person's schedule during it. Pausing a schedule
+  for its turn to end, and the model cannot add, resume or pause a person's schedule during it.
+  Nor can it assign or scope a sub-agent: no sub-agent is dispatched during a fired turn (a
+  person's own `/task assign`, `/task scope` and `/agents start` are held, not refused), and
+  held work starts when the turn ends. Pausing a schedule
   revokes its approval, and the approval now covers its limits and creation time too. Two
   sessions on one workspace run each occurrence once (a claim file under the engine dir), and
   share the approvals file without overwriting each other's. An unanswered startup prompt
