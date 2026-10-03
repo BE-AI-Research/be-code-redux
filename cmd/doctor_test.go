@@ -182,3 +182,33 @@ func TestHeadlessApproverRefusesToolCall(t *testing.T) {
 		t.Fatalf("message:\n%s", out)
 	}
 }
+
+// A max_tokens at least half the context reserves most of it for one reply;
+// doctor says so, with the advice the session itself gives.
+func TestDoctorMaxTokensLine(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxTokens, cfg.ContextTokens = 32768, 32768
+	got := maxTokensDoctorLine(cfg, 32768)
+	if !strings.Contains(got, "max_tokens 32768 leaves no room for the conversation in a 32768-token window; reserving 16384 instead") ||
+		!strings.Contains(got, "Change max_tokens in config (0 lets the server decide)") {
+		t.Fatalf("line: %q", got)
+	}
+	// Judged against the known window when context_tokens is unset.
+	cfg.MaxTokens, cfg.ContextTokens = 16384, 0
+	if got := maxTokensDoctorLine(cfg, 32768); !strings.Contains(got, "max_tokens 16384") || !strings.Contains(got, "Change max_tokens") {
+		t.Fatalf("half the window: %q", got)
+	}
+	// Nothing to say for a modest value, an unset one, or no known context.
+	cfg.MaxTokens, cfg.ContextTokens = 4096, 32768
+	if got := maxTokensDoctorLine(cfg, 32768); got != "" {
+		t.Fatalf("modest: %q", got)
+	}
+	cfg.MaxTokens = 0
+	if got := maxTokensDoctorLine(cfg, 32768); got != "" {
+		t.Fatalf("unset: %q", got)
+	}
+	cfg.MaxTokens, cfg.ContextTokens = 32768, 0
+	if got := maxTokensDoctorLine(cfg, 0); got != "" {
+		t.Fatalf("unknown context: %q", got)
+	}
+}

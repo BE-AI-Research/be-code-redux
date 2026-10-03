@@ -128,15 +128,17 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	b.WriteString(tr)
 	a.awaitWindow(ctx) // never send with no window on the wire
 	// In the lane: the handoff is written on the way out, outside any turn.
+	msgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: handoffSystemPrompt},
+		{Role: provider.RoleUser, Content: b.String()},
+	}
 	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
 		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model: a.Model,
-			Messages: []provider.Message{
-				{Role: provider.RoleSystem, Content: handoffSystemPrompt},
-				{Role: provider.RoleUser, Content: b.String()},
-			},
+			Model:       a.Model,
+			Messages:    msgs,
 			Temperature: 0.1,
-			NoThink:     true, // seconds instead of minutes on thinking models
+			NoThink:     true,                                         // seconds instead of minutes on thinking models
+			MaxTokens:   a.harnessReplyTokens(notesReplyTokens, msgs), // a briefing, not the user's turn
 		}, nil)
 	})
 	if err != nil {
@@ -277,6 +279,7 @@ func (a *Agent) ApplyWindow(window int) bool {
 	limit := a.History.Budget - a.History.Reserve
 	a.History.mu.Unlock()
 	a.capToolOutput(limit)
+	a.noteBudget(target, reserve)
 	return clamped
 }
 
@@ -295,14 +298,18 @@ func (a *Agent) ApplyResolvedWindow(window int) bool {
 // reserveFor is the generation headroom kept free below the window.
 // Reasoning models spend a large, unpredictable share of the window
 // thinking before the first answer token, so they get a third of it;
-// plain models a quarter. An explicit max_tokens wins.
+// plain models a quarter. An explicit max_tokens wins, but never takes more
+// than half the effective budget (CapReserve): it is the reply's limit, and
+// a max_tokens as large as the window would otherwise reserve all of it,
+// leave the conversation nothing and compact before every call. The request
+// itself still carries the configured max_tokens.
 //
 // It takes modelMu because the profile it reads is what a model switch
 // rewrites, and the window it is sizing for may be arriving on
 // resolveModel's goroutine while the switch itself ran on a UI's.
 func (a *Agent) reserveFor(window int) int {
 	if a.Cfg.MaxTokens > 0 {
-		return a.Cfg.MaxTokens
+		return CapReserve(a.Cfg.MaxTokens, a.effectiveBudget(window))
 	}
 	a.modelMu.Lock()
 	thinking := a.Profile.StripThink
@@ -335,9 +342,16 @@ func (a *Agent) applyReserve(window int) {
 	reserve := a.reserveFor(window)
 	a.History.mu.Lock()
 	a.History.Reserve = reserve
-	limit := a.History.Budget - reserve
+	budget := a.History.Budget
+	limit := budget - reserve
 	a.History.mu.Unlock()
 	a.capToolOutput(limit)
+	// Before any window is known the budget is a stand-in (an unset
+	// context_tokens is NewHistory's guess): explaining it would name a
+	// window that does not exist, and the real one is about to arrive.
+	if a.Window() > 0 || a.Cfg.ContextTokens > 0 {
+		a.noteBudget(budget, reserve)
+	}
 }
 
 // capToolOutput scales the per-call tool-output cap to the usable limit. It

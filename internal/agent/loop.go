@@ -174,6 +174,11 @@ type Agent struct {
 	// reporting another window is not news: the model is reloaded by the
 	// request that carries ours, not by deciding to (see checkBackend).
 	windowUnconfirmed atomic.Bool
+	// reserveCapNoted and lowLimitNoted make the two budget explanations
+	// (budget.go) once-per-session. quietBudget is set on scratch agents,
+	// whose budget is the primary's business and which have nobody to tell.
+	reserveCapNoted, lowLimitNoted atomic.Bool
+	quietBudget                    bool
 	// resolving is open while the current model's parameters are being
 	// resolved and closed when that resolution ends, however it ends. Guarded
 	// by modelMu. Requests wait on it (awaitWindow) rather than go out with
@@ -1834,15 +1839,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 
 	// In the lane: compaction runs between turns, never inside chatWithRetry's
 	// hold, so taking it here cannot nest.
+	summaryMsgs := []provider.Message{
+		{Role: provider.RoleSystem, Content: compactSystemPrompt},
+		{Role: provider.RoleUser, Content: u.String()},
+	}
 	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
 		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model: model,
-			Messages: []provider.Message{
-				{Role: provider.RoleSystem, Content: compactSystemPrompt},
-				{Role: provider.RoleUser, Content: u.String()},
-			},
+			Model:       model,
+			Messages:    summaryMsgs,
 			Temperature: 0.1,
 			NoThink:     true, // a summary does not need minutes of deliberation
+			// A few hundred words, never the session's max_tokens: sized
+			// for the window, that let one summary run for minutes.
+			MaxTokens: a.harnessReplyTokens(summaryReplyTokens, summaryMsgs),
 		}, nil)
 	})
 	if err != nil {
@@ -1887,17 +1896,19 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// list is wanted". Its notes are already applied. Ask once more, in
 		// the same exchange so it can see what it wrote — a second request
 		// from scratch gets the same answer.
+		againMsgs := []provider.Message{
+			{Role: provider.RoleSystem, Content: compactSystemPrompt},
+			{Role: provider.RoleUser, Content: u.String()},
+			{Role: provider.RoleAssistant, Content: resp.Content},
+			{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
+		}
 		again, rerr := a.inLane(ctx, func() (*provider.ChatResponse, error) {
 			return a.Provider.Chat(ctx, provider.ChatRequest{
-				Model: model,
-				Messages: []provider.Message{
-					{Role: provider.RoleSystem, Content: compactSystemPrompt},
-					{Role: provider.RoleUser, Content: u.String()},
-					{Role: provider.RoleAssistant, Content: resp.Content},
-					{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
-				},
+				Model:       model,
+				Messages:    againMsgs,
 				Temperature: 0.1,
 				NoThink:     true,
+				MaxTokens:   a.harnessReplyTokens(summaryReplyTokens, againMsgs),
 			}, nil)
 		})
 		if rerr == nil {

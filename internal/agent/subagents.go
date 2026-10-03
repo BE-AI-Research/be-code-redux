@@ -966,7 +966,8 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 		Cfg: &cfg, Provider: cp, Model: run.cw.Model, Tools: reg,
 		Profile: prof, compat: compat, projectNotes: a.projectNotes,
 		retryBase: a.retryBase, stallAfter: a.stallAfter,
-		Engine: a.Engine,
+		Engine:      a.Engine,
+		quietBudget: true, // the primary explains its own budget
 	}
 	node := d.Node
 	scratch.observeFn = func(ev engine.Event) string {

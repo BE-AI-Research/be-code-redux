@@ -1192,6 +1192,13 @@ hand; `/config` prints what the running session actually resolved.
   models or a third (4k–16k) for reasoning models, which think before they
   answer. The
   chars-per-token estimate recalibrates from server-reported usage each request.
+  `max_tokens` is the limit on one reply, sent with every ordinary turn; `0`
+  (the default) lets the server decide. A value near the window would reserve
+  all of it and leave the conversation nothing, so the reserve is capped at half
+  the budget (the window, or `context_tokens` when smaller) and the session and
+  `doctor` say so — lower `max_tokens` to make the warning go away. The harness's
+  own requests (compaction summaries, the handoff briefing, `/init`) are bounded
+  at 2048–4096 tokens regardless.
 - `keep_alive` ("30m") — how long Ollama keeps the model resident after each request
   (refreshed after every prompt; "0" disables). Sharing the server with other
   clients can still evict the model; BE-Code then reports the eviction, retries

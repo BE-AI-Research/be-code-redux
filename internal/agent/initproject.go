@@ -180,7 +180,9 @@ func (a *Agent) InitProject(ctx context.Context, facts discover.Facts) (string, 
 		a.awaitWindow(ctx) // never send with no window on the wire
 		// In the lane: /init runs on its own goroutine, outside any turn.
 		resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-			return a.Provider.Chat(ctx, provider.ChatRequest{Model: a.Model, Messages: msgs, Temperature: 0.2, NoThink: true}, nil)
+			// Notes, not the user's turn: bounded like the handoff briefing.
+			return a.Provider.Chat(ctx, provider.ChatRequest{Model: a.Model, Messages: msgs, Temperature: 0.2, NoThink: true,
+				MaxTokens: a.harnessReplyTokens(notesReplyTokens, msgs)}, nil)
 		})
 		if err != nil {
 			return "", false, err
