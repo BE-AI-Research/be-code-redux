@@ -424,6 +424,42 @@ to.
 `/browser forget <host>` revokes one; `/browser close` disconnects. `be-code doctor` reports what
 answers at the address, or what a launch would use.
 
+**Your own Chrome.** Chrome 144 and later can lend BE-Code the browser you already use — signed
+in to everything — without a launch flag: open `chrome://inspect/#remote-debugging` and turn
+remote debugging on, then set `"browser": {"enabled": true, "use_my_chrome": true}` (or type
+`/browser attach` for this session only, leaving the config as it is). BE-Code reads the
+`DevToolsActivePort` file Chrome writes into its user-data dir — `browser.chrome_channel`
+(`stable`, `beta`, `dev` or `canary`) picks which Chrome's, `browser.chrome_user_data_dir` names
+one outright (Chromium and other builds need it) — and connects to that port alone. Chrome asks
+"Allow remote debugging?" for each connection; while it waits BE-Code says `Chrome is asking to
+allow remote debugging — click Allow in Chrome`, and gives up after 60 seconds. It never launches
+anything in this mode: no port file, an unreadable one, or a stale one left by a Chrome that has
+exited is reported with the directory it looked in and the `chrome://inspect` toggle. While
+attached:
+
+- **Every action asks — reading too.** On any site not in the `allow` tier, every browser
+  action asks as a watched site, with no "always", and `-y` does not answer it: `open` (judged on
+  the address it is about to open, before going there — "open mail.example in your Chrome?"),
+  `snapshot`, `read`, `scroll`, `back` (judged on the page it goes back to), and every click,
+  keystroke and selection. A page the model was not approved to see in that call — a redirect, a
+  link that went elsewhere — is not shown; it has to ask to read it. `allow` sites never ask; a
+  `deny` site is refused outright, reading included; the password-field refusal works as above.
+- **Your tabs stay private.** The model works only in tabs it opened itself (it opens one on its
+  first call) and never reads, lists or acts on any other; its tab list shows only its own, and
+  only the site of each unless that site is in `allow`.
+  `/browser tabs` lists all of them to you with a short id each (`[t3]`), `/browser tab <id>`
+  hands one over to the model (a number works only while it still names the tab you were shown),
+  and `/browser untab <id|all>` takes it back. A handed-over tab's earlier history is reachable
+  with `back`, which asks like everything else.
+- **Only its own tabs close.** `/browser close` and the end of the session close the tabs the
+  model opened — never one you handed over, never the browser — and drop every hand-over.
+  `/browser close` also cancels an attach still waiting on Chrome's prompt. Downloads are
+  refused in its tabs only, not across your browser.
+
+`/browser` reads `attached to your Chrome (stable)`; `be-code doctor` reports whether the port
+file exists and which port it names, without connecting (a connection would raise Chrome's
+prompt).
+
 ## Scheduled events
 
 A running session can wake the model later to do a pre-decided piece of work — a follow-up
@@ -1092,7 +1128,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 
 | | |
 | --- | --- |
-| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>]` |
+| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
 | **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
@@ -1211,7 +1247,11 @@ hand; `/config` prints what the running session actually resolved.
   there; `browser.executable` (auto-detect); `browser.profile` (`~/.be-code/browser/profile`);
   `browser.allow_remote` (false) — permit an address off this machine; `browser.sites` ({}) —
   host glob → `allow` | `watch` | `deny`; `browser.snapshot_chars` (12000) — the snapshot
-  budget; `browser.settle_timeout` (10, seconds) — how long to wait for a page to settle
+  budget; `browser.settle_timeout` (10, seconds) — how long to wait for a page to settle;
+  `browser.use_my_chrome` (false) — attach to your own running Chrome instead (see "Your own
+  Chrome"); `browser.chrome_channel` (`stable`) — `stable` | `beta` | `dev` | `canary`, whose
+  user-data dir holds its `DevToolsActivePort` (an unknown value warns and uses `stable`);
+  `browser.chrome_user_data_dir` (unset) — that dir outright, `~` expanded
 - `schedules.enabled` (true) — scheduled events: `/schedule` and the model's `schedule` tool;
   `schedules.min_interval` ("5m") — a recurring schedule may not run more often than this;
   `schedules.max_active` (20) — active schedules and timers across the project and the session;

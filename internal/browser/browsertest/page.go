@@ -184,6 +184,20 @@ func (s *PageScript) install() {
 		s.targets = append(s.targets, &Target{ID: id, URL: "about:blank", Tree: EmptyTree, history: []string{"about:blank"}})
 		return map[string]any{"targetId": id}, nil
 	})
+	b.Handle("Target.closeTarget", func(_ string, p json.RawMessage) (any, error) {
+		a := arg[struct {
+			TargetID string `json:"targetId"`
+		}](p)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for i, t := range s.targets {
+			if t.ID == a.TargetID {
+				s.targets = append(s.targets[:i], s.targets[i+1:]...)
+				return map[string]any{"success": true}, nil
+			}
+		}
+		return nil, errors.New("No target with given id found")
+	})
 	b.Handle("Page.getFrameTree", func(sid string, _ json.RawMessage) (any, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -468,4 +482,36 @@ func (s *PageScript) emitNav(sid string, t *Target, loader string) {
 		time.Sleep(delay)
 		s.B.Emit(sid, "Page.loadEventFired", map[string]any{"timestamp": 1})
 	}()
+}
+
+// NavigateOn makes the next call of method navigate the calling tab to url
+// before it is answered — a redirect, or a click by the person, landing in
+// the middle of a read. The navigation's events reach the client ahead of
+// the reply, as they would from Chrome.
+func (s *PageScript) NavigateOn(method, url string) {
+	b := s.B
+	b.mu.Lock()
+	prev := b.handlers[method]
+	b.mu.Unlock()
+	var once sync.Once
+	b.Handle(method, func(sid string, p json.RawMessage) (any, error) {
+		once.Do(func() {
+			s.mu.Lock()
+			t := s.bySessionLocked(sid)
+			loader := ""
+			if t != nil {
+				t.history = append(t.history[:t.index+1], url)
+				t.index = len(t.history) - 1
+				loader = s.showLocked(t, url)
+			}
+			s.mu.Unlock()
+			if t != nil {
+				s.emitNav(sid, t, loader)
+			}
+		})
+		if prev == nil {
+			return map[string]any{}, nil
+		}
+		return prev(sid, p)
+	})
 }

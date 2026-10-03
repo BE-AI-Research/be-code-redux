@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +57,16 @@ type BrowserConfig struct {
 	SettleTimeout int           // seconds
 	ForceHeadless bool          // tests only
 	QuietWindow   time.Duration // tests only; zero means the default
+	// The person's own Chrome (browser.use_my_chrome): which channel's
+	// user-data dir holds its DevToolsActivePort, or the dir outright.
+	UseMyChrome       bool
+	ChromeChannel     string
+	ChromeUserDataDir string
+	ConsentWait       time.Duration // tests only; zero means 60s
 }
+
+// statusOut is where status notes go with no status line; a var for tests.
+var statusOut io.Writer = os.Stderr
 
 // BrowserTool is the one flat browser tool (spec §2.1).
 type BrowserTool struct {
@@ -71,15 +82,50 @@ type BrowserTool struct {
 // browser call.
 func NewBrowser(cfg BrowserConfig) *BrowserTool {
 	consent, warns := browser.NewConsent(cfg.Sites)
-	return &BrowserTool{
-		session: browser.NewSession(browser.Options{
-			Address: cfg.Address, Launch: cfg.Launch, Executable: cfg.Executable, Profile: cfg.Profile,
-			AllowRemote: cfg.AllowRemote, SnapshotChars: cfg.SnapshotChars,
-			SettleTimeout: time.Duration(cfg.SettleTimeout) * time.Second,
-			ForceHeadless: cfg.ForceHeadless, QuietWindow: cfg.QuietWindow,
-		}),
-		consent:  consent,
-		Warnings: warns,
+	// Resolved whether or not use_my_chrome is on: /browser attach uses it.
+	dir, label, warn := browser.ResolveChromeDir(cfg.ChromeChannel, cfg.ChromeUserDataDir)
+	if warn != "" {
+		warns = append(warns, warn)
+	}
+	t := &BrowserTool{consent: consent, Warnings: warns}
+	t.session = browser.NewSession(browser.Options{
+		Address: cfg.Address, Launch: cfg.Launch, Executable: cfg.Executable, Profile: cfg.Profile,
+		AllowRemote: cfg.AllowRemote, SnapshotChars: cfg.SnapshotChars,
+		SettleTimeout: time.Duration(cfg.SettleTimeout) * time.Second,
+		ForceHeadless: cfg.ForceHeadless, QuietWindow: cfg.QuietWindow,
+		MyChrome: cfg.UseMyChrome, ChromeDir: dir, ChromeLabel: label, ConsentWait: cfg.ConsentWait,
+		Notify:  t.status,
+		TitleOK: func(host string) bool { return consent.Tier(host) == browser.TierAllow },
+	})
+	return t
+}
+
+// status puts a live note on the UI's status line ("" clears it): Chrome's
+// consent prompt, or how /browser attach went. It may run on a goroutine
+// of its own. With no status line (plain and headless runs), a note is a
+// line on stderr instead, so the person still hears that Chrome is asking.
+func (t *BrowserTool) status(msg string) {
+	if t.r != nil && t.r.OnStatus != nil {
+		t.r.OnStatus(msg)
+		return
+	}
+	if msg != "" {
+		fmt.Fprintln(statusOut, msg)
+	}
+}
+
+// notice puts a lasting line on the transcript (plain mode: the output):
+// how /browser attach went, which a status line would lose.
+func (t *BrowserTool) notice(msg string) {
+	if t.r != nil && t.r.OnNotice != nil {
+		t.r.OnNotice(msg)
+		if t.r.OnStatus != nil {
+			t.r.OnStatus("")
+		}
+		return
+	}
+	if msg != "" {
+		fmt.Fprintln(statusOut, msg)
 	}
 }
 
@@ -138,6 +184,31 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 	if browserRefActions[action] {
 		refErr = page.Resolve(ctx, ref)
 	}
+	// In the person's own Chrome every action is judged, reads included,
+	// and what the action leaves on screen is shown only from the host it
+	// was approved for (or an allow-tier one): seen says which.
+	mine := t.session.MyChrome()
+	var seen *approvedPage
+	if mine {
+		seen = &approvedPage{}
+	}
+	backID := 0
+	if mine && !browserInteractions[action] && action != "tabs" && refErr == nil {
+		refusal, judgedHost, judgedURL, dest, id := t.mineGate(ctx, page, action, args)
+		if refusal != "" {
+			return Result{IsError: true, Content: refusal}
+		}
+		if action != "open" {
+			newHost := browser.HostOf(page.URL())
+			if newHost != judgedHost || (judgedHost == "" && page.URL() != judgedURL) {
+				return Result{IsError: true, Content: fmt.Sprintf(
+					"the page moved to %s while waiting for approval; take a snapshot and try again",
+					t.hostDisplay(newHost, page))}
+			}
+		}
+		*seen = dest
+		backID = id
+	}
 	if browserInteractions[action] && refErr == nil {
 		refusal, judgedHost, judgedURL := t.gate(ctx, page, action, ref, args)
 		if refusal != "" {
@@ -160,16 +231,90 @@ func (t *BrowserTool) Run(ctx context.Context, args map[string]any) Result {
 				"the page moved to %s while waiting for approval; take a snapshot and try again",
 				t.hostDisplay(newHost, page))}
 		}
+		if seen != nil {
+			*seen = approvedPage{ok: true, host: judgedHost, url: judgedURL}
+		}
 	}
 	since := time.Now()
 	actErr := refErr
 	switch {
 	case refErr != nil:
 		// not run: the ref named nothing on the page
+	case backID != 0:
+		// The destination the person approved, not whatever is one step
+		// back by the time the prompt was answered.
+		actErr = page.BackTo(ctx, backID)
 	default:
 		actErr = t.act(ctx, page, action, ref, tabN, args)
 	}
-	return t.finish(ctx, page, action, notes, since, actErr)
+	return t.finish(ctx, page, action, notes, since, actErr, seen)
+}
+
+// approvedPage is, in my-Chrome mode, the page an action was approved to
+// leave on screen: its host, or for a page with no address its URL.
+type approvedPage struct {
+	ok        bool
+	host, url string
+}
+
+// mineGate is consent for a non-interaction action in the person's own
+// Chrome (open, read, snapshot, scroll, back): judged on the host the
+// action reads or goes to — the destination for open and back — and,
+// outside the allow tier, asked as browser_watch every time. It returns
+// the refusal, the current page it judged (for the moved check), what the
+// action is approved to show, and for back the history entry approved.
+func (t *BrowserTool) mineGate(ctx context.Context, page *browser.Page, action string, args map[string]any) (refusal, judgedHost, judgedURL string, dest approvedPage, backID int) {
+	judgedURL = page.URL()
+	judgedHost = browser.HostOf(judgedURL)
+	target, targetURL := judgedHost, judgedURL
+	var what, question string
+	disp := func(h, u string) string {
+		if h == "" {
+			return fmt.Sprintf("a page with no address (%s)", browser.ShortURL(u))
+		}
+		return h
+	}
+	switch action {
+	case "open":
+		u, err := browser.NormalizeURL(argString(args, "url", "address", "href", "link", "page"))
+		if err != nil {
+			// Not run past this: Navigate refuses it the same way, and the
+			// page on screen is shown only if its host is allowed.
+			return "", judgedHost, judgedURL, approvedPage{}, 0
+		}
+		target, targetURL = browser.HostOf(u), u
+		what = "open " + u
+		question = "open " + disp(target, u) + " in your Chrome?"
+	case "back":
+		if id, u, err := page.BackTarget(ctx); err == nil {
+			target, targetURL, backID = browser.HostOf(u), u, id
+			what = "go back to " + u
+			question = "go back to " + disp(target, u) + " in your Chrome?"
+		} else {
+			what = "go back"
+			question = "go back from " + disp(target, targetURL) + " in your Chrome? (where it leads is not known)"
+		}
+	case "read":
+		what, question = "read the page", "read the page on "+disp(target, targetURL)+" in your Chrome?"
+	case "snapshot":
+		what, question = "look at the page", "look at the page on "+disp(target, targetURL)+" in your Chrome?"
+	case "scroll":
+		what, question = "scroll the page", "scroll the page on "+disp(target, targetURL)+" in your Chrome?"
+	default:
+		what, question = action, action+" on "+disp(target, targetURL)+" in your Chrome?"
+	}
+	dest = approvedPage{ok: true, host: target, url: targetURL}
+	tier := t.consent.Tier(target)
+	switch {
+	case tier == browser.TierDeny:
+		return fmt.Sprintf("%s is denied by browser.sites (in your own Chrome that covers reading too)", disp(target, targetURL)), judgedHost, judgedURL, approvedPage{}, 0
+	case tier == browser.TierAllow && target != "":
+		return "", judgedHost, judgedURL, dest, backID
+	}
+	if t.approve(ctx, "browser_watch", question+" (every action in your own Chrome asks)\n  "+what) {
+		return "", judgedHost, judgedURL, dest, backID
+	}
+	return fmt.Sprintf("the user declined: %s on %s", what, disp(target, targetURL)), judgedHost, judgedURL, approvedPage{}, 0
 }
 
 // act runs one browser action on page.
@@ -198,7 +343,7 @@ func (t *BrowserTool) act(ctx context.Context, page *browser.Page, action, ref s
 
 // finish reports an action: notes, the error if any, and the page as it
 // now stands.
-func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action string, notes []string, since time.Time, actErr error) Result {
+func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action string, notes []string, since time.Time, actErr error, seen *approvedPage) Result {
 	if ctx.Err() != nil {
 		return Result{IsError: true, Content: "browser action cancelled"}
 	}
@@ -227,7 +372,44 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 		return Result{IsError: true, Content: err.Error()}
 	}
 	notes = append(notes, more...)
-	notes = append(notes, page.TakeNotes()...)
+	// withhold is the result for the person's own Chrome when the page on
+	// screen is not one this call was approved to read (a redirect, a link,
+	// a stale ref, a navigation that landed mid-read): nothing of it is
+	// shown, not even its alerts' text.
+	withhold := func(pageNotes int) Result {
+		t.session.Record()
+		var b strings.Builder
+		b.WriteString(WebHeader + "\n")
+		for _, n := range notes {
+			b.WriteString(n + "\n")
+		}
+		if k := pageNotes + len(page.TakeNotes()); k > 0 {
+			fmt.Fprintf(&b, "(%d page notes withheld)\n", k)
+		}
+		if actErr != nil {
+			b.WriteString(actErr.Error() + "\n")
+		}
+		fmt.Fprintf(&b, "the page on %s is not shown: in your own Chrome every read asks — take a snapshot to read it",
+			t.hostDisplay(browser.HostOf(page.URL()), page))
+		return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+	}
+	if seen != nil && !t.mayShow(page, *seen) {
+		return withhold(0)
+	}
+	pageNotes := page.TakeNotes()
+	doc := page.DocumentID()
+	// stillSeen re-checks, after content was fetched, that the page is
+	// still the one approved: the check above read the URL before the
+	// fetch, and the page may have moved since (a redirect, an SSO bounce,
+	// the person clicking in a handed tab). Always true outside my-Chrome
+	// mode.
+	stillSeen := func() bool {
+		if seen == nil {
+			return true
+		}
+		page.Info(ctx)
+		return page.DocumentID() == doc && t.mayShow(page, *seen)
+	}
 	body := ""
 	if action == "read" && actErr == nil {
 		if text, err := page.Read(ctx); err != nil {
@@ -243,11 +425,19 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			// This can still carry page-controlled notes (an alert's own
 			// text): headed and marked exactly like any other result that
 			// shows something about the page (spec §3.6).
+			if !stillSeen() {
+				return withhold(len(pageNotes))
+			}
 			t.markIfUntrusted(page.URL())
+			notes = append(notes, pageNotes...)
 			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
 		}
 		body = snap
 	}
+	if !stillSeen() {
+		return withhold(len(pageNotes))
+	}
+	notes = append(notes, pageNotes...)
 	t.session.Record()
 	t.markIfUntrusted(page.URL())
 	var b strings.Builder
@@ -260,6 +450,29 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	}
 	b.WriteString(body)
 	return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+}
+
+// denied is the deny tier's refusal of an interaction. Outside the
+// person's own Chrome the site can still be read; in it, it cannot.
+func (t *BrowserTool) denied(disp string) string {
+	if t.session.MyChrome() {
+		return fmt.Sprintf("interacting with %s is denied by browser.sites", disp)
+	}
+	return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp)
+}
+
+// mayShow says whether, in my-Chrome mode, the page now on screen may be
+// shown: the one this call was approved for, or an allow-tier host.
+func (t *BrowserTool) mayShow(page *browser.Page, seen approvedPage) bool {
+	u := page.URL()
+	h := browser.HostOf(u)
+	if h != "" && t.consent.Tier(h) == browser.TierAllow {
+		return true
+	}
+	if !seen.ok || h != seen.host {
+		return false
+	}
+	return h != "" || u == seen.url
 }
 
 // gate is consent for one interaction (spec §3.1–3.4). It returns "" to
@@ -289,18 +502,27 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		// "always", even an "*": "allow" glob: every interaction on it
 		// asks, watch-style (fix round 1, item 3).
 		if t.consent.Tier(host) == browser.TierDeny {
-			return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
+			return t.denied(disp), host, judgedURL
 		}
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
 		}
 		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
 	}
-	switch t.consent.Tier(host) {
+	tier := t.consent.Tier(host)
+	if tier == browser.TierAsk && t.session.MyChrome() {
+		// The person's own Chrome, signed in to everything they use: every
+		// interaction outside the allow tier asks, with no "always".
+		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s in your Chrome? (every action in your own Chrome asks)\n  %s", disp, what)) {
+			return "", host, judgedURL
+		}
+		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
+	}
+	switch tier {
 	case browser.TierAllow:
 		return "", host, judgedURL
 	case browser.TierDeny:
-		return fmt.Sprintf("interacting with %s is denied by browser.sites; you can still read it", disp), host, judgedURL
+		return t.denied(disp), host, judgedURL
 	case browser.TierWatch:
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (watched: every action asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
@@ -334,7 +556,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 // still keys on the empty host as usual; this only changes what is shown.
 func (t *BrowserTool) hostDisplay(host string, page *browser.Page) string {
 	if host == "" {
-		return fmt.Sprintf("a page with no address (%s)", page.URL())
+		return fmt.Sprintf("a page with no address (%s)", browser.ShortURL(page.URL()))
 	}
 	return host
 }
@@ -377,8 +599,17 @@ func (t *BrowserTool) tabs(ctx context.Context, notes []string) Result {
 		b.WriteString(n + "\n")
 	}
 	b.WriteString("tabs:")
+	mine := t.session.MyChrome()
 	for _, tab := range tabs {
 		line := strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: ")
+		if h := browser.HostOf(tab.URL); mine && (h == "" || t.consent.Tier(h) != browser.TierAllow) {
+			// A title, a path and a query are page content; in your own
+			// Chrome reading them asks, so only the host is listed.
+			line = h
+			if h == "" {
+				line = "a page with no address (" + browser.ShortURL(tab.URL) + ")"
+			}
+		}
 		if tab.Current {
 			line += " (current)"
 		}
@@ -409,8 +640,12 @@ func (t *BrowserTool) StatusLines() []string {
 	st := t.session.Status()
 	var out []string
 	switch {
+	case !st.Connected && st.MyChrome:
+		out = append(out, "browser: not connected (it attaches to your Chrome ("+st.Label+") on the model's first browser call)")
 	case !st.Connected:
 		out = append(out, "browser: not connected (it starts on the model's first browser call)")
+	case st.MyChrome:
+		out = append(out, "browser: attached to your Chrome ("+st.Label+")")
 	case st.Launched:
 		out = append(out, fmt.Sprintf("browser: launched %s (%s)", st.Product, st.Exe))
 	default:
@@ -427,9 +662,95 @@ func (t *BrowserTool) StatusLines() []string {
 	return out
 }
 
+// AttachMyChrome is /browser attach: this session switches to the
+// person's own Chrome (the config is unchanged) and connects on a
+// goroutine of its own, whose outcome reaches the transcript. It never
+// waits; /browser close cancels one still waiting on Chrome's prompt.
+func (t *BrowserTool) AttachMyChrome() string {
+	t.session.AttachMyChromeAsync(t.notice)
+	return "browser: attaching to your Chrome (" + t.session.Status().Label + ") for this session — if Chrome asks \"Allow remote debugging?\", click Allow (/browser close cancels)"
+}
+
+// CancelAttach ends a /browser attach still waiting on Chrome's prompt.
+func (t *BrowserTool) CancelAttach() bool { return t.session.CancelAttach() }
+
+func tabLine(tab browser.Tab) string {
+	return strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: ")
+}
+
+// PersonTabLines is /browser tabs: every tab of the person's Chrome, for
+// the person — never shown to the model — each with a stable id. It never
+// waits.
+func (t *BrowserTool) PersonTabLines() []string {
+	if !t.session.MyChrome() {
+		return []string{"/browser tabs lists your own Chrome's tabs once attached to it (/browser attach)"}
+	}
+	tabs := t.session.ListForPerson()
+	if len(tabs) == 0 {
+		return []string{"not attached to your Chrome yet (the model's first browser call, or /browser attach)"}
+	}
+	out := []string{"your Chrome's tabs (the agent works only in those marked agent):"}
+	for _, tab := range tabs {
+		line := fmt.Sprintf("  %d. [%s] %s", tab.Index, tab.Handle, tabLine(tab))
+		if tab.Agent {
+			line += " (agent)"
+		}
+		if tab.Current {
+			line += " (current)"
+		}
+		out = append(out, line)
+	}
+	return append(out, "/browser tab <id> hands one over to the agent; /browser untab <id|all> takes it back")
+}
+
+// HandOver is /browser tab <id>: the person gives the agent one of their
+// own tabs. It never waits.
+func (t *BrowserTool) HandOver(ref string) string {
+	tab, err := t.session.HandOver(ref)
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("handed over %s: %s — the agent works in it from its next browser call and never closes it; "+
+		"the tab's earlier history is reachable with back (which asks); /browser untab %s takes it back",
+		tab.Handle, tabLine(tab), tab.Handle)
+}
+
+// Untab is /browser untab <id|all>: hand-overs taken back. It never waits.
+func (t *BrowserTool) Untab(ref string) string {
+	tabs, err := t.session.Unhand(ref)
+	if err != nil {
+		return err.Error()
+	}
+	if len(tabs) == 0 {
+		return "no tab was handed over"
+	}
+	var names []string
+	for _, tab := range tabs {
+		names = append(names, tab.Handle)
+	}
+	return "took back " + strings.Join(names, ", ") + "; the agent no longer works in it from its next browser call"
+}
+
 // PageURL is the address of the tab being driven, as last seen ("" when
-// not connected). It never waits on the browser.
-func (t *BrowserTool) PageURL() string { return t.session.Status().URL }
+// not connected), for working memory — which the model reads back and the
+// task documents keep. In the person's own Chrome it is the host alone
+// unless the host is in the allow tier: a path and a query are page
+// content, and a page withheld from the model (never an allow-tier one)
+// must not reach it this way either. It never waits on the browser.
+func (t *BrowserTool) PageURL() string {
+	u := t.session.Status().URL
+	if u == "" || !t.session.MyChrome() {
+		return u
+	}
+	h := browser.HostOf(u)
+	switch {
+	case h == "":
+		return browser.ShortURL(u)
+	case t.consent.Tier(h) == browser.TierAllow:
+		return u
+	}
+	return h
+}
 
 // Forget revokes one host's session consent.
 func (t *BrowserTool) Forget(host string) bool { return t.consent.Forget(host) }

@@ -147,3 +147,79 @@ func refFor(t *testing.T, snap, prefix string) string {
 	t.Fatalf("no %s in:\n%s", prefix, snap)
 	return ""
 }
+
+// TestRealBrowserMyChromeMode attaches in my-Chrome mode to a real
+// Chromium. The chrome://inspect toggle (and its "Allow remote debugging?"
+// prompt) cannot be switched on headlessly, so the browser is launched here
+// with --remote-debugging-port=0 on a throwaway profile instead: that writes
+// the same DevToolsActivePort file into the profile, which is all this mode
+// reads. What it proves against a real browser: the WebSocket-only attach
+// from the port file, a new tab of the agent's own, the existing tab kept
+// out of the model's list, and only the agent's tab closed on Close. The
+// toggle and the prompt themselves are on the live checklist. Skipped with
+// -short and where no browser is installed.
+func TestRealBrowserMyChromeMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("launches a real browser")
+	}
+	exe := FindExecutable()
+	if exe == "" {
+		t.Skip("no Chrome, Edge, Brave or Chromium installed")
+	}
+	profile := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	proc, err := Launch(ctx, exe, profile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Kill()
+	s := NewSession(Options{MyChrome: true, ChromeDir: profile, ChromeLabel: "test", SnapshotChars: 12000, SettleTimeout: 10 * time.Second})
+	defer s.Close()
+	p, notes, err := s.Page(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || !strings.HasPrefix(notes[0], "attached to your Chrome (test); working in a new tab") {
+		t.Fatalf("notes %q", notes)
+	}
+	tabs, err := s.Tabs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tabs) != 1 || !tabs[0].Current {
+		t.Fatalf("the model's tabs %+v", tabs)
+	}
+	waitFor(t, func() bool { return len(s.PersonTabs()) >= 2 })
+	ours := p.targetID
+	s.Close()
+	// The launched browser's own first tab is still open; the agent's is not.
+	conn, err := Dial(ctx, proc.WSURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Target.closeTarget answers before the tab is gone: wait for it.
+	ourOpen, pages := true, 0
+	for deadline := time.Now().Add(5 * time.Second); ourOpen && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var ts struct {
+			TargetInfos []targetInfo `json:"targetInfos"`
+		}
+		if err := conn.Call(ctx, "", "Target.getTargets", nil, &ts); err != nil {
+			t.Fatal(err)
+		}
+		ourOpen, pages = false, 0
+		for _, ti := range ts.TargetInfos {
+			if ti.Type == "page" {
+				pages++
+				ourOpen = ourOpen || ti.TargetID == ours
+			}
+		}
+	}
+	if ourOpen {
+		t.Fatal("the agent's tab was left open")
+	}
+	if pages == 0 {
+		t.Fatal("closed a tab that was not the agent's")
+	}
+}

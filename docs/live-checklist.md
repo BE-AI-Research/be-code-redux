@@ -187,3 +187,42 @@ schedules.go`, `internal/agent/schedules_api.go`, `internal/tools/allowance.go` 
     Expect a prompt of its own ("This session's timers will run while it is open") naming
     the switched-in timer before it can queue; `n` leaves it paused, `/schedule resume
     <name>` afterwards asks again and arms it.
+
+## Your own Chrome
+
+Chrome's remote-debugging toggle and its "Allow remote debugging?" prompt exist only in a real,
+visible Chrome with a person at it — no unit test or headless run can switch them on. Walk this
+once per release, or after touching `internal/browser/mychrome.go`, `internal/browser/session.go`
+or the browser tool's gate.
+
+40. **Attach.** In your everyday Chrome (144+), open `chrome://inspect/#remote-debugging` and
+    turn remote debugging on. `be-code doctor` (with `"use_my_chrome": true`) reads
+    `DevToolsActivePort names port N (not connected: …)` and Chrome shows no prompt. Ask the model
+    to open a page: Chrome asks "Allow remote debugging?", the status line reads `Chrome is asking
+    to allow remote debugging — click Allow in Chrome`, and once you click Allow a new tab opens
+    and the result notes `attached to your Chrome (stable); working in a new tab — your own tabs
+    stay private`. Chrome shows "controlled by automated test software" while attached.
+41. **Decline, and ignore.** `/browser close`, ask again and click the prompt's decline: the
+    result names the closed connection and `chrome://inspect`. Ask again and leave the prompt
+    alone: after 60 s, `Chrome did not allow remote debugging within 1m0s — …`. Record what
+    Chrome actually does in each case (closed socket, held handshake, held first reply).
+42. **Private tabs.** With a few of your own tabs open, ask for `tabs`: only the model's tab is
+    listed, and nothing from your tabs' titles or addresses is anywhere in the transcript.
+    `/browser tabs` lists them all to you with ids; close one of them, then `/browser tab <its old
+    number>`: refused, "the tab list changed". `/browser tab <id>` on one of yours, then ask for a
+    snapshot (it asks): the model now works in that tab. `/browser untab all` takes it back.
+43. **Every action asks.** On a site with no rule, opening it ("open … in your Chrome?"), a
+    snapshot, reading, scrolling, going back and each click all ask as watched, every time; `a`
+    grants nothing; `be-code run -y` with the same request is refused. A `deny` site cannot even
+    be opened. An `allow` site asks nothing. `/browser attach`, then `/browser close` while Chrome's
+    prompt is up: the attach is cancelled at once, and `/quit` during the prompt does not hang.
+44. **Detach.** `/quit` (and separately `/browser close`): the model's tabs close, the tab you
+    handed over and your own stay open, and Chrome keeps running. Downloads you start yourself
+    while attached still work.
+45. **Stale port file.** Quit Chrome entirely and ask again: if `DevToolsActivePort` is left
+    behind, the error says nothing is listening on the port it names (`a stale file …`) and
+    names the toggle; nothing is launched.
+46. **Chromium and channels.** Verify Chromium (and Beta/Dev/Canary, if installed) offer the same
+    toggle and write `DevToolsActivePort` where expected; for Chromium set
+    `browser.chrome_user_data_dir` (Linux likely `~/.config/chromium`) and repeat 40. Windows:
+    `chrome_user_data_dir` with `~\…` expands.

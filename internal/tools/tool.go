@@ -105,6 +105,9 @@ type Registry struct {
 	EditorName string
 	// OnStatus receives short progress notes for the UI's status line.
 	OnStatus func(msg string)
+	// OnNotice, when set, puts a lasting line on the transcript from any
+	// goroutine (the outcome of /browser attach).
+	OnNotice func(msg string)
 	// ShellAllow / ShellDeny are glob patterns matched against shell
 	// commands. Deny wins; an allow match skips the approval prompt.
 	ShellAllow []string

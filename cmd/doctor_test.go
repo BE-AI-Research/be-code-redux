@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,6 +97,34 @@ func TestBrowserDoctorLine(t *testing.T) {
 	cfg.Browser.Address, cfg.Browser.Launch = "127.0.0.1:1", false
 	if got := browserDoctorLine(cfg); got != "browser: nothing at 127.0.0.1:1, and browser.launch is off" {
 		t.Fatalf("launch off: %q", got)
+	}
+}
+
+func TestBrowserDoctorLineMyChrome(t *testing.T) {
+	cfg := config.Default()
+	cfg.Browser.Enabled, cfg.Browser.UseMyChrome = true, true
+	dir := t.TempDir()
+	cfg.Browser.ChromeUserDataDir = dir
+	want := "browser: your Chrome (" + dir + ") — no DevToolsActivePort in " + dir + "; turn remote debugging on at chrome://inspect/#remote-debugging"
+	if got := browserDoctorLine(cfg); got != want {
+		t.Fatalf("missing:\n got %q\nwant %q", got, want)
+	}
+	os.WriteFile(filepath.Join(dir, "DevToolsActivePort"), []byte("junk"), 0o600)
+	if got := browserDoctorLine(cfg); !strings.HasPrefix(got, "browser: your Chrome ("+dir+") — DevToolsActivePort in "+dir+" is unreadable") ||
+		!strings.Contains(got, "chrome://inspect/#remote-debugging") {
+		t.Fatalf("unreadable: %q", got)
+	}
+	// A port file is reported, never connected to: connecting would raise
+	// Chrome's "Allow remote debugging?" prompt from a health check.
+	fb := browsertest.New(t)
+	fb.SetWSOnly(true)
+	fb.WritePortFile(dir)
+	want = fmt.Sprintf("browser: your Chrome (%s) — DevToolsActivePort names port %d (not connected: Chrome asks you to allow the first browser call)", dir, fb.Port())
+	if got := browserDoctorLine(cfg); got != want {
+		t.Fatalf("present:\n got %q\nwant %q", got, want)
+	}
+	if len(fb.Calls("")) != 0 || fb.HTTPHits() != 0 {
+		t.Fatal("doctor connected to the person's Chrome")
 	}
 }
 

@@ -82,7 +82,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/coworkers", "list co-working models and how often each was consulted", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
 	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
-	{"/browser", "the browser: status, /browser forget <host>, /browser close", true},
+	{"/browser", "the browser: status, /browser forget <host>, /browser close, /browser attach (your Chrome), /browser tabs, /browser tab <id>, /browser untab <id|all>", true},
 	{"/task", "task record: /task [show <id>|open|clear|assign <id> <owner>|scope <id> <paths>|reply <id> <text>]", true},
 	{"/schedule", "scheduled events: /schedule [add <name> <when> -- <instruction> [allow …]|show|pause|resume|cancel|run <name>]", true},
 	{"/notes", "durable project notes: /notes [add <text>|drop N|clear]", true},

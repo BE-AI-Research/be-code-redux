@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -264,6 +266,9 @@ func browserDoctorLine(cfg *config.Config) string {
 	if !b.Enabled {
 		return "browser: off (set browser.enabled in config to enable)"
 	}
+	if b.UseMyChrome {
+		return myChromeDoctorLine(b)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if v, err := browser.FetchVersion(ctx, b.Address); err == nil {
@@ -284,6 +289,28 @@ func browserDoctorLine(cfg *config.Config) string {
 		mode = "headless: no display"
 	}
 	return fmt.Sprintf("browser: nothing at %s; the first browser call would launch %s (%s)", b.Address, exe, mode)
+}
+
+// myChromeDoctorLine reports the person's own Chrome by its
+// DevToolsActivePort alone. It never connects: a connection raises Chrome's
+// "Allow remote debugging?" prompt, which a health check must not do.
+func myChromeDoctorLine(b config.BrowserConfig) string {
+	dir, label, warn := browser.ResolveChromeDir(b.ChromeChannel, b.ChromeDir())
+	head := "browser: your Chrome (" + label + ")"
+	if warn != "" {
+		head += " [" + warn + "]"
+	}
+	if dir == "" {
+		return head + " — no home directory to find it in; set browser.chrome_user_data_dir"
+	}
+	port, _, err := browser.ReadDevToolsActivePort(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Sprintf("%s — no DevToolsActivePort in %s; turn remote debugging on at %s", head, dir, browser.ChromeToggle)
+	case err != nil:
+		return fmt.Sprintf("%s — DevToolsActivePort in %s is unreadable (%v); turn remote debugging on again at %s", head, dir, err, browser.ChromeToggle)
+	}
+	return fmt.Sprintf("%s — DevToolsActivePort names port %d (not connected: Chrome asks you to allow the first browser call)", head, port)
 }
 
 var sessionsCmd = &cobra.Command{

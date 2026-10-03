@@ -18,7 +18,7 @@ func TestIDEDefaults(t *testing.T) {
 }
 
 func TestBrowserConfigDefaults(t *testing.T) {
-	want := BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10}
+	want := BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10, ChromeChannel: "stable"}
 	if got := Default().Browser; !reflect.DeepEqual(got, want) {
 		t.Fatalf("defaults %+v", got)
 	}
@@ -34,6 +34,43 @@ func TestBrowserConfigPartialKeepsDefaults(t *testing.T) {
 	}
 	if !c.Browser.Enabled || c.Browser.Address != "127.0.0.1:9222" || !c.Browser.Launch || c.Browser.Sites["github.com"] != "watch" {
 		t.Fatalf("browser %+v", c.Browser)
+	}
+}
+
+func TestBrowserMyChromeKeysDefaultOffAndSurvivePartialConfig(t *testing.T) {
+	c := Default()
+	if c.Browser.UseMyChrome || c.Browser.ChromeChannel != "stable" || c.Browser.ChromeUserDataDir != "" {
+		t.Fatalf("my-Chrome defaults %+v", c.Browser)
+	}
+	if err := json.Unmarshal([]byte(`{"browser":{"enabled":true}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Browser.UseMyChrome || c.Browser.ChromeChannel != "stable" {
+		t.Fatalf("absent keys lost their defaults: %+v", c.Browser)
+	}
+	if err := json.Unmarshal([]byte(`{"browser":{"use_my_chrome":true,"chrome_channel":"beta","chrome_user_data_dir":"~/cr"}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Browser.UseMyChrome || c.Browser.ChromeChannel != "beta" || c.Browser.ChromeUserDataDir != "~/cr" || !c.Browser.Enabled {
+		t.Fatalf("my-Chrome keys %+v", c.Browser)
+	}
+}
+
+func TestBrowserChromeDirExpandsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for in, want := range map[string]string{
+		"":                   "",
+		"  ":                 "",
+		"~":                  home,
+		"~/chrome":           filepath.Join(home, "chrome"),
+		`~\Chrome\User Data`: filepath.Join(home, "Chrome", "User Data"),
+		"/srv/chrome":        "/srv/chrome",
+	} {
+		if got := (BrowserConfig{ChromeUserDataDir: in}).ChromeDir(); got != want {
+			t.Errorf("ChromeDir(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

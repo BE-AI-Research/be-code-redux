@@ -2,6 +2,21 @@
 
 ## v1.2.0 — scheduled events (in development)
 
+- **Your own Chrome.** With `browser.use_my_chrome` (or `/browser attach` for one session), the
+  browser tool attaches to the Chrome you already use once remote debugging is turned on at
+  `chrome://inspect/#remote-debugging` (Chrome 144+): it reads `DevToolsActivePort` from the
+  user-data dir of `browser.chrome_channel` (stable, beta, dev, canary) or
+  `browser.chrome_user_data_dir`, connects over the WebSocket alone, waits up to 60 s for Chrome's
+  "Allow remote debugging?" prompt (saying so once; `/browser close` cancels the wait), and never
+  launches anything. The model works only in tabs it opened (or one you hand over with
+  `/browser tab <id>` and take back with `/browser untab`; `/browser tabs` lists yours to you
+  alone, each with a stable id); on any site outside the `allow` tier **every** action asks —
+  opening a page (judged on its address before going there), reading, a snapshot, scrolling,
+  going back, and every interaction — and a page it was not approved to see is not shown; `deny`
+  refuses outright. Only its own tabs are closed when it detaches, and downloads are refused in
+  its tabs rather than browser-wide.
+  `be-code doctor` reports the port file without connecting.
+
 - **Scheduled events.** A running session can wake the model at a chosen time — one-off
   follow-ups the model sets for itself ("check the build again in 20 minutes"), recurring
   upkeep a person sets for the project ("every weekday at 09:00, pull, test, summarise what

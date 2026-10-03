@@ -27,6 +27,20 @@ type Options struct {
 	SettleTimeout time.Duration // bound on waiting for a page to settle; 0 means 10s
 	ForceHeadless bool          // launch headless whatever the display; tests use it
 	QuietWindow   time.Duration // network idle that counts as settled; 0 means 500ms
+
+	// My-Chrome mode (mychrome.go): attach to the person's own running
+	// Chrome through the DevToolsActivePort in ChromeDir, never Address,
+	// never a launch.
+	MyChrome    bool
+	ChromeDir   string        // the user-data dir holding DevToolsActivePort
+	ChromeLabel string        // what /browser calls it: the channel, or the dir
+	ConsentWait time.Duration // bound on Chrome's "Allow remote debugging?" prompt; 0 means 60s
+	// Notify receives a live notice while a connection waits on the
+	// person ("" clears it). It may be called from a timer goroutine.
+	Notify func(string)
+	// TitleOK says whether a tab's title may appear in a note the model
+	// reads, in my-Chrome mode (the allow tier); nil means never there.
+	TitleOK func(host string) bool
 }
 
 // sensitiveAutocompleteTokens are the autocomplete tokens (spec §3.4,
@@ -1045,19 +1059,36 @@ func (p *Page) Scroll(ctx context.Context, direction, ref string) error {
 
 // Back goes one step back in this tab's history.
 func (p *Page) Back(ctx context.Context) error {
+	id, _, err := p.BackTarget(ctx)
+	if err != nil {
+		return err
+	}
+	return p.BackTo(ctx, id)
+}
+
+// BackTarget is the history entry back would go to: its id and URL, so a
+// caller can judge the destination before going there.
+func (p *Page) BackTarget(ctx context.Context) (id int, url string, err error) {
 	var h struct {
 		CurrentIndex int `json:"currentIndex"`
 		Entries      []struct {
-			ID int `json:"id"`
+			ID  int    `json:"id"`
+			URL string `json:"url"`
 		} `json:"entries"`
 	}
 	if err := p.call(ctx, "Page.getNavigationHistory", nil, &h); err != nil {
-		return err
+		return 0, "", err
 	}
 	if h.CurrentIndex <= 0 || h.CurrentIndex > len(h.Entries) {
-		return errors.New("there is no earlier page in this tab's history")
+		return 0, "", errors.New("there is no earlier page in this tab's history")
 	}
-	if err := p.call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": h.Entries[h.CurrentIndex-1].ID}, nil); err != nil {
+	e := h.Entries[h.CurrentIndex-1]
+	return e.ID, e.URL, nil
+}
+
+// BackTo goes to history entry id (from BackTarget) and settles.
+func (p *Page) BackTo(ctx context.Context, id int) error {
+	if err := p.call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": id}, nil); err != nil {
 		return err
 	}
 	p.settle(ctx)
@@ -1144,6 +1175,14 @@ func startsWithDigit(s string) bool { return s != "" && s[0] >= '0' && s[0] <= '
 // Read returns the page's main text — main, else article, else the body —
 // from an isolated world, so the page's own scripts cannot rewrite what is
 // read. Form field values are never part of innerText.
+// DocumentID is the main frame's current loader id: it changes with every
+// new document, so a read bracketed by two equal values saw one document.
+func (p *Page) DocumentID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.loaderID
+}
+
 func (p *Page) Read(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	frame := p.frameID

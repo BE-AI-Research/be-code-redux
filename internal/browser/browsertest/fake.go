@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,13 +54,28 @@ type Browser struct {
 	// full wait, since only a test's very last Drop can know this.
 	list    []ListEntry
 	listSet bool // unset: GET /json/list 404s, the way a browser with no such endpoint does
+
+	// The person's-own-Chrome shape (Chrome 144+, remote debugging turned
+	// on at chrome://inspect): no HTTP endpoints at all, only the
+	// WebSocket, and a consent prompt that holds the connection until it
+	// is answered.
+	wsOnly         bool
+	httpHits       int
+	handshakeDelay time.Duration
+	firstReply     time.Duration
+	refuse         bool
+	done           chan struct{} // closed by New's own cleanup: every delay gives up
 }
 
 // New starts a fake browser, closed when the test ends.
 func New(t testing.TB) *Browser {
-	b := &Browser{t: t, handlers: map[string]Handler{}}
+	b := &Browser{t: t, handlers: map[string]Handler{}, done: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
+		if b.httpOff() {
+			http.NotFound(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
 			"Browser":              "FakeChrome/1.0",
@@ -72,6 +90,7 @@ func New(t testing.TB) *Browser {
 		b.mu.Lock()
 		b.closing = true
 		b.mu.Unlock()
+		close(b.done)
 		b.Drop()
 		b.Srv.Close()
 	})
@@ -100,7 +119,87 @@ func (b *Browser) SetList(entries []ListEntry) {
 	b.mu.Unlock()
 }
 
+// SetWSOnly makes the fake serve the WebSocket alone: every HTTP endpoint
+// (/json/version, /json/list) 404s and is counted, the way a Chrome whose
+// remote debugging was turned on at chrome://inspect may answer.
+func (b *Browser) SetWSOnly(on bool) {
+	b.mu.Lock()
+	b.wsOnly = on
+	b.mu.Unlock()
+}
+
+// HTTPHits counts the HTTP endpoint requests refused while SetWSOnly is on.
+func (b *Browser) HTTPHits() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.httpHits
+}
+
+func (b *Browser) httpOff() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.wsOnly {
+		b.httpHits++
+	}
+	return b.wsOnly
+}
+
+// SetConsentDelay simulates Chrome's "Allow remote debugging?" prompt:
+// handshake holds the WebSocket upgrade, firstReply the first reply on each
+// new connection, until the delay passes (the person clicking Allow).
+func (b *Browser) SetConsentDelay(handshake, firstReply time.Duration) {
+	b.mu.Lock()
+	b.handshakeDelay, b.firstReply = handshake, firstReply
+	b.mu.Unlock()
+}
+
+// SetRefuse makes every new WebSocket close as soon as it is upgraded —
+// a consent prompt declined.
+func (b *Browser) SetRefuse(on bool) {
+	b.mu.Lock()
+	b.refuse = on
+	b.mu.Unlock()
+}
+
+// Port is the port the fake listens on.
+func (b *Browser) Port() int {
+	_, p, _ := strings.Cut(b.Addr(), ":")
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+// WSPath is the browser target path, DevToolsActivePort's second line.
+func (b *Browser) WSPath() string { return "/devtools/browser/fake" }
+
+// WritePortFile writes dir/DevToolsActivePort naming this fake, the file a
+// Chrome with remote debugging turned on keeps in its user-data dir.
+func (b *Browser) WritePortFile(dir string) {
+	b.t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "DevToolsActivePort"), []byte(strconv.Itoa(b.Port())+"\n"+b.WSPath()+"\n"), 0o600); err != nil {
+		b.t.Fatal(err)
+	}
+}
+
+// wait sleeps d, or less when r's client goes away or the fake is closing;
+// it reports whether the full delay passed.
+func (b *Browser) wait(r *http.Request, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	select {
+	case <-time.After(d):
+		return true
+	case <-r.Context().Done():
+	case <-b.done:
+	}
+	return false
+}
+
 func (b *Browser) serveList(w http.ResponseWriter, r *http.Request) {
+	if b.httpOff() {
+		http.NotFound(w, r)
+		return
+	}
 	b.mu.Lock()
 	list, ok := b.list, b.listSet
 	b.mu.Unlock()
@@ -206,9 +305,19 @@ func (b *Browser) Drop() {
 }
 
 func (b *Browser) serveWS(w http.ResponseWriter, r *http.Request) {
+	b.mu.Lock()
+	hsDelay, replyDelay, refuse := b.handshakeDelay, b.firstReply, b.refuse
+	b.mu.Unlock()
+	if !b.wait(r, hsDelay) {
+		return
+	}
 	sc, err := Upgrade(w, r)
 	if err != nil {
 		b.t.Errorf("browsertest: upgrade: %v", err)
+		return
+	}
+	if refuse {
+		sc.Close()
 		return
 	}
 	b.mu.Lock()
@@ -252,6 +361,14 @@ func (b *Browser) serveWS(w http.ResponseWriter, r *http.Request) {
 			resp["result"] = res
 		}
 		out, _ := json.Marshal(resp)
+		if replyDelay > 0 {
+			select {
+			case <-time.After(replyDelay):
+			case <-b.done:
+				return
+			}
+			replyDelay = 0
+		}
 		if sc.WriteMessage(out) != nil {
 			return
 		}
