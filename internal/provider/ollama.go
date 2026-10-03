@@ -374,6 +374,10 @@ func (p *Ollama) Prefill(ctx context.Context, req ChatRequest) (*ChatResponse, e
 
 func (p *Ollama) NativeFallback() bool { return p.nativeBroken.Load() }
 
+// HonoursNoThink reports whether NoThink reaches the server: only on the
+// native route, which carries think:false; the OpenAI fallback cannot.
+func (p *Ollama) HonoursNoThink() bool { return !p.nativeBroken.Load() }
+
 func (p *Ollama) thinkState(model string) (cannotThink, noLevels bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

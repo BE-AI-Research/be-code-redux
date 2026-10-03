@@ -231,3 +231,80 @@ func TestHandoffAndInitRepliesAreBounded(t *testing.T) {
 		t.Fatalf("init max_tokens = %d", got.MaxTokens)
 	}
 }
+
+// thinkHonouringProvider is a provider that says NoThink really switches
+// reasoning off (native Ollama).
+type thinkHonouringProvider struct{ scriptedProvider }
+
+func (*thinkHonouringProvider) HonoursNoThink() bool { return true }
+
+// A backend that ignores NoThink lets a thinking model reason before it
+// summarises; a 2048 cap would be spent on reasoning and come back empty.
+// Such a request gets the thinking headroom; one NoThink reaches keeps 2048.
+func TestHarnessReplyTokensGivesThinkingHeadroomWhenNoThinkIgnored(t *testing.T) {
+	ignoring, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	ignoring.SetModel("qwen3:8b")
+	ignoring.ApplyWindow(32768)
+	_, reserve, _ := ignoring.History.Scalars()
+	if got := ignoring.harnessReplyTokens(summaryReplyTokens, nil); got != reserve || got <= summaryReplyTokens {
+		t.Fatalf("NoThink ignored: got %d, want the thinking reserve %d", got, reserve)
+	}
+	honouring, _ := newTestAgent(t, &thinkHonouringProvider{}, nil)
+	honouring.SetModel("qwen3:8b")
+	honouring.ApplyWindow(32768)
+	if got := honouring.harnessReplyTokens(summaryReplyTokens, nil); got != summaryReplyTokens {
+		t.Fatalf("NoThink honoured: got %d, want %d", got, summaryReplyTokens)
+	}
+	plain, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	plain.SetModel("llama3:8b")
+	plain.ApplyWindow(32768)
+	if got := plain.harnessReplyTokens(summaryReplyTokens, nil); got != summaryReplyTokens {
+		t.Fatalf("plain model: got %d, want %d", got, summaryReplyTokens)
+	}
+}
+
+// The profile reserve is sized from the budget, not the window: a
+// context_tokens of 8192 under a 32k window left a thinking model's 10922
+// reserve larger than the whole budget.
+func TestProfileReserveSizedFromEffectiveBudget(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 8192 })
+	ag.SetModel("qwen3:8b")
+	ag.ApplyWindow(32768)
+	if l := ag.History.Limit(); l < 4096 {
+		t.Fatalf("Limit = %d (reserve %d), want a workable budget", l, ag.History.Reserve)
+	}
+}
+
+// Under a context_tokens cap the notice names the budget, not a window.
+func TestReserveCapNoticeNamesContextBudget(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.MaxTokens = 32768; c.ContextTokens = 16384 })
+	var log noticeLog
+	ag.Events.OnNotice = log.add
+	ag.FlushQueuedNotices()
+	ag.ApplyWindow(32768)
+	want := "max_tokens 32768 leaves no room for the conversation in a 16384-token context budget; reserving 8192 instead. Change max_tokens in config (0 lets the server decide) to avoid this."
+	if n := log.count(want); n != 1 {
+		t.Fatalf("got %q", log.msgs)
+	}
+}
+
+// Plan mode's scratch agent explains nothing: the budget is the primary's.
+func TestPlanAgentIsQuietAboutBudget(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, nil)
+	if !ag.planAgent().quietBudget {
+		t.Fatal("planAgent must set quietBudget")
+	}
+}
+
+// A backend that reports no window is explained once wiring is done, by the
+// one number it has: context_tokens.
+func TestExplainBudgetWithoutWindow(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, ownerConfig)
+	var log noticeLog
+	ag.Events.OnNotice = log.add
+	ag.ExplainBudget()
+	ag.ExplainBudget()
+	if n := log.count("max_tokens 32768 leaves no room for the conversation in a 32768-token context budget; reserving 16384 instead."); n != 1 {
+		t.Fatalf("got %q", log.msgs)
+	}
+}

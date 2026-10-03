@@ -48,10 +48,26 @@ func (a *Agent) effectiveBudget(window int) int {
 }
 
 // ReserveCapNote is what the session (and doctor) says when max_tokens is
-// too large to reserve in full.
-func ReserveCapNote(maxTokens, window, reserve int) string {
-	return fmt.Sprintf("max_tokens %d leaves no room for the conversation in a %d-token window; reserving %d instead. "+
-		"Change max_tokens in config (0 lets the server decide) to avoid this.", maxTokens, window, reserve)
+// too large to reserve in full. size is the effective budget; contextBudget
+// says it is the context_tokens cap rather than the window.
+func ReserveCapNote(maxTokens, size, reserve int, contextBudget bool) string {
+	what := "window"
+	if contextBudget {
+		what = "context budget"
+	}
+	return fmt.Sprintf("max_tokens %d leaves no room for the conversation in a %d-token %s; reserving %d instead. "+
+		"Change max_tokens in config (0 lets the server decide) to avoid this.", maxTokens, size, what, reserve)
+}
+
+// ExplainBudget runs noteBudget for a session that has learned no window
+// (a backend that reports none): ApplyWindow explains every other one.
+// cmd calls it once wiring is done.
+func (a *Agent) ExplainBudget() {
+	if a.History == nil || a.Window() > 0 {
+		return
+	}
+	budget, reserve, _ := a.History.Scalars()
+	a.noteBudget(budget, reserve)
 }
 
 // noteBudget explains, once per session each, a reserve the max_tokens cap
@@ -64,7 +80,9 @@ func (a *Agent) noteBudget(budget, reserve int) {
 		return
 	}
 	if m := a.Cfg.MaxTokens; m > 0 && reserve < m && a.reserveCapNoted.CompareAndSwap(false, true) {
-		a.announce(ReserveCapNote(m, budget, reserve))
+		c := a.Cfg.ContextTokens
+		w := a.Window()
+		a.announce(ReserveCapNote(m, budget, reserve, c > 0 && (w <= 0 || c < w)))
 	}
 	if l := budget - reserve; l < lowLimitTokens && a.lowLimitNoted.CompareAndSwap(false, true) {
 		shown := l
@@ -75,6 +93,13 @@ func (a *Agent) noteBudget(budget, reserve int) {
 			"expect compaction on nearly every call. Give the model a larger window (context_window, context_tokens) or set a smaller max_tokens.",
 			budget, reserve, shown))
 	}
+}
+
+// honoursNoThink reports whether the provider really switches reasoning off
+// for a NoThink request (provider.ThinkController); unknown means no.
+func (a *Agent) honoursNoThink() bool {
+	tc, ok := a.Provider.(provider.ThinkController)
+	return ok && tc.HonoursNoThink()
 }
 
 // announce delivers a notice to the UI, or — during wiring, before one
@@ -91,12 +116,24 @@ func (a *Agent) announce(msg string) {
 // harnessReplyTokens is the max_tokens for one of the harness's own requests:
 // limit, or the configured max_tokens when smaller, and never more than the
 // window leaves beside prompt.
+//
+// A thinking model on a backend that cannot switch reasoning off (anything
+// but native Ollama: the OpenAI route ignores NoThink) reasons before it
+// answers, and would spend a summary-sized cap on reasoning alone and come
+// back empty; such a request gets the session's reserve, the headroom sized
+// for exactly that.
 func (a *Agent) harnessReplyTokens(limit int, prompt []provider.Message) int {
+	budget, reserve, cpt := a.History.Scalars()
 	n := limit
+	a.modelMu.Lock()
+	thinking := a.Profile.StripThink
+	a.modelMu.Unlock()
+	if thinking && !a.honoursNoThink() && reserve > n {
+		n = reserve
+	}
 	if m := a.Cfg.MaxTokens; m > 0 && m < n {
 		n = m
 	}
-	budget, _, cpt := a.History.Scalars()
 	window := a.Window()
 	if window <= 0 {
 		window = budget

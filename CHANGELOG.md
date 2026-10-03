@@ -83,9 +83,12 @@
   reserving R instead. Change max_tokens in config (0 lets the server decide) to avoid this.`
   Ordinary turns still send the configured `max_tokens`. The harness's own replies are bounded
   instead: a compaction summary at 2048 tokens, the handoff briefing and `/init`'s BECODE.md at
-  4096 (a smaller `max_tokens` still wins). A budget the reserve leaves under 2048 tokens of — a
-  thinking model's 4096 floor in a 4096-token window — is now named once instead of compacting
-  in silence.
+  4096 (a smaller `max_tokens` still wins) — except that a thinking model on a backend that
+  cannot switch reasoning off (anything but native Ollama) gets the session's reserve, so its
+  reasoning cannot eat the summary. The profile reserve is now sized from the effective budget,
+  so a `context_tokens` far below the window no longer reserves more than the whole budget. A
+  budget the reserve still leaves under 2048 tokens of — a thinking model's 4096 floor in a
+  4096-token context — is now named once instead of compacting in silence.
 
 ## v1.1.5 — a browser the model can drive
 

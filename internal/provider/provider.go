@@ -121,6 +121,15 @@ type NativeFallbacker interface {
 	NativeFallback() bool
 }
 
+// ThinkController is implemented by providers that can say whether a
+// request's NoThink really switches reasoning off. Native Ollama sends
+// think:false; the OpenAI route has no such field, so a provider that does
+// not implement this (or says false) is assumed to let a thinking model
+// reason anyway.
+type ThinkController interface {
+	HonoursNoThink() bool
+}
+
 // KeepAliver is implemented by providers that can extend a model's
 // residency (Ollama keep_alive), so idle expiry between prompts does not
 // evict it and force a slow reload plus prompt re-processing.

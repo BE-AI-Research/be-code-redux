@@ -297,8 +297,8 @@ func (a *Agent) ApplyResolvedWindow(window int) bool {
 
 // reserveFor is the generation headroom kept free below the window.
 // Reasoning models spend a large, unpredictable share of the window
-// thinking before the first answer token, so they get a third of it;
-// plain models a quarter. An explicit max_tokens wins, but never takes more
+// thinking before the first answer token, so they get a third of the
+// effective budget; plain models a quarter. An explicit max_tokens wins, but never takes more
 // than half the effective budget (CapReserve): it is the reply's limit, and
 // a max_tokens as large as the window would otherwise reserve all of it,
 // leave the conversation nothing and compact before every call. The request
@@ -308,8 +308,11 @@ func (a *Agent) ApplyResolvedWindow(window int) bool {
 // rewrites, and the window it is sizing for may be arriving on
 // resolveModel's goroutine while the switch itself ran on a UI's.
 func (a *Agent) reserveFor(window int) int {
+	// Sized from the budget, not the window: a context_tokens cap far below
+	// the window otherwise reserved more than the whole budget.
+	window = a.effectiveBudget(window)
 	if a.Cfg.MaxTokens > 0 {
-		return CapReserve(a.Cfg.MaxTokens, a.effectiveBudget(window))
+		return CapReserve(a.Cfg.MaxTokens, window)
 	}
 	a.modelMu.Lock()
 	thinking := a.Profile.StripThink
@@ -346,10 +349,11 @@ func (a *Agent) applyReserve(window int) {
 	limit := budget - reserve
 	a.History.mu.Unlock()
 	a.capToolOutput(limit)
-	// Before any window is known the budget is a stand-in (an unset
-	// context_tokens is NewHistory's guess): explaining it would name a
-	// window that does not exist, and the real one is about to arrive.
-	if a.Window() > 0 || a.Cfg.ContextTokens > 0 {
+	// Before any window is known the budget is a stand-in, and the real
+	// one is usually about to arrive through ApplyWindow, which explains
+	// it. A session that never learns a window is explained by
+	// ExplainBudget once wiring is done.
+	if a.Window() > 0 {
 		a.noteBudget(budget, reserve)
 	}
 }
