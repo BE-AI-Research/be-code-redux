@@ -318,6 +318,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		ag.SetEngineCards(nil)
 	}
 	applyModelParams(cfg, p, reg, ag, model)
+	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
 }
 

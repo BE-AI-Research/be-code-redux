@@ -1188,10 +1188,18 @@ hand; `/config` prints what the running session actually resolved.
   wins, so existing config files keep behaving — but a cap below the window
   means the rest of the window goes unused, and BE-Code now says so at startup
   instead of shrinking the budget in silence. Generation headroom is reserved
-  from it: `max_tokens` if set, else a quarter of the window (1k–4k) for plain
+  from it: `max_tokens` if set, else a quarter of the budget (1k–4k) for plain
   models or a third (4k–16k) for reasoning models, which think before they
   answer. The
   chars-per-token estimate recalibrates from server-reported usage each request.
+  `max_tokens` is the limit on one reply, sent with every ordinary turn; `0`
+  (the default) lets the server decide. A value near the window would reserve
+  all of it and leave the conversation nothing, so the reserve is capped at half
+  the budget (the window, or `context_tokens` when smaller) and the session and
+  `doctor` say so — lower `max_tokens` to make the warning go away. The harness's
+  own requests (compaction summaries, the handoff briefing, `/init`) are bounded
+  at 2048–4096 tokens regardless — or, for a reasoning model on a backend that
+  cannot turn reasoning off (anything but native Ollama), at the reserve.
 - `keep_alive` ("30m") — how long Ollama keeps the model resident after each request
   (refreshed after every prompt; "0" disables). Sharing the server with other
   clients can still evict the model; BE-Code then reports the eviction, retries

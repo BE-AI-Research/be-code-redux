@@ -32,6 +32,7 @@ func (a *Agent) planAgent() *Agent {
 		Cfg: a.Cfg, Provider: a.Provider, Model: a.Model, Tools: readOnly,
 		Profile: a.Profile, compat: a.compat, projectNotes: a.projectNotes,
 		repoMap: a.repoMap, Events: a.Events,
+		quietBudget: true, // the primary explains its own budget
 	}
 	scratch.window.Store(int64(a.Window()))
 	scratch.knownTools = map[string]bool{}

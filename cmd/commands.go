@@ -464,6 +464,7 @@ var doctorCmd = &cobra.Command{
 			return err
 		}
 		fmt.Println("providers:")
+		window := 0 // the default provider's known window, when doctor learns it
 		names := make([]string, 0, len(cfg.Providers))
 		for name := range cfg.Providers {
 			names = append(names, name)
@@ -483,8 +484,11 @@ var doctorCmd = &cobra.Command{
 			}
 			fmt.Printf("  %-14s %s (%dms)\n", name, status, time.Since(start).Milliseconds())
 			if o, ok := p.(*provider.Ollama); ok && name == cfg.DefaultProvider {
-				reportWindow(cmd.Context(), o, cfg, name)
+				window = reportWindow(cmd.Context(), o, cfg, name)
 			}
+		}
+		if line := maxTokensDoctorLine(cfg, window); line != "" {
+			fmt.Println(line)
 		}
 		model := provider.ResolveModel(cfg, cfg.DefaultProvider, "")
 		if prof := profiles.Detect(model); prof.Notes != "" {
@@ -530,7 +534,10 @@ var doctorCmd = &cobra.Command{
 // and what the model is loaded with, because they differing is what makes
 // Ollama reload the model and evict whoever else was using it. That is the
 // question reload_on_mismatch answers, so doctor names its setting too.
-func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, providerName string) {
+//
+// It returns the window it learned — configured, else loaded, else the
+// Modelfile's — or 0, for maxTokensDoctorLine.
+func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, providerName string) (known int) {
 	model := provider.ResolveModel(cfg, providerName, "")
 	want := 0
 	if pc, ok := cfg.Providers[providerName]; ok {
@@ -544,8 +551,12 @@ func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, p
 		asks = fmt.Sprintf("context_window=%d", want)
 	}
 	fmt.Printf("  %-14s %s: %s\n", "", model, asks)
+	known = want
 
 	loadedWindow, resident, err := o.Resident(ctx, model)
+	if known <= 0 && resident && loadedWindow > 0 {
+		known = loadedWindow
+	}
 	switch {
 	case err != nil:
 		fmt.Printf("  %-14s could not read loaded models (%v); the window in use is unknown\n", "", compactErr(err))
@@ -560,6 +571,9 @@ func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, p
 		fmt.Printf("  %-14s loaded with %d tokens (ok)\n", "", loadedWindow)
 	default:
 		n, _ := o.ContextLength(ctx, model)
+		if known <= 0 {
+			known = n
+		}
 		if n > 0 {
 			fmt.Printf("  %-14s not loaded; the Modelfile says %d tokens\n", "", n)
 		} else {
@@ -569,6 +583,27 @@ func reportWindow(ctx context.Context, o *provider.Ollama, cfg *config.Config, p
 	if cfg.ContextTokens > 0 {
 		fmt.Printf("  %-14s context_tokens=%d caps the prompt budget below whatever window is in use\n", "", cfg.ContextTokens)
 	}
+	return known
+}
+
+// maxTokensDoctorLine flags a max_tokens of at least half the context — the
+// smaller of context_tokens and the known window. A session reserves at most
+// half for the reply (agent.CapReserve) and says so; doctor says it before a
+// session does. "" when there is nothing to say.
+func maxTokensDoctorLine(cfg *config.Config, window int) string {
+	m := cfg.MaxTokens
+	ctxTokens := window
+	if c := cfg.ContextTokens; c > 0 && (ctxTokens <= 0 || c < ctxTokens) {
+		ctxTokens = c
+	}
+	if m <= 0 || ctxTokens <= 0 || m*2 < ctxTokens {
+		return ""
+	}
+	if r := agent.CapReserve(m, ctxTokens); r < m {
+		return "max tokens: " + agent.ReserveCapNote(m, ctxTokens, r, cfg.ContextTokens > 0 && (window <= 0 || cfg.ContextTokens < window))
+	}
+	return fmt.Sprintf("max tokens: max_tokens %d reserves half of a %d-token window for one reply. "+
+		"Change max_tokens in config (0 lets the server decide) to leave the conversation more room.", m, ctxTokens)
 }
 
 var verifyCmd = &cobra.Command{

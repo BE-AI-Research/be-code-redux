@@ -75,6 +75,20 @@
   those actions, and now `schedule`, have no "always" and re-ask every time.
 - Fixed: a plain-mode run that fails no longer discards the lines you typed while it was running;
   they stay queued for the next turn.
+- Fixed: a `max_tokens` as large as the context window no longer reserves the whole window for
+  the reply. It left the conversation a budget of zero (the context wheel at 999%), compacted
+  before every model call, and each compaction's summary could run for many minutes — which
+  looked like a frozen session. The reserve is now at most half the budget, and the session (and
+  `doctor`) says so once: `max_tokens N leaves no room for the conversation in a W-token window;
+  reserving R instead. Change max_tokens in config (0 lets the server decide) to avoid this.`
+  Ordinary turns still send the configured `max_tokens`. The harness's own replies are bounded
+  instead: a compaction summary at 2048 tokens, the handoff briefing and `/init`'s BECODE.md at
+  4096 (a smaller `max_tokens` still wins) — except that a thinking model on a backend that
+  cannot switch reasoning off (anything but native Ollama) gets the session's reserve, so its
+  reasoning cannot eat the summary. The profile reserve is now sized from the effective budget,
+  so a `context_tokens` far below the window no longer reserves more than the whole budget. A
+  budget the reserve still leaves under 2048 tokens of — a thinking model's 4096 floor in a
+  4096-token context — is now named once instead of compacting in silence.
 
 ## v1.1.5 — a browser the model can drive
 

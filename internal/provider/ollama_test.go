@@ -650,3 +650,16 @@ func TestPrefillReadsThePromptAndGeneratesNothing(t *testing.T) {
 		t.Fatalf("usage: %+v", resp.Usage)
 	}
 }
+
+// NoThink is honoured on the native route only.
+func TestOllamaHonoursNoThinkOnlyNatively(t *testing.T) {
+	p := NewOllama("o", "http://127.0.0.1:1", "")
+	var tc ThinkController = p
+	if !tc.HonoursNoThink() {
+		t.Fatal("native route must honour NoThink")
+	}
+	p.nativeBroken.Store(true)
+	if tc.HonoursNoThink() {
+		t.Fatal("the OpenAI fallback cannot switch reasoning off")
+	}
+}

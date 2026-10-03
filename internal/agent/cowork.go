@@ -535,6 +535,7 @@ func (a *Agent) consultAgent(cp provider.Provider, cw config.CoworkerConfig, res
 		// co-worker with no delay at all and never say a word about a
 		// backend that has gone quiet.
 		retryBase: a.retryBase, stallAfter: a.stallAfter,
+		quietBudget: true, // the primary explains its own budget; a consultation has nobody to tell
 	}
 	name := cw.Name
 	scratch.Events = Events{
