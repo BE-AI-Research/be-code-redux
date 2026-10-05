@@ -13,8 +13,10 @@ of those tools has: **the model is small, local, and fallible, so the harness mu
 quality.** Every design decision follows from that.
 
 It talks to whatever inference you already run — Ollama, llama.cpp, LM Studio, vLLM, a BE AI
-Engine fabric — and nothing else: no telemetry, no account, no network call but the endpoints
-you configured (and web search, which is opt-in and off by default). A session survives the
+Engine fabric — and, since 1.2, to an [online provider](#online-providers) such as OpenRouter if
+you choose one, with a local model still doing the housekeeping and nothing leaving the machine
+until you have said yes, per project and per site. No telemetry, no account, no network call but
+the endpoints you configured (and web search, which is opt-in and off by default). A session survives the
 terminal that started it, several terminals can watch and drive the same run, and the record of
 what the model has read and decided lives in your project as Markdown you can edit by hand.
 
@@ -72,7 +74,9 @@ what the model has read and decided lives in your project as Markdown you can ed
 
 - **A backend.** Any OpenAI-compatible server on your machine or LAN: Ollama (best supported —
   native `/api`, a window you set rather than discover), llama.cpp, LM Studio, vLLM, or a BE AI
-  Engine fabric. No cloud account is needed anywhere.
+  Engine fabric. No cloud account is needed anywhere — or, with no local GPU, an online
+  provider (OpenRouter, OpenAI, Groq, DeepSeek, Mistral, Gemini, Anthropic) and its API key in
+  your environment; see [Online providers](#online-providers).
 - **A model that can call tools.** Anything in the 7B–32B class with tool calling works; models
   whose native tool calling is broken are carried by compat mode (see below). Qwen3-family
   models are what BE-Code is tuned and measured against.
@@ -152,7 +156,8 @@ and packages the VS Code extension beside them.
 
 **First launch** runs a setup wizard: it probes local backends concurrently
 (Ollama :11434, llama.cpp :8080, LM Studio :1234, vLLM :8000, BE AI Engine :9800),
-lists the models on whichever answer, and writes your config from two keypresses.
+lists the models on whichever answer, and writes your config from two keypresses. It also
+offers **use an online provider** (OpenRouter first), with or without a local backend.
 Re-run any time with `be-code setup`.
 
 ## The two interfaces
@@ -547,17 +552,19 @@ there is no background daemon.
 ## Online providers
 
 BE-Code is offline-first, but the main model can be an online one (OpenRouter, OpenAI, Groq,
-DeepSeek, Mistral, Gemini, Anthropic) while a small local model does the housekeeping. `be-code
-setup` offers it as the last numbered choice, next to the local default when no backend is
-found (so no local GPU is needed): pick a preset (OpenRouter first), pick a model from
-the provider's listing, and the first local backend found, if any, becomes the helper (without one, `local_helper`
-stays unset). Setup saves nothing
-and says `set <KEY_ENV> in your shell, then run be-code setup again` when the key is not in the
-environment — keys come only from the environment variable the preset names, never from the config
-file.
+DeepSeek, Mistral, Gemini, Anthropic) while a small local model does the housekeeping.
+`be-code setup` offers it as the last numbered choice, next to the local default when no
+backend is found (so no local GPU is needed): pick a preset (OpenRouter first), pick a model
+from the provider's listing, and the first local backend found, if any, becomes the helper
+(without one, `local_helper` stays unset). Setup saves nothing and says
+`set <KEY_ENV> in your shell, then run be-code setup again` when the key is not in the
+environment — keys come only from the environment variable the preset names, never from the
+config file.
 
 A provider counts as online when it says `"online": true` **or** its address is off this machine
-and network, whatever the entry says (startup warns once). Online model families (`gpt-`, `claude`,
+and network, whatever the entry says (startup warns once). Local means loopback, link-local,
+private (RFC 1918) and Tailscale/CGNAT (100.64.0.0/10) addresses, bare host names, and names
+ending `.local`, `.lan`, `.home.arpa` or `.internal`. Online model families (`gpt-`, `claude`,
 `gemini`, ...) match a profile only at the start of the name or after a `/`, so a local distill
 that mentions one keeps its own family.
 
@@ -578,12 +585,14 @@ that mentions one keeps its own family.
   and `/stats` show the session's estimated spend, or `not tracked` for a model with no price.
   `max_spend_usd` (0 = off) caps it: when the next request would pass the cap BE-Code asks
   (`spend_cap`, no "always") and stops otherwise. Housekeeping done on the online main model
-  and plan mode are counted and capped too.
+  and plan mode are counted and capped too. Only OpenRouter lists prices today, so on the other
+  presets the notice says `max_spend_usd cannot apply`.
 - **Local helper.** `local_helper` (`{"provider", "model"}`) names a local model that does
   compaction summaries, the exit handoff, `/init`, commit messages and review (when no reviewer
   is set), so those never cost money or send the conversation off the machine. An online helper
   is refused. When it is unset or down, one notice says so and the chores run on the main
-  model, counted against spend.
+  model, counted against spend. A separately configured `reviewer` on an online provider asks
+  once per session before it sees changed files, as an online co-worker does.
 - **Rejected keys and outages.** A 401/403 is not retried and names the environment variable; a
   429 honours `Retry-After` (at most 30 s). When the provider stays unreachable after the
   retries and a local helper is configured, BE-Code offers once per outage to switch the main
@@ -1050,7 +1059,8 @@ Continuum components or CI.
 | `lmstudio`     | `http://localhost:1234/v1`    | LM Studio                      |
 | `be-ai-engine` | `http://localhost:9800/v1`    | BE AI Engine fabric (set `BE_AI_ENGINE_KEY`; point `base_url` at your fabric head node) |
 
-Anything OpenAI-compatible works (vLLM included) — add an entry to `providers`.
+Anything OpenAI-compatible works (vLLM included) — add an entry to `providers`. Online
+providers have presets (`be-code setup` writes them); see [Online providers](#online-providers).
 
 ```bash
 ./be-code -p be-ai-engine -m qwen3:8b        # pick provider/model per run
@@ -1117,7 +1127,11 @@ write instead of writing unattended.
 - All file tools are confined to the workspace root (path-traversal hardened, per BE-CLI lessons).
 - Every shell command requires interactive approval (`y`/`N`/`a`lways) unless `-y` /
   `auto_approve_shell` is set.
-- No telemetry, no network calls except to your configured inference endpoints. Fully offline.
+- No telemetry, no network calls except to your configured inference endpoints. Fully offline
+  with a local backend.
+- With an online main model, nothing is sent until the project is approved (`online_project`),
+  page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
+  API keys are read only from the environment.
 
 ## Layout
 
