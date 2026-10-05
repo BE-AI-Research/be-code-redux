@@ -76,6 +76,14 @@ type Stats struct {
 	Compactions    int
 	Repairs        int
 	ToolsByName    map[string]int
+	// SpendUSD is the estimated cost of the main model's replies while an
+	// online provider serves it (prompt and completion tokens times the
+	// model's per-token prices). HelperPromptTokens and HelperCompletionTokens
+	// are what the harness's own helper calls used, kept apart from the
+	// main model's.
+	SpendUSD               float64
+	HelperPromptTokens     int
+	HelperCompletionTokens int
 }
 
 // slowPromptRead is the prompt-processing time past which a request is
@@ -95,6 +103,9 @@ func (s *Stats) add(d Stats) {
 	s.ReasoningChars += d.ReasoningChars
 	s.Compactions += d.Compactions
 	s.Repairs += d.Repairs
+	s.SpendUSD += d.SpendUSD
+	s.HelperPromptTokens += d.HelperPromptTokens
+	s.HelperCompletionTokens += d.HelperCompletionTokens
 	for k, v := range d.ToolsByName {
 		if s.ToolsByName == nil {
 			s.ToolsByName = map[string]int{}
@@ -170,6 +181,11 @@ type Agent struct {
 	onlineMu   sync.Mutex
 	onlineName string
 	pricing    Pricing
+	// spendRaise is what continuing past the cap has added to it, this
+	// session only (the config is never written); unpricedSaid latches the
+	// once-per-session "not tracked" notice.
+	spendRaise   float64
+	unpricedSaid bool
 
 	projectNotes string
 	handoff      string // briefing from the resumed session, kept in the system prompt
@@ -1197,6 +1213,11 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		}
 		// A model switch still being resolved has no window on the wire.
 		a.awaitWindow(ctx)
+		// An online model costs money: stop at the cap unless asked.
+		if err := a.checkSpendCap(ctx); err != nil {
+			a.autosave(userInput)
+			return "", err
+		}
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
@@ -1711,6 +1732,13 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 			used.PromptTokens += a.History.MessageTokens(m)
 		}
 		used.CompletionTokens = a.History.est(resp.Content)
+	}
+	if _, online := a.Online(); online {
+		if p := a.Pricing(); p.Known {
+			used.SpendUSD = float64(used.PromptTokens)*p.Prompt + float64(used.CompletionTokens)*p.Completion
+		} else if a.markUnpricedSaid() {
+			a.notice("spend is not tracked for this model")
+		}
 	}
 	a.addStats(used)
 	return resp, nil

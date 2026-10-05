@@ -224,6 +224,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("schedule:"), detail)
 	case "tool_call":
 		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
+	case "spend_cap":
+		fmt.Printf("%s\n%s\n", yell("spend cap reached:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
@@ -232,7 +234,7 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 	// must not advertise a key that does nothing.
 	prompt := "approve? [y/N/a(lways)] "
 	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule" ||
-		action == "tool_call"
+		action == "tool_call" || action == "spend_cap"
 	if noAlways {
 		prompt = "approve? [y/N] "
 	}

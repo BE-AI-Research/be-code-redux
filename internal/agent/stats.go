@@ -75,6 +75,16 @@ func (a *Agent) StatsReport(clients []string) string {
 	if s.Requests > 0 {
 		row("per request", "%d prompt · %d completion", s.PromptTokens/s.Requests, s.CompletionTokens/s.Requests)
 	}
+	if _, online := a.Online(); online {
+		if a.Pricing().Known {
+			row("spend", "$%.2f (est.)", s.SpendUSD)
+		} else {
+			row("spend", "not tracked")
+		}
+		if s.HelperPromptTokens > 0 || s.HelperCompletionTokens > 0 {
+			row("helper tokens", "%d prompt · %d completion", s.HelperPromptTokens, s.HelperCompletionTokens)
+		}
+	}
 	row("time in requests", "%s", engine.ShortDuration(s.Elapsed))
 	if s.PromptTime > 0 || s.LoadTime > 0 {
 		row("server prompt reading", "%s · model loading %s", s.PromptTime.Round(100*time.Millisecond), s.LoadTime.Round(100*time.Millisecond))

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"context"
+	"fmt"
 	"strings"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -20,6 +22,7 @@ func (a *Agent) SetOnline(providerName, keyEnv string, p Pricing) {
 	defer a.onlineMu.Unlock()
 	a.onlineName = providerName
 	a.pricing = p
+	a.unpricedSaid = false
 	if providerName != "" && keyEnv != "" {
 		a.KeyEnv = keyEnv
 	}
@@ -76,4 +79,51 @@ func longestKey(id string, table map[string]float64) (float64, bool) {
 		}
 	}
 	return v, found
+}
+
+// markUnpricedSaid latches the once-per-session notice and reports whether
+// this call was the first.
+func (a *Agent) markUnpricedSaid() bool {
+	a.onlineMu.Lock()
+	defer a.onlineMu.Unlock()
+	if a.unpricedSaid {
+		return false
+	}
+	a.unpricedSaid = true
+	return true
+}
+
+// SpendCap is the session's current cap in USD: max_spend_usd plus whatever
+// continuing past it has added. 0 means no cap.
+func (a *Agent) SpendCap() float64 {
+	if a.Cfg.MaxSpendUSD <= 0 {
+		return 0
+	}
+	a.onlineMu.Lock()
+	defer a.onlineMu.Unlock()
+	return a.Cfg.MaxSpendUSD + a.spendRaise
+}
+
+// checkSpendCap runs ahead of every primary model call. Local sessions are
+// never touched. Past the cap it asks spend_cap, which has no "always" and
+// which -y never answers; yes raises the cap for this session by another
+// max_spend_usd (the config is never written), anything else stops the run.
+func (a *Agent) checkSpendCap(ctx context.Context) error {
+	if _, online := a.Online(); !online {
+		return nil
+	}
+	capUSD := a.SpendCap()
+	spent := a.Usage().SpendUSD
+	if capUSD <= 0 || spent < capUSD {
+		return nil
+	}
+	step := a.Cfg.MaxSpendUSD
+	detail := fmt.Sprintf("This session has spent $%.2f of your $%.2f cap. Continue (raises the cap by $%.2f)?", spent, capUSD, step)
+	if a.Tools.AskPerson(ctx, "spend_cap", detail) {
+		a.onlineMu.Lock()
+		a.spendRaise += step
+		a.onlineMu.Unlock()
+		return nil
+	}
+	return fmt.Errorf("spend cap reached ($%.2f of $%.2f); raise max_spend_usd or continue when asked", spent, capUSD)
 }
