@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -156,7 +158,12 @@ func (p *OpenAICompat) Chat(ctx context.Context, req ChatRequest, onDelta Stream
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("%s: HTTP %d: %s", p.ProviderName, resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, &HTTPError{
+			Provider:   p.ProviderName,
+			Code:       resp.StatusCode,
+			Body:       strings.TrimSpace(string(b)),
+			RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 
 	return p.consumeStream(resp.Body, onDelta, req.OnReasoning)
@@ -310,9 +317,17 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: HTTP %d listing models", p.ProviderName, resp.StatusCode)
 	}
+	// OpenRouter adds a window and per-token prices to the OpenAI shape;
+	// its prices are strings. Every other server leaves them out, and an
+	// absent field stays 0 ("not known"), never a guess.
 	var body struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string     `json:"id"`
+			ContextLength flexNumber `json:"context_length"`
+			Pricing       struct {
+				Prompt     flexNumber `json:"prompt"`
+				Completion flexNumber `json:"completion"`
+			} `json:"pricing"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -320,9 +335,29 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(body.Data))
 	for _, m := range body.Data {
-		out = append(out, ModelInfo{ID: m.ID})
+		out = append(out, ModelInfo{
+			ID:              m.ID,
+			ContextLength:   int(m.ContextLength),
+			PromptPrice:     float64(m.Pricing.Prompt),
+			CompletionPrice: float64(m.Pricing.Completion),
+		})
 	}
 	return out, nil
+}
+
+// flexNumber decodes a JSON number or a numeric string; anything else
+// (null, "", a word) is 0 rather than a failed listing.
+type flexNumber float64
+
+func (f *flexNumber) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		*f = 0
+		return nil
+	}
+	*f = flexNumber(v)
+	return nil
 }
 
 func (p *OpenAICompat) Ping(ctx context.Context) (string, error) {

@@ -4,6 +4,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
@@ -119,7 +121,14 @@ func stdoutIsTTY() bool {
 // we're on a real terminal; otherwise loads (writing defaults if needed).
 func loadOrWizard(ctx context.Context) (*config.Config, error) {
 	if !config.Exists() && stdinIsTTY() && stdoutIsTTY() {
-		return setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
+		// A missing key comes back as setup.MissingKeyError, whose text is
+		// the same "set <KEY_ENV> in your shell, then run be-code setup
+		// again" `be-code setup` prints.
+		cfg, err := setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
+		if err == nil && cfg == nil {
+			return nil, errors.New("no config saved; run be-code setup again")
+		}
+		return cfg, err
 	}
 	return config.Load()
 }
@@ -205,6 +214,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
+	for _, w := range cfg.OnlineWarnings() {
+		fmt.Fprintf(os.Stderr, "warn: %s\n", w)
+	}
+
 	// Co-working models: the agent has already taken the usable ones from
 	// the config; the warnings for the unusable ones belong here, printed
 	// once, and the consult tool exists only when there is someone to ask.
@@ -269,6 +282,26 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		return rp, c.Reviewer.Model, nil
 	}
 
+	// Local helper factory (same dodge): the local model that takes the
+	// housekeeping chores while the main model is online. Its window comes
+	// from a loader with no approver, as a reviewer's and co-worker's do. A
+	// helper on an online provider is refused: the point of it is that the
+	// chores stay on this machine.
+	agent.HelperFactory = func(ctx context.Context, c *config.Config) (provider.Provider, string, int, error) {
+		name := c.LocalHelper.Provider
+		if name == "" {
+			name = c.DefaultProvider
+		}
+		if pc, ok := c.Providers[name]; ok && config.ProviderIsOnline(pc) {
+			return nil, "", 0, fmt.Errorf("local_helper provider %q is online", name)
+		}
+		hp, err := provider.FromConfig(c, name)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return hp, c.LocalHelper.Model, secondaryLoad(ctx, c, hp, c.LocalHelper.Model, ag), nil
+	}
+
 	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
 	agent.CoworkerFactory = func(ctx context.Context, c *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
 		cp, err := provider.FromConfig(c, cw.Provider)
@@ -318,6 +351,13 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		ag.SetEngineCards(nil)
 	}
 	applyModelParams(cfg, p, reg, ag, model)
+	applyOnline(cfg, p, ag, mainProviderName(cfg), model)
+	// Every later switch of the main provider or model re-runs the same
+	// resolution, so the online state never outlives the provider it
+	// described (same import-cycle dodge as ReviewerFactory).
+	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
+		resolveOnline(ctx, cfg, a.CurrentProviderClient(), a, name, model, false)
+	}
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
 }
@@ -749,6 +789,13 @@ func runInteractive(cmd *cobra.Command) error {
 		// startup prompt is answered on r.lines, so StartSchedules runs
 		// here on the REPL goroutine rather than on a goroutine of its own.
 		repl.OnStart = func() {
+			// Per-project consent for an online main model first (spec
+			// §2.1): before sub-agents or schedules can start, and before
+			// the first line is taken. A gate that fails ends the session.
+			if !ag.StartOnlineGate() {
+				repl.Stop()
+				return
+			}
 			repl.ResolveModelParams(ctx)
 			ag.StartSubAgents()
 			ag.StartSchedules()
@@ -787,16 +834,34 @@ func runInteractive(cmd *cobra.Command) error {
 	// panic-fenced — Session.Ask tolerates being raised with nobody
 	// rendering yet exactly the way ag.ResolveModel's own goResolve does
 	// below.
-	ag.StartSubAgentsAsync()
-	// Scheduled events: the same shape — the startup prompt is a shared ask.
-	ag.StartSchedulesAsync()
+	//
+	// Per-project consent for an online main model (spec §2.1) comes first:
+	// nothing may dispatch a sub-agent or run a scheduled event before it
+	// passes, and the question is a shared ask too, so it waits on a
+	// goroutine of its own while the program renders. A local session (or
+	// an approved one) runs done on this goroutine, exactly as before. A
+	// gate that fails ends the session; its notice is repeated below, after
+	// the screen has gone.
+	ag.StartOnlineGateAsync(func(ok bool) {
+		if !ok {
+			s.Quit()
+			return
+		}
+		ag.StartSubAgentsAsync()
+		// Scheduled events: the same shape — the startup prompt is a shared ask.
+		ag.StartSchedulesAsync()
+	})
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
 	// approval modal, which is the only place under a TUI a person can see
 	// it. A terminal that attaches after it is raised is shown it too
 	// (Session.NewView), so this is safe to run before the program starts.
 	ag.ResolveModel()
-	return s.RunLocal(ctx)
+	err = s.RunLocal(ctx)
+	if msg := ag.OnlineRefusal(); msg != "" {
+		fmt.Println(msg)
+	}
+	return err
 }
 
 // startupWarn reports a warning raised while the session is still being built.
@@ -845,4 +910,166 @@ func warnScheduleAllow(cfg *config.Config, ag *agent.Agent) {
 	for _, err := range errs {
 		startupWarn(ag, fmt.Sprintf("schedules.allow %v; dropped", err))
 	}
+}
+
+// mainProviderName is the provider the session's main model runs on.
+func mainProviderName(cfg *config.Config) string {
+	if flagProvider != "" {
+		return flagProvider
+	}
+	return cfg.DefaultProvider
+}
+
+// presetFor finds the preset a configured provider stands for: by base URL
+// (trailing slash ignored), else by the provider's own config name.
+func presetFor(name string, pc config.ProviderConfig) provider.Preset {
+	base := strings.TrimRight(pc.BaseURL, "/")
+	for _, pr := range provider.Presets() {
+		if strings.TrimRight(pr.BaseURL, "/") == base {
+			return pr
+		}
+	}
+	if pr, ok := provider.PresetByName(name); ok {
+		return pr
+	}
+	return provider.Preset{}
+}
+
+// listOnlineModel asks an online provider's /models for one model's row,
+// under a 5 s bound. A listing that fails or lacks the model gives an empty
+// row and the error (nil when merely absent).
+func listOnlineModel(ctx context.Context, p provider.Provider, model string) (provider.ModelInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ms, err := p.ListModels(ctx)
+	if err != nil {
+		return provider.ModelInfo{}, err
+	}
+	for _, m := range ms {
+		if m.ID == model {
+			return m, nil
+		}
+	}
+	return provider.ModelInfo{}, nil
+}
+
+// setShareGate puts the share_page gate on the main registry for the online
+// provider name, or clears it ("": a local main model, nothing asks).
+// The allow tier (browser.sites, loopback included) is what decides, for
+// page text already in the conversation, which hosts never ask.
+func setShareGate(cfg *config.Config, ag *agent.Agent, name string) {
+	if ag == nil || ag.Tools == nil {
+		return
+	}
+	if name == "" {
+		ag.Tools.SetShareGate(nil)
+		return
+	}
+	consent, _ := browser.NewConsent(cfg.Browser.Sites)
+	ag.Tools.SetShareGate(&tools.ShareGate{Provider: name, Allow: func(host string) bool {
+		return consent.Tier(host) == browser.TierAllow
+	}})
+}
+
+// applyOnline is the online half of startup: the main provider's key name for
+// the rejected-key message, and — for an online provider — the window and
+// prices its listing (or its preset) gives. The loader never runs for these:
+// they are openai-typed, so applyModelParams has already returned. A listing
+// that cannot be read is a warning, never fatal.
+func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string) {
+	resolveOnline(context.Background(), cfg, p, ag, name, model, true)
+}
+
+// onlineSwitchWindow is the window a switch to an online model applies when
+// neither its preset nor a configured context_window gives one (startup
+// instead falls through to ExplainBudget's derived default).
+const onlineSwitchWindow = 32768
+
+// resolveOnline sets the online state for the main provider and model. It is
+// applyOnline at startup (wait: the listing is read before the session
+// starts) and agent.OnlineResolver after every /provider, /model or helper
+// switch (no wait: a switch runs inside a UI's update, so the preset's
+// window and prices apply at once and the listing's land behind it, if the
+// session is still on that model). A local provider clears the state.
+func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string, wait bool) {
+	pc, ok := cfg.Providers[name]
+	if !ok {
+		setShareGate(cfg, ag, "")
+		if !wait {
+			ag.SetKeyEnv("")
+			ag.SetOnline("", "", agent.Pricing{})
+		}
+		return
+	}
+	ag.SetKeyEnv(pc.APIKeyEnv)
+	if !config.ProviderIsOnline(pc) {
+		setShareGate(cfg, ag, "")
+		ag.SetOnline("", "", agent.Pricing{})
+		return
+	}
+	// Page text (browser, web_fetch, web_search) reaches this provider only
+	// with the person's per-site consent (online spec §2.2). Set here, with
+	// the online state, so every switch — to the helper or back — sets or
+	// clears it too.
+	setShareGate(cfg, ag, name)
+	preset := presetFor(name, pc)
+	configured := pc.ContextWindow
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		configured = mc.ContextWindow
+	}
+	keyMissing := pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == ""
+	if !wait {
+		// Only the state the gate reads is set here, synchronously: a TUI
+		// switch runs inside Update, under the session lock, and the window
+		// is applied behind it because ApplyWindow may raise a notice, which
+		// takes that same lock.
+		ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, provider.ModelInfo{}, preset))
+		go func() {
+			defer func() { _ = recover() }() // advisory: the preset already applies
+			current := func() bool {
+				cur, on := ag.Online()
+				return on && cur == name && ag.CurrentModel() == model
+			}
+			// A switch never keeps the previous model's window: with no
+			// preset or configured window (the listing may still land
+			// below), the online default applies until something knows.
+			w := agent.OnlineWindow(provider.ModelInfo{}, preset, configured)
+			if w <= 0 {
+				w = onlineSwitchWindow
+			}
+			if current() {
+				ag.ApplyWindow(w)
+			}
+			if keyMissing || p == nil {
+				return
+			}
+			// Not the switch's own context: plain mode's is cancelled as
+			// soon as the switch returns. listOnlineModel bounds it.
+			listed, err := listOnlineModel(context.Background(), p, model)
+			if err != nil || listed.ID == "" || !current() {
+				return // unreadable, or switched again meanwhile
+			}
+			if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+				ag.ApplyWindow(w)
+			}
+			ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
+		}()
+		return
+	}
+	var listed provider.ModelInfo
+	if keyMissing {
+		// No key: the listing would only be refused. Say so and go on with
+		// the preset and configured window.
+		startupWarn(ag, fmt.Sprintf("%s is not set; not asking %s for its model list, and requests will be refused until it is exported", pc.APIKeyEnv, name))
+	} else {
+		var err error
+		listed, err = listOnlineModel(ctx, p, model)
+		if err != nil {
+			startupWarn(ag, fmt.Sprintf("could not read %s's model list (%v); window and prices fall back to the preset", name, compactErr(err)))
+		}
+	}
+	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+		ag.ApplyWindow(w)
+	}
+	ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
 }

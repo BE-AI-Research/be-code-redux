@@ -141,10 +141,19 @@ func runSessionHost(code string) error {
 	// StartSubAgentsAsync keeps the resume pass here (it never blocks) and
 	// moves the gate and the first schedule to a goroutine of their own; see
 	// runInteractive's own comment on this same call in cmd/root.go.
-	ag.StartSubAgentsAsync()
-	// Scheduled events start under the same rule: their startup prompt is a
-	// shared ask, so it waits on a goroutine of its own for a terminal.
-	ag.StartSchedulesAsync()
+	//
+	// The online consent question (spec §2.1) runs first and gates both; see
+	// runInteractive's matching call.
+	ag.StartOnlineGateAsync(func(ok bool) {
+		if !ok {
+			s.Quit()
+			return
+		}
+		ag.StartSubAgentsAsync()
+		// Scheduled events start under the same rule: their startup prompt is a
+		// shared ask, so it waits on a goroutine of its own for a terminal.
+		ag.StartSchedulesAsync()
+	})
 
 	// The hosted case is the one that most needed this. Here stdio is the
 	// host's log file, so a loader notice printed at startup is written
@@ -177,6 +186,9 @@ func runSessionHost(code string) error {
 	// their restore instead of vanishing with the alt buffer.
 	out := live.NewCRLFWriter(h.Output())
 	fmt.Fprint(out, live.ExitAltScreen)
+	if msg := ag.OnlineRefusal(); msg != "" {
+		fmt.Fprintln(out, "\n"+msg)
+	}
 	fmt.Fprintln(out, "\nfinishing session (writing the handoff briefing)...")
 	finishSession(ag, true, out)
 	h.Close(live.ReasonEnded)

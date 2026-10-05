@@ -110,3 +110,24 @@ func TestPrefillCanBeTurnedOffAndNeedsTheCapability(t *testing.T) {
 	plain.ResolveModelNow(context.Background())
 	plain.stopPrefill()
 }
+
+// Final fix 2: an online main model is never prefilled, even an approved
+// one on an ollama-typed endpoint that can prefill.
+func TestNoPrefillWhileOnline(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	pp := &prefillProvider{funcProvider: &funcProvider{}, release: make(chan struct{})}
+	close(pp.release)
+	ag.Provider = pp
+	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "earlier"})
+	ag.SetOnline("ollama-cloud", "K", Pricing{})
+	if !ag.StartOnlineGate() {
+		t.Fatal("project gate")
+	}
+	ag.StartPrefill()
+	time.Sleep(50 * time.Millisecond)
+	ag.stopPrefill()
+	if n, _ := pp.seen(); n != 0 {
+		t.Fatalf("prefilled an online model: %d", n)
+	}
+}

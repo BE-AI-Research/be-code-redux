@@ -307,8 +307,8 @@ func (m *View) menuStatus() string {
 		win = fmt.Sprintf("%d tokens", w)
 	}
 	rows := [][2]string{
-		{"provider", m.prov.Name()},
-		{"model", m.ag.Model},
+		{"provider", m.ag.CurrentProvider()},
+		{"model", m.ag.CurrentModel()},
 		{"profile", m.ag.Profile.Family},
 		{"window", win},
 		{"context", fmt.Sprintf("%d of %d tokens (%d%%)", m.usage.ctxTokens, m.usage.budget, m.ctxPercent())},

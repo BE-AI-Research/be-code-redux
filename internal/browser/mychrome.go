@@ -314,14 +314,17 @@ func (s *Session) pickMineLocked(ctx context.Context) (string, error) {
 
 // tabName is how a note the model reads names a tab: its title, except in
 // my-Chrome mode, where a title is page content and only an allow-tier
-// host's is shown — any other tab is named by its host.
+// host's is shown — any other tab is named by its host. Outside it the same
+// holds for a host not yet shared with an online main model (TitleShared).
 func (s *Session) tabName(ctx context.Context, p *Page) string {
 	title, u := p.Info(ctx)
-	if !s.connMine {
-		return title
-	}
+	title = collapse(title) // one line: a title must not start a line of its own
 	h := HostOf(u)
-	if h != "" && s.opts.TitleOK != nil && s.opts.TitleOK(h) {
+	if !s.connMine {
+		if s.opts.TitleShared == nil || s.opts.TitleShared(h) {
+			return title
+		}
+	} else if h != "" && s.opts.TitleOK != nil && s.opts.TitleOK(h) {
 		return title
 	}
 	if h == "" {

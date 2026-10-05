@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -61,6 +62,27 @@ func (t *webSearchTool) Schema() json.RawMessage {
 		"required":["query"]}`)
 }
 
+// searchErr is a request error without the API key: a *url.Error names the
+// whole request URL, whose query carries key=..., so it is reported as its
+// operation, the URL without its query and the underlying error. Whatever
+// else is left is scrubbed of the key, plain and query-encoded, as well.
+func searchErr(err error, key string) string {
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		where := ue.URL
+		if i := strings.IndexAny(where, "?#"); i >= 0 {
+			where = where[:i]
+		}
+		msg = fmt.Sprintf("%s %q: %v", ue.Op, where, ue.Err)
+	}
+	if key != "" {
+		msg = strings.ReplaceAll(msg, key, "[redacted]")
+		msg = strings.ReplaceAll(msg, url.QueryEscape(key), "[redacted]")
+	}
+	return msg
+}
+
 func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	q := strings.TrimSpace(argString(args, "query", "q", "search"))
 	if q == "" {
@@ -84,11 +106,11 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	v.Set("num", fmt.Sprint(n))
 	req, err := http.NewRequestWithContext(ctx, "GET", t.cfg.Endpoint+"?"+v.Encode(), nil)
 	if err != nil {
-		return Result{IsError: true, Content: err.Error()}
+		return Result{IsError: true, Content: "web_search: " + searchErr(err, key)}
 	}
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return Result{IsError: true, Content: "web_search: " + err.Error()}
+		return Result{IsError: true, Content: "web_search: " + searchErr(err, key)}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -102,6 +124,10 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 		if json.Unmarshal(body, &ge) == nil && ge.Error.Message != "" {
 			msg = ge.Error.Message
 		}
+		if key != "" {
+			msg = strings.ReplaceAll(msg, key, "[redacted]")
+			msg = strings.ReplaceAll(msg, url.QueryEscape(key), "[redacted]")
+		}
 		return Result{IsError: true, Content: fmt.Sprintf("web_search: HTTP %d: %.300s", resp.StatusCode, msg)}
 	}
 	var out struct {
@@ -113,6 +139,14 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return Result{IsError: true, Content: "web_search: bad response: " + err.Error()}
+	}
+	// With an online main model, results reach it only once the person has
+	// said so — one grant covers every search for the session (online spec
+	// §2.2). An empty result list carries no third party's text.
+	if len(out.Items) > 0 && t.r != nil && !t.r.shareAsk(ctx, webSearchShareKey, false, func(provider string) string {
+		return "Send web search results to " + provider + "?"
+	}) {
+		return Result{IsError: true, Content: "not shared with " + t.r.ShareProvider() + ": web search results"}
 	}
 	// Results are third parties' titles and snippets: whatever host they
 	// name, the request has read untrusted text (browser spec §3.6).
@@ -196,6 +230,12 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	if resp.Request != nil && resp.Request.URL != nil {
 		final = resp.Request.URL
 	}
+	// With an online main model the page reaches it only from a host the
+	// person shared with it: judged on the host that answered, after any
+	// redirect; the allow tier never asks (online spec §2.2).
+	if fh := browser.NormalizeHost(final.Host); t.r != nil && t.consent.Tier(fh) != browser.TierAllow && !t.r.shareOK(ctx, fh, false) {
+		return Result{IsError: true, Content: "not shared with " + t.r.ShareProvider() + ": " + fh}
+	}
 	if t.r != nil && (t.consent.Tier(u.Host) != browser.TierAllow || t.consent.Tier(final.Host) != browser.TierAllow) {
 		t.r.MarkUntrustedWeb()
 	}
@@ -214,7 +254,10 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	if t.r != nil && t.r.MaxOutput() > 0 {
 		max = t.r.MaxOutput()
 	}
-	header := fmt.Sprintf("%s (%d chars total)\n", u, len(text)+off)
+	// The address the page came from, after any redirect: what the model
+	// should cite, and what tells a later reader which host the text is
+	// from (the agent's ShareEarlier pass).
+	header := fmt.Sprintf("%s (%d chars total)\n", final, len(text)+off)
 	return Result{Content: header + truncate(text, max)}
 }
 

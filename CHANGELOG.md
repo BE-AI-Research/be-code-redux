@@ -1,6 +1,31 @@
 # BE-Code Changelog
 
-## v1.2.0 — scheduled events (in development)
+## v1.2.0 — scheduled events, online providers (in development)
+
+- **Online main models.** `be-code setup` can pick an online provider (presets for OpenRouter,
+  OpenAI, Groq, DeepSeek, Mistral, Gemini and Anthropic; keys only from their environment
+  variables) and the main model can be one while a small local model keeps house. A provider is
+  online when flagged `online` or when its address is off this network. Model profiles for the
+  online families are anchored to the start of a name or a `/`, so a local distill keeps its own.
+  A 401/403 is reported as a rejected key and never retried; a 429 honours `Retry-After` (up to
+  30 s).
+- **Consent before anything leaves.** Each project is asked once before its code goes to an online
+  main model (`online_project`, remembered in `~/.be-code/engine/<key>/online.json`, `/online
+  forget` withdraws it); a mid-session `/provider` or `/model` switch to an unapproved provider
+  asks at the next request; `-y` approves for that `run`/`init` only and a scheduled event
+  refuses. Page text from the browser, `web_fetch` and `web_search` reaches an online model only
+  after `share_page` is answered per site (yes covers the host for the session; your own Chrome
+  asks every page; `web_search` asks once; the `allow` tier skips), and when a session goes online
+  page text already in the conversation asks per site too — no replaces it with a "not shown"
+  note. `online_project`, `share_page`, `spend_cap` and `switch_to_local` have no "always".
+- **Spend.** The status line and `/stats` show the session's estimated spend from the provider's
+  listed prices; `max_spend_usd` caps it and asks (`spend_cap`) before the request that would pass
+  it. Chores run on the online main model and plan mode are counted and capped too.
+- **Local helper.** `local_helper` runs compaction summaries, the handoff, `/init`, commit
+  messages and review (when no reviewer is set) on a local model; an online helper is refused, and
+  one notice says when it is unset or unavailable. When the online provider stays down after the
+  retries, BE-Code offers once per outage to switch the main model to the helper
+  (`switch_to_local`).
 
 - **Your own Chrome.** With `browser.use_my_chrome` (or `/browser attach` for one session), the
   browser tool attaches to the Chrome you already use once remote debugging is turned on at

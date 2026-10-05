@@ -419,3 +419,20 @@ func (r *Registry) ask(ctx context.Context, action, detail string, nilApproves b
 	}
 	return ok
 }
+
+// AskPerson raises one question through the approval seam from outside the
+// tools package (the spend cap). In a fired turn it is marked FiredAsk and
+// bounded by the allowance's deadline, exactly as the tools' own are; with
+// nobody to ask the answer is no.
+func (r *Registry) AskPerson(ctx context.Context, action, detail string) bool {
+	if r.Fired() {
+		return r.ask(withoutInherit(ctx), action, detail, false)
+	}
+	switch {
+	case r.ApproveCtx != nil:
+		return r.ApproveCtx(ctx, action, detail)
+	case r.Approve != nil:
+		return r.Approve(action, detail)
+	}
+	return false
+}

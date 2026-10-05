@@ -103,10 +103,16 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	var t strings.Builder
 	for _, m := range a.History.Messages {
 		if isToolResult(m) {
+			// Text from the web — a browser page, a fetched page, search
+			// snippets — never reaches the next session's system prompt
+			// (browser spec §3.5, same rule as RecentContext), nor the
+			// model asked to write the briefing, settled or not.
 			if browserResult(m, a.History.Messages) {
-				// A page's text never reaches the next session's system
-				// prompt (browser spec §3.5, same rule as RecentContext).
 				t.WriteString("[tool result] [browser result withheld]\n")
+				continue
+			}
+			if webResult(m, a.History.Messages) {
+				t.WriteString("[tool result] [web result withheld]\n")
 				continue
 			}
 			fmt.Fprintf(&t, "[tool result] %.300s\n", m.Content)
@@ -126,29 +132,24 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 		tr = "[earlier transcript omitted]\n" + cut
 	}
 	b.WriteString(tr)
-	a.awaitWindow(ctx) // never send with no window on the wire
 	// In the lane: the handoff is written on the way out, outside any turn.
 	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: handoffSystemPrompt},
 		{Role: provider.RoleUser, Content: b.String()},
 	}
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model:       a.Model,
+	resp, target, err := a.choreChat(ctx, choreOpts{await: true}, func(t choreTarget) (provider.ChatRequest, error) {
+		return provider.ChatRequest{
+			Model:       t.model,
 			Messages:    msgs,
 			Temperature: 0.1,
-			NoThink:     true,                                         // seconds instead of minutes on thinking models
-			MaxTokens:   a.harnessReplyTokens(notesReplyTokens, msgs), // a briefing, not the user's turn
-		}, nil)
+			NoThink:     true,                                  // seconds instead of minutes on thinking models
+			MaxTokens:   t.replyTokens(notesReplyTokens, msgs), // a briefing, not the user's turn
+		}, nil
 	})
 	if err != nil {
 		return "", err
 	}
-	out := resp.Content
-	if a.Profile.StripThink {
-		out = StripThink(out)
-	}
-	return out, nil
+	return target.strip(resp.Content), nil
 }
 
 // heuristicHandoff is the no-model fallback: task, files touched, last reply.
@@ -219,6 +220,7 @@ func (a *Agent) Resume(s *store.Session) {
 	// schedules are reread on every wake.
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	a.conversationReplaced()
 	// A saved history that shows the model a page — the browser's, or
 	// web_fetch's or web_search's text — starts this session with the shell
 	// suspended, as the request that read it did (browser spec §3.6); a

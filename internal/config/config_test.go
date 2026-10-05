@@ -471,12 +471,14 @@ func TestValidCoworkersCleansMaxScope(t *testing.T) {
 }
 
 func TestLocalEndpoint(t *testing.T) {
-	for _, local := range []string{"http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:1234/v1", "http://192.168.1.150:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.4:1/v1", "http://ollama-box:11434", "http://nas.local/v1", "unix:///tmp/x.sock", ""} {
+	for _, local := range []string{"http://localhost:11434/v1", "http://127.0.0.1:8080", "http://[::1]:1234/v1", "http://192.168.1.150:11434/v1", "http://10.0.0.5/v1", "http://172.16.4.4:1/v1", "http://ollama-box:11434", "http://nas.local/v1", "unix:///tmp/x.sock", "",
+		"http://100.64.0.1:11434", "http://100.101.2.3/v1", "http://100.127.255.254", "http://gpu.home.arpa:11434", "http://ollama.corp.internal/v1"} {
 		if !LocalEndpoint(local) {
 			t.Errorf("%q should be local", local)
 		}
 	}
-	for _, remote := range []string{"https://api.anthropic.com/v1", "https://api.openai.com", "http://8.8.8.8/v1", "https://example.org:443/v1"} {
+	for _, remote := range []string{"https://api.anthropic.com/v1", "https://api.openai.com", "http://8.8.8.8/v1", "https://example.org:443/v1",
+		"http://100.63.255.255", "http://100.128.0.1", "https://internal.example.com", "https://home.arpa.example.com"} {
 		if LocalEndpoint(remote) {
 			t.Errorf("%q should be remote", remote)
 		}

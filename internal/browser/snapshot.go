@@ -480,7 +480,9 @@ func PageLine(title, rawURL string) string {
 	case t == "":
 		return "page: " + clip(u, 120)
 	case u == "":
-		return "page: " + clip(t, 120)
+		// No address: the separator the host is read back by must not come
+		// from the page's own title.
+		return "page: " + clip(strings.ReplaceAll(t, " — ", " - "), 120)
 	}
 	return "page: " + clip(t, 120) + " — " + clip(u, 120)
 }

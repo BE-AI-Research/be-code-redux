@@ -860,3 +860,58 @@ func TestWarnScheduleAllow(t *testing.T) {
 		t.Fatalf("nothing to warn about: %q", out)
 	}
 }
+
+func TestApplyOnlineFromListing(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	cfg.Model = "vendor/m"
+	t.Setenv("BE_TEST_ONLINE_KEY", "k")
+	ag := callBuildAgent(t, cfg)
+	if name, ok := ag.Online(); !ok || name != "or" {
+		t.Fatalf("Online() = %q, %v", name, ok)
+	}
+	pr := ag.Pricing()
+	if !pr.Known || pr.Prompt != 3e-6 || pr.Completion != 15e-6 {
+		t.Fatalf("pricing %+v", pr)
+	}
+	if ag.KeyEnv() != "BE_TEST_ONLINE_KEY" {
+		t.Fatalf("KeyEnv %q", ag.KeyEnv())
+	}
+	b, reserve, _ := ag.History.Scalars()
+	if b != 131072 || reserve <= 0 {
+		t.Fatalf("budget %d reserve %d", b, reserve)
+	}
+}
+
+func TestApplyOnlineListingFailureIsOnlyAWarning(t *testing.T) {
+	cfg := onlineTestConfig("http://127.0.0.1:1/v1")
+	cfg.Providers["or"] = config.ProviderConfig{Type: "openai", BaseURL: "http://127.0.0.1:1/v1", APIKeyEnv: "K", Online: true, ContextWindow: 64000}
+	ag := callBuildAgent(t, cfg)
+	if _, ok := ag.Online(); !ok {
+		t.Fatal("should still be marked online")
+	}
+	if ag.Pricing().Known {
+		t.Fatal("no prices expected")
+	}
+}
+
+func TestApplyOnlineWithoutKeySkipsListing(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	pc := cfg.Providers["or"]
+	pc.ContextWindow = 64000
+	cfg.Providers["or"] = pc
+	t.Setenv("BE_TEST_ONLINE_KEY", "")
+	ag := callBuildAgent(t, cfg)
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("listing requested %d time(s) without a key", n)
+	}
+	if _, ok := ag.Online(); !ok {
+		t.Fatal("should still be online")
+	}
+	if b, _, _ := ag.History.Scalars(); b != 64000 {
+		t.Fatalf("budget %d, want configured 64000", b)
+	}
+}

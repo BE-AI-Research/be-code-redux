@@ -51,7 +51,6 @@ type Session struct {
 
 	cfg      *config.Config
 	ag       *agent.Agent
-	prov     provider.Provider
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
 	// consultCancel stops a /consult asked while a run was in progress: it
@@ -197,9 +196,13 @@ type Session struct {
 // NewSession builds the shared core and wires the agent's callbacks to it.
 // Every callback runs on the agent goroutine and does nothing but broadcast,
 // so none of them can block the loop on a terminal.
-func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Session {
+//
+// The provider argument is no longer kept: the session reads the agent's
+// current provider (Agent.CurrentProviderClient), which a declined switch or
+// the helper fallback changes from the agent's side.
+func NewSession(cfg *config.Config, ag *agent.Agent, _ provider.Provider) *Session {
 	s := &Session{
-		cfg: cfg, ag: ag, prov: prov,
+		cfg: cfg, ag: ag,
 		now:      time.Now,
 		histFile: loadInputHistory(ui.HistoryFile()),
 		custom:   commands.Load(ag.Tools.Root),
@@ -879,6 +882,13 @@ func (s *Session) runContextLocked() context.Context {
 // a keystroke to submit. (mu is not reentrant, so there is no unlocked
 // variant to call by mistake.)
 func (s *Session) Submit(text string, from int) {
+	if s.ag.OnlineGatePending() {
+		// Nothing is accepted before the online consent question is
+		// answered (spec §2.1); the backstop would refuse it anyway.
+		name, _ := s.ag.Online()
+		s.appendEntryLocked(entry{Kind: entryErr, Text: "waiting for your answer about sending this project to " + name})
+		return
+	}
 	s.ag.BeginTypedRequest() // a person typed this (browser spec §3.6)
 	s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(from), Text: text})
 	s.startTurnLocked(text)

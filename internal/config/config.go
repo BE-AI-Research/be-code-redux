@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -144,6 +145,17 @@ type ProviderConfig struct {
 	// config can reach keys the harness knows nothing about (top_k, top_p,
 	// repeat_penalty...). A Models entry's Options override these key by key.
 	Options map[string]any `json:"options,omitempty"`
+	// Online marks the endpoint as off this machine and network, so the
+	// project is sent elsewhere. An endpoint that is not local counts as
+	// online whatever this says (ProviderIsOnline).
+	Online bool `json:"online,omitempty"`
+}
+
+// LocalHelperConfig names the local model that does housekeeping chores
+// while the main model is online.
+type LocalHelperConfig struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 // ModelConfig carries one model's runtime parameters. Parameters belong to
@@ -161,6 +173,12 @@ type Config struct {
 	DefaultProvider string                    `json:"default_provider"`
 	Model           string                    `json:"model"`
 	Providers       map[string]ProviderConfig `json:"providers"`
+
+	// LocalHelper is the local model used for housekeeping while the main
+	// model is online. Empty means none.
+	LocalHelper LocalHelperConfig `json:"local_helper"`
+	// MaxSpendUSD caps a session's online spend; 0 turns the cap off.
+	MaxSpendUSD float64 `json:"max_spend_usd"`
 
 	// Models holds per-model runtime parameters (context window, keep-alive,
 	// passthrough options), keyed by model name. Resolution order for one
@@ -735,9 +753,34 @@ func (pc ProviderConfig) APIKey() string {
 	return os.Getenv(pc.APIKeyEnv)
 }
 
+// ProviderIsOnline reports whether a provider sends the project off this
+// network: flagged online, or at an address that is not local.
+func ProviderIsOnline(pc ProviderConfig) bool {
+	return pc.Online || !LocalEndpoint(pc.BaseURL)
+}
+
+// OnlineWarnings is one warning per provider whose address is not local
+// but whose online flag is unset; such a provider is treated as online.
+func (c *Config) OnlineWarnings() []string {
+	names := make([]string, 0, len(c.Providers))
+	for n := range c.Providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var ws []string
+	for _, n := range names {
+		pc := c.Providers[n]
+		if !pc.Online && !LocalEndpoint(pc.BaseURL) {
+			ws = append(ws, fmt.Sprintf("provider %q is at %s, not local; treating it as online (set \"online\": true)", n, pc.BaseURL))
+		}
+	}
+	return ws
+}
+
 // LocalEndpoint reports whether a provider's base URL stays on this machine
-// or this network: loopback, link-local, RFC 1918, a bare host name, or a
-// unix socket. Anything else means a request carries the workspace off the
+// or this network: loopback, link-local, RFC 1918, CGNAT 100.64.0.0/10
+// (Tailscale's own range), a bare host name, a .local/.lan/.home.arpa/
+// .internal name, or a unix socket. Anything else means a request carries the workspace off the
 // premises, which is what a co-worker's Online flag exists to gate.
 func LocalEndpoint(baseURL string) bool {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
@@ -746,12 +789,17 @@ func LocalEndpoint(baseURL string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	switch {
-	case host == "localhost", strings.HasSuffix(host, ".local"), strings.HasSuffix(host, ".lan"), !strings.Contains(host, "."):
+	case host == "localhost", strings.HasSuffix(host, ".local"), strings.HasSuffix(host, ".lan"),
+		strings.HasSuffix(host, ".home.arpa"), strings.HasSuffix(host, ".internal"), !strings.Contains(host, "."):
 		return true
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return false // a real DNS name
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || cgnat.Contains(ip)
 }
+
+// cgnat is RFC 6598's shared address space, which Tailscale hands out to a
+// tailnet's own machines.
+var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}

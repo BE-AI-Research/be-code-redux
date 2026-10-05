@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -35,6 +36,16 @@ func (a *Agent) planAgent() *Agent {
 		quietBudget: true, // the primary explains its own budget
 	}
 	scratch.window.Store(int64(a.Window()))
+	// Plan mode runs on the primary's own model, so while it is online the
+	// scratch agent prices its replies the same way and checks the
+	// primary's spend cap before each call (spendParent); its spend is
+	// handed back through usageTokens. The helper is shared, not rebuilt.
+	if name, online := a.Online(); online {
+		scratch.SetOnline(name, "", a.Pricing())
+		scratch.SetKeyEnv(a.KeyEnv())
+		scratch.spendParent = a
+	}
+	scratch.helper = a.helperSt()
 	scratch.knownTools = map[string]bool{}
 	for _, n := range readOnly.Names() {
 		scratch.knownTools[n] = true
@@ -79,17 +90,16 @@ func (a *Agent) GenerateCommit(ctx context.Context) (string, error) {
 	if strings.TrimSpace(diff) == "" {
 		return "", fmt.Errorf("no changes to commit (or not a git repository)")
 	}
-	a.awaitWindow(ctx) // never send with no window on the wire
 	// In the lane: /commit is a UI command, never inside a turn's own call.
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model: a.Model,
+	resp, _, err := a.choreChat(ctx, choreOpts{await: true}, func(t choreTarget) (provider.ChatRequest, error) {
+		return provider.ChatRequest{
+			Model: t.model,
 			Messages: []provider.Message{
 				{Role: provider.RoleSystem, Content: "Write a single-line git commit message (max 72 chars, imperative mood, conventional-commits style when it fits) for this diff. Output ONLY the message."},
 				{Role: provider.RoleUser, Content: diff},
 			},
 			Temperature: 0.1,
-		}, nil)
+		}, nil
 	})
 	if err != nil {
 		return "", err
@@ -122,35 +132,11 @@ func (a *Agent) Undo() ([]string, error) {
 // Review asks the configured reviewer model to critique this session's
 // changes. Returns "" when the reviewer approves.
 func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewerModel string) (string, error) {
-	changed := []string{}
-	if a.Checkpoints != nil {
-		changed = a.Checkpoints.ChangedLast()
-	}
-	if len(changed) == 0 {
+	msgs := a.reviewMessages()
+	if msgs == nil {
 		return "", nil
 	}
-	var b strings.Builder
-	for _, rel := range changed {
-		data, err := os.ReadFile(filepath.Join(a.Tools.Root, rel))
-		if err != nil {
-			continue
-		}
-		if len(data) > 12*1024 {
-			data = data[:12*1024]
-		}
-		fmt.Fprintf(&b, "=== %s ===\n%s\n", rel, string(data))
-	}
-	if b.Len() == 0 {
-		return "", nil
-	}
-	req := provider.ChatRequest{
-		Model: reviewerModel,
-		Messages: []provider.Message{
-			{Role: provider.RoleSystem, Content: "You are a strict senior code reviewer. Review the changed files below for bugs, security issues, and broken edge cases. If the code is acceptable, reply with exactly APPROVED. Otherwise list the concrete problems (max 5, most severe first) with file names."},
-			{Role: provider.RoleUser, Content: b.String()},
-		},
-		Temperature: 0.1,
-	}
+	req := provider.ChatRequest{Model: reviewerModel, Messages: msgs, Temperature: 0.1}
 	// One lane per server (spec §2.2). The reviewer is a second model that
 	// may well share the primary's backend — and does share it in the
 	// common "small model drafts, bigger model reviews on the same Ollama"
@@ -175,9 +161,112 @@ func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewer
 	if err != nil {
 		return "", err
 	}
-	verdict := strings.TrimSpace(StripThink(resp.Content))
-	if strings.HasPrefix(strings.ToUpper(verdict), "APPROVED") {
-		return "", nil
+	return reviewVerdict(resp.Content), nil
+}
+
+// reviewerConsentKey is the session-wide consent key for a separately
+// configured online reviewer: parenthesised, so no co-worker's own name can
+// collide with it in ConsentCoworker's "always".
+const reviewerConsentKey = "(reviewer)"
+
+// reviewerName is the separately configured reviewer as provider/model.
+func (a *Agent) reviewerName() string {
+	prov := a.Cfg.Reviewer.Provider
+	if prov == "" {
+		prov = a.Cfg.DefaultProvider
 	}
-	return verdict, nil
+	return prov + "/" + a.Cfg.Reviewer.Model
+}
+
+// reviewerConsent is the consent an online co-worker needs (Agent.consent),
+// asked for a separately configured reviewer whose provider is online
+// (config.ProviderIsOnline) before any review request: action consult, once
+// per session; -y allows through AutoApproveConsult; a headless run without
+// -y declines (its approver refuses); a fired turn declines without asking.
+// A local reviewer never asks.
+func (a *Agent) reviewerConsent() bool {
+	prov := a.Cfg.Reviewer.Provider
+	if prov == "" {
+		prov = a.Cfg.DefaultProvider
+	}
+	pc, ok := a.Cfg.Providers[prov]
+	if !ok || !config.ProviderIsOnline(pc) {
+		return true
+	}
+	if a.Tools.Fired() {
+		return false
+	}
+	if a.allowedFor(reviewerConsentKey) {
+		return true
+	}
+	if a.Cfg.AutoApproveConsult {
+		a.allow(reviewerConsentKey)
+		return true
+	}
+	if a.Tools.Approve == nil {
+		return false
+	}
+	detail := fmt.Sprintf("coworker: %s (%s)\norigin: review\nthe reviewer is online: the files this turn changed are sent to it for review; nothing is edited",
+		reviewerConsentKey, a.reviewerName())
+	if !a.Tools.Approve("consult", detail) {
+		return false
+	}
+	a.allow(reviewerConsentKey) // once per session: a yes stands until exit
+	return true
+}
+
+// helperReview is the second-model review done by the local helper, when
+// the main model is online and no reviewer is configured separately (spec
+// §3). A helper that fails falls back to the primary like any other chore.
+func (a *Agent) helperReview(ctx context.Context) (string, string, error) {
+	msgs := a.reviewMessages()
+	if msgs == nil {
+		return "", "", nil
+	}
+	resp, t, err := a.choreChat(ctx, choreOpts{await: true, urgent: true}, func(t choreTarget) (provider.ChatRequest, error) {
+		return provider.ChatRequest{Model: t.model, Messages: msgs, Temperature: 0.1}, nil
+	})
+	if err != nil {
+		return "", t.model, err
+	}
+	return reviewVerdict(resp.Content), t.model, nil
+}
+
+// reviewMessages is the review request for the last turn's changed files,
+// nil when there is nothing to review.
+func (a *Agent) reviewMessages() []provider.Message {
+	changed := []string{}
+	if a.Checkpoints != nil {
+		changed = a.Checkpoints.ChangedLast()
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, rel := range changed {
+		data, err := os.ReadFile(filepath.Join(a.Tools.Root, rel))
+		if err != nil {
+			continue
+		}
+		if len(data) > 12*1024 {
+			data = data[:12*1024]
+		}
+		fmt.Fprintf(&b, "=== %s ===\n%s\n", rel, string(data))
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return []provider.Message{
+		{Role: provider.RoleSystem, Content: "You are a strict senior code reviewer. Review the changed files below for bugs, security issues, and broken edge cases. If the code is acceptable, reply with exactly APPROVED. Otherwise list the concrete problems (max 5, most severe first) with file names."},
+		{Role: provider.RoleUser, Content: b.String()},
+	}
+}
+
+// reviewVerdict is "" for an approval, else the issues raised.
+func reviewVerdict(content string) string {
+	verdict := strings.TrimSpace(StripThink(content))
+	if strings.HasPrefix(strings.ToUpper(verdict), "APPROVED") {
+		return ""
+	}
+	return verdict
 }

@@ -178,4 +178,9 @@ type ModelInfo struct {
 	SizeBytes    int64
 	Family       string
 	Quantization string
+	// ContextLength and the prices come from a listing that reports them
+	// (OpenRouter); 0 means the server did not say. Prices are USD per token.
+	ContextLength   int
+	PromptPrice     float64
+	CompletionPrice float64
 }

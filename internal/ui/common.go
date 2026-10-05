@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"unicode"
+
+	"github.com/brown-enterprises/be-code/internal/agent"
 )
 
 // ANSI helpers — plain enough for any terminal, disabled when not a TTY.
@@ -75,6 +77,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/handoff", "show the briefing carried over from a resumed session", false},
 	{"/map", "show the repo map", false},
 	{"/stats", "session metrics: context, model cost, tools, tasks", false},
+	{"/online", "the online main model: provider, approval, spend; /online forget", true},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
@@ -137,6 +140,24 @@ var busySafe = map[string]bool{
 	"/inbox": true, "/dm": true,
 	// /whoami only reads this terminal's resolved chat identity.
 	"/whoami": true,
+	// The online state and its approval store; forgetting only touches the
+	// file the next session reads.
+	"/online": true,
+}
+
+// OnlineCommand is /online in both UIs: the report, or /online forget.
+func OnlineCommand(ag *agent.Agent, args []string) string {
+	if len(args) > 0 && args[0] == "forget" {
+		if err := ag.ForgetOnline(); err != nil {
+			return "error: " + err.Error()
+		}
+		name, _ := ag.Online()
+		return "forgot the approval for " + name + "; the next session asks again"
+	}
+	if len(args) > 0 {
+		return "usage: /online [forget]"
+	}
+	return ag.OnlineReport()
 }
 
 // BusySafeCommand reports whether a slash command line may run while the

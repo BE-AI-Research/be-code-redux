@@ -54,6 +54,11 @@ var initCmd = &cobra.Command{
 		if ideSession != nil {
 			defer ideSession.Close()
 		}
+		// The /init notes are a request to the main model: an online one
+		// needs this project's consent, decided as run decides it.
+		if err := headlessOnlineGate(ag, flagYes); err != nil {
+			return err
+		}
 		root := ag.Tools.Root
 		path, err := ui.RunInit(cmd.Context(), ag, ui.InitOptions{
 			Root:    root,

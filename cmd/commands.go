@@ -61,6 +61,13 @@ var runCmd = &cobra.Command{
 			ag.Events = ui.Events()
 		}
 		ag.Tools.Approve = headlessApprover(cfg)
+		// Per-project consent for an online main model (spec §2.1): a
+		// headless run never asks. -y allows it for this run only and
+		// remembers nothing; without -y only a remembered yes will do.
+		if err := headlessOnlineGate(ag, flagYes); err != nil {
+			ag.Tools.Close()
+			return err
+		}
 		// Approve and Events are wired above; a dispatch before this point
 		// would ask consent of nobody and print to nobody.
 		ag.StartSubAgents()
@@ -107,6 +114,7 @@ var runCmd = &cobra.Command{
 				"uncached_prompt_reads":     ag.Usage().SlowReads,
 				"sub_agents":                subAgentRows(ag),
 			}
+			addSpendJSON(out, ag)
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(out); err != nil {
@@ -126,6 +134,20 @@ var runCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// addSpendJSON adds run --json's spend_usd while the main model is online:
+// the estimated spend, or null when the model's price is unknown (spend is
+// not tracked). A local run's object is left exactly as it was.
+func addSpendJSON(out map[string]any, ag *agent.Agent) {
+	if _, online := ag.Online(); !online {
+		return
+	}
+	if !ag.Pricing().Known {
+		out["spend_usd"] = nil
+		return
+	}
+	out["spend_usd"] = ag.Usage().SpendUSD
 }
 
 func reviewIssues(rep *agent.ReviewedReport) string {
@@ -215,6 +237,21 @@ func nextHeadlessRequest(ag *agent.Agent) (string, bool) {
 	return strings.Join(texts, "\n\n"), true
 }
 
+// headlessOnlineGate is the run command's per-project consent (spec §2.1):
+// nothing is asked. -y approves an online main model for this run only and
+// remembers nothing; without it only a remembered yes lets the run start.
+func headlessOnlineGate(ag *agent.Agent, yes bool) error {
+	name, online := ag.Online()
+	if !online || ag.OnlineApproved() {
+		return nil
+	}
+	if !yes {
+		return fmt.Errorf("this project is not approved for %s; run interactively once, or pass -y for this run", name)
+	}
+	ag.ApproveOnlineForRun()
+	return nil
+}
+
 func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 	in := bufio.NewReader(os.Stdin)
 	return func(action, detail string) bool {
@@ -225,9 +262,11 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// site, and a shell command after an untrusted page, ask every time
 		// — and an unattended -y run has nobody to ask.
 		// -y never approves a schedule (schedules spec §3.1), nor a fired
-		// turn's tool_call.
+		// turn's tool_call, nor online_project (its one -y path is the run
+		// command's own ApproveOnlineForRun, never this prompt), nor
+		// share_page (online spec §2.2: page text to an online model).
 		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
-			((action == "schedule" || action == "tool_call") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
+			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}
@@ -238,7 +277,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 			return true
 		}
 		if !stdinIsTTY() {
-			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" {
+			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" {
 				// -y never approves these two (browser spec §3.3, §3.6), so
 				// the usual "use -y" hint would be a false promise.
 				fmt.Fprintf(os.Stderr, "denied %s (non-interactive; this action always asks a person): %.120s\n", action, detail)
@@ -490,6 +529,9 @@ var doctorCmd = &cobra.Command{
 		if line := maxTokensDoctorLine(cfg, window); line != "" {
 			fmt.Println(line)
 		}
+		if line := onlineDoctorLine(cmd.Context(), cfg); line != "" {
+			fmt.Println(line)
+		}
 		model := provider.ResolveModel(cfg, cfg.DefaultProvider, "")
 		if prof := profiles.Detect(model); prof.Notes != "" {
 			fmt.Printf("model: %s → %s profile (%s)\n", model, prof.Family, prof.Notes)
@@ -673,4 +715,49 @@ func absPath(p string) (string, error) {
 		p = wd + string(os.PathSeparator) + p
 	}
 	return p, nil
+}
+
+// onlineDoctorLine reports the default provider when it is online: whether its
+// key is set, whether it answers, and the window and prices it gives the
+// model. "" for a local default. With the key missing it never connects.
+func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
+	name := cfg.DefaultProvider
+	pc, ok := cfg.Providers[name]
+	if !ok || !config.ProviderIsOnline(pc) {
+		return ""
+	}
+	model := provider.ResolveModel(cfg, name, "")
+	keyEnv := tools.EnvNameForDisplay(pc.APIKeyEnv)
+	if pc.APIKeyEnv == "" {
+		keyEnv = "(no api_key_env)"
+	}
+	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == "" {
+		return fmt.Sprintf("online: %s · %s — key %s missing · not checked", name, model, keyEnv)
+	}
+	p, err := provider.FromConfig(cfg, name)
+	if err != nil {
+		return fmt.Sprintf("online: %s · %s — config error: %v", name, model, err)
+	}
+	preset := presetFor(name, pc)
+	listed, lerr := listOnlineModel(ctx, p, model)
+	state := "reachable"
+	if lerr != nil {
+		state = "unreachable"
+	}
+	configured := pc.ContextWindow
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		configured = mc.ContextWindow
+	}
+	window := "unknown"
+	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+		window = fmt.Sprintf("%d", w)
+	}
+	price := "prices unknown"
+	if cfg.MaxSpendUSD > 0 {
+		price += " (" + agent.UnpricedNote(cfg.MaxSpendUSD) + ")"
+	}
+	if pr := agent.PricingFor(model, listed, preset); pr.Known {
+		price = fmt.Sprintf("$%.2f/$%.2f per Mtok", pr.Prompt*1e6, pr.Completion*1e6)
+	}
+	return fmt.Sprintf("online: %s · %s — key %s set · %s · window %s · %s", name, model, keyEnv, state, window, price)
 }

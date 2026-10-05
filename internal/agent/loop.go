@@ -76,6 +76,14 @@ type Stats struct {
 	Compactions    int
 	Repairs        int
 	ToolsByName    map[string]int
+	// SpendUSD is the estimated cost of the main model's replies while an
+	// online provider serves it (prompt and completion tokens times the
+	// model's per-token prices). HelperPromptTokens and HelperCompletionTokens
+	// are what the harness's own helper calls used, kept apart from the
+	// main model's.
+	SpendUSD               float64
+	HelperPromptTokens     int
+	HelperCompletionTokens int
 }
 
 // slowPromptRead is the prompt-processing time past which a request is
@@ -95,6 +103,9 @@ func (s *Stats) add(d Stats) {
 	s.ReasoningChars += d.ReasoningChars
 	s.Compactions += d.Compactions
 	s.Repairs += d.Repairs
+	s.SpendUSD += d.SpendUSD
+	s.HelperPromptTokens += d.HelperPromptTokens
+	s.HelperCompletionTokens += d.HelperCompletionTokens
 	for k, v := range d.ToolsByName {
 		if s.ToolsByName == nil {
 			s.ToolsByName = map[string]int{}
@@ -161,6 +172,51 @@ type Agent struct {
 	// UI can report the connection once it owns the screen.
 	IDETools int
 
+	// Online state (online.go): the online provider serving the main model
+	// and its prices.
+	onlineMu   sync.Mutex
+	onlineName string
+	// outageDeclined: the switch to the local helper was offered during
+	// this outage and refused; cleared by the next successful primary call
+	// (outage.go). Under onlineMu.
+	outageDeclined bool
+	pricing        Pricing
+	// webSharedWith is the online provider the history's earlier page text
+	// was last settled for (share.go); "" while local. Under onlineMu.
+	webSharedWith string
+	// keyEnv names the environment variable the main provider's API key
+	// came from (the provider's api_key_env), so a rejected key can be
+	// named without ever printing it. Empty: "API key rejected by …".
+	// Under onlineMu: a provider switch changes it mid-session.
+	keyEnv string
+	// Per-project consent (online_consent.go): providers approved this
+	// session, the -y run's in-memory approval, the startup gate's state,
+	// a person's switch to an unapproved provider (asked inline on the
+	// next call), the last provider/model a call went out on, and the
+	// refusal said when the gate ended the session.
+	onlineOK    map[string]bool
+	onlineRunOK bool
+	gatePending bool
+	gateInline  bool
+	// providerUnresolved: SetProvider ran and its paired model switch (which
+	// resolves the online state) has not yet; the gate refuses meanwhile.
+	providerUnresolved bool
+	lastGood           mainModel
+	gateRefusal        string
+	// spendRaise is what continuing past the cap has added to it, this
+	// session only (the config is never written); unpricedSaid latches the
+	// "not tracked" notice once per provider+model per session.
+	spendRaise   float64
+	unpricedSaid map[string]bool
+	// spendParent is the agent a scratch agent's spend belongs to (plan
+	// mode while online): its cap checks and unpriced notice go there.
+	spendParent *Agent
+
+	// helper is the local helper (helper.go), built on the first chore and
+	// shared with scratch agents; helperInit allocates it.
+	helper     *helperState
+	helperInit sync.Once
+
 	projectNotes string
 	handoff      string // briefing from the resumed session, kept in the system prompt
 	// window is the backend context window when detected (0 = unknown),
@@ -199,9 +255,12 @@ type Agent struct {
 	inbox Inbox // mid-task user messages (see inbox.go)
 
 	// Backend resilience (see resilience.go).
-	retryBase        time.Duration // first retry delay; doubles per attempt
-	stallAfter       time.Duration // silence before a "waiting for backend" notice
-	unloadedNotified bool          // one notice per eviction, not per turn
+	retryBase  time.Duration // first retry delay; doubles per attempt
+	stallAfter time.Duration // silence before a "waiting for backend" notice
+	// sleep waits out one retry delay; nil means a real, ctx-aware wait.
+	// Tests replace it to record the requested delay instead of sleeping.
+	sleep            func(ctx context.Context, d time.Duration) error
+	unloadedNotified bool // one notice per eviction, not per turn
 	// nativeFallbackNotified keeps the native-endpoint downgrade to one
 	// notice per session (see noteNativeFallback).
 	nativeFallbackNotified bool
@@ -395,7 +454,16 @@ func (a *Agent) applyModelLocked(model string) {
 // silent, which is how a session ends up quietly unable to set its context
 // window with nothing on screen to say so.
 func (a *Agent) SetProvider(p provider.Provider) {
+	a.modelMu.Lock()
 	a.Provider = p
+	a.modelMu.Unlock()
+	if OnlineResolver != nil {
+		// Fail closed until the paired SetModel/SetModelNow resolves
+		// whether this provider is online (every caller pairs them).
+		a.onlineMu.Lock()
+		a.providerUnresolved = true
+		a.onlineMu.Unlock()
+	}
 	a.nativeFallbackNotified = false
 	a.unloadedNotified = false
 	// A loader speaks for one backend. Carrying the old one across a
@@ -424,7 +492,9 @@ var LoaderFactory func(cfg *config.Config, p provider.Provider) ModelLoader
 // itself is synchronous — the next request uses the new model whatever the
 // backend says — and the parameter resolution runs behind it.
 func (a *Agent) SetModel(model string) {
-	if l, gen := a.applySwitch(model); l != nil {
+	l, gen := a.applySwitch(model)
+	a.resolveOnline(context.Background(), model)
+	if l != nil {
 		a.goResolve(l, model, gen)
 	}
 }
@@ -440,7 +510,9 @@ func (a *Agent) SetModel(model string) {
 // The caller bounds ctx and makes its own prompts wait on it; see
 // REPL.underPrompt.
 func (a *Agent) SetModelNow(ctx context.Context, model string) {
-	if l, gen := a.applySwitch(model); l != nil {
+	l, gen := a.applySwitch(model)
+	a.resolveOnline(ctx, model)
+	if l != nil {
 		a.resolveModel(ctx, l, model, gen)
 	}
 }
@@ -859,6 +931,19 @@ func (a *Agent) ClearHistory() {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	a.History.Messages = nil
+	a.conversationReplaced()
+}
+
+// conversationReplaced is called by every path that swaps History.Messages
+// wholesale (ClearHistory, Resume). What the history held was settled for
+// an online provider (share.go); the conversation now in its place never
+// was, so the next request to an online model settles it from scratch —
+// asking share_page per site — instead of trusting the old mark. The caller
+// holds turnMu, as settleEarlierWebText's own writer does.
+func (a *Agent) conversationReplaced() {
+	a.onlineMu.Lock()
+	a.webSharedWith = ""
+	a.onlineMu.Unlock()
 }
 
 // CompactNow is Compact under the turn lock, for a UI asking for it
@@ -1184,6 +1269,17 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		}
 		// A model switch still being resolved has no window on the wire.
 		a.awaitWindow(ctx)
+		// Nothing reaches an online model before this project is approved
+		// for it (spec §2.1).
+		if err := a.checkOnlineGate(ctx, true); err != nil {
+			a.autosave(userInput)
+			return "", err
+		}
+		// An online model costs money: stop at the cap unless asked.
+		if err := a.checkSpendCap(ctx); err != nil {
+			a.autosave(userInput)
+			return "", err
+		}
 		// Another client may have evicted or reloaded the model with a
 		// different window since the last call; adapt before prompting.
 		a.checkBackend(ctx)
@@ -1192,13 +1288,25 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// this same turn, and compaction has to measure the prompt it is
 		// actually about to send.
 		a.recomposeSystem(a.lastGitInfo)
+		// Page text read before the main model went online (or for another
+		// provider) reaches it only for a site the person shares now.
+		a.settleEarlierWebText(ctx)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
 		req := a.requestFor(effort, true)
 
 		resp, err := a.chatWithRetry(ctx, req)
+		if err == nil {
+			a.noteOutageOver()
+		}
 		if err != nil {
+			// An online provider that stays down: offer the local helper
+			// once (outage.go). A yes retries the turn on the new model.
+			if a.offerOutageSwitch(ctx, err) {
+				turn--
+				continue
+			}
 			// Some servers reject the tools field outright — fall back to
 			// embedded tool calls for the rest of the session.
 			if !a.compat && a.Cfg.CompatToolCalls != "never" && looksLikeToolsUnsupported(err) {
@@ -1699,6 +1807,13 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 		}
 		used.CompletionTokens = a.History.est(resp.Content)
 	}
+	if _, online := a.Online(); online {
+		if p := a.Pricing(); p.Known {
+			used.SpendUSD = float64(used.PromptTokens)*p.Prompt + float64(used.CompletionTokens)*p.Completion
+		} else {
+			a.unpricedNotice()
+		}
+	}
 	a.addStats(used)
 	return resp, nil
 }
@@ -1744,6 +1859,18 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if len(a.History.Messages) <= keepTail {
 		return fmt.Errorf("nothing to compact")
 	}
+	// The summary may be asked of the online main model: earlier page text
+	// goes only for the sites shared with it (share.go). Only once the
+	// project is approved for that model, checked without asking: nobody is
+	// asked about pages for a provider nothing may be sent to (the summary
+	// then goes to the helper, or the primary's own gate refuses it).
+	if a.checkOnlineGate(ctx, false) == nil {
+		a.settleEarlierWebText(ctx)
+	}
+	// Still unsettled (the project is not approved yet): the summary would
+	// become the head message the online model later reads, and settling only
+	// looks at tool results — so no page text goes into it unasked.
+	withholdWeb := a.earlierWebUnsettled()
 	// The model and its profile are snapshotted rather than read where they
 	// are used: this runs on the resolution's goroutine after a model
 	// switch, and a *second* switch landing mid-compaction would otherwise
@@ -1806,6 +1933,10 @@ func (a *Agent) Compact(ctx context.Context) error {
 				}
 			}
 		}
+		if withholdWeb && isToolResult(m) && webResult(m, a.History.Messages) {
+			fmt.Fprintf(&b, "[%s] [web result withheld]\n", m.Role)
+			continue
+		}
 		fmt.Fprintf(&b, "[%s] %.600s\n", m.Role, m.Content)
 		for _, tc := range m.ToolCalls {
 			fmt.Fprintf(&b, "  (called %s %.200s)\n", tc.Name, tc.Arguments)
@@ -1823,36 +1954,77 @@ func (a *Agent) Compact(ctx context.Context) error {
 		task = task[:2000] + "..."
 	}
 
-	var u strings.Builder
-	fmt.Fprintf(&u, "Original task:\n%s\n\n", task)
+	var hdr strings.Builder
+	fmt.Fprintf(&hdr, "Original task:\n%s\n\n", task)
 	if prior != "" {
-		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
+		fmt.Fprintf(&hdr, "Previous summary:\n%s\n\n", prior)
 	}
 	// The same capped block the prompt carries (ruling F-1). Rendered
 	// uncapped it was most of a 16k window by itself, so the request that
 	// exists to relieve an overflowing context overflowed it — and came back
 	// empty, which is the failure this branch was built to survive.
 	if wm := a.workingMemory(); wm != "" {
-		fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
+		fmt.Fprintf(&hdr, "Working memory:\n%s\n\n", wm)
 	}
-	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
+	header := hdr.String()
+	// summaryUser is the summary request's user message for one target. The
+	// primary gets it exactly as before the helper existed; a helper with a
+	// smaller window gets the transcript cut from its oldest end until the
+	// request fits beside the reply, the header (task, prior summary,
+	// working memory) always kept. No room even then is errChoreTooBig,
+	// which continues from the task record below.
+	summaryUser := func(t choreTarget) (string, error) {
+		full := header + "Transcript (most recent last):\n" + transcript
+		room := t.promptRoom(summaryReplyTokens)
+		if room < 0 {
+			return full, nil
+		}
+		fixed := []provider.Message{{Role: provider.RoleSystem, Content: compactSystemPrompt}, {Role: provider.RoleUser, Content: full}}
+		if helperPromptTokens(fixed) <= room {
+			return full, nil
+		}
+		const omitted = "[earlier transcript omitted; see previous summary]\n"
+		fixed[1].Content = header + "Transcript (most recent last):\n" + omitted
+		spare := int(float64(room-helperPromptTokens(fixed)) * defaultCharsPerToken)
+		if spare < 512 {
+			return "", errChoreTooBig
+		}
+		cut := transcript
+		if len(cut) > spare {
+			cut = cut[len(cut)-spare:]
+			if nl := strings.IndexByte(cut, '\n'); nl >= 0 {
+				cut = cut[nl+1:]
+			}
+		}
+		return fixed[1].Content + cut, nil
+	}
 
 	// In the lane: compaction runs between turns, never inside chatWithRetry's
 	// hold, so taking it here cannot nest.
-	summaryMsgs := []provider.Message{
-		{Role: provider.RoleSystem, Content: compactSystemPrompt},
-		{Role: provider.RoleUser, Content: u.String()},
-	}
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model:       model,
+	var u string
+	resp, target, err := a.choreChat(ctx, choreOpts{}, func(t choreTarget) (provider.ChatRequest, error) {
+		user, uerr := summaryUser(t)
+		if uerr != nil {
+			return provider.ChatRequest{}, uerr
+		}
+		u = user
+		summaryMsgs := []provider.Message{
+			{Role: provider.RoleSystem, Content: compactSystemPrompt},
+			{Role: provider.RoleUser, Content: user},
+		}
+		m := model
+		if t.helper {
+			m = t.model
+		}
+		return provider.ChatRequest{
+			Model:       m,
 			Messages:    summaryMsgs,
 			Temperature: 0.1,
 			NoThink:     true, // a summary does not need minutes of deliberation
 			// A few hundred words, never the session's max_tokens: sized
 			// for the window, that let one summary run for minutes.
-			MaxTokens: a.harnessReplyTokens(summaryReplyTokens, summaryMsgs),
-		}, nil)
+			MaxTokens: t.replyTokens(summaryReplyTokens, summaryMsgs),
+		}, nil
 	})
 	if err != nil {
 		// A summary that never arrived is the same situation as one that
@@ -1875,7 +2047,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 	// is left is the summary, and filesOnly says the list was all there was.
 	split := func(r *provider.ChatResponse) (summary string, filesOnly bool) {
 		summary = r.Content
-		if stripThink {
+		if target.helper {
+			summary = target.strip(summary)
+		} else if stripThink {
 			summary = StripThink(summary)
 		}
 		if a.engine() != nil {
@@ -1898,18 +2072,22 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// from scratch gets the same answer.
 		againMsgs := []provider.Message{
 			{Role: provider.RoleSystem, Content: compactSystemPrompt},
-			{Role: provider.RoleUser, Content: u.String()},
+			{Role: provider.RoleUser, Content: u},
 			{Role: provider.RoleAssistant, Content: resp.Content},
 			{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
 		}
-		again, rerr := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-			return a.Provider.Chat(ctx, provider.ChatRequest{
-				Model:       model,
-				Messages:    againMsgs,
-				Temperature: 0.1,
-				NoThink:     true,
-				MaxTokens:   a.harnessReplyTokens(summaryReplyTokens, againMsgs),
-			}, nil)
+		// The same target as the first request: the retry continues its
+		// exchange, so it goes to whichever model wrote the files list.
+		againModel := model
+		if target.helper {
+			againModel = target.model
+		}
+		again, rerr := a.choreDo(ctx, target, choreOpts{}, provider.ChatRequest{
+			Model:       againModel,
+			Messages:    againMsgs,
+			Temperature: 0.1,
+			NoThink:     true,
+			MaxTokens:   target.replyTokens(summaryReplyTokens, againMsgs),
 		})
 		if rerr == nil {
 			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
@@ -2127,14 +2305,31 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 	}
 
 	// Reviewer routing: a second (usually larger) model critiques the diff.
-	if a.Cfg.ReviewOnDone && a.Cfg.Reviewer.Model != "" && ReviewerFactory != nil {
-		reviewer, reviewerModel, rerr := ReviewerFactory(a.Cfg)
-		if rerr != nil {
-			a.notice("reviewer unavailable: %v", rerr)
-			return answer, rep, nil
+	// While the main model is online and no reviewer is configured
+	// separately, the local helper is the reviewer (spec §3).
+	separate := a.Cfg.Reviewer.Model != "" && ReviewerFactory != nil
+	if a.Cfg.ReviewOnDone && (separate || (a.Cfg.Reviewer.Model == "" && a.helperConfigured())) {
+		var issues string
+		var rerr error
+		if separate {
+			if !a.reviewerConsent() {
+				a.notice("review skipped: the reviewer %s is online and sending it this turn's changes was not approved", a.reviewerName())
+				return answer, rep, nil
+			}
+			reviewer, reviewerModel, ferr := ReviewerFactory(a.Cfg)
+			if ferr != nil {
+				a.notice("reviewer unavailable: %v", ferr)
+				return answer, rep, nil
+			}
+			a.notice("review pass: %s", reviewerModel)
+			issues, rerr = a.Review(ctx, reviewer, reviewerModel)
+		} else {
+			var reviewerModel string
+			issues, reviewerModel, rerr = a.helperReview(ctx)
+			if rerr == nil && reviewerModel != "" {
+				a.notice("review pass: %s", reviewerModel)
+			}
 		}
-		a.notice("review pass: %s", reviewerModel)
-		issues, rerr := a.Review(ctx, reviewer, reviewerModel)
 		if rerr != nil {
 			a.notice("review failed: %v", rerr)
 			return answer, rep, nil
@@ -2180,9 +2375,10 @@ func (a *Agent) Usage() Stats {
 }
 
 // usageTokens is what a scratch agent (plan, consultation) hands back to
-// its parent: its tokens and round-trips, not its tool calls or elapsed
+// its parent: its tokens, round-trips and spend, not its tool calls or elapsed
 // time, which the parent's own turn already accounts for.
 func (a *Agent) usageTokens() Stats {
 	u := a.Usage()
-	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests}
+	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests,
+		SpendUSD: u.SpendUSD, HelperPromptTokens: u.HelperPromptTokens, HelperCompletionTokens: u.HelperCompletionTokens}
 }

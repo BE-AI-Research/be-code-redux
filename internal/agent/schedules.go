@@ -635,6 +635,10 @@ func (s *scheduler) begin(id string) (sc schedule.Schedule, project bool, reason
 		return sc, false, "it no longer exists"
 	case !isPending:
 		return sc, project, "it is no longer queued"
+	case !s.a.OnlineApproved():
+		// A scheduled event never raises the online question (spec §2.1).
+		name, _ := s.a.Online()
+		return sc, project, notApprovedReason(name)
 	case (s.held[id] != 0 || s.unconfirmed[id] || s.asking[id]) && !pe.manual:
 		return sc, project, "it is waiting for a person to confirm it"
 	case !s.approvedLocked(sc):

@@ -37,7 +37,7 @@ what the model has read and decided lives in your project as Markdown you can ed
 [Working memory](#working-memory) · [Task record](#task-record) · [Project memory](#project-memory)
 
 **Integrations** — [VS Code](#vs-code) · [Visual Studio](#visual-studio) · [Browser](#browser) ·
-[Scheduled events](#scheduled-events) · [MCP servers](#mcp-servers) ·
+[Scheduled events](#scheduled-events) · [Online providers](#online-providers) · [MCP servers](#mcp-servers) ·
 [Web search](#web-search-optional-google-programmable-search) · [Scripting](#scripting)
 
 **Reference** — [Commands](#command-reference) · [Config](#config-reference) · [Safety model](#safety-model) ·
@@ -543,6 +543,59 @@ there is no background daemon.
 - **Dropping a queued event** from the queue popup skips that occurrence: a one-off is marked
   done ("dropped from the queue"); a recurring one simply fires again at its next time.
 - `/schedule` lists them; `/schedule show|pause|resume|cancel|run <name>` manages them.
+
+## Online providers
+
+BE-Code is offline-first, but the main model can be an online one (OpenRouter, OpenAI, Groq,
+DeepSeek, Mistral, Gemini, Anthropic) while a small local model does the housekeeping. `be-code
+setup` offers it as the last numbered choice, next to the local default when no backend is
+found (so no local GPU is needed): pick a preset (OpenRouter first), pick a model from
+the provider's listing, and the first local backend found, if any, becomes the helper (without one, `local_helper`
+stays unset). Setup saves nothing
+and says `set <KEY_ENV> in your shell, then run be-code setup again` when the key is not in the
+environment — keys come only from the environment variable the preset names, never from the config
+file.
+
+A provider counts as online when it says `"online": true` **or** its address is off this machine
+and network, whatever the entry says (startup warns once). Online model families (`gpt-`, `claude`,
+`gemini`, ...) match a profile only at the start of the name or after a `/`, so a local distill
+that mentions one keeps its own family.
+
+- **Per-project approval.** Before the first request a project would send to an online main
+  model, BE-Code asks once (`online_project`): yes remembers the project in
+  `~/.be-code/engine/<key>/online.json`; there is no "always" shortcut. Switching to an
+  unapproved online provider mid-session with `/provider` or `/model` asks at the next request
+  (no reverts the switch). `be-code run -y` and `be-code init -y` approve for that run only;
+  a scheduled event refuses. `/online` reports the provider, approval and spend; `/online forget`
+  withdraws the approval.
+- **Page text asks per site.** Text a browser page, `web_fetch` or `web_search` returned is not
+  sent to an online model unless you say so (`share_page`, no "always"). A yes covers that host
+  for the session; with your own Chrome attached every page asks; `web_search` asks once per
+  session; hosts in the browser `allow` tier skip the question. When a session goes online,
+  page text already in the conversation asks per site too: yes keeps it, no replaces it with a
+  "not shown" note. Refusals never carry page text, labels or errors.
+- **Spend.** Prices come from the provider's listing (else the preset's table); the status line
+  and `/stats` show the session's estimated spend, or `not tracked` for a model with no price.
+  `max_spend_usd` (0 = off) caps it: when the next request would pass the cap BE-Code asks
+  (`spend_cap`, no "always") and stops otherwise. Housekeeping done on the online main model
+  and plan mode are counted and capped too.
+- **Local helper.** `local_helper` (`{"provider", "model"}`) names a local model that does
+  compaction summaries, the exit handoff, `/init`, commit messages and review (when no reviewer
+  is set), so those never cost money or send the conversation off the machine. An online helper
+  is refused. When it is unset or down, one notice says so and the chores run on the main
+  model, counted against spend.
+- **Rejected keys and outages.** A 401/403 is not retried and names the environment variable; a
+  429 honours `Retry-After` (at most 30 s). When the provider stays unreachable after the
+  retries and a local helper is configured, BE-Code offers once per outage to switch the main
+  model to it (`switch_to_local`, no "always"; `-y` does not answer it).
+
+```json
+{ "default_provider": "openrouter", "model": "anthropic/claude-sonnet-4.5",
+  "providers": { "openrouter": { "type": "openai", "base_url": "https://openrouter.ai/api/v1",
+                                 "api_key_env": "OPENROUTER_API_KEY", "online": true } },
+  "local_helper": { "provider": "ollama", "model": "qwen3:8b" },
+  "max_spend_usd": 5 }
+```
 
 ## Web search (optional, Google Programmable Search)
 
@@ -1129,7 +1182,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 | | |
 | --- | --- |
 | **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
-| **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` |
+| **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` `/online [forget]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
 | **People** | `/chat` `/inbox` `/dm [name]` `/whoami [set]` `/back` |
@@ -1152,6 +1205,18 @@ hand; `/config` prints what the running session actually resolved.
   passed through to Ollama's options block untouched, so config can reach keys
   the harness knows nothing about (`top_k`, `top_p`, `repeat_penalty`...).
   Ignored for `type: openai`, which has no such knob.
+- `providers.<name>.online` (false) — marks an endpoint as off this machine and network. An
+  endpoint at a non-local address counts as online whatever this says (startup warns once).
+- `local_helper` (`{"provider": "", "model": ""}`) — the local model for housekeeping (compaction
+  summaries, handoff, `/init`, commit messages, review without a reviewer) while the main model
+  is online; an online helper is refused.
+- `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
+  (`spend_cap`).
+  Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`,
+  `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only
+  from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,
+  `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`). See
+  [Online providers](#online-providers).
 - `models{}` ({}) — the same three keys per model, keyed by the model name
   exactly as the backend spells it (tag included), e.g.
   `"models": {"qwen3:8b": {"context_window": 32768, "keep_alive": "30m",

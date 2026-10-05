@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/brown-enterprises/be-code/internal/browser/browsertest"
@@ -210,5 +213,65 @@ func TestDoctorMaxTokensLine(t *testing.T) {
 	cfg.MaxTokens, cfg.ContextTokens = 32768, 0
 	if got := maxTokensDoctorLine(cfg, 0); got != "" {
 		t.Fatalf("unknown context: %q", got)
+	}
+}
+
+func onlineTestServer(t *testing.T, hits *int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(hits, 1)
+		fmt.Fprint(w, `{"data":[{"id":"vendor/m","context_length":131072,"pricing":{"prompt":"0.000003","completion":"0.000015"}}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func onlineTestConfig(url string) *config.Config {
+	cfg := config.Default()
+	cfg.DefaultProvider = "or"
+	cfg.Model = "vendor/m"
+	cfg.Providers = map[string]config.ProviderConfig{
+		"or": {Type: "openai", BaseURL: url, APIKeyEnv: "BE_TEST_ONLINE_KEY", Online: true},
+	}
+	return cfg
+}
+
+func TestDoctorOnlineLine(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+
+	t.Setenv("BE_TEST_ONLINE_KEY", "")
+	got := onlineDoctorLine(context.Background(), cfg)
+	if !strings.Contains(got, "missing") || atomic.LoadInt32(&hits) != 0 {
+		t.Fatalf("missing key must say so and not connect: %q hits=%d", got, hits)
+	}
+
+	t.Setenv("BE_TEST_ONLINE_KEY", "k")
+	got = onlineDoctorLine(context.Background(), cfg)
+	for _, want := range []string{"online: or · vendor/m", "BE_TEST_ONLINE_KEY set", "reachable", "window 131072", "$3.00/$15.00 per Mtok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+
+	// Final fix 4: an unpriced model with max_spend_usd set says the cap
+	// cannot apply.
+	noPrice := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"vendor/m","context_length":131072}]}`)
+	}))
+	defer noPrice.Close()
+	cfg2 := onlineTestConfig(noPrice.URL)
+	if got := onlineDoctorLine(context.Background(), cfg2); !strings.HasSuffix(got, "· prices unknown") {
+		t.Fatalf("unpriced, no cap: %q", got)
+	}
+	cfg2.MaxSpendUSD = 5
+	if got := onlineDoctorLine(context.Background(), cfg2); !strings.Contains(got, "prices unknown (spend is not tracked for this model; max_spend_usd cannot apply)") {
+		t.Fatalf("unpriced with cap: %q", got)
+	}
+
+	cfg.Providers = map[string]config.ProviderConfig{"or": {Type: "openai", BaseURL: "http://127.0.0.1:1/v1"}}
+	if got := onlineDoctorLine(context.Background(), cfg); got != "" {
+		t.Fatalf("local default should print nothing, got %q", got)
 	}
 }

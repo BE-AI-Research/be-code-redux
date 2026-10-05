@@ -263,7 +263,7 @@ func TestModelPickerRowsShowTheWindowAndResidency(t *testing.T) {
 	s := newTestSession(t)
 	m := s.NewView(0, "local")
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.prov = detailerProvider{rows: []provider.ModelDetail{
+	m.ag.Provider = detailerProvider{rows: []provider.ModelDetail{
 		{ID: "big", SizeBytes: 17_000_000_000, Family: "qwen3", Quantization: "Q4_K_XL", Window: 32768, Resident: true},
 		{ID: "small", SizeBytes: 4_000_000_000, Family: "llama", Quantization: "Q4_0"},
 	}}

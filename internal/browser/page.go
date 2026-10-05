@@ -41,6 +41,11 @@ type Options struct {
 	// TitleOK says whether a tab's title may appear in a note the model
 	// reads, in my-Chrome mode (the allow tier); nil means never there.
 	TitleOK func(host string) bool
+	// TitleShared says, outside my-Chrome mode, whether a tab's title may
+	// appear in a note the model reads: with an online main model only for
+	// a host already shared with it (or in the allow tier). nil means
+	// always, as with a local main model.
+	TitleShared func(host string) bool
 }
 
 // sensitiveAutocompleteTokens are the autocomplete tokens (spec §3.4,

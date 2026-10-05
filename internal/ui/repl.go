@@ -32,7 +32,6 @@ type REPL struct {
 	quitAfter bool // set by /quit typed during a run
 	Cfg       *config.Config
 	Agent     *agent.Agent
-	Provider  provider.Provider
 	Custom    map[string]commands.Command
 	rl        *readline.Instance
 
@@ -95,7 +94,8 @@ func HistoryFile() string {
 }
 
 // NewREPL builds the REPL with readline configured.
-func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, error) {
+// The provider argument is not kept: the REPL reads the agent's current one.
+func NewREPL(cfg *config.Config, ag *agent.Agent, _ provider.Provider) (*REPL, error) {
 	custom := commands.Load(ag.Tools.Root)
 	items := slashCompleterItems()
 	for _, n := range commands.Names(custom) {
@@ -103,7 +103,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	}
 	completer := readline.NewPrefixCompleter(items...)
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:            cyan("be-code> "),
+		Prompt:            cyan(MainPrompt(ag)),
 		HistoryFile:       HistoryFile(),
 		HistoryLimit:      2000,
 		AutoComplete:      completer,
@@ -114,7 +114,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	if err != nil {
 		return nil, err
 	}
-	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl,
+	r := &REPL{Cfg: cfg, Agent: ag, Custom: custom, rl: rl,
 		wakeCh: make(chan struct{}, 1)}
 	ag.Tools.Approve = r.approve
 	ag.Tools.ApproveCtx = r.approveCtx
@@ -224,18 +224,22 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("schedule:"), detail)
 	case "tool_call":
 		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
+	case "spend_cap":
+		fmt.Printf("%s\n%s\n", yell("spend cap reached:"), detail)
+	case "online_project":
+		fmt.Printf("%s\n%s\n", yell("online model:"), detail)
+	case "share_page":
+		fmt.Printf("%s\n%s\n", yell("share with the online model:"), detail)
+	case "switch_to_local":
+		fmt.Printf("%s\n%s\n", yell("online model not responding:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
 	// browser_watch, shell_after_web, schedule and tool_call have no
 	// "always" (browser spec §3.2, §3.6; schedules spec §3.1): the prompt
 	// must not advertise a key that does nothing.
-	prompt := "approve? [y/N/a(lways)] "
-	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule" ||
-		action == "tool_call"
-	if noAlways {
-		prompt = "approve? [y/N] "
-	}
+	noAlways := noAlwaysAction(action)
+	prompt := approvePrompt(action)
 	answer, answered := r.promptAnswer(ctx, yell(prompt))
 	if !answered {
 		tools.MarkWithdrawn(ctx)
@@ -313,16 +317,54 @@ func (t replTerminal) Withdraw(note string) {
 	}
 }
 
+// noAlwaysAction lists the approvals with no "always": browser_watch,
+// shell_after_web, schedule, tool_call, spend_cap, online_project and
+// share_page (browser spec §3.2, §3.6; schedules spec §3.1; online spec
+// §2.1–2.3).
+func noAlwaysAction(action string) bool {
+	switch action {
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local":
+		return true
+	}
+	return false
+}
+
+// approvePrompt is the answer line: a prompt must not advertise a key that
+// does nothing.
+func approvePrompt(action string) string {
+	if noAlwaysAction(action) {
+		return "approve? [y/N] "
+	}
+	return "approve? [y/N/a(lways)] "
+}
+
+// MainPrompt is the REPL's input prompt: "be-code (online)> " while the
+// main model is online (spec §2.1), else "be-code> ".
+func MainPrompt(ag *agent.Agent) string {
+	if ag != nil {
+		if _, online := ag.Online(); online {
+			return "be-code (online)> "
+		}
+	}
+	return "be-code> "
+}
+
+// Stop ends Run before the first line is read (OnStart: the online gate
+// refused).
+func (r *REPL) Stop() { r.quitAfter = true }
+
 // Run drives the interactive loop until /quit or EOF.
 func (r *REPL) Run(ctx context.Context) error {
 	defer r.rl.Close()
 	fmt.Printf("BE-Code — offline agentic coding %s\n", dim("(plain mode)"))
 	fmt.Printf("%s\n", dim(fmt.Sprintf("provider=%s model=%s workspace=%s",
-		r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root)))
-	if status, err := r.Provider.Ping(ctx); err != nil {
-		fmt.Printf("%s backend unreachable: %v\n", red("warn>"), err)
-	} else {
-		fmt.Printf("%s %s %s\n", grn("ok>"), r.Provider.Name(), dim(status))
+		r.Agent.CurrentProvider(), r.Agent.CurrentModel(), r.Agent.Tools.Root)))
+	if prov := r.Agent.CurrentProviderClient(); prov != nil {
+		if status, err := prov.Ping(ctx); err != nil {
+			fmt.Printf("%s backend unreachable: %v\n", red("warn>"), err)
+		} else {
+			fmt.Printf("%s %s %s\n", grn("ok>"), prov.Name(), dim(status))
+		}
 	}
 	fmt.Printf("%s\n\n", dim("/help for commands · Tab completes · ↑ history · type while it works to queue a message"))
 	if NeedsInitHint(r.Agent.Tools.Root) {
@@ -344,8 +386,14 @@ func (r *REPL) Run(ctx context.Context) error {
 	}()
 	if r.OnStart != nil {
 		r.OnStart()
+		if r.quitAfter {
+			return nil
+		}
 	}
 	for {
+		// The prompt says (online) while the main model is: a switch may
+		// have changed that since the last line.
+		r.setPrompt(cyan(MainPrompt(r.Agent)))
 		ev, ok := r.nextLine()
 		if !ok {
 			fmt.Println()
@@ -473,7 +521,7 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 // withdrawn, not a "no".
 func (r *REPL) promptAnswer(ctx context.Context, q string) (string, bool) {
 	r.setPrompt(q)
-	defer r.setPrompt(cyan("be-code> "))
+	defer func() { r.setPrompt(cyan(MainPrompt(r.Agent))) }()
 	r.mu.Lock()
 	busy := r.busy
 	ch := make(chan string, 1)
@@ -775,7 +823,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/models":
 		// The same rows the TUI's picker shows: size, family, quantization,
 		// the window each is loaded with, and whether it is resident.
-		models, err := provider.ModelDetails(ctx, r.Provider)
+		models, err := provider.ModelDetails(ctx, r.Agent.CurrentProviderClient())
 		if err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
@@ -785,16 +833,16 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/model":
 		if len(fields) < 2 {
-			fmt.Printf("current model: %s (profile %s)\n", r.Agent.Model, r.Agent.Profile.Family)
+			fmt.Printf("current model: %s (profile %s)\n", r.Agent.CurrentModel(), r.Agent.CurrentFamily())
 			break
 		}
 		// Inline, not on a goroutine: the consent question this may raise
 		// is answered through the one input stream this loop is reading.
 		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, fields[1]) })
-		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.Profile.Family)
+		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.CurrentFamily())
 	case "/provider":
 		if len(fields) < 2 {
-			fmt.Printf("current provider: %s (configured: see /config)\n", r.Provider.Name())
+			fmt.Printf("current provider: %s (configured: see /config)\n", r.Agent.CurrentProvider())
 			break
 		}
 		p, err := provider.FromConfig(r.Cfg, fields[1])
@@ -802,11 +850,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
-		r.Provider = p
 		r.Agent.SetProvider(p)
 		model := provider.ResolveModel(r.Cfg, fields[1], "")
 		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, model) })
-		fmt.Printf("provider set to %s (model %s)\n", p.Name(), r.Agent.Model)
+		fmt.Printf("provider set to %s (model %s)\n", r.Agent.CurrentProvider(), r.Agent.CurrentModel())
 	case "/sessions":
 		printSessions()
 	case "/resume":
@@ -1011,7 +1058,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Cfg.MaxRepairs, r.Cfg.CompatToolCalls, r.Cfg.ApproveFileWrites, r.Cfg.AutoApproveShell)
 	case "/clear":
 		r.Agent.ClearHistory()
-		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
+		r.Agent.SetSession(store.NewSession(r.Agent.CurrentProvider(), r.Agent.CurrentModel(), r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
 		r.Agent.ConfirmHeldTimers() // a fresh session has none: a no-op today
 	case "/undo":
@@ -1047,6 +1094,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Printf("compacted; context now ~%d tokens\n", r.Agent.History.Tokens())
 	case "/stats":
 		fmt.Println(r.Agent.StatsReport(nil))
+	case "/online":
+		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
 	case "/map":
 		m := r.Agent.RepoMap()
 		if m == "" {

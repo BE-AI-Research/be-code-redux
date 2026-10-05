@@ -100,7 +100,7 @@ func (m *View) askList(title string, load func() ([]pickItem, error),
 func (m *View) askModelPicker() tea.Cmd {
 	// The provider is read here, under the lock Update holds, not from the
 	// loading goroutine: /provider can replace it while this list loads.
-	prov, ctx := m.prov, m.rootCtx
+	prov, ctx := m.ag.CurrentProviderClient(), m.rootCtx
 	return m.askList("Select model", func() ([]pickItem, error) {
 		// Details, not ListModels: the window a model is loaded with and
 		// whether it is resident at all are what the list is being asked.
