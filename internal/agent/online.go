@@ -22,7 +22,9 @@ func (a *Agent) SetOnline(providerName, keyEnv string, p Pricing) {
 	defer a.onlineMu.Unlock()
 	a.onlineName = providerName
 	a.pricing = p
-	a.unpricedSaid = false
+	// The unpriced notice is not re-armed here: it is once per model per
+	// session (markUnpricedSaid keys it), and SetOnline runs again for the
+	// same provider and model when the listing arrives after a switch.
 	if providerName != "" && keyEnv != "" {
 		a.keyEnv = keyEnv
 	}
@@ -97,19 +99,41 @@ func longestKey(id string, table map[string]float64) (float64, bool) {
 	return v, found
 }
 
-// markUnpricedSaid latches the once-per-session notice and reports whether
-// this call was the first.
+// markUnpricedSaid latches the unpriced notice once per provider and model
+// per session and reports whether this call was the first.
 func (a *Agent) markUnpricedSaid() bool {
 	if a.spendParent != nil {
 		return a.spendParent.markUnpricedSaid()
 	}
+	model := a.CurrentModel() // modelMu, never under onlineMu
 	a.onlineMu.Lock()
 	defer a.onlineMu.Unlock()
-	if a.unpricedSaid {
+	key := a.onlineName + "\x00" + model
+	if a.unpricedSaid[key] {
 		return false
 	}
-	a.unpricedSaid = true
+	if a.unpricedSaid == nil {
+		a.unpricedSaid = map[string]bool{}
+	}
+	a.unpricedSaid[key] = true
 	return true
+}
+
+// UnpricedNote is what is said of an online model with no known price: its
+// spend is not counted, so a max_spend_usd cap (capUSD > 0) cannot apply to
+// it either. The notice, /online and doctor all use it.
+func UnpricedNote(capUSD float64) string {
+	if capUSD > 0 {
+		return "spend is not tracked for this model; max_spend_usd cannot apply"
+	}
+	return "spend is not tracked for this model"
+}
+
+// unpricedNotice is the once-per-model notice for an unpriced online reply.
+func (a *Agent) unpricedNotice() {
+	if a.markUnpricedSaid() {
+		a.notice("%s", UnpricedNote(a.Cfg.MaxSpendUSD))
+	}
 }
 
 // SpendCap is the session's current cap in USD: max_spend_usd plus whatever

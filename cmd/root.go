@@ -121,9 +121,12 @@ func stdoutIsTTY() bool {
 // we're on a real terminal; otherwise loads (writing defaults if needed).
 func loadOrWizard(ctx context.Context) (*config.Config, error) {
 	if !config.Exists() && stdinIsTTY() && stdoutIsTTY() {
+		// A missing key comes back as setup.MissingKeyError, whose text is
+		// the same "set <KEY_ENV> in your shell, then run be-code setup
+		// again" `be-code setup` prints.
 		cfg, err := setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
 		if err == nil && cfg == nil {
-			return nil, errors.New("no config saved; set the provider's key and run be-code again")
+			return nil, errors.New("no config saved; run be-code setup again")
 		}
 		return cfg, err
 	}
@@ -977,6 +980,11 @@ func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name,
 	resolveOnline(context.Background(), cfg, p, ag, name, model, true)
 }
 
+// onlineSwitchWindow is the window a switch to an online model applies when
+// neither its preset nor a configured context_window gives one (startup
+// instead falls through to ExplainBudget's derived default).
+const onlineSwitchWindow = 32768
+
 // resolveOnline sets the online state for the main provider and model. It is
 // applyOnline at startup (wait: the listing is read before the session
 // starts) and agent.OnlineResolver after every /provider, /model or helper
@@ -1022,7 +1030,14 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 				cur, on := ag.Online()
 				return on && cur == name && ag.CurrentModel() == model
 			}
-			if w := agent.OnlineWindow(provider.ModelInfo{}, preset, configured); w > 0 && current() {
+			// A switch never keeps the previous model's window: with no
+			// preset or configured window (the listing may still land
+			// below), the online default applies until something knows.
+			w := agent.OnlineWindow(provider.ModelInfo{}, preset, configured)
+			if w <= 0 {
+				w = onlineSwitchWindow
+			}
+			if current() {
 				ag.ApplyWindow(w)
 			}
 			if keyMissing || p == nil {

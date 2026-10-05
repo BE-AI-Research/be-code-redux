@@ -205,9 +205,9 @@ type Agent struct {
 	gateRefusal        string
 	// spendRaise is what continuing past the cap has added to it, this
 	// session only (the config is never written); unpricedSaid latches the
-	// once-per-session "not tracked" notice.
+	// "not tracked" notice once per provider+model per session.
 	spendRaise   float64
-	unpricedSaid bool
+	unpricedSaid map[string]bool
 	// spendParent is the agent a scratch agent's spend belongs to (plan
 	// mode while online): its cap checks and unpriced notice go there.
 	spendParent *Agent
@@ -931,6 +931,19 @@ func (a *Agent) ClearHistory() {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
 	a.History.Messages = nil
+	a.conversationReplaced()
+}
+
+// conversationReplaced is called by every path that swaps History.Messages
+// wholesale (ClearHistory, Resume). What the history held was settled for
+// an online provider (share.go); the conversation now in its place never
+// was, so the next request to an online model settles it from scratch —
+// asking share_page per site — instead of trusting the old mark. The caller
+// holds turnMu, as settleEarlierWebText's own writer does.
+func (a *Agent) conversationReplaced() {
+	a.onlineMu.Lock()
+	a.webSharedWith = ""
+	a.onlineMu.Unlock()
 }
 
 // CompactNow is Compact under the turn lock, for a UI asking for it
@@ -1797,8 +1810,8 @@ func (a *Agent) chatFiltered(ctx context.Context, req provider.ChatRequest) (*pr
 	if _, online := a.Online(); online {
 		if p := a.Pricing(); p.Known {
 			used.SpendUSD = float64(used.PromptTokens)*p.Prompt + float64(used.CompletionTokens)*p.Completion
-		} else if a.markUnpricedSaid() {
-			a.notice("spend is not tracked for this model")
+		} else {
+			a.unpricedNotice()
 		}
 	}
 	a.addStats(used)
@@ -1847,8 +1860,13 @@ func (a *Agent) Compact(ctx context.Context) error {
 		return fmt.Errorf("nothing to compact")
 	}
 	// The summary may be asked of the online main model: earlier page text
-	// goes only for the sites shared with it (share.go).
-	a.settleEarlierWebText(ctx)
+	// goes only for the sites shared with it (share.go). Only once the
+	// project is approved for that model, checked without asking: nobody is
+	// asked about pages for a provider nothing may be sent to (the summary
+	// then goes to the helper, or the primary's own gate refuses it).
+	if a.checkOnlineGate(ctx, false) == nil {
+		a.settleEarlierWebText(ctx)
+	}
 	// The model and its profile are snapshotted rather than read where they
 	// are used: this runs on the resolution's goroutine after a model
 	// switch, and a *second* switch landing mid-compaction would otherwise
@@ -2286,6 +2304,10 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 		var issues string
 		var rerr error
 		if separate {
+			if !a.reviewerConsent() {
+				a.notice("review skipped: the reviewer %s is online and sending it this turn's changes was not approved", a.reviewerName())
+				return answer, rep, nil
+			}
 			reviewer, reviewerModel, ferr := ReviewerFactory(a.Cfg)
 			if ferr != nil {
 				a.notice("reviewer unavailable: %v", ferr)

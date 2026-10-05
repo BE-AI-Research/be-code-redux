@@ -3,6 +3,7 @@ package setup
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,11 +66,11 @@ func TestWizardOnlineMissingKeySavesNothing(t *testing.T) {
 	}
 	var out strings.Builder
 	cfg, err := Wizard(context.Background(), bufio.NewReader(strings.NewReader("2\n1\n")), &out)
-	if err != nil || cfg != nil {
+	// Final fix 11: the one message, as an error both `be-code setup` and
+	// the first launch (loadOrWizard) print.
+	var mk *MissingKeyError
+	if cfg != nil || !errors.As(err, &mk) || err.Error() != "set OPENROUTER_API_KEY in your shell, then run be-code setup again" {
 		t.Fatalf("cfg=%v err=%v", cfg, err)
-	}
-	if !strings.Contains(out.String(), "set OPENROUTER_API_KEY in your shell, then run be-code setup again") {
-		t.Fatalf("output: %s", out.String())
 	}
 	if _, err := os.Stat(filepath.Join(home, ".be-code", "config.json")); err == nil {
 		t.Fatal("config was written")

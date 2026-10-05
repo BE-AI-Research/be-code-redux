@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
@@ -314,5 +315,133 @@ func TestEarlierWebTextSkipsStubsAndContentFree(t *testing.T) {
 	defer nmu.Unlock()
 	if len(notes) != 0 {
 		t.Fatalf("notices %q", notes)
+	}
+}
+
+// Final fix 1: /resume replaces the conversation, so whatever was settled
+// for the online provider before no longer describes it. The resumed
+// session's page text is settled again — asked per site — before the next
+// request, and a refused site's text never leaves.
+func TestResumeSettlesEarlierWebTextAgain(t *testing.T) {
+	ans := &shareAnswers{no: []string{"d.test"}}
+	ag, p := shareAgent(t, ans)
+	if _, err := ag.Run(context.Background(), "go on"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(ans.asks())
+	call := func(id string) provider.Message {
+		return provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: id, Name: "web_fetch", Arguments: "{}"}}}
+	}
+	res := func(id, content string) provider.Message {
+		return provider.Message{Role: provider.RoleTool, ToolCallID: id, Name: "web_fetch", Content: content}
+	}
+	ag.Resume(&store.Session{ID: "resumed", Messages: []provider.Message{
+		{Role: provider.RoleUser, Content: "older work"},
+		call("r1"), res("r1", "https://c.test/p (10 chars total)\nCHARLIE-TEXT"),
+		call("r2"), res("r2", "https://d.test/p (10 chars total)\nDELTA-TEXT"),
+		{Role: provider.RoleAssistant, Content: "done"},
+	}})
+	if _, err := ag.Run(context.Background(), "continue"); err != nil {
+		t.Fatal(err)
+	}
+	asks := ans.asks()[before:]
+	want := []string{
+		"Send what the agent reads on c.test to openrouter?",
+		"Send what the agent reads on d.test to openrouter?",
+	}
+	if strings.Join(asks, "|") != strings.Join(want, "|") {
+		t.Fatalf("asks after resume %q", asks)
+	}
+	reqs := p.requests()
+	var b strings.Builder
+	for _, m := range reqs[len(reqs)-1].Messages {
+		b.WriteString(m.Content + "\n")
+	}
+	sent := b.String()
+	if strings.Contains(sent, "DELTA-TEXT") || !strings.Contains(sent, "CHARLIE-TEXT") ||
+		!strings.Contains(sent, "(page text from d.test is not shown; it was not shared with openrouter)") {
+		t.Fatalf("resumed request:\n%s", sent)
+	}
+}
+
+// ClearHistory is a wholesale swap too: the mark goes with the transcript.
+func TestClearHistoryResetsWebSettle(t *testing.T) {
+	ans := &shareAnswers{}
+	ag, _ := shareAgent(t, ans)
+	ag.Run(context.Background(), "go on")
+	if ag.earlierWebUnsettled() {
+		t.Fatal("settled run reads unsettled")
+	}
+	ag.ClearHistory()
+	if !ag.earlierWebUnsettled() {
+		t.Fatal("ClearHistory kept the old settle mark")
+	}
+}
+
+// Final fix 7: the model-written handoff withholds every web result —
+// browser, web_fetch and web_search — whether or not the history was
+// settled for an online model, local or online.
+func TestHandoffWithholdsEveryWebResult(t *testing.T) {
+	check := func(name string, p *recProvider) {
+		t.Helper()
+		reqs := p.requests()
+		last := reqs[len(reqs)-1]
+		var b strings.Builder
+		for _, m := range last.Messages {
+			b.WriteString(m.Content + "\n")
+		}
+		got := b.String()
+		for _, gone := range []string{"ALPHA-ONE", "BRAVO-TEXT", "ALPHA-TWO", "SEARCH-ONE", "SEARCH-TWO", "UNKNOWN-TABS"} {
+			if strings.Contains(got, gone) {
+				t.Fatalf("%s: handoff request carries %q:\n%s", name, gone, got)
+			}
+		}
+		if !strings.Contains(got, "[web result withheld]") || !strings.Contains(got, "[browser result withheld]") {
+			t.Fatalf("%s: handoff request:\n%s", name, got)
+		}
+	}
+	// Online, settled with every site shared.
+	ag, p := shareAgent(t, &shareAnswers{})
+	ag.Run(context.Background(), "go on")
+	ag.SetSession(&store.Session{ID: "s1"})
+	if _, err := ag.WriteHandoff(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	check("online", p)
+
+	// Local.
+	lp := &recProvider{name: "ollama", def: provider.ChatResponse{Content: "ok"}}
+	la, _ := newTestAgent(t, lp, nil)
+	la.History.Messages = webHistory()
+	la.SetSession(&store.Session{ID: "s2"})
+	if _, err := la.WriteHandoff(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	check("local", lp)
+}
+
+// Final fix 9: /compact for an online provider the project is not approved
+// for asks nobody about pages, and sends nothing.
+func TestCompactUnapprovedOnlineAsksNoPages(t *testing.T) {
+	ans := &shareAnswers{}
+	t.Setenv("HOME", t.TempDir())
+	p := &recProvider{name: "openrouter", def: provider.ChatResponse{Content: "summary"}}
+	ag, _ := newTestAgent(t, p, nil)
+	var other []string
+	ag.Tools.Approve = func(action, detail string) bool {
+		if action != "share_page" {
+			other = append(other, action)
+		}
+		return ans.approve(action, detail)
+	}
+	ag.History.Messages = webHistory()
+	ag.SetOnline("openrouter", "K", Pricing{})
+	ag.Tools.SetShareGate(&tools.ShareGate{Provider: "openrouter"})
+	ag.CompactNow(context.Background())
+	if len(ans.asks()) != 0 || len(other) != 0 || len(p.requests()) != 0 {
+		t.Fatalf("share asks %q, other asks %q, requests %d", ans.asks(), other, len(p.requests()))
+	}
+	if !ag.earlierWebUnsettled() {
+		t.Fatal("the history was marked settled without anyone asked")
 	}
 }

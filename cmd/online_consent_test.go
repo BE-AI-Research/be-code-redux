@@ -5,7 +5,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
@@ -163,5 +165,60 @@ func TestHeadlessApproverRefusesSharePage(t *testing.T) {
 	})
 	if !strings.Contains(out, "this action always asks a person") {
 		t.Fatalf("message:\n%s", out)
+	}
+}
+
+// Final fix 5: a switch to an online model nobody knows the window of
+// applies the online default, never the previous model's window; a
+// configured context_window wins over that default.
+func TestOnlineSwitchWindowNeverInherited(t *testing.T) {
+	cfg := config.Default()
+	cfg.DefaultProvider = "odd"
+	cfg.Providers = map[string]config.ProviderConfig{
+		"odd": {Type: "openai", BaseURL: "https://llm.example.com/v1", APIKeyEnv: "BE_TEST_ODD_KEY", Online: true},
+	}
+	t.Setenv("BE_TEST_ODD_KEY", "")
+	ag, _ := testAgentFor(t, cfg, nil, "vendor/x")
+	ag.ApplyWindow(131072) // the previous model's
+	resolveOnline(context.Background(), cfg, nil, ag, "odd", "vendor/x", false)
+	waitUntil(t, func() bool { return ag.Window() == onlineSwitchWindow })
+
+	pc := cfg.Providers["odd"]
+	pc.ContextWindow = 65536
+	cfg.Providers["odd"] = pc
+	resolveOnline(context.Background(), cfg, nil, ag, "odd", "vendor/x", false)
+	waitUntil(t, func() bool { return ag.Window() == 65536 })
+}
+
+func waitUntil(t *testing.T, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition never held")
+}
+
+// Final fix 10: run --json carries spend_usd while online (null when the
+// price is unknown) and leaves a local run's object as it was.
+func TestRunJSONSpend(t *testing.T) {
+	ag, _ := testAgentFor(t, config.Default(), nil, "m")
+	out := map[string]any{}
+	addSpendJSON(out, ag)
+	if _, ok := out["spend_usd"]; ok {
+		t.Fatalf("local run carries spend_usd: %v", out)
+	}
+	ag.SetOnline("openrouter", "K", agent.Pricing{Prompt: 1e-6, Completion: 2e-6, Known: true})
+	addSpendJSON(out, ag)
+	if v, ok := out["spend_usd"].(float64); !ok || v != 0 {
+		t.Fatalf("online priced: %v", out)
+	}
+	ag.SetOnline("openrouter", "K", agent.Pricing{})
+	out = map[string]any{}
+	addSpendJSON(out, ag)
+	if v, ok := out["spend_usd"]; !ok || v != nil {
+		t.Fatalf("online unpriced: %v", out)
 	}
 }

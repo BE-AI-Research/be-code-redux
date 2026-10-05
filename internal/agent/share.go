@@ -119,9 +119,8 @@ func (a *Agent) settleEarlierWebText(ctx context.Context) {
 }
 
 // earlierWebUnsettled reports whether page text in the history has not yet
-// been settled for the online provider now in force: the model-written
-// handoff then leaves every web result out, as the pass above would have
-// done for any site nobody was asked about.
+// been settled for the online provider now in force (the next request to it
+// runs the pass above first).
 func (a *Agent) earlierWebUnsettled() bool {
 	if a.Tools == nil {
 		return false

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -161,6 +162,57 @@ func (a *Agent) Review(ctx context.Context, reviewer provider.Provider, reviewer
 		return "", err
 	}
 	return reviewVerdict(resp.Content), nil
+}
+
+// reviewerConsentKey is the session-wide consent key for a separately
+// configured online reviewer: parenthesised, so no co-worker's own name can
+// collide with it in ConsentCoworker's "always".
+const reviewerConsentKey = "(reviewer)"
+
+// reviewerName is the separately configured reviewer as provider/model.
+func (a *Agent) reviewerName() string {
+	prov := a.Cfg.Reviewer.Provider
+	if prov == "" {
+		prov = a.Cfg.DefaultProvider
+	}
+	return prov + "/" + a.Cfg.Reviewer.Model
+}
+
+// reviewerConsent is the consent an online co-worker needs (Agent.consent),
+// asked for a separately configured reviewer whose provider is online
+// (config.ProviderIsOnline) before any review request: action consult, once
+// per session; -y allows through AutoApproveConsult; a headless run without
+// -y declines (its approver refuses); a fired turn declines without asking.
+// A local reviewer never asks.
+func (a *Agent) reviewerConsent() bool {
+	prov := a.Cfg.Reviewer.Provider
+	if prov == "" {
+		prov = a.Cfg.DefaultProvider
+	}
+	pc, ok := a.Cfg.Providers[prov]
+	if !ok || !config.ProviderIsOnline(pc) {
+		return true
+	}
+	if a.Tools.Fired() {
+		return false
+	}
+	if a.allowedFor(reviewerConsentKey) {
+		return true
+	}
+	if a.Cfg.AutoApproveConsult {
+		a.allow(reviewerConsentKey)
+		return true
+	}
+	if a.Tools.Approve == nil {
+		return false
+	}
+	detail := fmt.Sprintf("coworker: %s (%s)\norigin: review\nthe reviewer is online: the files this turn changed are sent to it for review; nothing is edited",
+		reviewerConsentKey, a.reviewerName())
+	if !a.Tools.Approve("consult", detail) {
+		return false
+	}
+	a.allow(reviewerConsentKey) // once per session: a yes stands until exit
+	return true
 }
 
 // helperReview is the second-model review done by the local helper, when

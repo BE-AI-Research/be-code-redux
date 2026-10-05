@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -61,6 +62,27 @@ func (t *webSearchTool) Schema() json.RawMessage {
 		"required":["query"]}`)
 }
 
+// searchErr is a request error without the API key: a *url.Error names the
+// whole request URL, whose query carries key=..., so it is reported as its
+// operation, the URL without its query and the underlying error. Whatever
+// else is left is scrubbed of the key, plain and query-encoded, as well.
+func searchErr(err error, key string) string {
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		where := ue.URL
+		if i := strings.IndexAny(where, "?#"); i >= 0 {
+			where = where[:i]
+		}
+		msg = fmt.Sprintf("%s %q: %v", ue.Op, where, ue.Err)
+	}
+	if key != "" {
+		msg = strings.ReplaceAll(msg, key, "[redacted]")
+		msg = strings.ReplaceAll(msg, url.QueryEscape(key), "[redacted]")
+	}
+	return msg
+}
+
 func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	q := strings.TrimSpace(argString(args, "query", "q", "search"))
 	if q == "" {
@@ -84,11 +106,11 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	v.Set("num", fmt.Sprint(n))
 	req, err := http.NewRequestWithContext(ctx, "GET", t.cfg.Endpoint+"?"+v.Encode(), nil)
 	if err != nil {
-		return Result{IsError: true, Content: err.Error()}
+		return Result{IsError: true, Content: "web_search: " + searchErr(err, key)}
 	}
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return Result{IsError: true, Content: "web_search: " + err.Error()}
+		return Result{IsError: true, Content: "web_search: " + searchErr(err, key)}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

@@ -444,7 +444,7 @@ func (a *Agent) OnlineReport() string {
 	spent := a.Usage().SpendUSD
 	switch p := a.Pricing(); {
 	case !p.Known:
-		b.WriteString("spend: not tracked for this model")
+		b.WriteString("spend: " + strings.TrimPrefix(UnpricedNote(a.Cfg.MaxSpendUSD), "spend is "))
 	case a.SpendCap() > 0:
 		fmt.Fprintf(&b, "spend: $%.2f (est.) of a $%.2f cap", spent, a.SpendCap())
 	default:

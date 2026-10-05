@@ -101,15 +101,18 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	}
 	b.WriteString("Transcript (most recent last):\n")
 	var t strings.Builder
-	// While earlier page text has not been settled for the online model
-	// now in force, none of it is in the briefing it may be asked to write.
-	unsettled := a.earlierWebUnsettled()
 	for _, m := range a.History.Messages {
 		if isToolResult(m) {
-			if browserResult(m, a.History.Messages) || (unsettled && webResult(m, a.History.Messages)) {
-				// A page's text never reaches the next session's system
-				// prompt (browser spec §3.5, same rule as RecentContext).
+			// Text from the web — a browser page, a fetched page, search
+			// snippets — never reaches the next session's system prompt
+			// (browser spec §3.5, same rule as RecentContext), nor the
+			// model asked to write the briefing, settled or not.
+			if browserResult(m, a.History.Messages) {
 				t.WriteString("[tool result] [browser result withheld]\n")
+				continue
+			}
+			if webResult(m, a.History.Messages) {
+				t.WriteString("[tool result] [web result withheld]\n")
 				continue
 			}
 			fmt.Fprintf(&t, "[tool result] %.300s\n", m.Content)
@@ -217,6 +220,7 @@ func (a *Agent) Resume(s *store.Session) {
 	// schedules are reread on every wake.
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	a.conversationReplaced()
 	// A saved history that shows the model a page — the browser's, or
 	// web_fetch's or web_search's text — starts this session with the shell
 	// suspended, as the request that read it did (browser spec §3.6); a

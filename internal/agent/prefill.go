@@ -40,15 +40,19 @@ type prefillState struct {
 // prefill, when it is turned off, or when a request is running (that request
 // is warming the cache itself).
 func (a *Agent) StartPrefill() {
+	// Never while the main model is online, approved or not: a prefill is a
+	// whole prompt sent speculatively — billed by an online provider, and
+	// sent before any of this turn's own gates (spend cap, share settle)
+	// have run. An ollama-typed online endpoint can still be a Prefiller.
+	if _, online := a.Online(); online {
+		return
+	}
 	if a.Cfg == nil || !a.Cfg.PromptPrefill {
 		return
 	}
 	pf, ok := a.Provider.(provider.Prefiller)
 	if !ok {
 		return
-	}
-	if !a.OnlineApproved() {
-		return // a prefill is a request too (spec §2.1)
 	}
 	a.stopPrefill()
 	if !a.turnMu.TryLock() {

@@ -255,6 +255,21 @@ func TestDoctorOnlineLine(t *testing.T) {
 		}
 	}
 
+	// Final fix 4: an unpriced model with max_spend_usd set says the cap
+	// cannot apply.
+	noPrice := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"vendor/m","context_length":131072}]}`)
+	}))
+	defer noPrice.Close()
+	cfg2 := onlineTestConfig(noPrice.URL)
+	if got := onlineDoctorLine(context.Background(), cfg2); !strings.HasSuffix(got, "· prices unknown") {
+		t.Fatalf("unpriced, no cap: %q", got)
+	}
+	cfg2.MaxSpendUSD = 5
+	if got := onlineDoctorLine(context.Background(), cfg2); !strings.Contains(got, "prices unknown (spend is not tracked for this model; max_spend_usd cannot apply)") {
+		t.Fatalf("unpriced with cap: %q", got)
+	}
+
 	cfg.Providers = map[string]config.ProviderConfig{"or": {Type: "openai", BaseURL: "http://127.0.0.1:1/v1"}}
 	if got := onlineDoctorLine(context.Background(), cfg); got != "" {
 		t.Fatalf("local default should print nothing, got %q", got)

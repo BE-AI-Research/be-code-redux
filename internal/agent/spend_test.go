@@ -156,3 +156,40 @@ func TestSpendCapInFiredTurnRefusesOnTimeout(t *testing.T) {
 }
 
 func toolsFiredAsk(ctx context.Context) bool { return tools.FiredAsk(ctx) }
+
+// Final fix 4: with max_spend_usd set, the unpriced notice says the cap
+// cannot apply; SetOnline called again for the same provider and model (the
+// listing landing after a switch) does not re-arm it, while another model
+// gets its own notice once.
+func TestUnpricedNoticeWithCapOncePerModel(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{responses: []provider.ChatResponse{usageResp(10, 5), usageResp(10, 5), usageResp(10, 5)}},
+		func(c *config.Config) { c.MaxSpendUSD = 5 })
+	l := spendNotices(ag)
+	ag.SetOnline("openrouter", "K", Pricing{})
+	ag.ApproveOnlineForRun()
+	ag.RunFull(context.Background(), "hi")
+	ag.SetOnline("openrouter", "K", Pricing{}) // the async post-listing call
+	ag.RunFull(context.Background(), "hi")
+	count := func() int {
+		n := 0
+		for _, s := range l.log {
+			if strings.Contains(s, "spend is not tracked for this model; max_spend_usd cannot apply") {
+				n++
+			}
+		}
+		return n
+	}
+	if count() != 1 {
+		t.Fatalf("notices %q", l.log)
+	}
+	if !strings.Contains(ag.OnlineReport(), "spend: not tracked for this model; max_spend_usd cannot apply") {
+		t.Fatalf("/online:\n%s", ag.OnlineReport())
+	}
+	ag.modelMu.Lock()
+	ag.Model = "other-model"
+	ag.modelMu.Unlock()
+	ag.RunFull(context.Background(), "hi")
+	if count() != 2 {
+		t.Fatalf("another model was not told once: %q", l.log)
+	}
+}

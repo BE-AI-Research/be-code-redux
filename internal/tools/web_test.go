@@ -85,3 +85,38 @@ func TestWebFetchPrefersMainContent(t *testing.T) {
 		t.Fatalf("navigation not dropped:\n%s", body)
 	}
 }
+
+// Final fix 8: a failed web_search request never reports its URL's query,
+// which carries the API key.
+func TestWebSearchErrorOmitsKey(t *testing.T) {
+	t.Setenv("TEST_PSE_KEY", "sekrit-key/+=")
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("no hijacker")
+			return
+		}
+		c, _, _ := hj.Hijack()
+		c.Close() // the endpoint drops the connection: a *url.Error
+	}))
+	defer hang.Close()
+	refused := httptest.NewServer(http.NotFoundHandler())
+	refusedURL := refused.URL
+	refused.Close()
+	for _, ep := range []string{hang.URL, refusedURL} {
+		reg, _ := NewRegistry(t.TempDir(), nil)
+		reg.AddTool(NewWebSearch(WebSearchConfig{CX: "cx9", APIKeyEnv: "TEST_PSE_KEY", Endpoint: ep}))
+		res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "web_search", Arguments: `{"query":"go"}`})
+		if !res.IsError || !strings.HasPrefix(res.Content, "web_search: ") {
+			t.Fatalf("%s: %+v", ep, res)
+		}
+		for _, leak := range []string{"sekrit", "key=", "cx9"} {
+			if strings.Contains(res.Content, leak) {
+				t.Fatalf("%s: error carries %q: %s", ep, leak, res.Content)
+			}
+		}
+		if !strings.Contains(res.Content, ep) {
+			t.Fatalf("%s: error should still name the endpoint: %s", ep, res.Content)
+		}
+	}
+}

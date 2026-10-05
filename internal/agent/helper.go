@@ -346,8 +346,8 @@ func (a *Agent) addChoreUsage(req provider.ChatRequest, resp *provider.ChatRespo
 	}
 	if p := a.Pricing(); p.Known {
 		used.SpendUSD = float64(used.PromptTokens)*p.Prompt + float64(used.CompletionTokens)*p.Completion
-	} else if a.markUnpricedSaid() {
-		a.notice("spend is not tracked for this model")
+	} else {
+		a.unpricedNotice()
 	}
 	a.addStats(used)
 }

@@ -114,6 +114,7 @@ var runCmd = &cobra.Command{
 				"uncached_prompt_reads":     ag.Usage().SlowReads,
 				"sub_agents":                subAgentRows(ag),
 			}
+			addSpendJSON(out, ag)
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(out); err != nil {
@@ -133,6 +134,20 @@ var runCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// addSpendJSON adds run --json's spend_usd while the main model is online:
+// the estimated spend, or null when the model's price is unknown (spend is
+// not tracked). A local run's object is left exactly as it was.
+func addSpendJSON(out map[string]any, ag *agent.Agent) {
+	if _, online := ag.Online(); !online {
+		return
+	}
+	if !ag.Pricing().Known {
+		out["spend_usd"] = nil
+		return
+	}
+	out["spend_usd"] = ag.Usage().SpendUSD
 }
 
 func reviewIssues(rep *agent.ReviewedReport) string {
@@ -738,6 +753,9 @@ func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
 		window = fmt.Sprintf("%d", w)
 	}
 	price := "prices unknown"
+	if cfg.MaxSpendUSD > 0 {
+		price += " (" + agent.UnpricedNote(cfg.MaxSpendUSD) + ")"
+	}
 	if pr := agent.PricingFor(model, listed, preset); pr.Known {
 		price = fmt.Sprintf("$%.2f/$%.2f per Mtok", pr.Prompt*1e6, pr.Completion*1e6)
 	}

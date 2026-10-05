@@ -108,6 +108,15 @@ func pickNumber(in *bufio.Reader, out io.Writer, prompt string, lo, hi int) int 
 	}
 }
 
+// MissingKeyError is the wizard's answer when the chosen online provider's
+// key is not in the environment: nothing is saved. Its text is the one
+// message both `be-code setup` and the first launch print.
+type MissingKeyError struct{ KeyEnv string }
+
+func (e *MissingKeyError) Error() string {
+	return fmt.Sprintf("set %s in your shell, then run be-code setup again", e.KeyEnv)
+}
+
 // wizardOnline is the online path: pick a preset, check its key is in the
 // environment (keys never go in the config file), pick a model from the
 // provider's listing, and keep the first local backend as the helper. With
@@ -120,8 +129,7 @@ func wizardOnline(ctx context.Context, in *bufio.Reader, out io.Writer, found []
 	}
 	pre := presets[pickNumber(in, out, "Choose a provider", 1, len(presets))-1]
 	if os.Getenv(pre.KeyEnv) == "" {
-		fmt.Fprintf(out, "\nset %s in your shell, then run be-code setup again\n", pre.KeyEnv)
-		return nil, nil
+		return nil, &MissingKeyError{KeyEnv: pre.KeyEnv}
 	}
 	fmt.Fprintf(out, "\nListing models on %s...\n", pre.Name)
 	models, err := listOnline(ctx, pre)
