@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/update"
 )
@@ -143,5 +144,78 @@ func TestUpdateNeverTouchesConfig(t *testing.T) {
 	after, _ := os.Stat(cfgPath)
 	if b, _ := os.ReadFile(cfgPath); string(b) != string(want) || !after.ModTime().Equal(before.ModTime()) {
 		t.Fatalf("config.json changed: %q", b)
+	}
+}
+
+// /update typed while a run is busy (plain mode): runBusy services input on
+// the only goroutine that reads r.lines, so the command must not run inline
+// on it — the update question's answer would never be read.
+func TestREPLUpdateMidRunCanBeAnswered(t *testing.T) {
+	target, _ := fakeRelease(t, "9.9.9")
+	r := newTestREPL(t)
+	r.Agent.Tools.Approve = r.approve
+	r.Agent.Tools.ApproveCtx = r.approveCtx
+	r.lines = make(chan lineEvent, 4)
+	run := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		capture(t, func() {
+			r.runBusy(context.Background(), func(ctx context.Context) {
+				select {
+				case <-run:
+				case <-ctx.Done():
+				}
+			})
+		})
+		close(done)
+	}()
+	r.lines <- lineEvent{line: "/update"}
+	// The question is open once runBusy would forward a line to it.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		r.mu.Lock()
+		asking := r.ask != nil
+		r.mu.Unlock()
+		if asking {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(run)
+			t.Fatal("the update question never opened")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.lines <- lineEvent{line: "y"}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if b, _ := os.ReadFile(target); string(b) == "new binary" {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(run)
+			t.Fatal("the answer never reached the update; nothing installed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(run)
+	<-done
+}
+
+// The person's time answering is theirs: an answer that comes after the
+// release lookup's bound still installs.
+func TestUpdateSlowAnswerStillInstalls(t *testing.T) {
+	target, _ := fakeRelease(t, "9.9.9")
+	oldC, oldI := checkTimeout, installTimeout
+	checkTimeout, installTimeout = 100*time.Millisecond, 5*time.Second
+	t.Cleanup(func() { checkTimeout, installTimeout = oldC, oldI })
+	got := UpdateCommand(context.Background(), http.DefaultClient, func(string) bool {
+		time.Sleep(300 * time.Millisecond)
+		return true
+	}, nil)
+	if got != "updated to v9.9.9; restart BE-Code to use it" {
+		t.Fatalf("%q", got)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "new binary" {
+		t.Fatal("not installed")
 	}
 }

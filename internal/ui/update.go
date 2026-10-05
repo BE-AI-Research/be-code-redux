@@ -14,14 +14,18 @@ import (
 // (the `update` approval, which has no "always"), and install it in place.
 // onUpdated runs after a successful install (the TUI clears its notice). It
 // returns the line to show.
+// checkTimeout bounds the release lookup; installTimeout the download. A
+// person's time answering the question is bounded by neither.
+var checkTimeout, installTimeout = 15 * time.Second, 10 * time.Minute
+
 func UpdateCommand(ctx context.Context, c *http.Client, ask func(detail string) bool, onUpdated func()) string {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
 	cur := update.Current
 	if !update.Newer("0.0.0", cur) { // a dev build never updates itself
 		return update.ErrFromSource.Error()
 	}
-	rel, err := update.Latest(ctx, c)
+	checkCtx, cancelCheck := context.WithTimeout(ctx, checkTimeout)
+	rel, err := update.Latest(checkCtx, c)
+	cancelCheck()
 	if err != nil {
 		return "could not reach GitHub: " + err.Error()
 	}
@@ -35,7 +39,9 @@ func UpdateCommand(ctx context.Context, c *http.Client, ask func(detail string) 
 	if err != nil {
 		return "cannot find the installed binary: " + err.Error()
 	}
-	if err := update.Install(ctx, c, rel, runtime.GOOS, runtime.GOARCH, target); err != nil {
+	installCtx, cancelInstall := context.WithTimeout(ctx, installTimeout)
+	defer cancelInstall()
+	if err := update.Install(installCtx, c, rel, runtime.GOOS, runtime.GOARCH, target); err != nil {
 		return err.Error()
 	}
 	if onUpdated != nil {

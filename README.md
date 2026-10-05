@@ -16,7 +16,8 @@ It talks to whatever inference you already run — Ollama, llama.cpp, LM Studio,
 Engine fabric — and, since 1.2, to an [online provider](#online-providers) such as OpenRouter if
 you choose one, with a local model still doing the housekeeping and nothing leaving the machine
 until you have said yes, per project and per site. No telemetry, no account, no network call but
-the endpoints you configured (and web search, which is opt-in and off by default). A session survives the
+the endpoints you configured, web search (opt-in, off by default) and one check for a newer
+release at session start (`update_check: false` turns it off). A session survives the
 terminal that started it, several terminals can watch and drive the same run, and the record of
 what the model has read and decided lives in your project as Markdown you can edit by hand.
 
@@ -1136,13 +1137,14 @@ write instead of writing unattended.
 - All file tools are confined to the workspace root (path-traversal hardened, per BE-CLI lessons).
 - Every shell command requires interactive approval (`y`/`N`/`a`lways) unless `-y` /
   `auto_approve_shell` is set.
-- No telemetry, no network calls except to your configured inference endpoints. Fully offline
-  with a local backend.
+- No telemetry, no network calls except to your configured inference endpoints and one release
+  check against GitHub at session start (and in `be-code doctor`); `update_check: false` turns
+  both off, and then BE-Code is fully offline with a local backend.
 - With an online main model, nothing is sent until the project is approved (`online_project`),
   page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
   API keys are read only from the environment.
-- One GitHub request at session start asks whether a newer release exists (`update_check: false`
-  turns it off); an update installs only after you approve it and its checksum matches.
+- An update installs only after you approve it and its checksum matches the release's
+  `SHA256SUMS`, and it replaces only the `be-code` binary.
 
 ## Layout
 

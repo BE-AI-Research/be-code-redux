@@ -227,15 +227,24 @@ func Install(ctx context.Context, c *http.Client, r Release, goos, goarch, targe
 	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		return err
 	}
-	if runtime.GOOS == "windows" { // a running .exe cannot be overwritten
+	if renameAside { // a running .exe cannot be overwritten
 		old := target + ".old"
 		os.Remove(old) // left by the previous update
-		if err := os.Rename(target, old); err != nil {
+		if err := rename(target, old); err != nil {
 			return &NotWritableError{Dir: dir}
 		}
 	}
-	if err := os.Rename(tmp.Name(), target); err != nil {
+	if err := rename(tmp.Name(), target); err != nil {
+		if renameAside {
+			rename(target+".old", target) // put the old binary back: never no be-code at all
+		}
 		return &NotWritableError{Dir: dir}
 	}
 	return nil
 }
+
+// renameAside and rename are seams for a test of the Windows path.
+var (
+	renameAside = runtime.GOOS == "windows"
+	rename      = os.Rename
+)

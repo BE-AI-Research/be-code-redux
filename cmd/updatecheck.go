@@ -12,12 +12,17 @@ import (
 // startUpdateCheck runs one background check for a newer release (5 s) when
 // update_check is on, and calls found only when one exists. Failures are
 // silent and it never blocks the caller: it only ever lights the notice;
-// installing is /update's, and the person's choice.
-func startUpdateCheck(cfg *config.Config, c *http.Client, found func(version string)) {
+// installing is /update's, and the person's choice. The returned channel
+// closes when the check is over (at once when it is off); callers ignore it,
+// tests wait on it.
+func startUpdateCheck(cfg *config.Config, c *http.Client, found func(version string)) <-chan struct{} {
+	done := make(chan struct{})
 	if !cfg.UpdateCheckOn() {
-		return
+		close(done)
+		return done
 	}
 	go func() {
+		defer close(done)
 		defer func() { recover() }() // a check must never take the session down
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -26,6 +31,7 @@ func startUpdateCheck(cfg *config.Config, c *http.Client, found func(version str
 			found(rel.Version)
 		}
 	}()
+	return done
 }
 
 // updateDoctorLine is doctor's one line about updates.

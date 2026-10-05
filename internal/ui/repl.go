@@ -1100,9 +1100,14 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/online":
 		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
 	case "/update":
-		fmt.Println(UpdateCommand(ctx, http.DefaultClient, func(d string) bool {
-			return r.Agent.Tools.AskPerson(ctx, "update", d)
-		}, nil))
+		// Through runBusy, as /consult is: typed mid-run, this goroutine is
+		// the one reading r.lines, so the question's answer (and Ctrl-C)
+		// must be serviced while the update runs, not after it.
+		r.runBusy(ctx, func(ctx context.Context) {
+			fmt.Println(UpdateCommand(ctx, http.DefaultClient, func(d string) bool {
+				return r.Agent.Tools.AskPerson(ctx, "update", d)
+			}, nil))
+		})
 	case "/map":
 		m := r.Agent.RepoMap()
 		if m == "" {

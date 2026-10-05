@@ -38,7 +38,8 @@ func fakeLatest(t *testing.T, version string, code int) *atomic.Int32 {
 func TestStartCheckFindsNewer(t *testing.T) {
 	fakeLatest(t, "9.9.9", http.StatusOK)
 	got := make(chan string, 1)
-	startUpdateCheck(config.Default(), http.DefaultClient, func(v string) { got <- v })
+	done := startUpdateCheck(config.Default(), http.DefaultClient, func(v string) { got <- v })
+	defer func() { <-done }()
 	select {
 	case v := <-got:
 		if v != "9.9.9" {
@@ -55,7 +56,8 @@ func TestStartCheckSilentOnFailure(t *testing.T) {
 			fakeLatest(t, "1.0.0", code)
 			found := make(chan string, 1)
 			start := time.Now()
-			startUpdateCheck(config.Default(), http.DefaultClient, func(v string) { found <- v })
+			done := startUpdateCheck(config.Default(), http.DefaultClient, func(v string) { found <- v })
+			defer func() { <-done }()
 			if time.Since(start) > 50*time.Millisecond {
 				t.Fatal("the check blocked its caller")
 			}
@@ -73,8 +75,7 @@ func TestStartCheckOff(t *testing.T) {
 	cfg := config.Default()
 	off := false
 	cfg.UpdateCheck = &off
-	startUpdateCheck(cfg, http.DefaultClient, func(string) { t.Error("notice with the check off") })
-	time.Sleep(200 * time.Millisecond)
+	<-startUpdateCheck(cfg, http.DefaultClient, func(string) { t.Error("notice with the check off") })
 	if hits.Load() != 0 {
 		t.Fatalf("%d requests with update_check off", hits.Load())
 	}

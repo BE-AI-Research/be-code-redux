@@ -202,3 +202,28 @@ func TestInstallRefusesATargetThatIsNotTheBinary(t *testing.T) {
 		t.Fatalf("config changed: %q", b)
 	}
 }
+
+// Windows renames the running binary aside before moving the new one in. If
+// that second rename fails, the old binary is put back: never no be-code.
+func TestInstallWindowsRollsBackOnFailedSwap(t *testing.T) {
+	fakeGitHub(t, []byte("new"), sha([]byte("new")))
+	r, _ := Latest(context.Background(), http.DefaultClient)
+	p := target(t)
+	oldAside, oldRename := renameAside, rename
+	renameAside = true
+	calls := 0
+	rename = func(from, to string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("file in use")
+		}
+		return os.Rename(from, to)
+	}
+	t.Cleanup(func() { renameAside, rename = oldAside, oldRename })
+	if err := Install(context.Background(), http.DefaultClient, r, runtime.GOOS, runtime.GOARCH, p); err == nil {
+		t.Fatal("the failed swap was not reported")
+	}
+	if b, err := os.ReadFile(p); err != nil || string(b) != "old" {
+		t.Fatalf("binary not restored: %q %v", b, err)
+	}
+}
