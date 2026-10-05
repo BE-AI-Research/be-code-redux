@@ -863,3 +863,18 @@ func TestRunnerOptionsCannotBypassConsent(t *testing.T) {
 		t.Fatal("with reload_on_mismatch always the user has agreed to reloads; the key must pass")
 	}
 }
+
+// ConfiguredWindow is what config asks for, without touching the server; the
+// agent compares it with the server's window to tell a too-small model from
+// a too-large conversation.
+func TestConfiguredWindow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Models = map[string]config.ModelConfig{"m": {ContextWindow: 32768}}
+	l := New(provider.NewOllama("t", "http://127.0.0.1:1", ""), cfg, nil, func(string) {})
+	if got := l.ConfiguredWindow("m"); got != 32768 {
+		t.Fatalf("m: %d", got)
+	}
+	if got := l.ConfiguredWindow("other"); got != 0 {
+		t.Fatalf("unset: %d", got)
+	}
+}
