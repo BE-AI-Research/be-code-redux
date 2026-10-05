@@ -1,3 +1,4 @@
+<img width="2334" height="1079" alt="be-code-redux-launchdate" src="https://github.com/user-attachments/assets/a04617d4-eb0f-41ed-bde4-aebe4b641fca" />
 # BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
