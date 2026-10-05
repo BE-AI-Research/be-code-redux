@@ -895,3 +895,23 @@ func TestApplyOnlineListingFailureIsOnlyAWarning(t *testing.T) {
 		t.Fatal("no prices expected")
 	}
 }
+
+func TestApplyOnlineWithoutKeySkipsListing(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	pc := cfg.Providers["or"]
+	pc.ContextWindow = 64000
+	cfg.Providers["or"] = pc
+	t.Setenv("BE_TEST_ONLINE_KEY", "")
+	ag := callBuildAgent(t, cfg)
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Fatalf("listing requested %d time(s) without a key", n)
+	}
+	if _, ok := ag.Online(); !ok {
+		t.Fatal("should still be online")
+	}
+	if b, _, _ := ag.History.Scalars(); b != 64000 {
+		t.Fatalf("budget %d, want configured 64000", b)
+	}
+}

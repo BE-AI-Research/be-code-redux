@@ -910,9 +910,17 @@ func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name,
 		return
 	}
 	preset := presetFor(name, pc)
-	listed, err := listOnlineModel(context.Background(), p, model)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warn: could not read %s's model list (%v); window and prices fall back to the preset\n", name, compactErr(err))
+	var listed provider.ModelInfo
+	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == "" {
+		// No key: the listing would only be refused. Say so and go on with
+		// the preset and configured window.
+		startupWarn(ag, fmt.Sprintf("%s is not set; not asking %s for its model list, and requests will be refused until it is exported", pc.APIKeyEnv, name))
+	} else {
+		var err error
+		listed, err = listOnlineModel(context.Background(), p, model)
+		if err != nil {
+			startupWarn(ag, fmt.Sprintf("could not read %s's model list (%v); window and prices fall back to the preset", name, compactErr(err)))
+		}
 	}
 	configured := pc.ContextWindow
 	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
