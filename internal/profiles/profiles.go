@@ -30,56 +30,81 @@ var defaultProfile = Profile{Family: "generic", Compat: "auto", Temperature: -1}
 // (11 chars) not "deepseek" (8 chars). Online vendor models (e.g. "openai/gpt-4")
 // use Compat "never" for native tool calls; local models vary.
 var table = []struct {
-	match string
-	p     Profile
+	match    string
+	anchored bool // if true, match must be at start or after '/' to avoid false positives
+	p        Profile
 }{
-	{"qwen3", Profile{Family: "qwen3", Compat: "auto", Temperature: 0.2, StripThink: true,
+	{"qwen3", false, Profile{Family: "qwen3", Compat: "auto", Temperature: 0.2, StripThink: true,
 		Notes: "reasoning tags stripped; native tool calls usually fine via Ollama"}},
-	{"qwen", Profile{Family: "qwen", Compat: "auto", Temperature: 0.2,
+	{"qwen", false, Profile{Family: "qwen", Compat: "auto", Temperature: 0.2,
 		Notes: "solid native tool calling"}},
-	// Online vendor models (OpenRouter, Together, etc.)
-	{"deepseek-v3", Profile{Family: "deepseek-v3", Compat: "never", Temperature: 0.2}},
-	{"deepseek-chat", Profile{Family: "deepseek-chat", Compat: "never", Temperature: 0.2}},
-	{"o3", Profile{Family: "o3", Compat: "never", Temperature: -1,
+	// Online vendor models (OpenRouter, Together, etc.) are anchored to avoid
+	// capturing distilled models like "Qwen3-Claude-Distill" or "olmo3".
+	{"deepseek-v3", true, Profile{Family: "deepseek-v3", Compat: "never", Temperature: 0.2}},
+	{"deepseek-chat", true, Profile{Family: "deepseek-chat", Compat: "never", Temperature: 0.2}},
+	{"o3", true, Profile{Family: "o3", Compat: "never", Temperature: -1,
 		Notes: "reasoning model; temperature ignored"}},
-	{"o4", Profile{Family: "o4", Compat: "never", Temperature: -1}},
-	{"gpt", Profile{Family: "gpt", Compat: "never", Temperature: 0.2}},
-	{"claude", Profile{Family: "claude", Compat: "never", Temperature: 0.2}},
-	{"gemini", Profile{Family: "gemini", Compat: "never", Temperature: 0.2}},
+	{"o4", true, Profile{Family: "o4", Compat: "never", Temperature: -1}},
+	{"gpt-", true, Profile{Family: "gpt", Compat: "never", Temperature: 0.2}},
+	{"claude", true, Profile{Family: "claude", Compat: "never", Temperature: 0.2}},
+	{"gemini", true, Profile{Family: "gemini", Compat: "never", Temperature: 0.2}},
 	// Local models
-	{"deepseek-r1", Profile{Family: "deepseek-r1", Compat: "always", Temperature: 0.3, StripThink: true,
+	{"deepseek-r1", false, Profile{Family: "deepseek-r1", Compat: "always", Temperature: 0.3, StripThink: true,
 		Notes: "reasoning model: embedded tool calls + think-stripping"}},
-	{"deepseek", Profile{Family: "deepseek", Compat: "auto", Temperature: 0.2,
+	{"deepseek", false, Profile{Family: "deepseek", Compat: "auto", Temperature: 0.2,
 		Notes: "coder variants are strong at diffs"}},
-	{"gemma", Profile{Family: "gemma", Compat: "always", Temperature: 0.3,
+	{"gemma", false, Profile{Family: "gemma", Compat: "always", Temperature: 0.3,
 		Notes: "no native tool-call training; embedded format required (see BE-MCPql)"}},
-	{"llama", Profile{Family: "llama", Compat: "auto", Temperature: 0.3,
+	{"llama", false, Profile{Family: "llama", Compat: "auto", Temperature: 0.3,
 		Notes: "3.1+ handle native tool calls"}},
-	{"mistral", Profile{Family: "mistral", Compat: "auto", Temperature: 0.25,
+	{"mistral", false, Profile{Family: "mistral", Compat: "auto", Temperature: 0.25,
 		Notes: "native tool calls supported"}},
-	{"codestral", Profile{Family: "codestral", Compat: "auto", Temperature: 0.2,
+	{"codestral", false, Profile{Family: "codestral", Compat: "auto", Temperature: 0.2,
 		Notes: "code-tuned mistral"}},
-	{"phi", Profile{Family: "phi", Compat: "always", Temperature: 0.3,
+	{"phi", false, Profile{Family: "phi", Compat: "always", Temperature: 0.3,
 		Notes: "small; embedded calls more reliable"}},
-	{"granite", Profile{Family: "granite", Compat: "auto", Temperature: 0.2, Notes: ""}},
-	{"starcoder", Profile{Family: "starcoder", Compat: "always", Temperature: 0.2,
+	{"granite", false, Profile{Family: "granite", Compat: "auto", Temperature: 0.2, Notes: ""}},
+	{"starcoder", false, Profile{Family: "starcoder", Compat: "always", Temperature: 0.2,
 		Notes: "completion-oriented; embedded calls"}},
-	{"codellama", Profile{Family: "codellama", Compat: "always", Temperature: 0.2,
+	{"codellama", false, Profile{Family: "codellama", Compat: "always", Temperature: 0.2,
 		Notes: "pre-tool-era; embedded calls"}},
-	{"gpt-oss", Profile{Family: "gpt-oss", Compat: "auto", Temperature: 0.3, StripThink: true,
+	{"gpt-oss", false, Profile{Family: "gpt-oss", Compat: "auto", Temperature: 0.3, StripThink: true,
 		Notes: "reasoning output stripped"}},
 }
 
 // Detect returns the profile for a model name (e.g. "qwen3:8b",
 // "deepseek-r1:14b-qwen-distill-q4_K_M"). Among matching rows the longest
 // match wins, so "deepseek-r1:...-qwen-distill" resolves to deepseek-r1,
-// not qwen, and "codellama" beats "llama".
+// not qwen, and "codellama" beats "llama". Anchored rows (online vendors)
+// match only at the start of the name or after a '/' to avoid false positives
+// like matching "claude" in "Qwen3-Claude-Distill".
 func Detect(model string) Profile {
 	m := strings.ToLower(model)
 	best := defaultProfile
 	bestLen := 0
 	for _, row := range table {
-		if strings.Contains(m, row.match) && len(row.match) > bestLen {
+		// Check if the match string appears in the model name
+		var found bool
+		idx := 0
+		for {
+			nextIdx := strings.Index(m[idx:], row.match)
+			if nextIdx == -1 {
+				break
+			}
+			actualIdx := idx + nextIdx
+			// For anchored rows, check if match is at start or after '/'
+			if row.anchored {
+				if actualIdx == 0 || (actualIdx > 0 && m[actualIdx-1] == '/') {
+					found = true
+					break
+				}
+			} else {
+				found = true
+				break
+			}
+			idx = actualIdx + 1
+		}
+		if found && len(row.match) > bestLen {
 			best, bestLen = row.p, len(row.match)
 		}
 	}
