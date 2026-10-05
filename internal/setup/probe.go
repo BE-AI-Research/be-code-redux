@@ -85,3 +85,18 @@ func BuildConfig(chosenProvider, chosenModel string) *config.Config {
 	}
 	return cfg
 }
+
+// BuildOnlineConfig is BuildConfig for an online main model: the preset's
+// provider (online true, key from its environment variable), the chosen
+// model, and, when a local backend was found, its first model as the
+// local_helper that does housekeeping.
+func BuildOnlineConfig(pre provider.Preset, model string, helper *Found) *config.Config {
+	cfg := BuildConfig("", "")
+	cfg.Providers[pre.Name] = pre.ProviderConfig()
+	cfg.DefaultProvider = pre.Name
+	cfg.Model = model
+	if helper != nil && len(helper.Models) > 0 {
+		cfg.LocalHelper = config.LocalHelperConfig{Provider: helper.Name, Model: helper.Models[0].ID}
+	}
+	return cfg
+}

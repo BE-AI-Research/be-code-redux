@@ -226,3 +226,30 @@ or the browser tool's gate.
     toggle and write `DevToolsActivePort` where expected; for Chromium set
     `browser.chrome_user_data_dir` (Linux likely `~/.config/chromium`) and repeat 40. Windows:
     `chrome_user_data_dir` with `~\…` expands.
+47. **Real OpenRouter session.** With `OPENROUTER_API_KEY` exported and a local Ollama running,
+    `be-code setup` and pick the online provider, an OpenRouter model, and see the Ollama model
+    saved as `local_helper`. Start a session in a fresh project: the first request asks "send this
+    project to openrouter?" (`online_project`, no "always"); answer yes, work for a few turns, and
+    watch the status line spend rise and `/stats` and `/online` agree with OpenRouter's own usage
+    page. `/quit`, start again: no question. `/online forget`, start again: it asks.
+48. **Declined project prompt.** Answer no to 47's question: nothing is sent (check the provider's
+    request log), the TUI says why and quits (plain mode and `be-code run` exit with the
+    refusal). `be-code run -y` runs but does not remember; the next interactive start asks. A
+    `/provider openrouter` switch from a local model asks at the next request, and no reverts.
+49. **Deliberate cap hit.** Set `max_spend_usd` to `0.01` and work until it trips: the
+    `spend_cap` modal appears before the request that would pass it, `-y` does not answer it, and
+    no leaves the session on the main model without sending. Compaction on the capped session
+    continues from the task record rather than failing the run.
+50. **Helper down.** With `local_helper` set and the helper's server stopped, force a compaction
+    (`/compact`): one notice that the helper is unavailable, the summary runs on the main model
+    and counts toward spend. With `local_helper` unset the notice says so once. Set the helper to
+    an online model: refused at startup.
+51. **Outage switch.** Disconnect the network (or block the provider's host) mid-request: after the
+    retries `switch_to_local` offers the helper once; yes continues on the local model, no is not
+    asked again until a request succeeds. A wrong key (`OPENROUTER_API_KEY=bad`) says the key was
+    rejected, names the variable and does not retry or offer a switch.
+52. **Page text.** With the browser tool on, ask the online model to open a page outside the
+    `allow` tier: `share_page` asks per host (no "always"), yes covers that host for the session,
+    no shows the model a "not shown" note with no page text. With my-Chrome attached every page
+    asks. Read a page while on a local model, then `/provider openrouter`: the earlier page
+    asks per site before it is sent; no replaces it with the note.

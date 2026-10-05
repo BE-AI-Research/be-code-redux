@@ -4,6 +4,7 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -120,7 +121,11 @@ func stdoutIsTTY() bool {
 // we're on a real terminal; otherwise loads (writing defaults if needed).
 func loadOrWizard(ctx context.Context) (*config.Config, error) {
 	if !config.Exists() && stdinIsTTY() && stdoutIsTTY() {
-		return setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
+		cfg, err := setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
+		if err == nil && cfg == nil {
+			return nil, errors.New("no config saved; set the provider's key and run be-code again")
+		}
+		return cfg, err
 	}
 	return config.Load()
 }
