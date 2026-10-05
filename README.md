@@ -1152,6 +1152,8 @@ hand; `/config` prints what the running session actually resolved.
   passed through to Ollama's options block untouched, so config can reach keys
   the harness knows nothing about (`top_k`, `top_p`, `repeat_penalty`...).
   Ignored for `type: openai`, which has no such knob.
+- `providers.<name>.online` (false) — marks an endpoint as off this machine and network. An endpoint at a non-local address counts as online whatever this says (startup warns once). `local_helper` (`{"provider": "", "model": ""}`) names the local model for housekeeping while the main model is online; `max_spend_usd` (0 = off) caps a session's online spend.
+  Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`, `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`).
 - `models{}` ({}) — the same three keys per model, keyed by the model name
   exactly as the backend spells it (tag included), e.g.
   `"models": {"qwen3:8b": {"context_window": 32768, "keep_alive": "30m",

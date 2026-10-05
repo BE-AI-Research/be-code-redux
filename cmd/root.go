@@ -205,6 +205,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
 
+	for _, w := range cfg.OnlineWarnings() {
+		fmt.Fprintf(os.Stderr, "warn: %s\n", w)
+	}
+
 	// Co-working models: the agent has already taken the usable ones from
 	// the config; the warnings for the unusable ones belong here, printed
 	// once, and the consult tool exists only when there is someone to ask.
