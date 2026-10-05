@@ -600,7 +600,7 @@ func maxTokensDoctorLine(cfg *config.Config, window int) string {
 		return ""
 	}
 	if r := agent.CapReserve(m, ctxTokens); r < m {
-		return "max tokens: " + agent.ReserveCapNote(m, ctxTokens, r, cfg.ContextTokens > 0 && (window <= 0 || cfg.ContextTokens < window))
+		return "max tokens: " + agent.ReserveCapNote(m, ctxTokens, r, window <= 0 || (cfg.ContextTokens > 0 && cfg.ContextTokens < window))
 	}
 	return fmt.Sprintf("max tokens: max_tokens %d reserves half of a %d-token window for one reply. "+
 		"Change max_tokens in config (0 lets the server decide) to leave the conversation more room.", m, ctxTokens)

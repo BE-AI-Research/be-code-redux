@@ -308,3 +308,20 @@ func TestExplainBudgetWithoutWindow(t *testing.T) {
 		t.Fatalf("got %q", log.msgs)
 	}
 }
+
+// With neither a window nor context_tokens the budget is the built-in
+// default, which is no window either: the notice must say "context budget".
+func TestExplainBudgetWithoutWindowOrContextTokens(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.MaxTokens = 1 << 20; c.ContextTokens = 0 })
+	var log noticeLog
+	ag.Events.OnNotice = log.add
+	ag.ExplainBudget()
+	for _, m := range log.msgs {
+		if strings.Contains(m, "-token window") {
+			t.Fatalf("a guessed budget was called a window: %q", m)
+		}
+	}
+	if n := log.count("-token context budget; reserving"); n != 1 {
+		t.Fatalf("want one context-budget notice, got %q", log.msgs)
+	}
+}

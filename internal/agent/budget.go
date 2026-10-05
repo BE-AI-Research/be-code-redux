@@ -49,7 +49,7 @@ func (a *Agent) effectiveBudget(window int) int {
 
 // ReserveCapNote is what the session (and doctor) says when max_tokens is
 // too large to reserve in full. size is the effective budget; contextBudget
-// says it is the context_tokens cap rather than the window.
+// says it is not a known window (the context_tokens cap, or a default).
 func ReserveCapNote(maxTokens, size, reserve int, contextBudget bool) string {
 	what := "window"
 	if contextBudget {
@@ -82,7 +82,9 @@ func (a *Agent) noteBudget(budget, reserve int) {
 	if m := a.Cfg.MaxTokens; m > 0 && reserve < m && a.reserveCapNoted.CompareAndSwap(false, true) {
 		c := a.Cfg.ContextTokens
 		w := a.Window()
-		a.announce(ReserveCapNote(m, budget, reserve, c > 0 && (w <= 0 || c < w)))
+		// Only a known window is called one: no window means the budget is
+		// context_tokens or the built-in default, a context budget either way.
+		a.announce(ReserveCapNote(m, budget, reserve, w <= 0 || (c > 0 && c < w)))
 	}
 	if l := budget - reserve; l < lowLimitTokens && a.lowLimitNoted.CompareAndSwap(false, true) {
 		shown := l
