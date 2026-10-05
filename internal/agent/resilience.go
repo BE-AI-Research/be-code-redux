@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,25 +37,75 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 			return resp, nil
 		}
 		lastErr = err
+		// A typed HTTP answer is judged before the string classifier: a
+		// rejected key never gets better by asking again, and a rate limit
+		// says how long to wait.
+		var he *provider.HTTPError
+		typed := errors.As(err, &he)
+		if typed && (he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden) {
+			return nil, rejectedKeyError(a.KeyEnv, he)
+		}
 		if ctx.Err() != nil || !isRetryableBackendError(err) || attempt == maxBackendRetries {
 			break
 		}
 		delay := a.retryBase << uint(attempt)
-		if delay > 30*time.Second {
-			delay = 30 * time.Second
+		rateLimited := typed && he.Code == http.StatusTooManyRequests
+		if rateLimited && he.RetryAfter > 0 {
+			delay = he.RetryAfter
 		}
-		a.transient("backend error (%v); retrying in %s (attempt %d/%d, task state preserved)",
-			compactErr(err), delay.Round(time.Millisecond), attempt+1, maxBackendRetries)
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		if delay > maxRetryDelay || delay < 0 {
+			delay = maxRetryDelay
+		}
+		if rateLimited {
+			a.transient("rate-limited by %s; retrying in %ds", he.Provider, wholeSeconds(delay))
+		} else {
+			a.transient("backend error (%v); retrying in %s (attempt %d/%d, task state preserved)",
+				compactErr(err), delay.Round(time.Millisecond), attempt+1, maxBackendRetries)
+		}
+		if err := a.wait(ctx, delay); err != nil {
+			return nil, err
 		}
 	}
 	if isRetryableBackendError(lastErr) && ctx.Err() == nil {
 		return nil, fmt.Errorf("backend unavailable after %d retries: %w", maxBackendRetries, lastErr)
 	}
 	return nil, lastErr
+}
+
+// maxRetryDelay caps one retry's wait, a server's own Retry-After included.
+const maxRetryDelay = 30 * time.Second
+
+// wait sleeps for d or until ctx ends, through a.sleep when a test set one.
+func (a *Agent) wait(ctx context.Context, d time.Duration) error {
+	if a.sleep != nil {
+		return a.sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// wholeSeconds rounds a delay up to whole seconds for a notice, never 0.
+func wholeSeconds(d time.Duration) int {
+	s := int((d + time.Second - 1) / time.Second)
+	if s < 1 {
+		s = 1
+	}
+	return s
+}
+
+// rejectedKeyError names the variable the key came from, never the key.
+func rejectedKeyError(keyEnv string, he *provider.HTTPError) error {
+	who := keyEnv
+	if who == "" {
+		who = "API key"
+	}
+	return fmt.Errorf("%s rejected by %s (%w)", who, he.Provider, he)
 }
 
 // inLane runs one model call inside the primary's lane on its server, when

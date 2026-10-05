@@ -160,6 +160,10 @@ type Agent struct {
 	// IDETools is how many editor tools were attached (0 when none), so a
 	// UI can report the connection once it owns the screen.
 	IDETools int
+	// KeyEnv names the environment variable the main provider's API key
+	// came from (the provider's api_key_env), so a rejected key can be
+	// named without ever printing it. Empty: "API key rejected by …".
+	KeyEnv string
 
 	projectNotes string
 	handoff      string // briefing from the resumed session, kept in the system prompt
@@ -199,9 +203,12 @@ type Agent struct {
 	inbox Inbox // mid-task user messages (see inbox.go)
 
 	// Backend resilience (see resilience.go).
-	retryBase        time.Duration // first retry delay; doubles per attempt
-	stallAfter       time.Duration // silence before a "waiting for backend" notice
-	unloadedNotified bool          // one notice per eviction, not per turn
+	retryBase  time.Duration // first retry delay; doubles per attempt
+	stallAfter time.Duration // silence before a "waiting for backend" notice
+	// sleep waits out one retry delay; nil means a real, ctx-aware wait.
+	// Tests replace it to record the requested delay instead of sleeping.
+	sleep            func(ctx context.Context, d time.Duration) error
+	unloadedNotified bool // one notice per eviction, not per turn
 	// nativeFallbackNotified keeps the native-endpoint downgrade to one
 	// notice per session (see noteNativeFallback).
 	nativeFallbackNotified bool
