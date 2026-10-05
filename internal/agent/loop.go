@@ -1867,6 +1867,10 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if a.checkOnlineGate(ctx, false) == nil {
 		a.settleEarlierWebText(ctx)
 	}
+	// Still unsettled (the project is not approved yet): the summary would
+	// become the head message the online model later reads, and settling only
+	// looks at tool results — so no page text goes into it unasked.
+	withholdWeb := a.earlierWebUnsettled()
 	// The model and its profile are snapshotted rather than read where they
 	// are used: this runs on the resolution's goroutine after a model
 	// switch, and a *second* switch landing mid-compaction would otherwise
@@ -1928,6 +1932,10 @@ func (a *Agent) Compact(ctx context.Context) error {
 					}
 				}
 			}
+		}
+		if withholdWeb && isToolResult(m) && webResult(m, a.History.Messages) {
+			fmt.Fprintf(&b, "[%s] [web result withheld]\n", m.Role)
+			continue
 		}
 		fmt.Fprintf(&b, "[%s] %.600s\n", m.Role, m.Content)
 		for _, tc := range m.ToolCalls {

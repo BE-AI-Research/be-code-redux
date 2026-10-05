@@ -124,6 +124,10 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 		if json.Unmarshal(body, &ge) == nil && ge.Error.Message != "" {
 			msg = ge.Error.Message
 		}
+		if key != "" {
+			msg = strings.ReplaceAll(msg, key, "[redacted]")
+			msg = strings.ReplaceAll(msg, url.QueryEscape(key), "[redacted]")
+		}
 		return Result{IsError: true, Content: fmt.Sprintf("web_search: HTTP %d: %.300s", resp.StatusCode, msg)}
 	}
 	var out struct {

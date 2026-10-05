@@ -445,3 +445,32 @@ func TestCompactUnapprovedOnlineAsksNoPages(t *testing.T) {
 		t.Fatal("the history was marked settled without anyone asked")
 	}
 }
+
+// An unapproved online project compacts on the local helper: the summary
+// becomes the head message the online model reads once approved, and
+// settling only stubs tool results — so no page text goes into it unasked.
+func TestCompactUnapprovedOnlineHelperGetsNoPageText(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &recProvider{name: "openrouter", def: provider.ChatResponse{Content: "summary"}}
+	h := &recProvider{name: "ollama", def: provider.ChatResponse{Content: "summary"}}
+	withHelper(t, h, 0, nil)
+	ag, _ := newTestAgent(t, p, helperCfg)
+	ag.Tools.Approve = func(action, detail string) bool { return false }
+	ag.History.Messages = webHistory()
+	ag.SetOnline("openrouter", "K", Pricing{})
+	ag.Tools.SetShareGate(&tools.ShareGate{Provider: "openrouter"})
+	ag.CompactNow(context.Background())
+	if len(p.requests()) != 0 {
+		t.Fatalf("the unapproved online model got %d requests", len(p.requests()))
+	}
+	if len(h.requests()) == 0 {
+		t.Fatal("the summary did not go to the helper")
+	}
+	for _, r := range h.requests() {
+		for _, m := range r.Messages {
+			if strings.Contains(m.Content, "BRAVO-TEXT") {
+				t.Fatalf("page text reached the summary request: %q", m.Content)
+			}
+		}
+	}
+}

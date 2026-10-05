@@ -120,3 +120,18 @@ func TestWebSearchErrorOmitsKey(t *testing.T) {
 		}
 	}
 }
+
+func TestWebSearchHTTPErrorBodyOmitsKey(t *testing.T) {
+	t.Setenv("TEST_PSE_KEY", "sekrit-key/+=")
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("bad request: " + r.URL.String()))
+	}))
+	defer echo.Close()
+	reg, _ := NewRegistry(t.TempDir(), nil)
+	reg.AddTool(NewWebSearch(WebSearchConfig{CX: "cx9", APIKeyEnv: "TEST_PSE_KEY", Endpoint: echo.URL}))
+	res := reg.Dispatch(context.Background(), provider.ToolCall{Name: "web_search", Arguments: `{"query":"go"}`})
+	if !res.IsError || strings.Contains(res.Content, "sekrit") {
+		t.Fatalf("HTTP error body carries the key: %+v", res)
+	}
+}
