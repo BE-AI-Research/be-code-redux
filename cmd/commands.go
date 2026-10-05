@@ -490,6 +490,9 @@ var doctorCmd = &cobra.Command{
 		if line := maxTokensDoctorLine(cfg, window); line != "" {
 			fmt.Println(line)
 		}
+		if line := onlineDoctorLine(cmd.Context(), cfg); line != "" {
+			fmt.Println(line)
+		}
 		model := provider.ResolveModel(cfg, cfg.DefaultProvider, "")
 		if prof := profiles.Detect(model); prof.Notes != "" {
 			fmt.Printf("model: %s → %s profile (%s)\n", model, prof.Family, prof.Notes)
@@ -673,4 +676,46 @@ func absPath(p string) (string, error) {
 		p = wd + string(os.PathSeparator) + p
 	}
 	return p, nil
+}
+
+// onlineDoctorLine reports the default provider when it is online: whether its
+// key is set, whether it answers, and the window and prices it gives the
+// model. "" for a local default. With the key missing it never connects.
+func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
+	name := cfg.DefaultProvider
+	pc, ok := cfg.Providers[name]
+	if !ok || !config.ProviderIsOnline(pc) {
+		return ""
+	}
+	model := provider.ResolveModel(cfg, name, "")
+	keyEnv := tools.EnvNameForDisplay(pc.APIKeyEnv)
+	if pc.APIKeyEnv == "" {
+		keyEnv = "(no api_key_env)"
+	}
+	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == "" {
+		return fmt.Sprintf("online: %s · %s — key %s missing · not checked", name, model, keyEnv)
+	}
+	p, err := provider.FromConfig(cfg, name)
+	if err != nil {
+		return fmt.Sprintf("online: %s · %s — config error: %v", name, model, err)
+	}
+	preset := presetFor(name, pc)
+	listed, lerr := listOnlineModel(ctx, p, model)
+	state := "reachable"
+	if lerr != nil {
+		state = "unreachable"
+	}
+	configured := pc.ContextWindow
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		configured = mc.ContextWindow
+	}
+	window := "unknown"
+	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+		window = fmt.Sprintf("%d", w)
+	}
+	price := "prices unknown"
+	if pr := agent.PricingFor(model, listed, preset); pr.Known {
+		price = fmt.Sprintf("$%.2f/$%.2f per Mtok", pr.Prompt*1e6, pr.Completion*1e6)
+	}
+	return fmt.Sprintf("online: %s · %s — key %s set · %s · window %s · %s", name, model, keyEnv, state, window, price)
 }

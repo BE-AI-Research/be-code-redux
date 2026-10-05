@@ -322,6 +322,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		ag.SetEngineCards(nil)
 	}
 	applyModelParams(cfg, p, reg, ag, model)
+	applyOnline(cfg, p, ag, mainProviderName(cfg), model)
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
 }
@@ -849,4 +850,76 @@ func warnScheduleAllow(cfg *config.Config, ag *agent.Agent) {
 	for _, err := range errs {
 		startupWarn(ag, fmt.Sprintf("schedules.allow %v; dropped", err))
 	}
+}
+
+// mainProviderName is the provider the session's main model runs on.
+func mainProviderName(cfg *config.Config) string {
+	if flagProvider != "" {
+		return flagProvider
+	}
+	return cfg.DefaultProvider
+}
+
+// presetFor finds the preset a configured provider stands for: by base URL
+// (trailing slash ignored), else by the provider's own config name.
+func presetFor(name string, pc config.ProviderConfig) provider.Preset {
+	base := strings.TrimRight(pc.BaseURL, "/")
+	for _, pr := range provider.Presets() {
+		if strings.TrimRight(pr.BaseURL, "/") == base {
+			return pr
+		}
+	}
+	if pr, ok := provider.PresetByName(name); ok {
+		return pr
+	}
+	return provider.Preset{}
+}
+
+// listOnlineModel asks an online provider's /models for one model's row,
+// under a 5 s bound. A listing that fails or lacks the model gives an empty
+// row and the error (nil when merely absent).
+func listOnlineModel(ctx context.Context, p provider.Provider, model string) (provider.ModelInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ms, err := p.ListModels(ctx)
+	if err != nil {
+		return provider.ModelInfo{}, err
+	}
+	for _, m := range ms {
+		if m.ID == model {
+			return m, nil
+		}
+	}
+	return provider.ModelInfo{}, nil
+}
+
+// applyOnline is the online half of startup: the main provider's key name for
+// the rejected-key message, and — for an online provider — the window and
+// prices its listing (or its preset) gives. The loader never runs for these:
+// they are openai-typed, so applyModelParams has already returned. A listing
+// that cannot be read is a warning, never fatal.
+func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string) {
+	pc, ok := cfg.Providers[name]
+	if !ok {
+		return
+	}
+	if pc.APIKeyEnv != "" {
+		ag.KeyEnv = pc.APIKeyEnv
+	}
+	if !config.ProviderIsOnline(pc) {
+		return
+	}
+	preset := presetFor(name, pc)
+	listed, err := listOnlineModel(context.Background(), p, model)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warn: could not read %s's model list (%v); window and prices fall back to the preset\n", name, compactErr(err))
+	}
+	configured := pc.ContextWindow
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		configured = mc.ContextWindow
+	}
+	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+		ag.ApplyWindow(w)
+	}
+	ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
 }

@@ -165,6 +165,12 @@ type Agent struct {
 	// named without ever printing it. Empty: "API key rejected by …".
 	KeyEnv string
 
+	// Online state (online.go): the online provider serving the main model
+	// and its prices.
+	onlineMu   sync.Mutex
+	onlineName string
+	pricing    Pricing
+
 	projectNotes string
 	handoff      string // briefing from the resumed session, kept in the system prompt
 	// window is the backend context window when detected (0 = unknown),
