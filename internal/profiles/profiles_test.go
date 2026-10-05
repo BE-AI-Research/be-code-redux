@@ -73,14 +73,14 @@ func TestLocalNamesNotCapturedByOnlineRows(t *testing.T) {
 	// Test that anchored online families don't capture local model distills
 	cases := map[string]string{
 		// Original local models must keep their families
-		"qwen3:8b":                                             "qwen3",
-		"phi3:mini":                                            "phi",
-		"llama3.3:70b":                                         "llama",
-		"granite3.1-dense":                                     "granite",
-		"gpt-oss:20b":                                          "gpt-oss",
-		"deepseek-r1:14b":                                      "deepseek-r1",
-		"deepseek-r1:14b-qwen-distill-q4_K_M":                  "deepseek-r1",
-		"deepseek-coder-v2":                                    "deepseek",
+		"qwen3:8b":                            "qwen3",
+		"phi3:mini":                           "phi",
+		"llama3.3:70b":                        "llama",
+		"granite3.1-dense":                    "granite",
+		"gpt-oss:20b":                         "gpt-oss",
+		"deepseek-r1:14b":                     "deepseek-r1",
+		"deepseek-r1:14b-qwen-distill-q4_K_M": "deepseek-r1",
+		"deepseek-coder-v2":                   "deepseek",
 		// Distilled models combining local and online names (must keep their base families)
 		"hf.co/unsloth/Qwen3-4B-Claude-4.5-Opus-Distill-GGUF": "qwen3",
 		"hf.co/x/Qwen3-8B-Gemini-2.5-Flash-Distill":           "qwen3",
