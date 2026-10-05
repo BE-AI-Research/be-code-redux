@@ -614,6 +614,10 @@ func argStringPresent(args map[string]any, keys ...string) (string, bool) {
 
 // truncate limits tool output so a single call can't blow the context
 // budget of a small local model.
+// ClipOutput holds s to max bytes the way every tool result is held (a
+// resumed session's older results go through it too).
+func ClipOutput(s string, max int) string { return truncate(s, max) }
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
