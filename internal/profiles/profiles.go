@@ -26,6 +26,9 @@ type Profile struct {
 var defaultProfile = Profile{Family: "generic", Compat: "auto", Temperature: -1}
 
 // table is ordered: first substring match on the lowercase model name wins.
+// Among matches, longest substring wins, so "deepseek-r1:..." matches "deepseek-r1"
+// (11 chars) not "deepseek" (8 chars). Online vendor models (e.g. "openai/gpt-4")
+// use Compat "never" for native tool calls; local models vary.
 var table = []struct {
 	match string
 	p     Profile
@@ -34,6 +37,16 @@ var table = []struct {
 		Notes: "reasoning tags stripped; native tool calls usually fine via Ollama"}},
 	{"qwen", Profile{Family: "qwen", Compat: "auto", Temperature: 0.2,
 		Notes: "solid native tool calling"}},
+	// Online vendor models (OpenRouter, Together, etc.)
+	{"deepseek-v3", Profile{Family: "deepseek-v3", Compat: "never", Temperature: 0.2}},
+	{"deepseek-chat", Profile{Family: "deepseek-chat", Compat: "never", Temperature: 0.2}},
+	{"o3", Profile{Family: "o3", Compat: "never", Temperature: -1,
+		Notes: "reasoning model; temperature ignored"}},
+	{"o4", Profile{Family: "o4", Compat: "never", Temperature: -1}},
+	{"gpt", Profile{Family: "gpt", Compat: "never", Temperature: 0.2}},
+	{"claude", Profile{Family: "claude", Compat: "never", Temperature: 0.2}},
+	{"gemini", Profile{Family: "gemini", Compat: "never", Temperature: 0.2}},
+	// Local models
 	{"deepseek-r1", Profile{Family: "deepseek-r1", Compat: "always", Temperature: 0.3, StripThink: true,
 		Notes: "reasoning model: embedded tool calls + think-stripping"}},
 	{"deepseek", Profile{Family: "deepseek", Compat: "auto", Temperature: 0.2,

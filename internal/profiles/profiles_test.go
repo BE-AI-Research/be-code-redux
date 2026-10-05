@@ -26,3 +26,40 @@ func TestDetect(t *testing.T) {
 		}
 	}
 }
+
+func TestOnlineFamiliesFromVendorNames(t *testing.T) {
+	cases := map[string]string{
+		"openai/gpt-4.1":               "gpt",
+		"anthropic/claude-sonnet-5":    "claude",
+		"google/gemini-3.5-flash":      "gemini",
+		"openai/o4-mini":               "o4",
+		"deepseek/deepseek-chat":       "deepseek-chat",
+		"deepseek/deepseek-r1":         "deepseek-r1",
+		"hf.co/unsloth/Qwen3.8-27B":    "qwen3",
+	}
+	for id, fam := range cases {
+		if p := Detect(id); p.Family != fam {
+			t.Errorf("%s: got %s, want %s", id, p.Family, fam)
+		}
+	}
+	if Detect("anthropic/claude-sonnet-5").Compat != "never" {
+		t.Error("online families use native tool calls")
+	}
+}
+
+func TestLocalNamesNotCapturedByOnlineRows(t *testing.T) {
+	cases := map[string]string{
+		"qwen3:8b":           "qwen3",
+		"phi3:mini":          "phi",
+		"llama3.3:70b":       "llama",
+		"granite3.1-dense":   "granite",
+		"gpt-oss:20b":        "gpt-oss",
+		"deepseek-r1:14b":    "deepseek-r1",
+		"deepseek-coder-v2":  "deepseek",
+	}
+	for name, expectedFamily := range cases {
+		if p := Detect(name); p.Family != expectedFamily {
+			t.Errorf("%s: got %s, want %s", name, p.Family, expectedFamily)
+		}
+	}
+}
