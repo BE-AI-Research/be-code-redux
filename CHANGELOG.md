@@ -2,6 +2,9 @@
 
 ## v1.2.1 — (in development)
 
+- The TUI header's version now comes from the build itself (build.mk's `VERSION`, `dev` for a
+  build from source), so it can never lag a release; the header credit line no longer names a
+  person.
 - **Updates from inside the app.** Each session start asks GitHub once, in the background,
   whether a newer release exists, and only lights `⬆ vX.Y.Z available` on the bottom line
   (`update_check: false` turns the check off). `/update`, or **Check for updates** in `/menu`,

@@ -1084,9 +1084,18 @@ func (m *View) refreshTranscript() {
 	}
 }
 
-// PublicVersion is the user-facing release line shown in the header,
-// independent of the internal build version in build.mk.
-const PublicVersion = "v1.2"
+// Version is the build's version (build.mk's VERSION, stamped at link
+// time); cmd sets it, so the header never needs editing for a release.
+var Version = "dev"
+
+// headerVersion is Version as the header shows it: "v1.2.1", or "dev" for a
+// build from source.
+func headerVersion() string {
+	if Version == "" || Version == "dev" {
+		return "dev"
+	}
+	return "v" + strings.TrimPrefix(Version, "v")
+}
 
 // headerMinRows is the terminal height from which the branded header is
 // drawn; below it the rows go to the transcript.
@@ -1225,12 +1234,7 @@ func (m *View) headerView() string {
 		}
 		lines[1] += strings.Repeat(" ", gap) + logo
 	}
-	// The credit line drops the author's name rather than wrap on a narrow
-	// terminal, which would push every row below it down by one.
-	credit := "  2026 BE AI Research · Shayne G. Brown · https://github.com/BE-AI-Research - " + PublicVersion
-	if lipgloss.Width(credit) > m.width {
-		credit = "  2026 BE AI Research · https://github.com/BE-AI-Research - " + PublicVersion
-	}
+	credit := "  2026 BE AI Research · https://github.com/BE-AI-Research - " + headerVersion()
 	attribution := m.st.Dim.Render(credit)
 	rule := m.st.Dim.Render(strings.Repeat("- ", m.width/2))
 	return strings.Join(lines, "\n") + "\n" + attribution + "\n" + rule
