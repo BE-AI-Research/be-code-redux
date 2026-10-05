@@ -273,6 +273,26 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		return rp, c.Reviewer.Model, nil
 	}
 
+	// Local helper factory (same dodge): the local model that takes the
+	// housekeeping chores while the main model is online. Its window comes
+	// from a loader with no approver, as a reviewer's and co-worker's do. A
+	// helper on an online provider is refused: the point of it is that the
+	// chores stay on this machine.
+	agent.HelperFactory = func(ctx context.Context, c *config.Config) (provider.Provider, string, int, error) {
+		name := c.LocalHelper.Provider
+		if name == "" {
+			name = c.DefaultProvider
+		}
+		if pc, ok := c.Providers[name]; ok && config.ProviderIsOnline(pc) {
+			return nil, "", 0, fmt.Errorf("local_helper provider %q is online", name)
+		}
+		hp, err := provider.FromConfig(c, name)
+		if err != nil {
+			return nil, "", 0, err
+		}
+		return hp, c.LocalHelper.Model, secondaryLoad(ctx, c, hp, c.LocalHelper.Model, ag), nil
+	}
+
 	// Co-worker factory (same import-cycle dodge as ReviewerFactory).
 	agent.CoworkerFactory = func(ctx context.Context, c *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
 		cp, err := provider.FromConfig(c, cw.Provider)

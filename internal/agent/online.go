@@ -84,6 +84,9 @@ func longestKey(id string, table map[string]float64) (float64, bool) {
 // markUnpricedSaid latches the once-per-session notice and reports whether
 // this call was the first.
 func (a *Agent) markUnpricedSaid() bool {
+	if a.spendParent != nil {
+		return a.spendParent.markUnpricedSaid()
+	}
 	a.onlineMu.Lock()
 	defer a.onlineMu.Unlock()
 	if a.unpricedSaid {
@@ -112,8 +115,22 @@ func (a *Agent) checkSpendCap(ctx context.Context) error {
 	if _, online := a.Online(); !online {
 		return nil
 	}
+	if a.spendParent != nil {
+		// A scratch agent (plan mode): its spend so far is not yet folded
+		// into the parent's, so the parent checks both against its cap.
+		return a.spendParent.checkSpendCapWith(ctx, a.Usage().SpendUSD)
+	}
+	return a.checkSpendCapWith(ctx, 0)
+}
+
+// checkSpendCapWith is checkSpendCap with pending spend a scratch agent has
+// not handed back yet.
+func (a *Agent) checkSpendCapWith(ctx context.Context, pending float64) error {
+	if _, online := a.Online(); !online {
+		return nil
+	}
 	capUSD := a.SpendCap()
-	spent := a.Usage().SpendUSD
+	spent := a.Usage().SpendUSD + pending
 	if capUSD <= 0 || spent < capUSD {
 		return nil
 	}

@@ -186,6 +186,14 @@ type Agent struct {
 	// once-per-session "not tracked" notice.
 	spendRaise   float64
 	unpricedSaid bool
+	// spendParent is the agent a scratch agent's spend belongs to (plan
+	// mode while online): its cap checks and unpriced notice go there.
+	spendParent *Agent
+
+	// helper is the local helper (helper.go), built on the first chore and
+	// shared with scratch agents; helperInit allocates it.
+	helper     *helperState
+	helperInit sync.Once
 
 	projectNotes string
 	handoff      string // briefing from the resumed session, kept in the system prompt
@@ -1864,36 +1872,77 @@ func (a *Agent) Compact(ctx context.Context) error {
 		task = task[:2000] + "..."
 	}
 
-	var u strings.Builder
-	fmt.Fprintf(&u, "Original task:\n%s\n\n", task)
+	var hdr strings.Builder
+	fmt.Fprintf(&hdr, "Original task:\n%s\n\n", task)
 	if prior != "" {
-		fmt.Fprintf(&u, "Previous summary:\n%s\n\n", prior)
+		fmt.Fprintf(&hdr, "Previous summary:\n%s\n\n", prior)
 	}
 	// The same capped block the prompt carries (ruling F-1). Rendered
 	// uncapped it was most of a 16k window by itself, so the request that
 	// exists to relieve an overflowing context overflowed it — and came back
 	// empty, which is the failure this branch was built to survive.
 	if wm := a.workingMemory(); wm != "" {
-		fmt.Fprintf(&u, "Working memory:\n%s\n\n", wm)
+		fmt.Fprintf(&hdr, "Working memory:\n%s\n\n", wm)
 	}
-	fmt.Fprintf(&u, "Transcript (most recent last):\n%s", transcript)
+	header := hdr.String()
+	// summaryUser is the summary request's user message for one target. The
+	// primary gets it exactly as before the helper existed; a helper with a
+	// smaller window gets the transcript cut from its oldest end until the
+	// request fits beside the reply, the header (task, prior summary,
+	// working memory) always kept. No room even then is errChoreTooBig,
+	// which continues from the task record below.
+	summaryUser := func(t choreTarget) (string, error) {
+		full := header + "Transcript (most recent last):\n" + transcript
+		room := t.promptRoom(summaryReplyTokens)
+		if room < 0 {
+			return full, nil
+		}
+		fixed := []provider.Message{{Role: provider.RoleSystem, Content: compactSystemPrompt}, {Role: provider.RoleUser, Content: full}}
+		if helperPromptTokens(fixed) <= room {
+			return full, nil
+		}
+		const omitted = "[earlier transcript omitted; see previous summary]\n"
+		fixed[1].Content = header + "Transcript (most recent last):\n" + omitted
+		spare := int(float64(room-helperPromptTokens(fixed)) * defaultCharsPerToken)
+		if spare < 512 {
+			return "", errChoreTooBig
+		}
+		cut := transcript
+		if len(cut) > spare {
+			cut = cut[len(cut)-spare:]
+			if nl := strings.IndexByte(cut, '\n'); nl >= 0 {
+				cut = cut[nl+1:]
+			}
+		}
+		return fixed[1].Content + cut, nil
+	}
 
 	// In the lane: compaction runs between turns, never inside chatWithRetry's
 	// hold, so taking it here cannot nest.
-	summaryMsgs := []provider.Message{
-		{Role: provider.RoleSystem, Content: compactSystemPrompt},
-		{Role: provider.RoleUser, Content: u.String()},
-	}
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model:       model,
+	var u string
+	resp, target, err := a.choreChat(ctx, choreOpts{}, func(t choreTarget) (provider.ChatRequest, error) {
+		user, uerr := summaryUser(t)
+		if uerr != nil {
+			return provider.ChatRequest{}, uerr
+		}
+		u = user
+		summaryMsgs := []provider.Message{
+			{Role: provider.RoleSystem, Content: compactSystemPrompt},
+			{Role: provider.RoleUser, Content: user},
+		}
+		m := model
+		if t.helper {
+			m = t.model
+		}
+		return provider.ChatRequest{
+			Model:       m,
 			Messages:    summaryMsgs,
 			Temperature: 0.1,
 			NoThink:     true, // a summary does not need minutes of deliberation
 			// A few hundred words, never the session's max_tokens: sized
 			// for the window, that let one summary run for minutes.
-			MaxTokens: a.harnessReplyTokens(summaryReplyTokens, summaryMsgs),
-		}, nil)
+			MaxTokens: t.replyTokens(summaryReplyTokens, summaryMsgs),
+		}, nil
 	})
 	if err != nil {
 		// A summary that never arrived is the same situation as one that
@@ -1916,7 +1965,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 	// is left is the summary, and filesOnly says the list was all there was.
 	split := func(r *provider.ChatResponse) (summary string, filesOnly bool) {
 		summary = r.Content
-		if stripThink {
+		if target.helper {
+			summary = target.strip(summary)
+		} else if stripThink {
 			summary = StripThink(summary)
 		}
 		if a.engine() != nil {
@@ -1939,18 +1990,22 @@ func (a *Agent) Compact(ctx context.Context) error {
 		// from scratch gets the same answer.
 		againMsgs := []provider.Message{
 			{Role: provider.RoleSystem, Content: compactSystemPrompt},
-			{Role: provider.RoleUser, Content: u.String()},
+			{Role: provider.RoleUser, Content: u},
 			{Role: provider.RoleAssistant, Content: resp.Content},
 			{Role: provider.RoleUser, Content: "That is the files list only. Now write the summary itself: the original task, what the user asked for and any standing instructions they gave, the decisions made, the current state and the outstanding work, in plain prose. Do not repeat the files list."},
 		}
-		again, rerr := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-			return a.Provider.Chat(ctx, provider.ChatRequest{
-				Model:       model,
-				Messages:    againMsgs,
-				Temperature: 0.1,
-				NoThink:     true,
-				MaxTokens:   a.harnessReplyTokens(summaryReplyTokens, againMsgs),
-			}, nil)
+		// The same target as the first request: the retry continues its
+		// exchange, so it goes to whichever model wrote the files list.
+		againModel := model
+		if target.helper {
+			againModel = target.model
+		}
+		again, rerr := a.choreDo(ctx, target, choreOpts{}, provider.ChatRequest{
+			Model:       againModel,
+			Messages:    againMsgs,
+			Temperature: 0.1,
+			NoThink:     true,
+			MaxTokens:   target.replyTokens(summaryReplyTokens, againMsgs),
 		})
 		if rerr == nil {
 			if s2, _ := split(again); strings.TrimSpace(s2) != "" {
@@ -2168,14 +2223,27 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 	}
 
 	// Reviewer routing: a second (usually larger) model critiques the diff.
-	if a.Cfg.ReviewOnDone && a.Cfg.Reviewer.Model != "" && ReviewerFactory != nil {
-		reviewer, reviewerModel, rerr := ReviewerFactory(a.Cfg)
-		if rerr != nil {
-			a.notice("reviewer unavailable: %v", rerr)
-			return answer, rep, nil
+	// While the main model is online and no reviewer is configured
+	// separately, the local helper is the reviewer (spec §3).
+	separate := a.Cfg.Reviewer.Model != "" && ReviewerFactory != nil
+	if a.Cfg.ReviewOnDone && (separate || (a.Cfg.Reviewer.Model == "" && a.helperConfigured())) {
+		var issues string
+		var rerr error
+		if separate {
+			reviewer, reviewerModel, ferr := ReviewerFactory(a.Cfg)
+			if ferr != nil {
+				a.notice("reviewer unavailable: %v", ferr)
+				return answer, rep, nil
+			}
+			a.notice("review pass: %s", reviewerModel)
+			issues, rerr = a.Review(ctx, reviewer, reviewerModel)
+		} else {
+			var reviewerModel string
+			issues, reviewerModel, rerr = a.helperReview(ctx)
+			if rerr == nil && reviewerModel != "" {
+				a.notice("review pass: %s", reviewerModel)
+			}
 		}
-		a.notice("review pass: %s", reviewerModel)
-		issues, rerr := a.Review(ctx, reviewer, reviewerModel)
 		if rerr != nil {
 			a.notice("review failed: %v", rerr)
 			return answer, rep, nil
@@ -2221,9 +2289,10 @@ func (a *Agent) Usage() Stats {
 }
 
 // usageTokens is what a scratch agent (plan, consultation) hands back to
-// its parent: its tokens and round-trips, not its tool calls or elapsed
+// its parent: its tokens, round-trips and spend, not its tool calls or elapsed
 // time, which the parent's own turn already accounts for.
 func (a *Agent) usageTokens() Stats {
 	u := a.Usage()
-	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests}
+	return Stats{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, Requests: u.Requests,
+		SpendUSD: u.SpendUSD, HelperPromptTokens: u.HelperPromptTokens, HelperCompletionTokens: u.HelperCompletionTokens}
 }

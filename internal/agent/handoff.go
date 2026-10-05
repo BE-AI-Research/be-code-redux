@@ -126,29 +126,24 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 		tr = "[earlier transcript omitted]\n" + cut
 	}
 	b.WriteString(tr)
-	a.awaitWindow(ctx) // never send with no window on the wire
 	// In the lane: the handoff is written on the way out, outside any turn.
 	msgs := []provider.Message{
 		{Role: provider.RoleSystem, Content: handoffSystemPrompt},
 		{Role: provider.RoleUser, Content: b.String()},
 	}
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) {
-		return a.Provider.Chat(ctx, provider.ChatRequest{
-			Model:       a.Model,
+	resp, target, err := a.choreChat(ctx, choreOpts{await: true}, func(t choreTarget) (provider.ChatRequest, error) {
+		return provider.ChatRequest{
+			Model:       t.model,
 			Messages:    msgs,
 			Temperature: 0.1,
-			NoThink:     true,                                         // seconds instead of minutes on thinking models
-			MaxTokens:   a.harnessReplyTokens(notesReplyTokens, msgs), // a briefing, not the user's turn
-		}, nil)
+			NoThink:     true,                                  // seconds instead of minutes on thinking models
+			MaxTokens:   t.replyTokens(notesReplyTokens, msgs), // a briefing, not the user's turn
+		}, nil
 	})
 	if err != nil {
 		return "", err
 	}
-	out := resp.Content
-	if a.Profile.StripThink {
-		out = StripThink(out)
-	}
-	return out, nil
+	return target.strip(resp.Content), nil
 }
 
 // heuristicHandoff is the no-model fallback: task, files touched, last reply.
