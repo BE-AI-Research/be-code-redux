@@ -20,13 +20,14 @@ you choose one, with a local model still doing the housekeeping and nothing leav
 until you have said yes, per project and per site. No telemetry, no account, no network call but
 the endpoints you configured, web search (opt-in, off by default) and one check for a newer
 release at session start (`update_check: false` turns it off). A session survives the
-terminal that started it, several terminals can watch and drive the same run, and the record of
-what the model has read and decided lives in your project as Markdown you can edit by hand.
+terminal that started it, several terminals can watch and drive the same run, the record of
+what the model has read and decided lives in your project as Markdown you can edit by hand, and
+since 1.2.1 it [updates itself from inside the app](#updating) when you choose to.
 
 ## Contents
 
 **Start here** — [Requirements](#requirements) · [Install](#install--uninstall) ·
-[Quick start](#quick-start) · [The two interfaces](#the-two-interfaces) · [Backends](#backends)
+[Updating](#updating) · [Quick start](#quick-start) · [The two interfaces](#the-two-interfaces) · [Backends](#backends)
 
 **Day to day** — [Approvals](#approvals-and-diff-previews) · [The screen](#the-screen) ·
 [Themes](#themes) · [Select and copy](#select-and-copy) ·
@@ -61,7 +62,9 @@ what the model has read and decided lives in your project as Markdown you can ed
    broken. `auto` mode tries native and falls back per session.
 3. **Aggressive context budgeting.** A `context_tokens` budget with compress-to-target trimming: old tool
    outputs collapse first, then old turns drop (the original task always survives). Small
-   contexts degrade before they overflow; BE-Code trims before that point.
+   contexts degrade before they overflow; BE-Code trims before that point. No single tool
+   result can outgrow the window either: each is held to a per-call cap, including the ones a
+   resumed session brings back.
 4. **One failure at a time.** Verification stops at the first failing check — small models
    repair best with a single root cause in front of them.
 5. **A record the conversation cannot lose.** What the model has read, run and decided is
@@ -142,7 +145,9 @@ process, which changes nothing about the machine's policy. Run that command your
 you prefer; arguments (`-NoSetup`, `-Purge`) pass straight through. Both installers are
 safe to re-run — they upgrade in place.
 
-**Updating.** Each session start asks GitHub once, in the background, whether a newer release
+### Updating
+
+Each session start asks GitHub once, in the background, whether a newer release
 exists; if one does, the bottom line shows `⬆ vX.Y.Z available`. Nothing is installed until you
 choose it: `/update` (or **Check for updates** in `/menu`) checks again, asks, downloads that
 release's binary for your platform, checks it against the release's `SHA256SUMS` and replaces
@@ -150,7 +155,8 @@ the installed `be-code` — only the binary: `~/.be-code/config.json`, sessions 
 else are left as they are. Restart BE-Code to use the new version. A build from source never
 updates itself. **Update check: on/off** in `/menu` (or `/update check off`, saved as
 `update_check: false`) stops the start-of-session check, and BE-Code is then fully offline with
-a local backend; `/update` itself still works when you choose it.
+a local backend; `/update` itself still works when you choose it. On 1.2.0 or earlier there is
+no `/update` yet: run the one-line installer above once, and later releases come in from the app.
 
 ## Quick start
 
@@ -199,7 +205,8 @@ On terminals with 30 or more rows a branded header sits at the top; below that t
 transcript, then the input row with a `(>):` prompt and the **context wheel** at its
 right: ○ ◔ ◑ ◕ ● shows how full the context is, and while the model works the wheel
 rotates (◴ ◵ ◶ ◷) with the percentage beside it. One bottom line shows `/menu /help`,
-the model, and the state. Type `/` on an empty input to open the **command palette**:
+the model, and the state — and `⬆ vX.Y.Z available` when a newer release is out
+(see [Updating](#updating)). Type `/` on an empty input to open the **command palette**:
 keep typing to filter, ↑↓ to pick, Enter runs it (or fills the input for commands that
 take an argument), Tab fills, Esc keeps what you typed. `/menu` opens a full-screen
 grouped menu with a status block (provider, model, profile, window, context usage,
