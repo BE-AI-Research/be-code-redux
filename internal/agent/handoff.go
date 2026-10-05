@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/brown-enterprises/be-code/internal/tools"
 	"slices"
 	"strings"
 	"time"
@@ -220,6 +221,17 @@ func (a *Agent) Resume(s *store.Session) {
 	// schedules are reread on every wake.
 	a.SetSession(s)
 	a.History.Messages = append([]provider.Message(nil), s.Messages...)
+	// A tool result saved before results were capped can be larger than the
+	// whole window (a 225 KB task show put the context wheel at 300%): hold
+	// it to the per-call cap now, as it would be held today. Only native
+	// tool messages — an embedded <tool_result> block is never split.
+	if max := a.Tools.MaxOutput(); max > 0 {
+		for i, m := range a.History.Messages {
+			if m.Role == provider.RoleTool && len(m.Content) > max {
+				a.History.Messages[i].Content = tools.ClipOutput(m.Content, max)
+			}
+		}
+	}
 	a.conversationReplaced()
 	// A saved history that shows the model a page — the browser's, or
 	// web_fetch's or web_search's text — starts this session with the shell

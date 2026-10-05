@@ -2,6 +2,9 @@
 
 ## v1.2.1 — (in development)
 
+- The TUI header's version now comes from the build itself (build.mk's `VERSION`, `dev` for a
+  build from source), so it can never lag a release; the header credit line no longer names a
+  person.
 - **Updates from inside the app.** Each session start asks GitHub once, in the background,
   whether a newer release exists, and only lights `⬆ vX.Y.Z available` on the bottom line
   (`update_check: false` turns the check off). `/update`, or **Check for updates** in `/menu`,
@@ -15,7 +18,9 @@
   backend.
 - Fixed: one tool result larger than the context window (a `task show` of a whole task tree came
   back at ~75k tokens in a 32k window) ended the run with an overflow error. Every tool result is
-  now held to the per-call output cap, whatever the tool.
+  now held to the per-call output cap, whatever the tool, and a resumed session's older results
+  are held to the same cap when it opens (one saved before the cap kept the context wheel at
+  300% until the next compaction).
 - When a request still does not fit after compaction, the error now tells the two cases apart:
   a model loaded smaller than `context_window` asks for still suggests reloading it (`ollama
   stop`, `reload_on_mismatch`); otherwise it says the conversation is too large and suggests

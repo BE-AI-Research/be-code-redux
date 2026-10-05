@@ -34,12 +34,30 @@ func TestHeaderHiddenOnShortTerminals(t *testing.T) {
 	if strings.Contains(m.View(), "BE-Code Redux") {
 		t.Fatal("header shown on a 24-row terminal")
 	}
+	old := Version
+	Version = "9.8.7" // the build's version, as cmd sets it from build.mk
+	t.Cleanup(func() { Version = old })
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	v := m.View()
-	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research", "Shayne G. Brown", "https://github.com/BE-AI-Research - v1.2"} {
+	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research · https://github.com/BE-AI-Research - v9.8.7"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("header lacks %q on a 40-row terminal:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "Shayne") {
+		t.Fatalf("the header names a person:\n%s", v)
+	}
+}
+
+// A build from source (no version stamped) says so rather than a number.
+func TestHeaderVersionOfASourceBuild(t *testing.T) {
+	old := Version
+	Version = "dev"
+	t.Cleanup(func() { Version = old })
+	m := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	if v := m.View(); !strings.Contains(v, "https://github.com/BE-AI-Research - dev") {
+		t.Fatalf("source build header:\n%s", v)
 	}
 }
 
@@ -126,16 +144,12 @@ func TestMenuOpensAndEscReturns(t *testing.T) {
 	}
 }
 
-// The credit line never wraps: on a terminal too narrow for the author's
-// name it falls back to the shorter attribution.
+// The credit line fits a 72-column terminal without wrapping.
 func TestHeaderCreditFitsNarrowTerminals(t *testing.T) {
 	m := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 72, Height: 40})
 	v := m.View()
-	if strings.Contains(v, "Shayne G. Brown") {
-		t.Fatalf("credit with the name shown on a 72-column terminal:\n%s", v)
-	}
-	if !strings.Contains(v, "2026 BE AI Research · https://github.com/BE-AI-Research - v1.2") {
-		t.Fatalf("short credit missing on a 72-column terminal:\n%s", v)
+	if !strings.Contains(v, "2026 BE AI Research · https://github.com/BE-AI-Research - "+headerVersion()) {
+		t.Fatalf("credit missing on a 72-column terminal:\n%s", v)
 	}
 }

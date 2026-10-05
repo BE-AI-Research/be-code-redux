@@ -98,6 +98,7 @@ func init() {
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
 	update.Current = Version
+	tui.Version = Version
 }
 
 // Execute is the entry point called from main.
