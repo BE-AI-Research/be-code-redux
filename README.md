@@ -1393,8 +1393,10 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.2.0 (in development)** — scheduled events: a running session can wake the model later, for
-a one-off follow-up or a project's recurring upkeep, under an allowance approved up front.
+**v1.2.0 — The beaver has landed.** Online main models (OpenRouter and other OpenAI-compatible
+providers) with a local helper keeping house, consent before anything leaves the machine (per
+project, per site), spend shown with an optional cap; scheduled events that wake the model later
+under an allowance approved up front; and the browser can attach to your own Chrome.
 
 Recent releases:
 

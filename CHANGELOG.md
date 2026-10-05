@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## v1.2.0 — scheduled events, online providers (in development)
+## v1.2.0 — The beaver has landed: online providers, scheduled events, your own Chrome (2026-10-05)
 
 - **Online main models.** `be-code setup` can pick an online provider (presets for OpenRouter,
   OpenAI, Groq, DeepSeek, Mistral, Gemini and Anthropic; keys only from their environment
