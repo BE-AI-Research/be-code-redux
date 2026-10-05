@@ -179,6 +179,10 @@ type Config struct {
 	LocalHelper LocalHelperConfig `json:"local_helper"`
 	// MaxSpendUSD caps a session's online spend; 0 turns the cap off.
 	MaxSpendUSD float64 `json:"max_spend_usd"`
+	// UpdateCheck turns off the quiet check for a newer release at session
+	// start (nil means on: an absent key and a chosen false differ). The
+	// /update command works either way.
+	UpdateCheck *bool `json:"update_check,omitempty"`
 
 	// Models holds per-model runtime parameters (context window, keep-alive,
 	// passthrough options), keyed by model name. Resolution order for one
@@ -758,6 +762,9 @@ func (pc ProviderConfig) APIKey() string {
 func ProviderIsOnline(pc ProviderConfig) bool {
 	return pc.Online || !LocalEndpoint(pc.BaseURL)
 }
+
+// UpdateCheckOn reports whether the start-of-session update check runs.
+func (c *Config) UpdateCheckOn() bool { return c.UpdateCheck == nil || *c.UpdateCheck }
 
 // OnlineWarnings is one warning per provider whose address is not local
 // but whose online flag is unset; such a provider is treated as online.

@@ -16,7 +16,8 @@ It talks to whatever inference you already run — Ollama, llama.cpp, LM Studio,
 Engine fabric — and, since 1.2, to an [online provider](#online-providers) such as OpenRouter if
 you choose one, with a local model still doing the housekeeping and nothing leaving the machine
 until you have said yes, per project and per site. No telemetry, no account, no network call but
-the endpoints you configured (and web search, which is opt-in and off by default). A session survives the
+the endpoints you configured, web search (opt-in, off by default) and one check for a newer
+release at session start (`update_check: false` turns it off). A session survives the
 terminal that started it, several terminals can watch and drive the same run, and the record of
 what the model has read and decided lives in your project as Markdown you can edit by hand.
 
@@ -138,6 +139,16 @@ local scripts are allowed, so the launchers run them as
 process, which changes nothing about the machine's policy. Run that command yourself if
 you prefer; arguments (`-NoSetup`, `-Purge`) pass straight through. Both installers are
 safe to re-run — they upgrade in place.
+
+**Updating.** Each session start asks GitHub once, in the background, whether a newer release
+exists; if one does, the bottom line shows `⬆ vX.Y.Z available`. Nothing is installed until you
+choose it: `/update` (or **Check for updates** in `/menu`) checks again, asks, downloads that
+release's binary for your platform, checks it against the release's `SHA256SUMS` and replaces
+the installed `be-code` — only the binary: `~/.be-code/config.json`, sessions and everything
+else are left as they are. Restart BE-Code to use the new version. A build from source never
+updates itself. **Update check: on/off** in `/menu` (or `/update check off`, saved as
+`update_check: false`) stops the start-of-session check, and BE-Code is then fully offline with
+a local backend; `/update` itself still works when you choose it.
 
 ## Quick start
 
@@ -1127,11 +1138,15 @@ write instead of writing unattended.
 - All file tools are confined to the workspace root (path-traversal hardened, per BE-CLI lessons).
 - Every shell command requires interactive approval (`y`/`N`/`a`lways) unless `-y` /
   `auto_approve_shell` is set.
-- No telemetry, no network calls except to your configured inference endpoints. Fully offline
-  with a local backend.
+- No telemetry, no network calls except to your configured inference endpoints and one release
+  check against GitHub at session start (and in `be-code doctor`); **Update check: off** in
+  `/menu` (`update_check: false`) turns both off, and then BE-Code is fully offline with a local
+  backend.
 - With an online main model, nothing is sent until the project is approved (`online_project`),
   page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
   API keys are read only from the environment.
+- An update installs only after you approve it and its checksum matches the release's
+  `SHA256SUMS`, and it replaces only the `be-code` binary.
 
 ## Layout
 
@@ -1195,7 +1210,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 
 | | |
 | --- | --- |
-| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
+| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/update` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
 | **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` `/online [forget]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
@@ -1226,6 +1241,9 @@ hand; `/config` prints what the running session actually resolved.
   is online; an online helper is refused.
 - `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
   (`spend_cap`).
+- `update_check` (true) — the quiet check for a newer release at session start, which only
+  lights the `⬆ vX.Y.Z available` notice; `false` turns it off (also **Update check** in `/menu`,
+  or `/update check on|off`). `/update` works either way.
   Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`,
   `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only
   from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,

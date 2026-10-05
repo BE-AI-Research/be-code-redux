@@ -49,10 +49,13 @@ type Session struct {
 
 	mu sync.Mutex // guards every field below except viewsMu/views and the test seams
 
-	cfg      *config.Config
-	ag       *agent.Agent
-	rootCtx  context.Context
-	cancelFn context.CancelFunc
+	cfg     *config.Config
+	ag      *agent.Agent
+	rootCtx context.Context
+	// updateAvailable is the newer release's version while one is known,
+	// shown on every terminal's bottom line ("" when none).
+	updateAvailable string
+	cancelFn        context.CancelFunc
 	// consultCancel stops a /consult asked while a run was in progress: it
 	// runs on the root context rather than the turn's, so Esc and /quit
 	// reach it here instead of through cancelFn.
@@ -812,6 +815,25 @@ func (s *Session) notice(text string) {
 	defer s.mu.Unlock()
 	s.flushLocked()
 	s.appendEntryLocked(noticeEntry(text))
+}
+
+// updateMsg tells every view the update flag changed (a redraw).
+type updateMsg struct{}
+
+// SetUpdateAvailable sets (or, with "", clears) the newer release every
+// terminal's bottom line shows.
+func (s *Session) SetUpdateAvailable(v string) {
+	s.mu.Lock()
+	s.updateAvailable = v
+	s.mu.Unlock()
+	s.broadcast(updateMsg{})
+}
+
+// UpdateAvailable is the newer release's version, or "".
+func (s *Session) UpdateAvailable() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateAvailable
 }
 
 // transient records a short-lived notice. It is not a transcript entry: it

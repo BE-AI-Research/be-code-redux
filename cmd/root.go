@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/brown-enterprises/be-code/internal/update"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -95,6 +97,7 @@ func init() {
 	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
+	update.Current = Version
 }
 
 // Execute is the entry point called from main.
@@ -792,6 +795,9 @@ func runInteractive(cmd *cobra.Command) error {
 			// Per-project consent for an online main model first (spec
 			// §2.1): before sub-agents or schedules can start, and before
 			// the first line is taken. A gate that fails ends the session.
+			startUpdateCheck(cfg, http.DefaultClient, func(v string) {
+				ag.Notice(fmt.Sprintf("BE-Code v%s is available — /update installs it", v))
+			})
 			if !ag.StartOnlineGate() {
 				repl.Stop()
 				return
@@ -842,6 +848,8 @@ func runInteractive(cmd *cobra.Command) error {
 	// an approved one) runs done on this goroutine, exactly as before. A
 	// gate that fails ends the session; its notice is repeated below, after
 	// the screen has gone.
+	// A newer release only lights a notice; installing is /update's.
+	startUpdateCheck(cfg, http.DefaultClient, s.SetUpdateAvailable)
 	ag.StartOnlineGateAsync(func(ok bool) {
 		if !ok {
 			s.Quit()

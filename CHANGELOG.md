@@ -1,5 +1,22 @@
 # BE-Code Changelog
 
+## v1.2.1 — (in development)
+
+- **Updates from inside the app.** Each session start asks GitHub once, in the background,
+  whether a newer release exists, and only lights `⬆ vX.Y.Z available` on the bottom line
+  (`update_check: false` turns the check off). `/update`, or **Check for updates** in `/menu`,
+  checks again and asks (`update`, no "always"; `-y` never answers it), then downloads the
+  release's binary for this platform, verifies it against the release's `SHA256SUMS` and
+  replaces the installed `be-code` — only that file; `config.json` and sessions are never
+  touched. Restart to use it. Unverifiable, missing or unwritable → nothing is replaced and the
+  reason is shown (with the install command when the folder is not writable). `doctor` reports
+  the latest version. **Update check: on/off** in `/menu` (or `/update check on|off`) saves
+  `update_check`; off, BE-Code makes no network call at start and is fully offline with a local
+  backend.
+- Fixed: one tool result larger than the context window (a `task show` of a whole task tree came
+  back at ~75k tokens in a 32k window) ended the run with an overflow error. Every tool result is
+  now held to the per-call output cap, whatever the tool.
+
 ## v1.2.0 — The beaver has landed: online providers, scheduled events, your own Chrome (2026-10-05)
 
 - **Online main models.** `be-code setup` can pick an online provider (presets for OpenRouter,

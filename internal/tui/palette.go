@@ -260,6 +260,8 @@ func (m *View) menuEntries() []menuEntry {
 		{"Settings", "Theme", "pick a colour theme for this terminal (applies immediately)",
 			func(m *View) (tea.Model, tea.Cmd) { return m.openThemePicker() }},
 		{"Settings", "Show config", "effective configuration", cmd("/config")},
+		{"Settings", "Check for updates", "look for a newer BE-Code and install it", cmd("/update")},
+		updateCheckEntry(m.cfg.UpdateCheckOn(), cmd),
 		{"Settings", "Help", "command reference", cmd("/help")},
 		{"Settings", "Quit", "exit BE-Code (writes the resume briefing)", cmd("/quit")},
 	}
@@ -342,3 +344,12 @@ func (m *View) viewMenu() string {
 }
 
 var _ = lipgloss.Width
+
+// updateCheckEntry is the menu's toggle for the start-of-session check; off,
+// BE-Code makes no network call at start (fully offline).
+func updateCheckEntry(on bool, cmd func(string) func(*View) (tea.Model, tea.Cmd)) menuEntry {
+	if on {
+		return menuEntry{"Settings", "Update check: on", "turn off the release check at session start (fully offline)", cmd("/update check off")}
+	}
+	return menuEntry{"Settings", "Update check: off", "check GitHub for a newer release at session start", cmd("/update check on")}
+}
