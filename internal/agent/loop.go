@@ -176,7 +176,11 @@ type Agent struct {
 	// and its prices.
 	onlineMu   sync.Mutex
 	onlineName string
-	pricing    Pricing
+	// outageDeclined: the switch to the local helper was offered during
+	// this outage and refused; cleared by the next successful primary call
+	// (outage.go). Under onlineMu.
+	outageDeclined bool
+	pricing        Pricing
 	// webSharedWith is the online provider the history's earlier page text
 	// was last settled for (share.go); "" while local. Under onlineMu.
 	webSharedWith string
@@ -1280,7 +1284,16 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		req := a.requestFor(effort, true)
 
 		resp, err := a.chatWithRetry(ctx, req)
+		if err == nil {
+			a.noteOutageOver()
+		}
 		if err != nil {
+			// An online provider that stays down: offer the local helper
+			// once (outage.go). A yes retries the turn on the new model.
+			if a.offerOutageSwitch(ctx, err) {
+				turn--
+				continue
+			}
 			// Some servers reject the tools field outright — fall back to
 			// embedded tool calls for the rest of the session.
 			if !a.compat && a.Cfg.CompatToolCalls != "never" && looksLikeToolsUnsupported(err) {

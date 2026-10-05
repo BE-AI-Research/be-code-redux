@@ -251,7 +251,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// command's own ApproveOnlineForRun, never this prompt), nor
 		// share_page (online spec §2.2: page text to an online model).
 		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
-			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
+			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}
@@ -262,7 +262,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 			return true
 		}
 		if !stdinIsTTY() {
-			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" {
+			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" {
 				// -y never approves these two (browser spec §3.3, §3.6), so
 				// the usual "use -y" hint would be a false promise.
 				fmt.Fprintf(os.Stderr, "denied %s (non-interactive; this action always asks a person): %.120s\n", action, detail)
