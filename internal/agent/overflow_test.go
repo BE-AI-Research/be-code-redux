@@ -76,7 +76,9 @@ func TestOverflowReResolvesTheWindowAndRetriesOnce(t *testing.T) {
 // not the server's raw JSON.
 func TestOverflowThatCannotBeFixedIsExplained(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
-	ag.SetLoader(&fakeLoader{window: 8192})
+	// Configured for 32768, but the server holds the model at 8192 and the
+	// reload was not allowed: the window is the problem, and a reload fixes it.
+	ag.SetLoader(&configuredLoader{fakeLoader: &fakeLoader{window: 8192}, configured: 32768})
 	ag.ApplyWindow(8192)
 	var calls atomic.Int64
 	ag.Provider = &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
@@ -165,5 +167,40 @@ func TestSavedOversizedToolResultIsRecovered(t *testing.T) {
 	out, err := ag.Run(context.Background(), "carry on")
 	if err != nil || out != "done" {
 		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+// configuredLoader is a loader that also says what window config asks for.
+type configuredLoader struct {
+	*fakeLoader
+	configured int
+}
+
+func (c *configuredLoader) ConfiguredWindow(string) int { return c.configured }
+
+// The window is what config asked for (the 2026-10-05 session: 32768 asked,
+// 32768 loaded) and the prompt still does not fit: the conversation is too
+// large. Telling the person to unload the model would change nothing.
+func TestOverflowWithTheRightWindowSaysTheConversationIsTooLarge(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 0 })
+	ag.SetLoader(&configuredLoader{fakeLoader: &fakeLoader{window: 8192}, configured: 8192})
+	ag.ApplyWindow(8192)
+	ag.Provider = &funcProvider{fn: func(provider.ChatRequest) (*provider.ChatResponse, error) {
+		return nil, errors.New(overflowBody)
+	}}
+	_, err := ag.Run(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"11320", "8192-token window", "the conversation is too large", "/compact", "/clear"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not mention %q: %s", want, msg)
+		}
+	}
+	for _, bad := range []string{"ollama stop", "reload_on_mismatch"} {
+		if strings.Contains(msg, bad) {
+			t.Errorf("error suggests %q, which cannot help here: %s", bad, msg)
+		}
 	}
 }

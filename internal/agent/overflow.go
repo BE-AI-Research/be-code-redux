@@ -102,6 +102,18 @@ func (a *Agent) overflowError(promptTokens, serverWindow int) error {
 	if promptTokens <= 0 {
 		promptTokens = a.History.Tokens()
 	}
+	// Only a model loaded smaller than config asks for is a window problem;
+	// otherwise reloading changes nothing and the conversation is what is
+	// too big.
+	configured := 0
+	if cw, ok := a.modelLoader().(interface{ ConfiguredWindow(string) int }); ok {
+		configured = cw.ConfiguredWindow(a.Model)
+	}
+	if configured <= serverWindow {
+		return fmt.Errorf("the request (%d tokens) does not fit the %d-token window %s is loaded with, and compaction could not bring it under: the conversation is too large (about %d of those tokens are the system prompt and tool schemas). "+
+			"To fix it: /compact to summarise it, or /clear to start fresh",
+			promptTokens, serverWindow, a.Model, a.History.Floor())
+	}
 	return fmt.Errorf("the request (%d tokens) does not fit the %d-token window %s is loaded with; about %d of those tokens are the system prompt and tool schemas, which compaction cannot remove. "+
 		"To fix it: unload the model on the server so it reloads at the configured window (`ollama stop %s`), "+
 		"or set reload_on_mismatch to \"always\" if that server is yours to reshape, or /clear to drop this conversation",

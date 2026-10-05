@@ -189,6 +189,9 @@ func (l *Loader) stripRunnerOptions(model string, p *Params) {
 // per-model one.
 func (l *Loader) KeepAlive(model string) time.Duration { return l.Params(model).KeepAlive }
 
+// ConfiguredWindow is the window config asks for this model (0: none set).
+func (l *Loader) ConfiguredWindow(model string) int { return l.Params(model).Window }
+
 // Apply resolves the model's parameters and makes them true on the server,
 // asking first whenever that would change what another application on the
 // box is using. It returns the window the session should budget against; 0

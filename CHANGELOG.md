@@ -16,6 +16,10 @@
 - Fixed: one tool result larger than the context window (a `task show` of a whole task tree came
   back at ~75k tokens in a 32k window) ended the run with an overflow error. Every tool result is
   now held to the per-call output cap, whatever the tool.
+- When a request still does not fit after compaction, the error now tells the two cases apart:
+  a model loaded smaller than `context_window` asks for still suggests reloading it (`ollama
+  stop`, `reload_on_mismatch`); otherwise it says the conversation is too large and suggests
+  `/compact` or `/clear`, instead of a reload that would change nothing.
 
 ## v1.2.0 — The beaver has landed: online providers, scheduled events, your own Chrome (2026-10-05)
 
