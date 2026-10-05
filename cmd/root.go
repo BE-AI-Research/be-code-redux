@@ -347,7 +347,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// resolution, so the online state never outlives the provider it
 	// described (same import-cycle dodge as ReviewerFactory).
 	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
-		resolveOnline(ctx, cfg, a.Provider, a, name, model, false)
+		resolveOnline(ctx, cfg, a.CurrentProviderClient(), a, name, model, false)
 	}
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil

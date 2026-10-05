@@ -834,7 +834,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		// Inline, not on a goroutine: the consent question this may raise
 		// is answered through the one input stream this loop is reading.
 		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, fields[1]) })
-		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.Profile.Family)
+		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.CurrentFamily())
 	case "/provider":
 		if len(fields) < 2 {
 			fmt.Printf("current provider: %s (configured: see /config)\n", r.Agent.CurrentProvider())
