@@ -1085,7 +1085,7 @@ func (m *View) refreshTranscript() {
 
 // PublicVersion is the user-facing release line shown in the header,
 // independent of the internal build version in build.mk.
-const PublicVersion = "v1.0"
+const PublicVersion = "v1.2"
 
 // headerMinRows is the terminal height from which the branded header is
 // drawn; below it the rows go to the transcript.

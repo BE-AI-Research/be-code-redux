@@ -36,7 +36,7 @@ func TestHeaderHiddenOnShortTerminals(t *testing.T) {
 	}
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	v := m.View()
-	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research", "Shayne G. Brown", "https://github.com/BE-AI-Research - v1.0"} {
+	for _, want := range []string{"BE-Code Redux", "2026 BE AI Research", "Shayne G. Brown", "https://github.com/BE-AI-Research - v1.2"} {
 		if !strings.Contains(v, want) {
 			t.Fatalf("header lacks %q on a 40-row terminal:\n%s", want, v)
 		}
@@ -135,7 +135,7 @@ func TestHeaderCreditFitsNarrowTerminals(t *testing.T) {
 	if strings.Contains(v, "Shayne G. Brown") {
 		t.Fatalf("credit with the name shown on a 72-column terminal:\n%s", v)
 	}
-	if !strings.Contains(v, "2026 BE AI Research · https://github.com/BE-AI-Research - v1.0") {
+	if !strings.Contains(v, "2026 BE AI Research · https://github.com/BE-AI-Research - v1.2") {
 		t.Fatalf("short credit missing on a 72-column terminal:\n%s", v)
 	}
 }
