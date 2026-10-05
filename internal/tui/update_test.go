@@ -34,3 +34,27 @@ func TestUpdateAskHasNoAlways(t *testing.T) {
 		t.Fatal("n never answered")
 	}
 }
+
+// The notice is the session's, so every attached terminal shows it, and
+// clearing it (after an update) clears it everywhere.
+func TestNoticeOnEveryView(t *testing.T) {
+	s, a, b := twoViews(t)
+	s.SetUpdateAvailable("9.9.9")
+	flush(a, b)
+	for name, v := range map[string]*View{"a": a, "b": b} {
+		s.mu.Lock()
+		line := v.bottomLine()
+		s.mu.Unlock()
+		if !strings.Contains(line, "⬆ v9.9.9 available") {
+			t.Fatalf("%s: %q", name, line)
+		}
+	}
+	s.SetUpdateAvailable("")
+	flush(a, b)
+	s.mu.Lock()
+	line := a.bottomLine()
+	s.mu.Unlock()
+	if strings.Contains(line, "available") {
+		t.Fatalf("cleared notice still shown: %q", line)
+	}
+}

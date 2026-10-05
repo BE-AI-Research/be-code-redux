@@ -1270,6 +1270,9 @@ func (m *View) bottomLine() string {
 	if name, at, ok := m.ag.NextSchedule(); ok {
 		line += m.st.Dim.Render(" · next: " + name + " " + at.Format("15:04"))
 	}
+	if v := m.updateAvailable; v != "" {
+		line += m.st.Dim.Render(" · ⬆ v" + v + " available")
+	}
 	if n := len(m.clients); n > 1 {
 		line += m.st.Accent.Render(fmt.Sprintf(" %s %d", m.clientsGlyph(), n))
 		if labels := m.clientLabels(m.width - lipgloss.Width(line) - 3); labels != "" {

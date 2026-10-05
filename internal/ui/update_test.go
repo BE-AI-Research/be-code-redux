@@ -125,3 +125,23 @@ func TestREPLUpdateApprovalHasNoAlways(t *testing.T) {
 		t.Fatalf("header:\n%s", out)
 	}
 }
+
+// The owner's rule: an update never touches config.json. The binary is
+// replaced; ~/.be-code/config.json is byte-for-byte what it was.
+func TestUpdateNeverTouchesConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfgPath := filepath.Join(home, ".be-code", "config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0o700)
+	want := []byte(`{"default_provider":"ollama","model":"mine"}`)
+	os.WriteFile(cfgPath, want, 0o600)
+	before, _ := os.Stat(cfgPath)
+	fakeRelease(t, "9.9.9")
+	if got := UpdateCommand(context.Background(), http.DefaultClient, func(string) bool { return true }, nil); !strings.HasPrefix(got, "updated to v9.9.9") {
+		t.Fatalf("%q", got)
+	}
+	after, _ := os.Stat(cfgPath)
+	if b, _ := os.ReadFile(cfgPath); string(b) != string(want) || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("config.json changed: %q", b)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -144,6 +145,8 @@ func runSessionHost(code string) error {
 	//
 	// The online consent question (spec §2.1) runs first and gates both; see
 	// runInteractive's matching call.
+	// A newer release only lights a notice; installing is /update's.
+	startUpdateCheck(cfg, http.DefaultClient, s.SetUpdateAvailable)
 	ag.StartOnlineGateAsync(func(ok bool) {
 		if !ok {
 			s.Quit()

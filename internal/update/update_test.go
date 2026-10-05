@@ -184,3 +184,21 @@ func TestInstallReplacesSymlinkTarget(t *testing.T) {
 		t.Fatal("symlink replaced by a file")
 	}
 }
+
+// An update replaces the be-code binary and nothing else: a target that is
+// not a be-code binary file (a config file, a directory) is refused untouched.
+func TestInstallRefusesATargetThatIsNotTheBinary(t *testing.T) {
+	fakeGitHub(t, []byte("new"), sha([]byte("new")))
+	r, _ := Latest(context.Background(), http.DefaultClient)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	os.WriteFile(cfg, []byte(`{"model":"x"}`), 0o600)
+	for _, target := range []string{cfg, dir} {
+		if err := Install(context.Background(), http.DefaultClient, r, runtime.GOOS, runtime.GOARCH, target); err == nil {
+			t.Fatalf("installed over %s", target)
+		}
+	}
+	if b, _ := os.ReadFile(cfg); string(b) != `{"model":"x"}` {
+		t.Fatalf("config changed: %q", b)
+	}
+}

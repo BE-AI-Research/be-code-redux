@@ -184,6 +184,11 @@ func fetch(ctx context.Context, c *http.Client, url string, limit int64, w io.Wr
 // release's SHA256SUMS and replaces target with it. Nothing is replaced
 // unless the checksum matches.
 func Install(ctx context.Context, c *http.Client, r Release, goos, goarch, target string) error {
+	// Only the be-code binary is ever replaced: never config.json or
+	// anything else a wrong target path could name.
+	if fi, err := os.Stat(target); err != nil || !fi.Mode().IsRegular() || !strings.HasPrefix(filepath.Base(target), "be-code") {
+		return fmt.Errorf("%s is not the installed be-code binary; not updated", target)
+	}
 	name := AssetName(goos, goarch)
 	binURL, ok := r.Assets[name]
 	if !ok {

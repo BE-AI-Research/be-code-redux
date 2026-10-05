@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -532,6 +533,7 @@ var doctorCmd = &cobra.Command{
 		if line := onlineDoctorLine(cmd.Context(), cfg); line != "" {
 			fmt.Println(line)
 		}
+		fmt.Println(updateDoctorLine(cmd.Context(), cfg, http.DefaultClient))
 		model := provider.ResolveModel(cfg, cfg.DefaultProvider, "")
 		if prof := profiles.Detect(model); prof.Notes != "" {
 			fmt.Printf("model: %s → %s profile (%s)\n", model, prof.Family, prof.Notes)
