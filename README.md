@@ -2,7 +2,7 @@
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.2.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.2.1-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -1425,12 +1425,18 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.2.0 — The beaver has landed.** Online main models (OpenRouter and other OpenAI-compatible
-providers) with a local helper keeping house, consent before anything leaves the machine (per
-project, per site), spend shown with an optional cap; scheduled events that wake the model later
-under an allowance approved up front; and the browser can attach to your own Chrome.
+**v1.2.1** — updates from inside the app: a quiet check at session start lights a notice, and
+`/update` installs the new release after checking it against the release's checksums (only the
+binary is replaced; your config is never touched). **Update check: off** in `/menu` keeps
+BE-Code fully offline. Also fixed: a single huge tool result could end a long session, and a
+resumed session holding one opened at 300% of its window.
 
 Recent releases:
+
+- **v1.2.0 — The beaver has landed.** Online main models (OpenRouter and other OpenAI-compatible
+  providers) with a local helper keeping house, consent before anything leaves the machine (per
+  project, per site), spend shown with an optional cap; scheduled events that wake the model
+  later under an allowance approved up front; and the browser can attach to your own Chrome.
 
 - **v1.1.5** — a browser the model can drive, with per-site consent, and a UserID prompt when a
   terminal attaches.

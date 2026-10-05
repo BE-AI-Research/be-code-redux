@@ -1,30 +1,30 @@
 # BE-Code Changelog
 
-## v1.2.1 — (in development)
+## v1.2.1 — Updates from inside the app, and long sessions that stay alive (2026-10-05)
 
-- The TUI header's version now comes from the build itself (build.mk's `VERSION`, `dev` for a
-  build from source), so it can never lag a release; the header credit line no longer names a
-  person.
 - **Updates from inside the app.** Each session start asks GitHub once, in the background,
-  whether a newer release exists, and only lights `⬆ vX.Y.Z available` on the bottom line
-  (`update_check: false` turns the check off). `/update`, or **Check for updates** in `/menu`,
-  checks again and asks (`update`, no "always"; `-y` never answers it), then downloads the
-  release's binary for this platform, verifies it against the release's `SHA256SUMS` and
-  replaces the installed `be-code` — only that file; `config.json` and sessions are never
-  touched. Restart to use it. Unverifiable, missing or unwritable → nothing is replaced and the
-  reason is shown (with the install command when the folder is not writable). `doctor` reports
-  the latest version. **Update check: on/off** in `/menu` (or `/update check on|off`) saves
-  `update_check`; off, BE-Code makes no network call at start and is fully offline with a local
-  backend.
-- Fixed: one tool result larger than the context window (a `task show` of a whole task tree came
-  back at ~75k tokens in a 32k window) ended the run with an overflow error. Every tool result is
-  now held to the per-call output cap, whatever the tool, and a resumed session's older results
-  are held to the same cap when it opens (one saved before the cap kept the context wheel at
-  300% until the next compaction).
+  whether a newer release exists, and only lights `⬆ vX.Y.Z available` on the bottom line.
+  `/update`, or **Check for updates** in `/menu`, checks again and asks (`update`, no "always";
+  `-y` never answers it), then downloads the release's binary for this platform, verifies it
+  against the release's `SHA256SUMS` and replaces the installed `be-code` — only that file;
+  `config.json` and sessions are never touched. Restart to use it. Unverifiable, missing or
+  unwritable → nothing is replaced and the reason is shown (with the install command when the
+  folder is not writable). `doctor` reports the latest version.
+- **Fully offline, one switch.** **Update check: on/off** in `/menu` (or `/update check on|off`,
+  saved as `update_check`) stops the start-of-session check; off, BE-Code makes no network call
+  at start and is fully offline with a local backend. `/update` still works when you choose it.
+- Fixed: a long session could end on its own. One tool result larger than the context window (a
+  `task show` of a whole task tree came back at ~75k tokens in a 32k window) ended the run with
+  an overflow error, and compaction could not shrink it. Every tool result is now held to the
+  per-call output cap, whatever the tool, and a resumed session's older results are held to the
+  same cap when it opens — one saved before the cap kept the context wheel at 300%.
 - When a request still does not fit after compaction, the error now tells the two cases apart:
   a model loaded smaller than `context_window` asks for still suggests reloading it (`ollama
   stop`, `reload_on_mismatch`); otherwise it says the conversation is too large and suggests
   `/compact` or `/clear`, instead of a reload that would change nothing.
+- The TUI header's version now comes from the build itself (build.mk's `VERSION`, `dev` for a
+  build from source), so it can never lag a release; the header credit line no longer names a
+  person.
 
 ## v1.2.0 — The beaver has landed: online providers, scheduled events, your own Chrome (2026-10-05)
 
