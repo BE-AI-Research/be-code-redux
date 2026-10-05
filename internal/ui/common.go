@@ -78,6 +78,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/map", "show the repo map", false},
 	{"/stats", "session metrics: context, model cost, tools, tasks", false},
 	{"/online", "the online main model: provider, approval, spend; /online forget", true},
+	{"/update", "check for a newer BE-Code and install it", false},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
@@ -143,6 +144,8 @@ var busySafe = map[string]bool{
 	// The online state and its approval store; forgetting only touches the
 	// file the next session reads.
 	"/online": true,
+	// Checking and installing touch only the binary on disk, never the run.
+	"/update": true,
 }
 
 // OnlineCommand is /online in both UIs: the report, or /online forget.

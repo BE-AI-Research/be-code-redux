@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -780,7 +781,7 @@ func (m *View) showAsk(a *ask) {
 	case askApproval:
 		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
 			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" || a.Action == "update" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -890,7 +891,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
 		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" || a.Action == "update" {
 			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
 			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
@@ -1407,6 +1408,10 @@ func (m *View) viewAsk() string {
 		title = "Online model not responding"
 		hint = "y switch · n keep waiting · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
+	case "update":
+		title = "Update BE-Code"
+		hint = "y install · n not now · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
 	case "tool_call":
 		title = "Tool call during a scheduled event"
 		hint = "y run it · n refuse · ↑↓ scroll"
@@ -1743,6 +1748,21 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}()
 	case "/online":
 		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, fields[1:])})
+	case "/update":
+		// Off the update loop: the question is a shared ask that blocks until
+		// a terminal answers, and the download can take a while. On the
+		// session's root context, so Esc on a run does not cancel it.
+		sess := m.Session
+		ctx := sess.rootCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		go func() {
+			line := ui.UpdateCommand(ctx, http.DefaultClient, func(d string) bool {
+				return sess.ag.Tools.AskPerson(ctx, "update", d)
+			}, func() { sess.SetUpdateAvailable("") })
+			sess.notice(line)
+		}()
 	case "/stats":
 		var labels []string
 		for _, c := range m.clients {

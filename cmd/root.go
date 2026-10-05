@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/brown-enterprises/be-code/internal/update"
 	"io"
 	"os"
 	"os/signal"
@@ -95,6 +96,7 @@ func init() {
 	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	mcp.ClientVersion = Version
+	update.Current = Version
 }
 
 // Execute is the entry point called from main.

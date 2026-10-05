@@ -260,6 +260,7 @@ func (m *View) menuEntries() []menuEntry {
 		{"Settings", "Theme", "pick a colour theme for this terminal (applies immediately)",
 			func(m *View) (tea.Model, tea.Cmd) { return m.openThemePicker() }},
 		{"Settings", "Show config", "effective configuration", cmd("/config")},
+		{"Settings", "Check for updates", "look for a newer BE-Code and install it", cmd("/update")},
 		{"Settings", "Help", "command reference", cmd("/help")},
 		{"Settings", "Quit", "exit BE-Code (writes the resume briefing)", cmd("/quit")},
 	}

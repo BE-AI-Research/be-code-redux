@@ -1,0 +1,36 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+// update has no "always": "a" leaves the modal open and changes nothing.
+func TestUpdateAskHasNoAlways(t *testing.T) {
+	s, a, _ := twoViews(t)
+	beforeShell, beforeBrowser := s.cfg.AutoApproveShell, s.cfg.AutoApproveBrowser
+	decided := make(chan bool, 1)
+	go func() { decided <- s.approveFromAgent("update", "Update BE-Code 1.0.0 → 9.9.9?") }()
+	waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+	view := a.View()
+	if !strings.Contains(view, "Update BE-Code") || !strings.Contains(view, "y install · n not now") {
+		t.Fatalf("title/hint:\n%s", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	flush(a)
+	if a.mode != modeAsk || s.cfg.AutoApproveShell != beforeShell || s.cfg.AutoApproveBrowser != beforeBrowser {
+		t.Fatal(`"a" must do nothing on an update prompt`)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	select {
+	case ok := <-decided:
+		if ok {
+			t.Fatal("n declines")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("n never answered")
+	}
+}

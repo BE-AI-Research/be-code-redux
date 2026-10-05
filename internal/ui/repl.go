@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -226,6 +227,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
 	case "spend_cap":
 		fmt.Printf("%s\n%s\n", yell("spend cap reached:"), detail)
+	case "update":
+		fmt.Printf("%s\n%s\n", yell("update BE-Code:"), detail)
 	case "online_project":
 		fmt.Printf("%s\n%s\n", yell("online model:"), detail)
 	case "share_page":
@@ -323,7 +326,7 @@ func (t replTerminal) Withdraw(note string) {
 // §2.1–2.3).
 func noAlwaysAction(action string) bool {
 	switch action {
-	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local":
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update":
 		return true
 	}
 	return false
@@ -1096,6 +1099,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Println(r.Agent.StatsReport(nil))
 	case "/online":
 		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
+	case "/update":
+		fmt.Println(UpdateCommand(ctx, http.DefaultClient, func(d string) bool {
+			return r.Agent.Tools.AskPerson(ctx, "update", d)
+		}, nil))
 	case "/map":
 		m := r.Agent.RepoMap()
 		if m == "" {
