@@ -1100,6 +1100,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/online":
 		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
 	case "/update":
+		if len(fields) > 1 && fields[1] == "check" {
+			fmt.Println(UpdateCheckCommand(r.Cfg, strings.Join(fields[2:], " ")))
+			break
+		}
 		// Through runBusy, as /consult is: typed mid-run, this goroutine is
 		// the one reading r.lines, so the question's answer (and Ctrl-C)
 		// must be serviced while the update runs, not after it.

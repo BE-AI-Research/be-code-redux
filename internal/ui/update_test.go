@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/update"
 )
 
@@ -217,5 +218,29 @@ func TestUpdateSlowAnswerStillInstalls(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(target); string(b) != "new binary" {
 		t.Fatal("not installed")
+	}
+}
+
+// The person can turn the start-of-session check off (fully offline) and on
+// again; the choice is saved in config.json so the next session honours it.
+func TestUpdateCheckToggleSaves(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	if got := UpdateCheckCommand(cfg, "off"); got != "update check off — BE-Code makes no network call at start" {
+		t.Fatalf("%q", got)
+	}
+	if cfg.UpdateCheckOn() {
+		t.Fatal("still on")
+	}
+	saved, err := config.Load()
+	if err != nil || saved.UpdateCheckOn() {
+		t.Fatalf("not saved off (err %v)", err)
+	}
+	if got := UpdateCheckCommand(cfg, ""); got != "update check on — BE-Code checks GitHub for a newer release at start" || !cfg.UpdateCheckOn() {
+		t.Fatalf("toggle back: %q", got)
+	}
+	if got := UpdateCheckCommand(cfg, "sideways"); got != "usage: /update check on|off" {
+		t.Fatalf("%q", got)
 	}
 }

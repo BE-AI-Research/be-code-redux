@@ -78,7 +78,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/map", "show the repo map", false},
 	{"/stats", "session metrics: context, model cost, tools, tasks", false},
 	{"/online", "the online main model: provider, approval, spend; /online forget", true},
-	{"/update", "check for a newer BE-Code and install it", false},
+	{"/update", "check for a newer BE-Code and install it; /update check on|off", false},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},

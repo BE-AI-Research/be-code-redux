@@ -146,8 +146,9 @@ choose it: `/update` (or **Check for updates** in `/menu`) checks again, asks, d
 release's binary for your platform, checks it against the release's `SHA256SUMS` and replaces
 the installed `be-code` — only the binary: `~/.be-code/config.json`, sessions and everything
 else are left as they are. Restart BE-Code to use the new version. A build from source never
-updates itself, and `update_check: false` stops the start-of-session check (the command still
-works).
+updates itself. **Update check: on/off** in `/menu` (or `/update check off`, saved as
+`update_check: false`) stops the start-of-session check, and BE-Code is then fully offline with
+a local backend; `/update` itself still works when you choose it.
 
 ## Quick start
 
@@ -1138,8 +1139,9 @@ write instead of writing unattended.
 - Every shell command requires interactive approval (`y`/`N`/`a`lways) unless `-y` /
   `auto_approve_shell` is set.
 - No telemetry, no network calls except to your configured inference endpoints and one release
-  check against GitHub at session start (and in `be-code doctor`); `update_check: false` turns
-  both off, and then BE-Code is fully offline with a local backend.
+  check against GitHub at session start (and in `be-code doctor`); **Update check: off** in
+  `/menu` (`update_check: false`) turns both off, and then BE-Code is fully offline with a local
+  backend.
 - With an online main model, nothing is sent until the project is approved (`online_project`),
   page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
   API keys are read only from the environment.
@@ -1240,7 +1242,8 @@ hand; `/config` prints what the running session actually resolved.
 - `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
   (`spend_cap`).
 - `update_check` (true) — the quiet check for a newer release at session start, which only
-  lights the `⬆ vX.Y.Z available` notice; `false` turns it off. `/update` works either way.
+  lights the `⬆ vX.Y.Z available` notice; `false` turns it off (also **Update check** in `/menu`,
+  or `/update check on|off`). `/update` works either way.
   Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`,
   `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only
   from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,

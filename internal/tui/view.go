@@ -1752,6 +1752,15 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/online":
 		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, fields[1:])})
 	case "/update":
+		if len(fields) > 1 && fields[1] == "check" {
+			line := ui.UpdateCheckCommand(m.cfg, strings.Join(fields[2:], " "))
+			if !m.cfg.UpdateCheckOn() {
+				m.updateAvailable = "" // fully offline: no notice from an earlier check either
+				m.broadcast(updateMsg{})
+			}
+			m.appendEntryLocked(entry{Kind: entryDim, Text: line})
+			return m, nil
+		}
 		// Off the update loop: the question is a shared ask that blocks until
 		// a terminal answers, and the download can take a while. On the
 		// session's root context, so Esc on a run does not cancel it.

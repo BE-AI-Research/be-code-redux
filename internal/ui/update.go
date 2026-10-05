@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/update"
 )
 
@@ -48,4 +49,29 @@ func UpdateCommand(ctx context.Context, c *http.Client, ask func(detail string) 
 		onUpdated()
 	}
 	return fmt.Sprintf("updated to v%s; restart BE-Code to use it", rel.Version)
+}
+
+// UpdateCheckCommand is /update check [on|off] (and the menu toggle): it
+// sets update_check and saves config.json, so the next session honours it.
+// No argument flips the current setting.
+func UpdateCheckCommand(cfg *config.Config, arg string) string {
+	on := !cfg.UpdateCheckOn()
+	switch arg {
+	case "":
+	case "on":
+		on = true
+	case "off":
+		on = false
+	default:
+		return "usage: /update check on|off"
+	}
+	cfg.UpdateCheck = &on
+	msg := "update check on — BE-Code checks GitHub for a newer release at start"
+	if !on {
+		msg = "update check off — BE-Code makes no network call at start"
+	}
+	if err := cfg.Save(); err != nil {
+		return msg + " (this session only: could not save config: " + err.Error() + ")"
+	}
+	return msg
 }

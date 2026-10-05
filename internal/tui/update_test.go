@@ -58,3 +58,33 @@ func TestNoticeOnEveryView(t *testing.T) {
 		t.Fatalf("cleared notice still shown: %q", line)
 	}
 }
+
+// The menu shows the check's state and flips it; turning it off clears a
+// lit notice on every terminal.
+func TestMenuUpdateCheckToggle(t *testing.T) {
+	s, a, b := twoViews(t)
+	label := func() string {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, e := range a.menuEntries() {
+			if strings.HasPrefix(e.label, "Update check") {
+				return e.label
+			}
+		}
+		return ""
+	}
+	if got := label(); got != "Update check: on" {
+		t.Fatalf("label %q", got)
+	}
+	s.SetUpdateAvailable("9.9.9")
+	s.mu.Lock()
+	a.slashCommand("/update check off")
+	s.mu.Unlock()
+	flush(a, b)
+	if got := label(); got != "Update check: off" {
+		t.Fatalf("label after off %q", got)
+	}
+	if s.UpdateAvailable() != "" {
+		t.Fatal("notice still lit with the check off")
+	}
+}

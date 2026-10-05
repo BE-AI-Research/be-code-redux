@@ -49,13 +49,13 @@ type Session struct {
 
 	mu sync.Mutex // guards every field below except viewsMu/views and the test seams
 
-	cfg      *config.Config
-	ag       *agent.Agent
-	rootCtx  context.Context
+	cfg     *config.Config
+	ag      *agent.Agent
+	rootCtx context.Context
 	// updateAvailable is the newer release's version while one is known,
 	// shown on every terminal's bottom line ("" when none).
 	updateAvailable string
-	cancelFn context.CancelFunc
+	cancelFn        context.CancelFunc
 	// consultCancel stops a /consult asked while a run was in progress: it
 	// runs on the root context rather than the turn's, so Esc and /quit
 	// reach it here instead of through cancelFn.

@@ -10,7 +10,9 @@
   replaces the installed `be-code` — only that file; `config.json` and sessions are never
   touched. Restart to use it. Unverifiable, missing or unwritable → nothing is replaced and the
   reason is shown (with the install command when the folder is not writable). `doctor` reports
-  the latest version.
+  the latest version. **Update check: on/off** in `/menu` (or `/update check on|off`) saves
+  `update_check`; off, BE-Code makes no network call at start and is fully offline with a local
+  backend.
 - Fixed: one tool result larger than the context window (a `task show` of a whole task tree came
   back at ~75k tokens in a 32k window) ended the run with an overflow error. Every tool result is
   now held to the per-call output cap, whatever the tool.
