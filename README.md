@@ -548,8 +548,10 @@ there is no background daemon.
 
 BE-Code is offline-first, but the main model can be an online one (OpenRouter, OpenAI, Groq,
 DeepSeek, Mistral, Gemini, Anthropic) while a small local model does the housekeeping. `be-code
-setup` offers it as the last numbered backend: pick a preset (OpenRouter first), pick a model from
-the provider's listing, and the first local backend found becomes the helper. Setup saves nothing
+setup` offers it as the last numbered choice, next to the local default when no backend is
+found (so no local GPU is needed): pick a preset (OpenRouter first), pick a model from
+the provider's listing, and the first local backend found, if any, becomes the helper (without one, `local_helper`
+stays unset). Setup saves nothing
 and says `set <KEY_ENV> in your shell, then run be-code setup again` when the key is not in the
 environment — keys come only from the environment variable the preset names, never from the config
 file.

@@ -36,8 +36,12 @@ func Wizard(ctx context.Context, in *bufio.Reader, out io.Writer) (*config.Confi
 	if len(found) == 0 {
 		fmt.Fprintln(out, `No local backends reachable (looked for Ollama :11434, llama.cpp :8080,
 LM Studio :1234, vLLM :8000, BE AI Engine :9800).
-Writing a default config pointing at Ollama — edit ~/.be-code/config.json
-or start a backend and run 'be-code doctor'.`)
+  [1] write a default config pointing at Ollama (edit ~/.be-code/config.json
+      or start a backend and run 'be-code doctor')
+  [2] use an online provider (OpenRouter, OpenAI, ...)`)
+		if pickNumber(in, out, "Choose", 1, 2) == 2 {
+			return wizardOnline(ctx, in, out, nil)
+		}
 		cfg := BuildConfig("", "")
 		return cfg, cfg.Save()
 	}

@@ -75,3 +75,27 @@ func TestWizardOnlineMissingKeySavesNothing(t *testing.T) {
 		t.Fatal("config was written")
 	}
 }
+
+func TestWizardOnlineWithNoLocalBackend(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("OPENROUTER_API_KEY", "k")
+	oldP, oldL := probeBackends, listOnline
+	t.Cleanup(func() { probeBackends, listOnline = oldP, oldL })
+	probeBackends = func(context.Context, []Candidate, time.Duration) []Found { return nil }
+	listOnline = func(context.Context, provider.Preset) ([]provider.ModelInfo, error) {
+		return []provider.ModelInfo{{ID: "a/one"}}, nil
+	}
+	var out strings.Builder
+	cfg, err := Wizard(context.Background(), bufio.NewReader(strings.NewReader("2\n1\n1\n")), &out)
+	if err != nil || cfg == nil {
+		t.Fatalf("cfg=%v err=%v\n%s", cfg, err, out.String())
+	}
+	if !cfg.Providers["openrouter"].Online || cfg.DefaultProvider != "openrouter" || cfg.Model != "a/one" {
+		t.Fatalf("config = %+v %q %q", cfg.Providers["openrouter"], cfg.DefaultProvider, cfg.Model)
+	}
+	if cfg.LocalHelper != (config.LocalHelperConfig{}) {
+		t.Fatalf("local_helper must stay unset: %+v", cfg.LocalHelper)
+	}
+}
