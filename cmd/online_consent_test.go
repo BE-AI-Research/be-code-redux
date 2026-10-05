@@ -117,3 +117,51 @@ func TestInitOnlineGate(t *testing.T) {
 		}
 	}
 }
+
+// The share_page gate follows the main provider: set while it is online,
+// cleared on a switch to a local one, set again on the way back.
+func TestShareGateFollowsProviderSwitch(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "openai", BaseURL: "http://127.0.0.1:9/v1"}
+	t.Setenv("BE_TEST_ONLINE_KEY", "k")
+	ag := callBuildAgent(t, cfg)
+	if got := ag.Tools.ShareProvider(); got != "or" {
+		t.Fatalf("online at startup: gate %q", got)
+	}
+	lan, err := provider.FromConfig(cfg, "lan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag.SetProvider(lan)
+	ag.SetModelNow(context.Background(), "qwen3")
+	if got := ag.Tools.ShareProvider(); got != "" {
+		t.Fatalf("a local main model keeps the gate %q", got)
+	}
+	or, _ := provider.FromConfig(cfg, "or")
+	ag.SetProvider(or)
+	ag.SetModelNow(context.Background(), "vendor/m")
+	if got := ag.Tools.ShareProvider(); got != "or" {
+		t.Fatalf("back online: gate %q", got)
+	}
+}
+
+func TestHeadlessApproverRefusesSharePage(t *testing.T) {
+	cfg := config.Default()
+	cfg.AutoApproveBrowser, cfg.AutoApproveShell = true, true
+	if headlessApprover(cfg)("share_page", "Send what the agent reads on a.test to or?") {
+		t.Fatal("-y answered share_page")
+	}
+	oldTTY := stdinIsTTY
+	stdinIsTTY = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTY = oldTTY })
+	out := captureStderr(t, func() {
+		if headlessApprover(config.Default())("share_page", "x") {
+			t.Error("non-interactive approved share_page")
+		}
+	})
+	if !strings.Contains(out, "this action always asks a person") {
+		t.Fatalf("message:\n%s", out)
+	}
+}

@@ -228,6 +228,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("spend cap reached:"), detail)
 	case "online_project":
 		fmt.Printf("%s\n%s\n", yell("online model:"), detail)
+	case "share_page":
+		fmt.Printf("%s\n%s\n", yell("share with the online model:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
@@ -314,11 +316,12 @@ func (t replTerminal) Withdraw(note string) {
 }
 
 // noAlwaysAction lists the approvals with no "always": browser_watch,
-// shell_after_web, schedule, tool_call, spend_cap and online_project
-// (browser spec §3.2, §3.6; schedules spec §3.1; online spec §2.1–2.3).
+// shell_after_web, schedule, tool_call, spend_cap, online_project and
+// share_page (browser spec §3.2, §3.6; schedules spec §3.1; online spec
+// §2.1–2.3).
 func noAlwaysAction(action string) bool {
 	switch action {
-	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project":
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page":
 		return true
 	}
 	return false

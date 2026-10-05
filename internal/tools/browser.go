@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/browser"
@@ -76,6 +77,12 @@ type BrowserTool struct {
 	// Warnings are the config problems found at construction (an unknown
 	// tier), printed once by the wiring.
 	Warnings []string
+
+	// shownMu guards shownURL: the address of the page last shown to an
+	// online main model under the share gate, which PageURL may record in
+	// full (a page not shared is recorded by its host alone).
+	shownMu  sync.Mutex
+	shownURL string
 }
 
 // NewBrowser builds the tool. Nothing connects until the model's first
@@ -96,6 +103,11 @@ func NewBrowser(cfg BrowserConfig) *BrowserTool {
 		MyChrome: cfg.UseMyChrome, ChromeDir: dir, ChromeLabel: label, ConsentWait: cfg.ConsentWait,
 		Notify:  t.status,
 		TitleOK: func(host string) bool { return consent.Tier(host) == browser.TierAllow },
+		// With an online main model a title is shown only for a host shared
+		// with it (or allow-tier); t.r is read when a note is written.
+		TitleShared: func(host string) bool {
+			return (host != "" && consent.Tier(host) == browser.TierAllow) || t.shareTitles(host)
+		},
 	})
 	return t
 }
@@ -376,7 +388,7 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	// screen is not one this call was approved to read (a redirect, a link,
 	// a stale ref, a navigation that landed mid-read): nothing of it is
 	// shown, not even its alerts' text.
-	withhold := func(pageNotes int) Result {
+	withholdAs := func(pageNotes int, why string) Result {
 		t.session.Record()
 		var b strings.Builder
 		b.WriteString(WebHeader + "\n")
@@ -389,9 +401,12 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 		if actErr != nil {
 			b.WriteString(actErr.Error() + "\n")
 		}
-		fmt.Fprintf(&b, "the page on %s is not shown: in your own Chrome every read asks — take a snapshot to read it",
-			t.hostDisplay(browser.HostOf(page.URL()), page))
+		b.WriteString(why)
 		return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+	}
+	withhold := func(pageNotes int) Result {
+		return withholdAs(pageNotes, fmt.Sprintf("the page on %s is not shown: in your own Chrome every read asks — take a snapshot to read it",
+			t.hostDisplay(browser.HostOf(page.URL()), page)))
 	}
 	if seen != nil && !t.mayShow(page, *seen) {
 		return withhold(0)
@@ -428,6 +443,9 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			if !stillSeen() {
 				return withhold(len(pageNotes))
 			}
+			if why := t.shareRefusal(ctx, page, doc); why != "" {
+				return withholdAs(len(pageNotes), why)
+			}
 			t.markIfUntrusted(page.URL())
 			notes = append(notes, pageNotes...)
 			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
@@ -436,6 +454,12 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	}
 	if !stillSeen() {
 		return withhold(len(pageNotes))
+	}
+	// Only now, on the page the content came from and after every check
+	// above let it through, is the person asked whether it may reach an
+	// online main model (online spec §2.2).
+	if why := t.shareRefusal(ctx, page, doc); why != "" {
+		return withholdAs(len(pageNotes), why)
 	}
 	notes = append(notes, pageNotes...)
 	t.session.Record()
@@ -450,6 +474,47 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	}
 	b.WriteString(body)
 	return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+}
+
+// shareRefusal is the share_page gate on the page whose content finish is
+// about to show: "" to show it, else why it is withheld. With no gate (a
+// local main model) it is always "". It is judged on the page as it stands
+// once the content was fetched — the final host, after any redirect — and a
+// page that changed document since the fetch began is withheld unasked,
+// since the content may be from either one. The allow tier never asks; the
+// person's own Chrome and a page with no address ask every time.
+func (t *BrowserTool) shareRefusal(ctx context.Context, page *browser.Page, doc string) string {
+	if t.r == nil {
+		return ""
+	}
+	g := t.r.shareGate()
+	if g == nil {
+		return ""
+	}
+	page.Info(ctx)
+	u := page.URL()
+	h := browser.HostOf(u)
+	disp := t.hostDisplay(h, page)
+	if page.DocumentID() != doc {
+		return fmt.Sprintf("the page on %s is not shown: it changed while it was read — take a snapshot to read it", disp)
+	}
+	if h != "" && t.consent.Tier(h) == browser.TierAllow {
+		t.noteShown(u)
+		return ""
+	}
+	everyTime := t.session.MyChrome() || (g.MyChrome != nil && g.MyChrome())
+	if t.r.shareOK(ctx, h, everyTime) {
+		t.noteShown(u)
+		return ""
+	}
+	return fmt.Sprintf("the page on %s is not shown (not shared with %s)", disp, g.Provider)
+}
+
+// noteShown records the address of the page last shown under the gate.
+func (t *BrowserTool) noteShown(u string) {
+	t.shownMu.Lock()
+	t.shownURL = u
+	t.shownMu.Unlock()
 }
 
 // denied is the deny tier's refusal of an interaction. Outside the
@@ -602,9 +667,13 @@ func (t *BrowserTool) tabs(ctx context.Context, notes []string) Result {
 	mine := t.session.MyChrome()
 	for _, tab := range tabs {
 		line := strings.TrimPrefix(browser.PageLine(tab.Title, tab.URL), "page: ")
-		if h := browser.HostOf(tab.URL); mine && (h == "" || t.consent.Tier(h) != browser.TierAllow) {
+		h := browser.HostOf(tab.URL)
+		allowed := h != "" && t.consent.Tier(h) == browser.TierAllow
+		if !allowed && (mine || !t.shareTitles(h)) {
 			// A title, a path and a query are page content; in your own
-			// Chrome reading them asks, so only the host is listed.
+			// Chrome reading them asks, and with an online main model they
+			// reach it only for a host already shared with it, so otherwise
+			// only the host is listed.
 			line = h
 			if h == "" {
 				line = "a page with no address (" + browser.ShortURL(tab.URL) + ")"
@@ -617,6 +686,16 @@ func (t *BrowserTool) tabs(ctx context.Context, notes []string) Result {
 		t.markIfUntrusted(tab.URL)
 	}
 	return Result{Content: t.clip(b.String())}
+}
+
+// shareTitles reports whether a tab on host may be listed with its title and
+// address: always with no share gate, else only for a host already shared
+// (never a page with no address, which asks every time).
+func (t *BrowserTool) shareTitles(host string) bool {
+	if t.r == nil || t.r.shareGate() == nil {
+		return true
+	}
+	return host != "" && t.r.shareGranted(host)
 }
 
 // markIfUntrusted raises the registry's flag for a page the user has not
@@ -737,10 +816,25 @@ func (t *BrowserTool) Untab(ref string) string {
 // unless the host is in the allow tier: a path and a query are page
 // content, and a page withheld from the model (never an allow-tier one)
 // must not reach it this way either. It never waits on the browser.
+//
+// With an online main model (the share gate) the same holds outside it: the
+// full address only for the page last shown to the model under the gate,
+// or an allow-tier one — a page withheld as not shared is its host alone.
 func (t *BrowserTool) PageURL() string {
 	u := t.session.Status().URL
-	if u == "" || !t.session.MyChrome() {
+	if u == "" {
 		return u
+	}
+	if !t.session.MyChrome() {
+		if t.r == nil || t.r.shareGate() == nil {
+			return u
+		}
+		t.shownMu.Lock()
+		shown := t.shownURL == u
+		t.shownMu.Unlock()
+		if shown {
+			return u
+		}
 	}
 	h := browser.HostOf(u)
 	switch {

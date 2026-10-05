@@ -104,3 +104,34 @@ func TestSubmitRefusedWhileOnlineGatePending(t *testing.T) {
 		t.Fatal("no explanation in the transcript")
 	}
 }
+
+// share_page has no "always" either: "a" leaves the modal open and changes
+// no standing approval, and the question is not coloured as a diff.
+func TestSharePageAskHasNoAlways(t *testing.T) {
+	s, a, _ := twoViews(t)
+	beforeCfg, beforeReg, beforeShell, beforeBrowser := s.cfg.ApproveFileWrites, s.ag.Tools.ApproveWrites, s.cfg.AutoApproveShell, s.cfg.AutoApproveBrowser
+	decided := make(chan bool, 1)
+	go func() {
+		decided <- s.approveFromAgent("share_page", "Send what the agent reads on a.test to openrouter?")
+	}()
+	waitFor(t, func() bool { flush(a); return a.mode == modeAsk })
+	view := a.View()
+	if !strings.Contains(view, "Send page text to an online model") || !strings.Contains(view, "y send it · n withhold it") {
+		t.Fatalf("title/hint:\n%s", view)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	flush(a)
+	if a.mode != modeAsk || s.cfg.ApproveFileWrites != beforeCfg || s.ag.Tools.ApproveWrites != beforeReg ||
+		s.cfg.AutoApproveShell != beforeShell || s.cfg.AutoApproveBrowser != beforeBrowser {
+		t.Fatal(`"a" must do nothing on a share_page prompt`)
+	}
+	a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	select {
+	case ok := <-decided:
+		if ok {
+			t.Fatal("n declines")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("n never answered")
+	}
+}

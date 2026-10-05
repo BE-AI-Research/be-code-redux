@@ -114,6 +114,14 @@ func (t *webSearchTool) Run(ctx context.Context, args map[string]any) Result {
 	if err := json.Unmarshal(body, &out); err != nil {
 		return Result{IsError: true, Content: "web_search: bad response: " + err.Error()}
 	}
+	// With an online main model, results reach it only once the person has
+	// said so — one grant covers every search for the session (online spec
+	// §2.2). An empty result list carries no third party's text.
+	if len(out.Items) > 0 && t.r != nil && !t.r.shareAsk(ctx, webSearchShareKey, false, func(provider string) string {
+		return "Send web search results to " + provider + "?"
+	}) {
+		return Result{IsError: true, Content: "not shared with " + t.r.ShareProvider() + ": web search results"}
+	}
 	// Results are third parties' titles and snippets: whatever host they
 	// name, the request has read untrusted text (browser spec §3.6).
 	if t.r != nil {
@@ -195,6 +203,12 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	final := u
 	if resp.Request != nil && resp.Request.URL != nil {
 		final = resp.Request.URL
+	}
+	// With an online main model the page reaches it only from a host the
+	// person shared with it: judged on the host that answered, after any
+	// redirect; the allow tier never asks (online spec §2.2).
+	if fh := browser.NormalizeHost(final.Host); t.r != nil && t.consent.Tier(fh) != browser.TierAllow && !t.r.shareOK(ctx, fh, false) {
+		return Result{IsError: true, Content: "not shared with " + t.r.ShareProvider() + ": " + fh}
 	}
 	if t.r != nil && (t.consent.Tier(u.Host) != browser.TierAllow || t.consent.Tier(final.Host) != browser.TierAllow) {
 		t.r.MarkUntrustedWeb()

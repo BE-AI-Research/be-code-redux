@@ -73,6 +73,9 @@ type PageScript struct {
 	LoadDelay time.Duration
 	// Pages maps a URL to the title and tree a navigation there shows.
 	Pages map[string][2]string
+	// Redirects maps a URL to where a navigation to it lands: a server-side
+	// redirect, as Chrome reports it (the frame navigates to the target).
+	Redirects map[string]string
 }
 
 // NewPage scripts b as a browser with one tab, T1, showing url.
@@ -326,6 +329,9 @@ func (s *PageScript) install() {
 		if a.URL == "https://unreachable.test/" {
 			s.mu.Unlock()
 			return map[string]any{"frameId": "F-" + t.ID, "errorText": "net::ERR_NAME_NOT_RESOLVED"}, nil
+		}
+		if to, ok := s.Redirects[a.URL]; ok {
+			a.URL = to
 		}
 		t.history = append(t.history[:t.index+1], a.URL)
 		t.index = len(t.history) - 1

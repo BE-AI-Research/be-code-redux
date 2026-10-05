@@ -780,7 +780,7 @@ func (m *View) showAsk(a *ask) {
 	case askApproval:
 		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
 			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -890,7 +890,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
 		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" {
 			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
 			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
@@ -1398,6 +1398,10 @@ func (m *View) viewAsk() string {
 	case "online_project":
 		title = "Send this project to an online model"
 		hint = "y allow for this project · n decline · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "share_page":
+		title = "Send page text to an online model"
+		hint = "y send it · n withhold it · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	case "tool_call":
 		title = "Tool call during a scheduled event"

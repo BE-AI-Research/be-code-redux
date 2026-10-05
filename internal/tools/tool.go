@@ -154,6 +154,9 @@ type Registry struct {
 	// fired is a scheduled event's allowance while its turn runs
 	// (allowance.go). Never copied by Subset or Scoped.
 	fired atomic.Pointer[firedPolicy]
+	// share is the share_page gate and its session grants (share.go), on
+	// the primary registry only: Subset and Scoped read their parent's.
+	share shareState
 }
 
 // NewRegistry builds the standard tool set rooted at dir.
