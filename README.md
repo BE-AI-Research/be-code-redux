@@ -139,6 +139,15 @@ process, which changes nothing about the machine's policy. Run that command your
 you prefer; arguments (`-NoSetup`, `-Purge`) pass straight through. Both installers are
 safe to re-run — they upgrade in place.
 
+**Updating.** Each session start asks GitHub once, in the background, whether a newer release
+exists; if one does, the bottom line shows `⬆ vX.Y.Z available`. Nothing is installed until you
+choose it: `/update` (or **Check for updates** in `/menu`) checks again, asks, downloads that
+release's binary for your platform, checks it against the release's `SHA256SUMS` and replaces
+the installed `be-code` — only the binary: `~/.be-code/config.json`, sessions and everything
+else are left as they are. Restart BE-Code to use the new version. A build from source never
+updates itself, and `update_check: false` stops the start-of-session check (the command still
+works).
+
 ## Quick start
 
 ```bash
@@ -1132,6 +1141,8 @@ write instead of writing unattended.
 - With an online main model, nothing is sent until the project is approved (`online_project`),
   page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
   API keys are read only from the environment.
+- One GitHub request at session start asks whether a newer release exists (`update_check: false`
+  turns it off); an update installs only after you approve it and its checksum matches.
 
 ## Layout
 
@@ -1195,7 +1206,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 
 | | |
 | --- | --- |
-| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
+| **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/update` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
 | **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` `/online [forget]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
@@ -1226,6 +1237,8 @@ hand; `/config` prints what the running session actually resolved.
   is online; an online helper is refused.
 - `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
   (`spend_cap`).
+- `update_check` (true) — the quiet check for a newer release at session start, which only
+  lights the `⬆ vX.Y.Z available` notice; `false` turns it off. `/update` works either way.
   Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`,
   `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only
   from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,
