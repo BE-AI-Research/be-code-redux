@@ -357,13 +357,20 @@ func TestRenderOrdinaryComboboxShowsOptions(t *testing.T) {
 func TestPageLine(t *testing.T) {
 	cases := map[[2]string]string{
 		{"PR", "https://github.com/acme/api/pull/42"}: "page: PR — github.com/acme/api/pull/42",
-		{"", "about:blank"}:                             "page: about:blank",
-		{"", ""}:                                        "page: (blank)",
-		{"Search", "https://acme.test/s?q=go"}:          "page: Search — acme.test/s?q=go",
+		{"", "about:blank"}:                           "page: about:blank",
+		{"", ""}:                                      "page: (blank)",
+		{"Search", "https://acme.test/s?q=go"}:        "page: Search — acme.test/s?q=go",
 	}
 	for in, want := range cases {
 		if got := PageLine(in[0], in[1]); got != want {
 			t.Errorf("PageLine(%q, %q) = %q, want %q", in[0], in[1], got, want)
 		}
+	}
+}
+
+func TestPageLineTitleOnlyCannotCarryAHost(t *testing.T) {
+	got := PageLine("x — localhost/", "")
+	if strings.Contains(got, " — ") {
+		t.Fatalf("title-only page line kept the host separator: %q", got)
 	}
 }
