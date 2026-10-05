@@ -19,10 +19,11 @@ import (
 type ShareGate struct {
 	// Provider is the name the person recognises the online provider by.
 	Provider string
-	// MyChrome, when set, reports that the browser is in the person's own
-	// Chrome, where every page asks. The browser tool also knows this of
-	// its own session; either one makes a browser page ask every time.
-	MyChrome func() bool
+	// Allow, when set, reports a host in the browser's allow tier
+	// (browser.sites, loopback included), which never asks. The tools judge
+	// their own reads by their own tiers; this is for page text already in
+	// the conversation when the gate is set (ShareEarlier).
+	Allow func(host string) bool
 }
 
 // webSearchShareKey is the one session grant web_search results share.
@@ -34,6 +35,9 @@ type shareState struct {
 	mu      sync.Mutex
 	gate    *ShareGate
 	granted map[string]bool
+	// myChrome is the browser tool's own mode (set when it attaches): a
+	// browser page from the person's own Chrome is never granted.
+	myChrome func() bool
 }
 
 // shareRoot is the registry the gate is read from: the primary one, whose
@@ -139,4 +143,44 @@ func (r *Registry) ShareProvider() string {
 		return g.Provider
 	}
 	return ""
+}
+
+// setShareMyChrome is the browser tool telling the primary registry how to
+// learn its mode.
+func (r *Registry) setShareMyChrome(f func() bool) {
+	root := r.shareRoot()
+	root.share.mu.Lock()
+	root.share.myChrome = f
+	root.share.mu.Unlock()
+}
+
+// ShareEarlier is share_page for page text already in the conversation when
+// the gate was set (a session going online, or changing provider): what was
+// read on host earlier may stay in the history the model is sent. No gate,
+// an allow-tier host or a host already shared → yes without asking;
+// otherwise the same question as a fresh read, and a yes grants the host as
+// it would — except text the browser read in the person's own Chrome
+// (fromBrowser in my-Chrome mode), whose yes covers only what is already
+// there. host must be known: a result whose host cannot be told is the
+// caller's to withhold unasked.
+func (r *Registry) ShareEarlier(ctx context.Context, host string, fromBrowser bool) bool {
+	root := r.shareRoot()
+	root.share.mu.Lock()
+	gate, mine := root.share.gate, root.share.myChrome
+	root.share.mu.Unlock()
+	if gate == nil {
+		return true
+	}
+	if host != "" && gate.Allow != nil && gate.Allow(host) {
+		return true
+	}
+	return r.shareOK(ctx, host, fromBrowser && mine != nil && mine())
+}
+
+// ShareEarlierSearch is ShareEarlier for web search results already in the
+// conversation: the one session-wide "(web search results)" question.
+func (r *Registry) ShareEarlierSearch(ctx context.Context) bool {
+	return r.shareAsk(ctx, webSearchShareKey, false, func(provider string) string {
+		return "Send web search results to " + provider + "?"
+	})
 }

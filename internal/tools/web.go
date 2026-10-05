@@ -228,7 +228,10 @@ func (t *webFetchTool) Run(ctx context.Context, args map[string]any) Result {
 	if t.r != nil && t.r.MaxOutput() > 0 {
 		max = t.r.MaxOutput()
 	}
-	header := fmt.Sprintf("%s (%d chars total)\n", u, len(text)+off)
+	// The address the page came from, after any redirect: what the model
+	// should cite, and what tells a later reader which host the text is
+	// from (the agent's ShareEarlier pass).
+	header := fmt.Sprintf("%s (%d chars total)\n", final, len(text)+off)
 	return Result{Content: header + truncate(text, max)}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
@@ -946,7 +947,9 @@ func listOnlineModel(ctx context.Context, p provider.Provider, model string) (pr
 
 // setShareGate puts the share_page gate on the main registry for the online
 // provider name, or clears it ("": a local main model, nothing asks).
-func setShareGate(ag *agent.Agent, name string) {
+// The allow tier (browser.sites, loopback included) is what decides, for
+// page text already in the conversation, which hosts never ask.
+func setShareGate(cfg *config.Config, ag *agent.Agent, name string) {
 	if ag == nil || ag.Tools == nil {
 		return
 	}
@@ -954,7 +957,10 @@ func setShareGate(ag *agent.Agent, name string) {
 		ag.Tools.SetShareGate(nil)
 		return
 	}
-	ag.Tools.SetShareGate(&tools.ShareGate{Provider: name})
+	consent, _ := browser.NewConsent(cfg.Browser.Sites)
+	ag.Tools.SetShareGate(&tools.ShareGate{Provider: name, Allow: func(host string) bool {
+		return consent.Tier(host) == browser.TierAllow
+	}})
 }
 
 // applyOnline is the online half of startup: the main provider's key name for
@@ -975,7 +981,7 @@ func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name,
 func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string, wait bool) {
 	pc, ok := cfg.Providers[name]
 	if !ok {
-		setShareGate(ag, "")
+		setShareGate(cfg, ag, "")
 		if !wait {
 			ag.SetKeyEnv("")
 			ag.SetOnline("", "", agent.Pricing{})
@@ -984,7 +990,7 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 	}
 	ag.SetKeyEnv(pc.APIKeyEnv)
 	if !config.ProviderIsOnline(pc) {
-		setShareGate(ag, "")
+		setShareGate(cfg, ag, "")
 		ag.SetOnline("", "", agent.Pricing{})
 		return
 	}
@@ -992,7 +998,7 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 	// with the person's per-site consent (online spec §2.2). Set here, with
 	// the online state, so every switch — to the helper or back — sets or
 	// clears it too.
-	setShareGate(ag, name)
+	setShareGate(cfg, ag, name)
 	preset := presetFor(name, pc)
 	configured := pc.ContextWindow
 	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {

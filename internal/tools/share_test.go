@@ -342,3 +342,85 @@ func TestShareGrantsResetOnProviderChangeAndCancelRefuses(t *testing.T) {
 		t.Fatal("a cancelled question was taken as a yes")
 	}
 }
+
+// Fix round 1, item 1: an action's error on a page not shared carries
+// nothing of the page — a select's "no option" lists every option.
+func TestSharePageRefusedHidesActionErrorText(t *testing.T) {
+	var log askLog
+	reg, bt, ps, _ := browserFixture(t, "https://acme.test/login", nil, log.shareApprover("acme.test"))
+	reg.SetShareGate(&ShareGate{Provider: "openrouter"})
+	do(bt, map[string]any{"action": "snapshot"}) // withheld, but the refs are the page's
+	ps.Lock()
+	ps.SelectResult = `no option "13"; the options are: Secret Option A, Secret Option B`
+	ps.Unlock()
+	res := do(bt, map[string]any{"action": "select", "ref": "e1", "value": "13"})
+	if strings.Contains(res.Content, "Secret Option") || !strings.Contains(res.Content, "the action failed") ||
+		!strings.Contains(res.Content, "the page on acme.test is not shown (not shared with openrouter)") {
+		t.Fatalf("result:\n%s", res.Content)
+	}
+	// A ref the model gave is its own: that error still reads as before.
+	res = do(bt, map[string]any{"action": "click", "ref": "e99"})
+	if !strings.Contains(res.Content, "e99 is not an element on this page") {
+		t.Fatalf("unknown ref:\n%s", res.Content)
+	}
+}
+
+// Fix round 1, item 2: a declined interaction on a page not shared names
+// the action and ref only; the person's question keeps the label.
+func TestSharePageDeclineNamesRefOnly(t *testing.T) {
+	var log askLog
+	reg, bt, _, _ := browserFixture(t, "https://acme.test/login", nil, log.approver(false))
+	reg.SetShareGate(&ShareGate{Provider: "openrouter"})
+	do(bt, map[string]any{"action": "snapshot"})
+	res := do(bt, map[string]any{"action": "click", "ref": "e4"})
+	if !res.IsError || res.Content != "the user declined: click e4 on acme.test" {
+		t.Fatalf("result %q", res.Content)
+	}
+	res = do(bt, map[string]any{"action": "type", "ref": "e1", "text": "x"})
+	if res.Content != "the user declined: type into e1 on acme.test" {
+		t.Fatalf("result %q", res.Content)
+	}
+	log.mu.Lock()
+	prompt := log.details[len(log.details)-2]
+	log.mu.Unlock()
+	if !strings.Contains(prompt, `click button "Sign in" [e4]`) {
+		t.Fatalf("the person's question lost the label:\n%s", prompt)
+	}
+
+	// Shared, the label is the model's to read again.
+	var log2 askLog
+	reg2, bt2, _, _ := browserFixture(t, "https://acme.test/login", nil, func(action, detail string) bool {
+		log2.approver(action == "share_page")(action, detail)
+		return action == "share_page"
+	})
+	reg2.SetShareGate(&ShareGate{Provider: "openrouter"})
+	do(bt2, map[string]any{"action": "snapshot"})
+	if res := do(bt2, map[string]any{"action": "click", "ref": "e4"}); res.Content != `the user declined: click button "Sign in" [e4] on acme.test` {
+		t.Fatalf("shared host: %q", res.Content)
+	}
+}
+
+func TestShareEarlier(t *testing.T) {
+	var log askLog
+	reg, _ := NewRegistry(t.TempDir(), log.approver(true))
+	if !reg.ShareEarlier(context.Background(), "a.test", false) || log.count() != 0 {
+		t.Fatal("no gate asks nothing")
+	}
+	reg.SetShareGate(&ShareGate{Provider: "openrouter", Allow: func(h string) bool { return h == "localhost" }})
+	if !reg.ShareEarlier(context.Background(), "localhost", false) || log.count() != 0 {
+		t.Fatal("the allow tier asks nothing")
+	}
+	reg.ShareEarlier(context.Background(), "a.test", false)
+	reg.ShareEarlier(context.Background(), "a.test", false)
+	reg.ShareEarlierSearch(context.Background())
+	if asks := log.shareAsks(); len(asks) != 2 || asks[1] != "Send web search results to openrouter?" {
+		t.Fatalf("asks %q", asks)
+	}
+	// From the person's own Chrome, a yes covers what is there and grants
+	// nothing.
+	reg.setShareMyChrome(func() bool { return true })
+	reg.ShareEarlier(context.Background(), "b.test", true)
+	if reg.shareGranted("b.test") {
+		t.Fatal("my-Chrome text granted its host")
+	}
+}

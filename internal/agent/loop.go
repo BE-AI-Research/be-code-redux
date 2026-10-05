@@ -177,6 +177,9 @@ type Agent struct {
 	onlineMu   sync.Mutex
 	onlineName string
 	pricing    Pricing
+	// webSharedWith is the online provider the history's earlier page text
+	// was last settled for (share.go); "" while local. Under onlineMu.
+	webSharedWith string
 	// keyEnv names the environment variable the main provider's API key
 	// came from (the provider's api_key_env), so a rejected key can be
 	// named without ever printing it. Empty: "API key rejected by …".
@@ -1268,6 +1271,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		// this same turn, and compaction has to measure the prompt it is
 		// actually about to send.
 		a.recomposeSystem(a.lastGitInfo)
+		// Page text read before the main model went online (or for another
+		// provider) reaches it only for a site the person shares now.
+		a.settleEarlierWebText(ctx)
 		// Compact inside the tool loop too: one long agentic request can
 		// blow the window on its own, long before the next user message.
 		a.maybeCompact(ctx)
@@ -1827,6 +1833,9 @@ func (a *Agent) Compact(ctx context.Context) error {
 	if len(a.History.Messages) <= keepTail {
 		return fmt.Errorf("nothing to compact")
 	}
+	// The summary may be asked of the online main model: earlier page text
+	// goes only for the sites shared with it (share.go).
+	a.settleEarlierWebText(ctx)
 	// The model and its profile are snapshotted rather than read where they
 	// are used: this runs on the resolution's goroutine after a model
 	// switch, and a *second* switch landing mid-compaction would otherwise

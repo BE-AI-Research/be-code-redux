@@ -144,6 +144,7 @@ func (t *BrowserTool) notice(msg string) {
 func (t *BrowserTool) attach(r *Registry) {
 	t.r = r
 	r.onClose = append(r.onClose, t.session.Close)
+	r.setShareMyChrome(t.session.MyChrome)
 }
 
 func (t *BrowserTool) Name() string { return "browser" }
@@ -326,6 +327,11 @@ func (t *BrowserTool) mineGate(ctx context.Context, page *browser.Page, action s
 	if t.approve(ctx, "browser_watch", question+" (every action in your own Chrome asks)\n  "+what) {
 		return "", judgedHost, judgedURL, dest, backID
 	}
+	if action == "back" && t.labelsHidden(target) {
+		// The entry's address came from the tab's history, not from the
+		// model: with an online main model it is not repeated back.
+		what = "go back"
+	}
 	return fmt.Sprintf("the user declined: %s on %s", what, disp(target, targetURL)), judgedHost, judgedURL, approvedPage{}, 0
 }
 
@@ -399,7 +405,7 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			fmt.Fprintf(&b, "(%d page notes withheld)\n", k)
 		}
 		if actErr != nil {
-			b.WriteString(actErr.Error() + "\n")
+			b.WriteString(shownActErr(action, actErr) + "\n")
 		}
 		b.WriteString(why)
 		return Result{Content: t.clip(b.String()), IsError: actErr != nil}
@@ -502,8 +508,7 @@ func (t *BrowserTool) shareRefusal(ctx context.Context, page *browser.Page, doc 
 		t.noteShown(u)
 		return ""
 	}
-	everyTime := t.session.MyChrome() || (g.MyChrome != nil && g.MyChrome())
-	if t.r.shareOK(ctx, h, everyTime) {
+	if t.r.shareOK(ctx, h, t.session.MyChrome()) {
 		t.noteShown(u)
 		return ""
 	}
@@ -572,7 +577,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s? (every action on a page with no address asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
 		}
-		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
+		return t.declined(host, disp, what, action, ref), host, judgedURL
 	}
 	tier := t.consent.Tier(host)
 	if tier == browser.TierAsk && t.session.MyChrome() {
@@ -581,7 +586,7 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 		if t.approve(ctx, "browser_watch", fmt.Sprintf("act on %s in your Chrome? (every action in your own Chrome asks)\n  %s", disp, what)) {
 			return "", host, judgedURL
 		}
-		return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
+		return t.declined(host, disp, what, action, ref), host, judgedURL
 	}
 	switch tier {
 	case browser.TierAllow:
@@ -611,7 +616,66 @@ func (t *BrowserTool) gate(ctx context.Context, page *browser.Page, action, ref 
 			return "", host, judgedURL
 		}
 	}
-	return fmt.Sprintf("the user declined: %s on %s", what, disp), host, judgedURL
+	return t.declined(host, disp, what, action, ref), host, judgedURL
+}
+
+// declined is gate's refusal as the model reads it. The question the person
+// saw named the element by its label, from the page; while that page is not
+// shared with an online main model the model is told the action and ref
+// only ("click e5").
+func (t *BrowserTool) declined(host, disp, what, action, ref string) string {
+	if t.labelsHidden(host) {
+		what = plainAction(action, ref)
+	}
+	return fmt.Sprintf("the user declined: %s on %s", what, disp)
+}
+
+// plainAction names an interaction by its verb and ref alone.
+func plainAction(action, ref string) string {
+	switch action {
+	case "type":
+		return "type into " + ref
+	case "select":
+		return "select in " + ref
+	case "press":
+		return "press a key"
+	}
+	return action + " " + ref
+}
+
+// labelsHidden reports whether text taken from the page on host — an
+// element's label, an address from the tab's history — must stay out of
+// what the model reads: with a share gate, for a host neither in the allow
+// tier nor shared (in the person's own Chrome, nothing is shared).
+func (t *BrowserTool) labelsHidden(host string) bool {
+	if t.r == nil || t.r.shareGate() == nil {
+		return false
+	}
+	if host != "" && t.consent.Tier(host) == browser.TierAllow {
+		return false
+	}
+	if t.session.MyChrome() {
+		return true
+	}
+	return !t.r.shareGranted(host)
+}
+
+// shownActErr is an action's error as a withheld result may print it: only
+// errors that carry nothing from the page — a ref the model gave, a closed
+// browser, a navigation (its address is the model's or the tab's own, its
+// reason Chrome's) — and otherwise "the action failed". A select's "no
+// option" lists the options and a page script's exception is the page's own
+// text.
+func shownActErr(action string, err error) string {
+	var unknown *browser.UnknownRefError
+	var stale *browser.StaleRefError
+	switch {
+	case errors.As(err, &unknown), errors.As(err, &stale), errors.Is(err, browser.ErrClosed),
+		errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
+		action == "open" || action == "back":
+		return err.Error()
+	}
+	return "the action failed"
 }
 
 // hostDisplay is host for every message gate prints, except that a page

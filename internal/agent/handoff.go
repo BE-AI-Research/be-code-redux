@@ -101,9 +101,12 @@ func (a *Agent) modelHandoff(ctx context.Context) (string, error) {
 	}
 	b.WriteString("Transcript (most recent last):\n")
 	var t strings.Builder
+	// While earlier page text has not been settled for the online model
+	// now in force, none of it is in the briefing it may be asked to write.
+	unsettled := a.earlierWebUnsettled()
 	for _, m := range a.History.Messages {
 		if isToolResult(m) {
-			if browserResult(m, a.History.Messages) {
+			if browserResult(m, a.History.Messages) || (unsettled && webResult(m, a.History.Messages)) {
 				// A page's text never reaches the next session's system
 				// prompt (browser spec §3.5, same rule as RecentContext).
 				t.WriteString("[tool result] [browser result withheld]\n")
