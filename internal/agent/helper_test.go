@@ -17,6 +17,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 // recProvider records every request and answers from a script, then with
@@ -395,5 +396,140 @@ func TestPlanModeSpendCountedWhileOnline(t *testing.T) {
 	}
 	if len(primary.requests()) != 1 {
 		t.Fatalf("a request went out past the cap: %d", len(primary.requests()))
+	}
+}
+
+// Fix round 1.
+
+func TestHelperEmptyProviderUsesDefaultLane(t *testing.T) {
+	helper := &recProvider{name: "helper", def: provider.ChatResponse{Content: "SUMMARY"}}
+	withHelper(t, helper, 32768, nil)
+	ag, _ := newTestAgent(t, &recProvider{name: "primary"}, func(c *config.Config) {
+		c.LocalHelper = config.LocalHelperConfig{Model: "helper-model"} // provider left empty
+	})
+	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.subs = &subAgents{lanes: subagent.NewLanes()}
+	if ag.helperLaneName() != ag.Cfg.DefaultProvider {
+		t.Fatalf("lane name %q", ag.helperLaneName())
+	}
+	// Hold the default provider's lane: a helper chore must queue behind it.
+	key := subagent.LaneKey(ag.Cfg.Providers[ag.Cfg.DefaultProvider].BaseURL)
+	release, err := ag.subs.lanes.Acquire(context.Background(), key, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedHistory(ag, 4, 50)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := ag.Compact(ctx); err == nil {
+		t.Fatal("compaction ran past a held lane")
+	}
+	if len(helper.requests()) != 0 {
+		t.Fatal("the helper was called without its lane")
+	}
+	release()
+	if err := ag.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(helper.requests()) != 1 {
+		t.Fatalf("helper got %d after release", len(helper.requests()))
+	}
+}
+
+func TestChoreOnOnlinePrimaryCountsSpend(t *testing.T) {
+	primary := &recProvider{name: "primary", def: provider.ChatResponse{Content: "BRIEFING",
+		Usage: provider.Usage{PromptTokens: 1000, CompletionTokens: 500}}}
+	ag, dir := newTestAgent(t, primary, nil) // no helper configured
+	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-5, Completion: 1e-5, Known: true})
+	ag.Session = store.NewSession("rec", "test-model", dir)
+	seedHistory(ag, 2, 20)
+	if _, err := ag.WriteHandoff(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	u := ag.Usage()
+	if got := u.SpendUSD; got < 0.015-1e-9 || got > 0.015+1e-9 {
+		t.Fatalf("chore spend %v, want 0.015", got)
+	}
+	if u.PromptTokens != 1000 || u.CompletionTokens != 500 || u.Requests != 1 {
+		t.Fatalf("chore usage %+v", u)
+	}
+}
+
+func TestChoreOnLocalPrimaryNotCounted(t *testing.T) {
+	primary := &recProvider{name: "primary", def: provider.ChatResponse{Content: "BRIEFING",
+		Usage: provider.Usage{PromptTokens: 1000, CompletionTokens: 500}}}
+	ag, dir := newTestAgent(t, primary, func(c *config.Config) { c.MaxSpendUSD = 0.0001 })
+	ag.Session = store.NewSession("rec", "test-model", dir)
+	ag.addStats(Stats{SpendUSD: 1})
+	ag.Tools.Approve = nil
+	seedHistory(ag, 2, 20)
+	if _, err := ag.WriteHandoff(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(primary.requests()) != 1 {
+		t.Fatal("a local chore was capped")
+	}
+	if u := ag.Usage(); u.Requests != 0 || u.PromptTokens != 0 || u.SpendUSD != 1 {
+		t.Fatalf("local chore counted: %+v", u)
+	}
+}
+
+func TestChorePastCapRefusedWithoutApprover(t *testing.T) {
+	primary := &recProvider{name: "primary", def: provider.ChatResponse{Content: "BRIEFING"}}
+	ag, dir := newTestAgent(t, primary, func(c *config.Config) { c.MaxSpendUSD = 0.01 })
+	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-5, Completion: 1e-5, Known: true})
+	ag.Session = store.NewSession("rec", "test-model", dir)
+	ag.addStats(Stats{SpendUSD: 0.02})
+	ag.Tools.Approve = nil
+	seedHistory(ag, 4, 50)
+	_ = ag.Compact(context.Background()) // refused: fails, or continues from the task record
+	h, _ := ag.WriteHandoff(context.Background(), true)
+	if strings.Contains(h, "BRIEFING") {
+		t.Fatal("handoff written by the model past the cap")
+	}
+	if n := len(primary.requests()); n != 0 {
+		t.Fatalf("%d requests sent past the cap", n)
+	}
+}
+
+func TestHelperBuildCutShortIsNotCached(t *testing.T) {
+	helper := &recProvider{name: "helper", def: provider.ChatResponse{Content: "x"}}
+	var builds atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	old := HelperFactory
+	HelperFactory = func(c context.Context, cfg *config.Config) (provider.Provider, string, int, error) {
+		if builds.Add(1) == 1 {
+			cancel() // the build's own wait is cut short: window 0
+			return helper, "helper-model", 0, nil
+		}
+		return helper, "helper-model", 8192, nil
+	}
+	t.Cleanup(func() { HelperFactory = old })
+	ag, _ := newTestAgent(t, &recProvider{name: "primary"}, helperCfg)
+	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.choreModel(ctx)
+	_, _, w, h := ag.choreModel(context.Background())
+	if !h || w != 8192 || builds.Load() != 2 {
+		t.Fatalf("helper %v window %d builds %d", h, w, builds.Load())
+	}
+	ag.choreModel(context.Background())
+	if builds.Load() != 2 {
+		t.Fatalf("a good build was not cached: %d", builds.Load())
+	}
+}
+
+func TestUnsetHelperNoticeOnceWhileOnline(t *testing.T) {
+	primary := &recProvider{name: "primary", def: provider.ChatResponse{Content: "x"}}
+	ag, _ := newTestAgent(t, primary, nil)
+	count := helperNotices(ag)
+	ag.choreModel(context.Background())
+	if count() != 0 {
+		t.Fatal("notice in a local session")
+	}
+	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.choreModel(context.Background())
+	ag.choreModel(context.Background())
+	if count() != 1 {
+		t.Fatalf("%d notices, want 1", count())
 	}
 }

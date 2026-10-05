@@ -43,7 +43,7 @@ type helperState struct {
 	model     string
 	window    int
 	downUntil time.Time
-	noticed   bool // the unavailable note was said since the helper last answered
+	noticed   bool // the unavailable note was said (once per session, unset or unreachable)
 }
 
 func (a *Agent) helperSt() *helperState {
@@ -94,6 +94,11 @@ func (a *Agent) primaryTarget() choreTarget {
 
 func (a *Agent) choreTarget(ctx context.Context) choreTarget {
 	if !a.helperConfigured() {
+		if _, online := a.Online(); online {
+			// Unset is the same situation as unreachable (spec §3): the
+			// chore goes to the online model, and the person hears it once.
+			a.sayHelperUnavailable()
+		}
 		return a.primaryTarget()
 	}
 	h := a.helperSt()
@@ -113,6 +118,14 @@ func (a *Agent) choreTarget(ctx context.Context) choreTarget {
 		}
 		if model == "" {
 			model = a.Cfg.LocalHelper.Model
+		}
+		if ctx.Err() != nil {
+			// The build's own wait was cut short, so the window it
+			// resolved (often 0) is not the helper's: use it for this
+			// chore, which is ending anyway, and build again next time.
+			h.mu.Unlock()
+			return choreTarget{a: a, p: p, model: model, window: window, helper: true,
+				thinking: profiles.Detect(model).StripThink}
 		}
 		h.p, h.model, h.window, h.built = p, model, window, true
 	}
@@ -143,20 +156,33 @@ func (a *Agent) helperDown(err error) {
 	h := a.helperSt()
 	h.mu.Lock()
 	h.downUntil = timeNow().Add(helperDownFor)
+	h.mu.Unlock()
+	fmt.Fprintf(os.Stderr, "local helper: %v\n", err)
+	a.sayHelperUnavailable()
+}
+
+// sayHelperUnavailable gives the unavailable note once per session, shared
+// by the unset and the unreachable helper. It must not be called under
+// helperState.mu.
+func (a *Agent) sayHelperUnavailable() {
+	h := a.helperSt()
+	h.mu.Lock()
 	say := !h.noticed
 	h.noticed = true
 	h.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "local helper: %v\n", err)
 	if say {
 		a.notice("%s", helperUnavailableNote)
 	}
 }
 
-func (a *Agent) helperAnswered() {
-	h := a.helperSt()
-	h.mu.Lock()
-	h.noticed = false
-	h.mu.Unlock()
+// helperLaneName is the provider whose lane the helper takes: the
+// configured one, or the default provider an empty name resolves to, as
+// the factory resolves it.
+func (a *Agent) helperLaneName() string {
+	if n := a.Cfg.LocalHelper.Provider; n != "" {
+		return n
+	}
+	return a.Cfg.DefaultProvider
 }
 
 // replyTokens is the chore's max_tokens: the primary's own harnessReplyTokens
@@ -261,9 +287,21 @@ func (a *Agent) choreSend(ctx context.Context, t choreTarget, o choreOpts, build
 // before the helper existed, or the helper in its server's lane.
 func (a *Agent) choreDo(ctx context.Context, t choreTarget, o choreOpts, req provider.ChatRequest) (*provider.ChatResponse, error) {
 	if !t.helper {
-		return a.inLane(ctx, func() (*provider.ChatResponse, error) { return t.p.Chat(ctx, req, nil) })
+		_, online := a.Online()
+		if online {
+			// A chore on the online model costs like any other call
+			// (spec §2.3): it passes the cap first and is counted after.
+			if err := a.checkSpendCap(ctx); err != nil {
+				return nil, err
+			}
+		}
+		resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) { return t.p.Chat(ctx, req, nil) })
+		if err == nil && online {
+			a.addChoreUsage(req, resp)
+		}
+		return resp, err
 	}
-	resp, err := inLaneWith(ctx, a.laneFor(a.Cfg.LocalHelper.Provider, o.urgent), func() (resp *provider.ChatResponse, err error) {
+	resp, err := inLaneWith(ctx, a.laneFor(a.helperLaneName(), o.urgent), func() (resp *provider.ChatResponse, err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("local helper panicked: %v", r)
@@ -274,7 +312,6 @@ func (a *Agent) choreDo(ctx context.Context, t choreTarget, o choreOpts, req pro
 	if err != nil {
 		return nil, err
 	}
-	a.helperAnswered()
 	a.addHelperUsage(req, resp)
 	return resp, nil
 }
@@ -289,6 +326,25 @@ func (a *Agent) addHelperUsage(req provider.ChatRequest, resp *provider.ChatResp
 		c = int(float64(len(resp.Content)) / defaultCharsPerToken)
 	}
 	a.addStats(Stats{HelperPromptTokens: p, HelperCompletionTokens: c})
+}
+
+// addChoreUsage counts a chore the online primary answered, priced the way
+// chatFiltered prices a turn. It does not calibrate the history: the chore's
+// prompt is not the conversation's.
+func (a *Agent) addChoreUsage(req provider.ChatRequest, resp *provider.ChatResponse) {
+	used := Stats{Requests: 1, PromptTokens: resp.Usage.PromptTokens, CompletionTokens: resp.Usage.CompletionTokens}
+	if used.PromptTokens == 0 && used.CompletionTokens == 0 {
+		for _, m := range req.Messages {
+			used.PromptTokens += a.History.MessageTokens(m)
+		}
+		used.CompletionTokens = a.History.est(resp.Content)
+	}
+	if p := a.Pricing(); p.Known {
+		used.SpendUSD = float64(used.PromptTokens)*p.Prompt + float64(used.CompletionTokens)*p.Completion
+	} else if a.markUnpricedSaid() {
+		a.notice("spend is not tracked for this model")
+	}
+	a.addStats(used)
 }
 
 // strip cleans a chore's reply the way the target's profile asks.
