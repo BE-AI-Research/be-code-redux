@@ -1449,7 +1449,7 @@ attach, undo, JSON mode, bench harness, task record) drives the real binary.
 ## Authors
 
 - BE AI Research — https://github.com/BE-AI-Research/be-code-redux
-- Shayne G. Brown — helper — https://github.com/BE-AI-Research/be-code-redux
+- Shayne G. Brown — Project Architect — https://github.com/BE-AI-Research/be-code-redux
 
 ## License
 
