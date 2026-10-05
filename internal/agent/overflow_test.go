@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // The error as the owner's Ollama 0.34 returned it on 2026-09-20, verbatim.
@@ -97,5 +99,71 @@ func TestOverflowThatCannotBeFixedIsExplained(t *testing.T) {
 	}
 	if calls.Load() > 2 {
 		t.Fatalf("retried %d times", calls.Load())
+	}
+}
+
+// bigTool returns a whole task tree's worth of text in one result.
+type bigTool struct{}
+
+func (bigTool) Name() string            { return "bigshow" }
+func (bigTool) Description() string     { return "big" }
+func (bigTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (bigTool) Run(context.Context, map[string]any) tools.Result {
+	return tools.Result{Content: strings.Repeat("note line with words in it\n", 9000)} // ~240 KB
+}
+
+// The 2026-10-05 session that died: one tool result (task show, the whole
+// tree) was ~75k tokens in a 32k window. Compaction keeps the newest result
+// whole, so the run ended. A tool result is held to the per-call cap, so the
+// next request fits.
+func TestOneHugeToolResultDoesNotEndTheRun(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 32768 })
+	ag.Tools.AddTool(bigTool{})
+	ag.RefreshSystem()
+	ag.ApplyWindow(32768)
+	var calls atomic.Int64
+	ag.Provider = &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		n := calls.Add(1)
+		size := 0
+		for _, m := range req.Messages {
+			size += len(m.Content)
+		}
+		if size/3 > 32768 {
+			return nil, errors.New(`HTTP 400: {"error":"request (80000 tokens) exceeds the available context size (32768 tokens)"}`)
+		}
+		if n == 1 {
+			return &provider.ChatResponse{ToolCalls: []provider.ToolCall{{ID: "c1", Name: "bigshow", Arguments: `{}`}}}, nil
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	out, err := ag.Run(context.Background(), "show the tree")
+	if err != nil || out != "done" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+}
+
+// A session saved before the cap (6EE9MY) still holds the oversized result as
+// its newest message. Continuing it must not die on the same request.
+func TestSavedOversizedToolResultIsRecovered(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.ContextTokens = 32768 })
+	ag.ApplyWindow(32768)
+	ag.History.Messages = append(ag.History.Messages,
+		provider.Message{Role: provider.RoleUser, Content: "show the tree"},
+		provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "task", Arguments: `{"action":"show"}`}}},
+		provider.Message{Role: provider.RoleTool, ToolCallID: "c1", Name: "task", Content: strings.Repeat("note line with words in it\n", 9000)},
+	)
+	ag.Provider = &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {
+		size := 0
+		for _, m := range req.Messages {
+			size += len(m.Content)
+		}
+		if size/3 > 32768 {
+			return nil, errors.New(`HTTP 400: {"error":"request (80000 tokens) exceeds the available context size (32768 tokens)"}`)
+		}
+		return &provider.ChatResponse{Content: "done"}, nil
+	}}
+	out, err := ag.Run(context.Background(), "carry on")
+	if err != nil || out != "done" {
+		t.Fatalf("out=%q err=%v", out, err)
 	}
 }

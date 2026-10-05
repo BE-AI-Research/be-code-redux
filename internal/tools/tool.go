@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/brown-enterprises/be-code/internal/mcp"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -466,7 +467,14 @@ func (r *Registry) Dispatch(ctx context.Context, call provider.ToolCall) Result 
 				"%s needs a person's approval during a scheduled event, and none was given", call.Name)}
 		}
 	}
-	return t.Run(ctx, args)
+	res := t.Run(ctx, args)
+	// Every result is held to the per-call cap, whatever the tool does about
+	// its own output: compaction keeps the newest result whole, so one result
+	// larger than the window (a whole task tree from `task show`) ends the run.
+	if max := r.MaxOutput(); max > 0 {
+		res.Content = truncate(res.Content, max)
+	}
+	return res
 }
 
 // ParseArgs decodes a tool call's arguments with exactly the tolerance
@@ -610,7 +618,11 @@ func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + fmt.Sprintf("\n... [truncated %d of %d bytes; narrow the request to see more]", len(s)-max, len(s))
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut-- // never split a character: the result goes to the server as JSON text
+	}
+	return s[:cut] + fmt.Sprintf("\n... [truncated %d of %d bytes; narrow the request to see more]", len(s)-cut, len(s))
 }
 
 func (r *Registry) editorName() string {
