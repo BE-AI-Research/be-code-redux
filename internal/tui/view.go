@@ -276,12 +276,15 @@ func (m *View) Init() tea.Cmd {
 }
 
 func (m *View) pingCmd() tea.Cmd {
+	// The agent's provider, not a copy: a declined switch or the helper
+	// fallback changes it from the agent's side.
+	prov := m.ag.CurrentProviderClient()
 	return func() tea.Msg {
-		status, err := m.prov.Ping(m.rootCtx)
+		status, err := prov.Ping(m.rootCtx)
 		if err != nil {
-			return noticeMsg(fmt.Sprintf("backend %s unreachable: %v", m.prov.Name(), err))
+			return noticeMsg(fmt.Sprintf("backend %s unreachable: %v", prov.Name(), err))
 		}
-		return noticeMsg(fmt.Sprintf("backend %s: %s", m.prov.Name(), status))
+		return noticeMsg(fmt.Sprintf("backend %s: %s", prov.Name(), status))
 	}
 }
 
@@ -1244,7 +1247,7 @@ func (m *View) bottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
 		}
 	}
-	modelSeg := m.st.Dim.Render(" · " + shortModel(m.ag.Model) + " · ")
+	modelSeg := m.st.Dim.Render(" · " + shortModel(m.ag.CurrentModel()) + " · ")
 	if name, online := m.ag.Online(); online {
 		// The badge replaces the plain model segment (spec §2.1).
 		modelSeg = m.st.Dim.Render(" · ") + m.st.Warn.Render("online: "+name+" · "+shortModel(m.ag.CurrentModel())) + m.st.Dim.Render(" · ")
@@ -1632,7 +1635,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		// takes the very lock Update is holding here. Waiting from inside
 		// Update would invert that order and hang the terminal.
 		m.setRunStateLocked(true, "clearing")
-		sess, name, model := m.Session, m.prov.Name(), m.ag.Model
+		sess, name, model := m.Session, m.ag.CurrentProvider(), m.ag.CurrentModel()
 		go func() {
 			sess.ag.ClearHistory()
 			// Under the session lock from here: SetSession writes what
@@ -2050,10 +2053,9 @@ func (m *View) setProvider(name string) (tea.Model, tea.Cmd) {
 		m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
 		return m, nil
 	}
-	m.prov = p
 	m.ag.SetProvider(p)
 	m.ag.SetModel(provider.ResolveModel(m.cfg, name, ""))
-	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.Model)})
+	m.appendEntryLocked(entry{Kind: entryOK, Text: fmt.Sprintf("provider set to %s (model %s)", name, m.ag.CurrentModel())})
 	return m, m.pingCmd()
 }
 

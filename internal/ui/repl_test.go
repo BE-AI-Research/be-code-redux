@@ -40,7 +40,7 @@ func newTestREPL(t *testing.T) *REPL {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &REPL{Cfg: cfg, Agent: agent.New(cfg, nullProvider{}, "m", reg, ""), Provider: nullProvider{}}
+	return &REPL{Cfg: cfg, Agent: agent.New(cfg, nullProvider{}, "m", reg, "")}
 }
 
 // testStoreFor opens a working-memory store rooted at the REPL's own
@@ -312,7 +312,7 @@ func TestPlainCoworkersAndConsult(t *testing.T) {
 		t.Fatalf("pre-flight refusal not printed:\n%s", out)
 	}
 	r.Cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b", Skills: "long reads"}}
-	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
+	r.Agent = agent.New(r.Cfg, nullProvider{}, "m", r.Agent.Tools, "")
 	r.Agent.Events = Events()
 	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
 		return scriptedProvider(func(provider.ChatRequest) string { return "Try the other branch." }), 0, nil
@@ -341,7 +341,7 @@ func TestPlainAlwaysAllowsTheCoworkerForTheSession(t *testing.T) {
 	r.Cfg.Coworkers = []config.CoworkerConfig{
 		{Name: "claude", Provider: "ollama", Model: "opus", Online: true},
 	}
-	r.Agent = agent.New(r.Cfg, r.Provider, "m", r.Agent.Tools, "")
+	r.Agent = agent.New(r.Cfg, nullProvider{}, "m", r.Agent.Tools, "")
 	r.Agent.Tools.Approve = r.approve
 	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
 		return scriptedProvider(func(provider.ChatRequest) string { return "advice" }), 0, nil

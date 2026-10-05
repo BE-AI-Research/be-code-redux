@@ -383,3 +383,63 @@ func TestSwitchToUnapprovedOnlineAsksInline(t *testing.T) {
 		}
 	}
 }
+
+// M2: after a declined switch the agent names the provider it went back to.
+func TestCurrentProviderAfterDeclinedSwitch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeResolver(t)
+	local := &recProvider{name: "ollama", def: provider.ChatResponse{Content: "local"}}
+	ag, _ := newTestAgent(t, local, nil)
+	var l safeLog
+	ag.Tools.Approve = l.approver(false)
+	if _, _, err := ag.RunFull(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	ag.SetProvider(&recProvider{name: "openrouter"})
+	ag.SetModelNow(context.Background(), "vendor/m")
+	if ag.CurrentProvider() != "openrouter" {
+		t.Fatalf("switched: %q", ag.CurrentProvider())
+	}
+	ag.RunFull(context.Background(), "second")
+	if got := ag.CurrentProvider(); got != "ollama" || ag.CurrentModel() != "test-model" {
+		t.Fatalf("after the no: %q %q", got, ag.CurrentModel())
+	}
+}
+
+// M3: SetProvider fails closed until its paired model switch resolves it.
+func TestSetProviderFailsClosedUntilResolved(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fakeResolver(t)
+	online := &recProvider{name: "openrouter", def: provider.ChatResponse{Content: "x"}}
+	ag, _ := newTestAgent(t, &recProvider{name: "ollama"}, nil)
+	ag.SetProvider(online)
+	err := ag.checkOnlineGate(context.Background(), true)
+	if err == nil || err.Error() != "the provider switch has not finished; nothing was sent" {
+		t.Fatalf("unresolved: %v", err)
+	}
+	if _, _, err := ag.RunFull(context.Background(), "hi"); err == nil || len(online.requests()) != 0 {
+		t.Fatalf("a request went out before the switch resolved: %v", err)
+	}
+	ag.SetProvider(&recProvider{name: "ollama", def: provider.ChatResponse{Content: "ok"}})
+	ag.SetModel("qwen3")
+	if err := ag.checkOnlineGate(context.Background(), true); err != nil {
+		t.Fatalf("resolved to local: %v", err)
+	}
+}
+
+// M8: nobody to ask is not a "no": nothing stored, no helper switch.
+func TestOnlineGateWithNoApproverIsWithdrawn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	withHelper(t, &recProvider{name: "ollama"}, 8192, nil)
+	ag, dir := onlineAgent(t, &recProvider{name: "openrouter"}, "openrouter", helperCfg)
+	ag.Tools.Approve, ag.Tools.ApproveCtx = nil, nil
+	if ag.StartOnlineGate() {
+		t.Fatal("no approver passed the gate")
+	}
+	if name, on := ag.Online(); !on || name != "openrouter" || ag.CurrentProvider() != "openrouter" || ag.OnlineRefusal() != "" {
+		t.Fatal("no approver switched to the helper or refused")
+	}
+	if _, err := os.Stat(onlineStoreFor(t, dir)); err == nil {
+		t.Fatal("nothing stored")
+	}
+}

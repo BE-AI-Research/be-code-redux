@@ -220,6 +220,11 @@ func (a *Agent) StartOnlineGate() bool {
 		a.gatePending = false
 		a.onlineMu.Unlock()
 	}()
+	if a.Tools.Approve == nil && a.Tools.ApproveCtx == nil {
+		// Nobody to ask is not a "no": nothing stored, no switch to the
+		// helper, as for a question withdrawn.
+		return false
+	}
 	ctx, out := tools.WithAskOutcome(context.Background())
 	yes := a.Tools.AskPerson(ctx, "online_project", a.onlineQuestion(name))
 	if yes {
@@ -295,6 +300,14 @@ func (a *Agent) checkOnlineGate(ctx context.Context, ask bool) error {
 		// Plan mode's scratch agent runs on the primary's model.
 		return a.spendParent.checkOnlineGate(ctx, ask)
 	}
+	a.onlineMu.Lock()
+	unresolved := a.providerUnresolved
+	a.onlineMu.Unlock()
+	if unresolved {
+		// SetProvider without its paired model switch yet: whether the new
+		// provider is online is not known, so nothing goes out.
+		return errors.New("the provider switch has not finished; nothing was sent")
+	}
 	name, online := a.Online()
 	if !online || a.OnlineApproved() {
 		a.noteGood()
@@ -353,7 +366,7 @@ func (a *Agent) declineSwitch(ctx context.Context, name string) {
 // restoreMain makes p and model the main model again, through the same
 // switch path a person's /provider and /model take.
 func (a *Agent) restoreMain(ctx context.Context, p provider.Provider, model string) {
-	if a.Provider != p {
+	if a.CurrentProviderClient() != p {
 		a.SetProvider(p)
 	}
 	a.SetModelNow(ctx, model)
@@ -391,11 +404,10 @@ func (a *Agent) resolveOnline(ctx context.Context, model string) {
 	if OnlineResolver == nil {
 		return
 	}
-	name := ""
-	if a.Provider != nil {
-		name = a.Provider.Name()
-	}
-	OnlineResolver(ctx, a, name, model)
+	OnlineResolver(ctx, a, a.CurrentProvider(), model)
+	a.onlineMu.Lock()
+	a.providerUnresolved = false
+	a.onlineMu.Unlock()
 	inline := false
 	if _, online := a.Online(); online && !a.OnlineApproved() {
 		inline = true
@@ -447,4 +459,29 @@ func (a *Agent) CurrentModel() string {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	return a.Model
+}
+
+// CurrentProvider is the configured name of the provider the main model is
+// on now ("" when none). UIs read it instead of their own copy: a declined
+// switch or the helper fallback changes it from the agent's side.
+func (a *Agent) CurrentProvider() string {
+	if p := a.CurrentProviderClient(); p != nil {
+		return p.Name()
+	}
+	return ""
+}
+
+// CurrentProviderClient is the main provider itself, for a UI's listing or
+// ping, read under the lock SetProvider writes it under.
+func (a *Agent) CurrentProviderClient() provider.Provider {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.Provider
+}
+
+// CurrentFamily is the main model's profile family, read under its lock.
+func (a *Agent) CurrentFamily() string {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.Profile.Family
 }

@@ -80,3 +80,40 @@ func TestOnlineStateFollowsProviderSwitch(t *testing.T) {
 		t.Fatalf("back online: %q %v %q", name, on, ag.KeyEnv())
 	}
 }
+
+// M6: init sends to the main model too, so it takes run's consent rule.
+func TestInitOnlineGate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", os.Getenv("HOME"))
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BE_TEST_ONLINE_KEY", "k")
+	prevDir, prevProvider, prevModel, prevYes, prevResume := flagDir, flagProvider, flagModel, flagYes, flagResume
+	t.Cleanup(func() {
+		flagDir, flagProvider, flagModel, flagYes, flagResume = prevDir, prevProvider, prevModel, prevYes, prevResume
+	})
+	flagDir, flagProvider, flagModel, flagYes, flagResume = t.TempDir(), "", "", false, ""
+	initCmd.SetContext(context.Background())
+	err := initCmd.RunE(initCmd, nil)
+	if err == nil || err.Error() != "this project is not approved for or; run interactively once, or pass -y for this run" {
+		t.Fatalf("init without -y: %v", err)
+	}
+	flagYes = true
+	captureStderr(t, func() {
+		if err := initCmd.RunE(initCmd, nil); err != nil && strings.Contains(err.Error(), "not approved") {
+			t.Errorf("init -y refused: %v", err)
+		}
+	})
+	home, _ := config.Dir()
+	if entries, _ := os.ReadDir(home + "/engine"); len(entries) > 0 {
+		for _, e := range entries {
+			if _, err := os.Stat(home + "/engine/" + e.Name() + "/online.json"); err == nil {
+				t.Fatal("init -y wrote online.json")
+			}
+		}
+	}
+}

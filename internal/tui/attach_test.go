@@ -296,7 +296,6 @@ func (blockingProvider) Chat(ctx context.Context, _ provider.ChatRequest, _ prov
 // turn does, not "plan failed: context canceled".
 func TestCancelledPlanReportsCancelled(t *testing.T) {
 	m := newTestModel(t)
-	m.prov = blockingProvider{}
 	m.ag.Provider = blockingProvider{}
 	m.Update(runes("/plan rewrite the parser"))
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})

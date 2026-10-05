@@ -35,10 +35,9 @@ func TestRunInitOutsideGitWritesBackupAndRefreshes(t *testing.T) {
 	os.MkdirAll(filepath.Join(root, "cmd/x"), 0o755)
 	os.WriteFile(filepath.Join(root, "cmd/x/main.go"), []byte("package main\nfunc main(){}\n"), 0o644)
 	os.WriteFile(filepath.Join(root, "BECODE.md"), []byte("old notes\n"), 0o644)
-	r.Provider = scriptedProvider(func(req provider.ChatRequest) string {
+	r.Agent.Provider = scriptedProvider(func(req provider.ChatRequest) string {
 		return "# X\n\nA Go tool. Build: `go build ./...`. Entry: cmd/x. Module file go.mod.\n"
 	})
-	r.Agent.Provider = r.Provider
 	var previews []string
 	path, err := RunInit(context.Background(), r.Agent, InitOptions{Root: root,
 		Approve: func(p string) bool { previews = append(previews, p); return true }, Log: func(string) {}})
@@ -79,8 +78,7 @@ func TestRunInitInGitRepoMakesRestoreBranchInsteadOfBackup(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "BECODE.md"), []byte("old notes\n"), 0o644)
 	gitInRoot(t, root, "git init -q -b main", "git config user.email t@t.local", "git config user.name t",
 		"git add -A", "git commit -qm initial", "sh -c 'echo scratch > notes.txt'")
-	r.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; build with `go build ./...`.\n" })
-	r.Agent.Provider = r.Provider
+	r.Agent.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; build with `go build ./...`.\n" })
 	var lines []string
 	_, err := RunInit(context.Background(), r.Agent, InitOptions{Root: root, Log: func(l string) { lines = append(lines, l) }})
 	if err != nil {
@@ -116,8 +114,7 @@ func TestRunInitRejectionInGitRepoMakesNoBranch(t *testing.T) {
 	root := r.Agent.Tools.Root
 	os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644)
 	gitInRoot(t, root, "git init -q -b main", "git config user.email t@t.local", "git config user.name t", "git add -A", "git commit -qm initial")
-	r.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; see go build ./....\n" })
-	r.Agent.Provider = r.Provider
+	r.Agent.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; see go build ./....\n" })
 	if _, err := RunInit(context.Background(), r.Agent, InitOptions{Root: root, Approve: func(string) bool { return false }}); err == nil {
 		t.Fatal("expected rejection")
 	}
@@ -130,8 +127,7 @@ func TestRunInitRespectsRejection(t *testing.T) {
 	r := newTestREPL(t)
 	root := r.Agent.Tools.Root
 	os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644)
-	r.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; see go build ./....\n" })
-	r.Agent.Provider = r.Provider
+	r.Agent.Provider = scriptedProvider(func(provider.ChatRequest) string { return "# X\nUses go.mod; see go build ./....\n" })
 	_, err := RunInit(context.Background(), r.Agent, InitOptions{Root: root, Approve: func(string) bool { return false }})
 	if err == nil || !strings.Contains(err.Error(), "rejected") {
 		t.Fatalf("err %v", err)

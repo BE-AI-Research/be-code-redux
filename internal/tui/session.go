@@ -51,7 +51,6 @@ type Session struct {
 
 	cfg      *config.Config
 	ag       *agent.Agent
-	prov     provider.Provider
 	rootCtx  context.Context
 	cancelFn context.CancelFunc
 	// consultCancel stops a /consult asked while a run was in progress: it
@@ -197,9 +196,13 @@ type Session struct {
 // NewSession builds the shared core and wires the agent's callbacks to it.
 // Every callback runs on the agent goroutine and does nothing but broadcast,
 // so none of them can block the loop on a terminal.
-func NewSession(cfg *config.Config, ag *agent.Agent, prov provider.Provider) *Session {
+//
+// The provider argument is no longer kept: the session reads the agent's
+// current provider (Agent.CurrentProviderClient), which a declined switch or
+// the helper fallback changes from the agent's side.
+func NewSession(cfg *config.Config, ag *agent.Agent, _ provider.Provider) *Session {
 	s := &Session{
-		cfg: cfg, ag: ag, prov: prov,
+		cfg: cfg, ag: ag,
 		now:      time.Now,
 		histFile: loadInputHistory(ui.HistoryFile()),
 		custom:   commands.Load(ag.Tools.Root),

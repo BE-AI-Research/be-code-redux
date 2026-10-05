@@ -191,7 +191,6 @@ func TestConsultMidRunRunsBesideTheTurnAndEscCancelsBoth(t *testing.T) {
 	s.cfg.Coworkers = []config.CoworkerConfig{{Name: "big", Provider: "ollama", Model: "qwen3:32b"}}
 	primary := newBlockingChat()
 	s.ag = agent.New(s.cfg, primary, "m", s.ag.Tools, "")
-	s.prov = primary
 	wireEvents(s)
 	coworker := newBlockingChat()
 	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {

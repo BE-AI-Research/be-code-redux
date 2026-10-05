@@ -32,7 +32,6 @@ type REPL struct {
 	quitAfter bool // set by /quit typed during a run
 	Cfg       *config.Config
 	Agent     *agent.Agent
-	Provider  provider.Provider
 	Custom    map[string]commands.Command
 	rl        *readline.Instance
 
@@ -95,7 +94,8 @@ func HistoryFile() string {
 }
 
 // NewREPL builds the REPL with readline configured.
-func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, error) {
+// The provider argument is not kept: the REPL reads the agent's current one.
+func NewREPL(cfg *config.Config, ag *agent.Agent, _ provider.Provider) (*REPL, error) {
 	custom := commands.Load(ag.Tools.Root)
 	items := slashCompleterItems()
 	for _, n := range commands.Names(custom) {
@@ -114,7 +114,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	if err != nil {
 		return nil, err
 	}
-	r := &REPL{Cfg: cfg, Agent: ag, Provider: p, Custom: custom, rl: rl,
+	r := &REPL{Cfg: cfg, Agent: ag, Custom: custom, rl: rl,
 		wakeCh: make(chan struct{}, 1)}
 	ag.Tools.Approve = r.approve
 	ag.Tools.ApproveCtx = r.approveCtx
@@ -353,11 +353,13 @@ func (r *REPL) Run(ctx context.Context) error {
 	defer r.rl.Close()
 	fmt.Printf("BE-Code — offline agentic coding %s\n", dim("(plain mode)"))
 	fmt.Printf("%s\n", dim(fmt.Sprintf("provider=%s model=%s workspace=%s",
-		r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root)))
-	if status, err := r.Provider.Ping(ctx); err != nil {
-		fmt.Printf("%s backend unreachable: %v\n", red("warn>"), err)
-	} else {
-		fmt.Printf("%s %s %s\n", grn("ok>"), r.Provider.Name(), dim(status))
+		r.Agent.CurrentProvider(), r.Agent.CurrentModel(), r.Agent.Tools.Root)))
+	if prov := r.Agent.CurrentProviderClient(); prov != nil {
+		if status, err := prov.Ping(ctx); err != nil {
+			fmt.Printf("%s backend unreachable: %v\n", red("warn>"), err)
+		} else {
+			fmt.Printf("%s %s %s\n", grn("ok>"), prov.Name(), dim(status))
+		}
 	}
 	fmt.Printf("%s\n\n", dim("/help for commands · Tab completes · ↑ history · type while it works to queue a message"))
 	if NeedsInitHint(r.Agent.Tools.Root) {
@@ -816,7 +818,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/models":
 		// The same rows the TUI's picker shows: size, family, quantization,
 		// the window each is loaded with, and whether it is resident.
-		models, err := provider.ModelDetails(ctx, r.Provider)
+		models, err := provider.ModelDetails(ctx, r.Agent.CurrentProviderClient())
 		if err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
@@ -826,7 +828,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		}
 	case "/model":
 		if len(fields) < 2 {
-			fmt.Printf("current model: %s (profile %s)\n", r.Agent.Model, r.Agent.Profile.Family)
+			fmt.Printf("current model: %s (profile %s)\n", r.Agent.CurrentModel(), r.Agent.CurrentFamily())
 			break
 		}
 		// Inline, not on a goroutine: the consent question this may raise
@@ -835,7 +837,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Printf("model set to %s (profile %s)\n", fields[1], r.Agent.Profile.Family)
 	case "/provider":
 		if len(fields) < 2 {
-			fmt.Printf("current provider: %s (configured: see /config)\n", r.Provider.Name())
+			fmt.Printf("current provider: %s (configured: see /config)\n", r.Agent.CurrentProvider())
 			break
 		}
 		p, err := provider.FromConfig(r.Cfg, fields[1])
@@ -843,11 +845,10 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}
-		r.Provider = p
 		r.Agent.SetProvider(p)
 		model := provider.ResolveModel(r.Cfg, fields[1], "")
 		r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, model) })
-		fmt.Printf("provider set to %s (model %s)\n", p.Name(), r.Agent.Model)
+		fmt.Printf("provider set to %s (model %s)\n", r.Agent.CurrentProvider(), r.Agent.CurrentModel())
 	case "/sessions":
 		printSessions()
 	case "/resume":
@@ -1052,7 +1053,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			r.Cfg.MaxRepairs, r.Cfg.CompatToolCalls, r.Cfg.ApproveFileWrites, r.Cfg.AutoApproveShell)
 	case "/clear":
 		r.Agent.ClearHistory()
-		r.Agent.SetSession(store.NewSession(r.Provider.Name(), r.Agent.Model, r.Agent.Tools.Root))
+		r.Agent.SetSession(store.NewSession(r.Agent.CurrentProvider(), r.Agent.CurrentModel(), r.Agent.Tools.Root))
 		fmt.Println("history cleared; new session started")
 		r.Agent.ConfirmHeldTimers() // a fresh session has none: a no-op today
 	case "/undo":

@@ -116,7 +116,7 @@ func (m *View) compactBottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · q%d", n))
 		}
 	}
-	modelSeg := m.st.Dim.Render(" · " + shortModelTo(m.ag.Model, compactModelCap) + " · ")
+	modelSeg := m.st.Dim.Render(" · " + shortModelTo(m.ag.CurrentModel(), compactModelCap) + " · ")
 	if _, online := m.ag.Online(); online {
 		// Too narrow for the provider: the word itself is the badge.
 		modelSeg = m.st.Dim.Render(" · ") + m.st.Warn.Render("online: "+shortModelTo(m.ag.CurrentModel(), compactModelCap)) + m.st.Dim.Render(" · ")
@@ -149,7 +149,7 @@ func (m *View) compactBottomLine() string {
 // compactMenuStatus is the two-line status block shown above the menu
 // entries in compact layout, in place of menuStatus's full row list.
 func (m *View) compactMenuStatus() string {
-	line1 := fmt.Sprintf("%s · %s", m.ag.Model, m.ag.Profile.Family)
+	line1 := fmt.Sprintf("%s · %s", m.ag.CurrentModel(), m.ag.CurrentFamily())
 	line2 := fmt.Sprintf("context %d%% · session %dk tokens", m.ctxPercent(), m.usage.total/1000)
 	return m.st.Dim.Render(line1) + "\n" + m.st.Dim.Render(line2)
 }

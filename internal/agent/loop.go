@@ -191,8 +191,11 @@ type Agent struct {
 	onlineRunOK bool
 	gatePending bool
 	gateInline  bool
-	lastGood    mainModel
-	gateRefusal string
+	// providerUnresolved: SetProvider ran and its paired model switch (which
+	// resolves the online state) has not yet; the gate refuses meanwhile.
+	providerUnresolved bool
+	lastGood           mainModel
+	gateRefusal        string
 	// spendRaise is what continuing past the cap has added to it, this
 	// session only (the config is never written); unpricedSaid latches the
 	// once-per-session "not tracked" notice.
@@ -444,7 +447,16 @@ func (a *Agent) applyModelLocked(model string) {
 // silent, which is how a session ends up quietly unable to set its context
 // window with nothing on screen to say so.
 func (a *Agent) SetProvider(p provider.Provider) {
+	a.modelMu.Lock()
 	a.Provider = p
+	a.modelMu.Unlock()
+	if OnlineResolver != nil {
+		// Fail closed until the paired SetModel/SetModelNow resolves
+		// whether this provider is online (every caller pairs them).
+		a.onlineMu.Lock()
+		a.providerUnresolved = true
+		a.onlineMu.Unlock()
+	}
 	a.nativeFallbackNotified = false
 	a.unloadedNotified = false
 	// A loader speaks for one backend. Carrying the old one across a
