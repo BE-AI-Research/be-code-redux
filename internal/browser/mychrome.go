@@ -318,6 +318,7 @@ func (s *Session) pickMineLocked(ctx context.Context) (string, error) {
 // holds for a host not yet shared with an online main model (TitleShared).
 func (s *Session) tabName(ctx context.Context, p *Page) string {
 	title, u := p.Info(ctx)
+	title = collapse(title) // one line: a title must not start a line of its own
 	h := HostOf(u)
 	if !s.connMine {
 		if s.opts.TitleShared == nil || s.opts.TitleShared(h) {

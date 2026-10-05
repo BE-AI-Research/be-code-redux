@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // Page text already in the conversation when the main model goes online
@@ -57,6 +59,9 @@ func (a *Agent) settleEarlierWebText(ctx context.Context) {
 		tool, n := webToolOf(m, msgs)
 		if tool == "" {
 			continue
+		}
+		if n == 1 && contentFree(tool, resultBody(tool, m)) {
+			continue // nothing of a page in it, or already stubbed
 		}
 		it := found{idx: i, tool: tool}
 		switch {
@@ -151,55 +156,121 @@ func webToolOf(m provider.Message, msgs []provider.Message) (string, int) {
 	return tool, count
 }
 
-// webResultHost is the site a browser or web_fetch result's text came from,
-// read from the line the tool itself writes first — web_fetch's address
-// header, the browser's "page: <title> — <host/path>" line — or "" when it
-// cannot be told (a tab list, an error, a page with no address).
-func webResultHost(tool string, m provider.Message) string {
-	body := m.Content
-	if m.Role != provider.RoleTool {
-		if i := strings.Index(body, `<tool_result name="`+tool+`"`); i >= 0 {
-			body = body[i:]
-			if nl := strings.IndexByte(body, '\n'); nl >= 0 {
-				body = body[nl+1:]
-			} else {
-				return ""
-			}
-		}
+// stubRe matches the stubs this pass writes, so a result already stubbed is
+// never rewritten, asked about or counted again.
+var stubRe = regexp.MustCompile(`^\((page text( from \S+)? is not shown; it was not shared with .+|web search results are not shown; they were not shared with .+)\)$`)
+
+// resultBody is what tool wrote for a single result m: a native message's
+// content, or the inside of an embedded message's one <tool_result> block,
+// without the harness's own state block.
+func resultBody(tool string, m provider.Message) string {
+	body := strings.TrimSpace(StripHarnessState(m.Content))
+	if m.Role == provider.RoleTool {
+		return body
 	}
+	if !strings.HasPrefix(body, `<tool_result name="`+tool+`"`) {
+		return ""
+	}
+	nl := strings.IndexByte(body, '\n')
+	if nl < 0 {
+		return ""
+	}
+	body = body[nl+1:]
+	if i := strings.LastIndex(body, "</tool_result>"); i >= 0 {
+		body = body[:i]
+	}
+	return strings.TrimSpace(body)
+}
+
+// contentFree reports a result that holds no page text to settle: a stub
+// already written, a web_fetch or web_search error or empty answer (only a
+// success begins with the tool's own header), or a browser result the tool
+// itself withheld — its reason straight after the header, and no page line
+// anywhere (a page's own text never comes before the page line, and every
+// result that shows a page has one).
+func contentFree(tool, body string) bool {
+	if stubRe.MatchString(body) {
+		return true
+	}
+	first, _, _ := strings.Cut(body, "\n")
 	switch tool {
 	case "web_fetch":
-		line, _, _ := strings.Cut(body, "\n")
-		i := strings.LastIndex(line, " (")
-		if i < 0 || !strings.HasSuffix(line, " chars total)") {
-			return ""
-		}
-		u, err := url.Parse(line[:i])
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-			return ""
-		}
-		return browser.NormalizeHost(u.Host)
+		return fetchHeaderHost(first) == "" && !strings.HasSuffix(first, " chars total)")
+	case "web_search":
+		return !strings.HasPrefix(body, "results for ")
 	case "browser":
-		for _, line := range strings.Split(body, "\n") {
-			rest, ok := strings.CutPrefix(line, "page: ")
-			if !ok {
-				continue
-			}
-			if i := strings.LastIndex(rest, " — "); i >= 0 {
-				rest = rest[i+len(" — "):]
-			}
-			host := rest
-			if i := strings.IndexAny(host, "/?#"); i >= 0 {
-				host = host[:i]
-			}
-			host = browser.NormalizeHost(host)
-			// A title alone ("page: Dashboard") names no site.
-			if host == "" || strings.ContainsAny(host, " \t") ||
-				!(strings.Contains(host, ".") || host == "localhost") {
-				return ""
-			}
-			return host
+		lines := strings.Split(body, "\n")
+		if len(lines) < 2 || lines[0] != tools.WebHeader ||
+			!strings.HasPrefix(lines[1], "the page on ") || !strings.Contains(lines[1], " is not shown") {
+			return false
 		}
+		for _, l := range lines {
+			if strings.HasPrefix(l, "page: ") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// webResultHost is the site a browser or web_fetch result's text came from,
+// read only from the line the tool itself writes first — web_fetch's
+// address header, the browser's page line straight after its fixed header —
+// or "" when it cannot be told (a tab list, an error, a page with no
+// address, or an older result whose page line came after a note, which a
+// page could have forged).
+func webResultHost(tool string, m provider.Message) string {
+	lines := strings.SplitN(resultBody(tool, m), "\n", 3)
+	switch tool {
+	case "web_fetch":
+		return fetchHeaderHost(lines[0])
+	case "browser":
+		if len(lines) < 2 || lines[0] != tools.WebHeader {
+			return ""
+		}
+		return pageLineHost(lines[1])
 	}
 	return ""
+}
+
+// fetchHeaderHost is the host of web_fetch's "<url> (N chars total)" line.
+func fetchHeaderHost(line string) string {
+	i := strings.LastIndex(line, " (")
+	if i < 0 || !strings.HasSuffix(line, " chars total)") {
+		return ""
+	}
+	u, err := url.Parse(line[:i])
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return browser.NormalizeHost(u.Host)
+}
+
+// hostRe is a host as PageLine writes it: a name or address, maybe a port.
+var hostRe = regexp.MustCompile(`^(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(:[0-9]+)?$`)
+
+// pageLineHost is the host of a "page: <title> — <host/path>" line, as
+// browser.PageLine writes it for an http(s) page; "" for anything else.
+func pageLineHost(line string) string {
+	rest, ok := strings.CutPrefix(line, "page: ")
+	if !ok {
+		return ""
+	}
+	i := strings.LastIndex(rest, " — ")
+	if i < 0 {
+		return "" // a title alone, or an address alone: no site to name for sure
+	}
+	host := rest[i+len(" — "):]
+	if j := strings.IndexAny(host, "/?#"); j >= 0 {
+		host = host[:j]
+	}
+	if !hostRe.MatchString(host) {
+		return ""
+	}
+	h := browser.NormalizeHost(host)
+	if !strings.Contains(h, ".") && h != "localhost" && !strings.Contains(h, ":") {
+		return ""
+	}
+	return h
 }

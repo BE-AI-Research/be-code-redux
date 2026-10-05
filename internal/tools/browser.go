@@ -396,18 +396,19 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	// shown, not even its alerts' text.
 	withholdAs := func(pageNotes int, why string) Result {
 		t.session.Record()
+		// The reason comes first, straight after the header: a withheld
+		// result has no page line, and nothing after it is from the page.
 		var b strings.Builder
-		b.WriteString(WebHeader + "\n")
+		b.WriteString(WebHeader + "\n" + oneLine(why))
 		for _, n := range notes {
-			b.WriteString(n + "\n")
+			b.WriteString("\n" + oneLine(n))
 		}
 		if k := pageNotes + len(page.TakeNotes()); k > 0 {
-			fmt.Fprintf(&b, "(%d page notes withheld)\n", k)
+			fmt.Fprintf(&b, "\n(%d page notes withheld)", k)
 		}
 		if actErr != nil {
-			b.WriteString(shownActErr(action, actErr) + "\n")
+			b.WriteString("\n" + oneLine(shownActErr(action, actErr)))
 		}
-		b.WriteString(why)
 		return Result{Content: t.clip(b.String()), IsError: actErr != nil}
 	}
 	withhold := func(pageNotes int) Result {
@@ -454,7 +455,9 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 			}
 			t.markIfUntrusted(page.URL())
 			notes = append(notes, pageNotes...)
-			return Result{IsError: true, Content: WebHeader + "\n" + strings.Join(append(notes, "reading the page failed: "+err.Error()), "\n")}
+			title, u := page.Info(ctx)
+			return Result{IsError: true, Content: t.clip(shownResult(browser.PageLine(title, u), notes,
+				"reading the page failed: "+err.Error(), ""))}
 		}
 		body = snap
 	}
@@ -470,16 +473,42 @@ func (t *BrowserTool) finish(ctx context.Context, page *browser.Page, action str
 	notes = append(notes, pageNotes...)
 	t.session.Record()
 	t.markIfUntrusted(page.URL())
-	var b strings.Builder
-	b.WriteString(WebHeader + "\n")
-	for _, n := range notes {
-		b.WriteString(n + "\n")
+	// The page line comes first: it is what says, later, which site the
+	// text is from (the agent's ShareEarlier pass), so nothing the page
+	// controls — an error, an alert — may come before it.
+	pageLine, rest, _ := strings.Cut(body, "\n")
+	if !strings.HasPrefix(pageLine, "page: ") {
+		title, u := page.Info(ctx)
+		pageLine, rest = browser.PageLine(title, u), body
 	}
+	errText := ""
 	if actErr != nil {
-		b.WriteString(actErr.Error() + "\n")
+		errText = actErr.Error()
 	}
-	b.WriteString(body)
-	return Result{Content: t.clip(b.String()), IsError: actErr != nil}
+	return Result{Content: t.clip(shownResult(pageLine, notes, errText, rest)), IsError: actErr != nil}
+}
+
+// shownResult is a browser result that shows a page: the header, the page
+// line, then the notes and the action's error, each one line, then the page.
+func shownResult(pageLine string, notes []string, errText, rest string) string {
+	var b strings.Builder
+	b.WriteString(WebHeader + "\n" + oneLine(pageLine))
+	for _, n := range notes {
+		b.WriteString("\n" + oneLine(n))
+	}
+	if errText != "" {
+		b.WriteString("\n" + oneLine(errText))
+	}
+	if rest != "" {
+		b.WriteString("\n" + rest)
+	}
+	return b.String()
+}
+
+// oneLine flattens line breaks to spaces: a note, an alert or an error the
+// page can word must never start a line of its own (a forged page line).
+func oneLine(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
 }
 
 // shareRefusal is the share_page gate on the page whose content finish is
@@ -725,7 +754,7 @@ func (t *BrowserTool) tabs(ctx context.Context, notes []string) Result {
 	var b strings.Builder
 	b.WriteString(WebHeader + "\n")
 	for _, n := range notes {
-		b.WriteString(n + "\n")
+		b.WriteString(oneLine(n) + "\n")
 	}
 	b.WriteString("tabs:")
 	mine := t.session.MyChrome()
