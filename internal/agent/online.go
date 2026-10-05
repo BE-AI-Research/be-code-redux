@@ -24,8 +24,24 @@ func (a *Agent) SetOnline(providerName, keyEnv string, p Pricing) {
 	a.pricing = p
 	a.unpricedSaid = false
 	if providerName != "" && keyEnv != "" {
-		a.KeyEnv = keyEnv
+		a.keyEnv = keyEnv
 	}
+}
+
+// KeyEnv names the environment variable the main provider's API key came
+// from; "" when none. Read under onlineMu: a provider switch changes it.
+func (a *Agent) KeyEnv() string {
+	a.onlineMu.Lock()
+	defer a.onlineMu.Unlock()
+	return a.keyEnv
+}
+
+// SetKeyEnv records the main provider's api_key_env (cmd, at startup and on
+// every provider switch).
+func (a *Agent) SetKeyEnv(name string) {
+	a.onlineMu.Lock()
+	a.keyEnv = name
+	a.onlineMu.Unlock()
 }
 
 // Online reports the online provider serving the main model, if any.

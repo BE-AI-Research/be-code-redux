@@ -875,8 +875,8 @@ func TestApplyOnlineFromListing(t *testing.T) {
 	if !pr.Known || pr.Prompt != 3e-6 || pr.Completion != 15e-6 {
 		t.Fatalf("pricing %+v", pr)
 	}
-	if ag.KeyEnv != "BE_TEST_ONLINE_KEY" {
-		t.Fatalf("KeyEnv %q", ag.KeyEnv)
+	if ag.KeyEnv() != "BE_TEST_ONLINE_KEY" {
+		t.Fatalf("KeyEnv %q", ag.KeyEnv())
 	}
 	b, reserve, _ := ag.History.Scalars()
 	if b != 131072 || reserve <= 0 {

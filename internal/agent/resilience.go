@@ -43,7 +43,7 @@ func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*p
 		var he *provider.HTTPError
 		typed := errors.As(err, &he)
 		if typed && (he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden) {
-			return nil, rejectedKeyError(a.KeyEnv, he)
+			return nil, rejectedKeyError(a.KeyEnv(), he)
 		}
 		if ctx.Err() != nil || !isRetryableBackendError(err) || attempt == maxBackendRetries {
 			break

@@ -289,6 +289,11 @@ func (a *Agent) choreDo(ctx context.Context, t choreTarget, o choreOpts, req pro
 	if !t.helper {
 		_, online := a.Online()
 		if online {
+			// Nothing reaches the online model before the project is
+			// approved for it (spec §2.1); a chore never asks.
+			if err := a.checkOnlineGate(ctx, false); err != nil {
+				return nil, err
+			}
 			// A chore on the online model costs like any other call
 			// (spec §2.3): it passes the cap first and is counted after.
 			if err := a.checkSpendCap(ctx); err != nil {

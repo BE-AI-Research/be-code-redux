@@ -343,6 +343,12 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	}
 	applyModelParams(cfg, p, reg, ag, model)
 	applyOnline(cfg, p, ag, mainProviderName(cfg), model)
+	// Every later switch of the main provider or model re-runs the same
+	// resolution, so the online state never outlives the provider it
+	// described (same import-cycle dodge as ReviewerFactory).
+	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
+		resolveOnline(ctx, cfg, a.Provider, a, name, model, false)
+	}
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
 }
@@ -774,6 +780,13 @@ func runInteractive(cmd *cobra.Command) error {
 		// startup prompt is answered on r.lines, so StartSchedules runs
 		// here on the REPL goroutine rather than on a goroutine of its own.
 		repl.OnStart = func() {
+			// Per-project consent for an online main model first (spec
+			// §2.1): before sub-agents or schedules can start, and before
+			// the first line is taken. A gate that fails ends the session.
+			if !ag.StartOnlineGate() {
+				repl.Stop()
+				return
+			}
 			repl.ResolveModelParams(ctx)
 			ag.StartSubAgents()
 			ag.StartSchedules()
@@ -812,16 +825,34 @@ func runInteractive(cmd *cobra.Command) error {
 	// panic-fenced — Session.Ask tolerates being raised with nobody
 	// rendering yet exactly the way ag.ResolveModel's own goResolve does
 	// below.
-	ag.StartSubAgentsAsync()
-	// Scheduled events: the same shape — the startup prompt is a shared ask.
-	ag.StartSchedulesAsync()
+	//
+	// Per-project consent for an online main model (spec §2.1) comes first:
+	// nothing may dispatch a sub-agent or run a scheduled event before it
+	// passes, and the question is a shared ask too, so it waits on a
+	// goroutine of its own while the program renders. A local session (or
+	// an approved one) runs done on this goroutine, exactly as before. A
+	// gate that fails ends the session; its notice is repeated below, after
+	// the screen has gone.
+	ag.StartOnlineGateAsync(func(ok bool) {
+		if !ok {
+			s.Quit()
+			return
+		}
+		ag.StartSubAgentsAsync()
+		// Scheduled events: the same shape — the startup prompt is a shared ask.
+		ag.StartSchedulesAsync()
+	})
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
 	// approval modal, which is the only place under a TUI a person can see
 	// it. A terminal that attaches after it is raised is shown it too
 	// (Session.NewView), so this is safe to run before the program starts.
 	ag.ResolveModel()
-	return s.RunLocal(ctx)
+	err = s.RunLocal(ctx)
+	if msg := ag.OnlineRefusal(); msg != "" {
+		fmt.Println(msg)
+	}
+	return err
 }
 
 // startupWarn reports a warning raised while the session is still being built.
@@ -919,32 +950,77 @@ func listOnlineModel(ctx context.Context, p provider.Provider, model string) (pr
 // they are openai-typed, so applyModelParams has already returned. A listing
 // that cannot be read is a warning, never fatal.
 func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string) {
+	resolveOnline(context.Background(), cfg, p, ag, name, model, true)
+}
+
+// resolveOnline sets the online state for the main provider and model. It is
+// applyOnline at startup (wait: the listing is read before the session
+// starts) and agent.OnlineResolver after every /provider, /model or helper
+// switch (no wait: a switch runs inside a UI's update, so the preset's
+// window and prices apply at once and the listing's land behind it, if the
+// session is still on that model). A local provider clears the state.
+func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider, ag *agent.Agent, name, model string, wait bool) {
 	pc, ok := cfg.Providers[name]
 	if !ok {
+		if !wait {
+			ag.SetKeyEnv("")
+			ag.SetOnline("", "", agent.Pricing{})
+		}
 		return
 	}
-	if pc.APIKeyEnv != "" {
-		ag.KeyEnv = pc.APIKeyEnv
-	}
+	ag.SetKeyEnv(pc.APIKeyEnv)
 	if !config.ProviderIsOnline(pc) {
+		ag.SetOnline("", "", agent.Pricing{})
 		return
 	}
 	preset := presetFor(name, pc)
+	configured := pc.ContextWindow
+	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
+		configured = mc.ContextWindow
+	}
+	keyMissing := pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == ""
+	if !wait {
+		// Only the state the gate reads is set here, synchronously: a TUI
+		// switch runs inside Update, under the session lock, and the window
+		// is applied behind it because ApplyWindow may raise a notice, which
+		// takes that same lock.
+		ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, provider.ModelInfo{}, preset))
+		go func() {
+			defer func() { _ = recover() }() // advisory: the preset already applies
+			current := func() bool {
+				cur, on := ag.Online()
+				return on && cur == name && ag.CurrentModel() == model
+			}
+			if w := agent.OnlineWindow(provider.ModelInfo{}, preset, configured); w > 0 && current() {
+				ag.ApplyWindow(w)
+			}
+			if keyMissing || p == nil {
+				return
+			}
+			// Not the switch's own context: plain mode's is cancelled as
+			// soon as the switch returns. listOnlineModel bounds it.
+			listed, err := listOnlineModel(context.Background(), p, model)
+			if err != nil || listed.ID == "" || !current() {
+				return // unreadable, or switched again meanwhile
+			}
+			if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
+				ag.ApplyWindow(w)
+			}
+			ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
+		}()
+		return
+	}
 	var listed provider.ModelInfo
-	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == "" {
+	if keyMissing {
 		// No key: the listing would only be refused. Say so and go on with
 		// the preset and configured window.
 		startupWarn(ag, fmt.Sprintf("%s is not set; not asking %s for its model list, and requests will be refused until it is exported", pc.APIKeyEnv, name))
 	} else {
 		var err error
-		listed, err = listOnlineModel(context.Background(), p, model)
+		listed, err = listOnlineModel(ctx, p, model)
 		if err != nil {
 			startupWarn(ag, fmt.Sprintf("could not read %s's model list (%v); window and prices fall back to the preset", name, compactErr(err)))
 		}
-	}
-	configured := pc.ContextWindow
-	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
-		configured = mc.ContextWindow
 	}
 	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
 		ag.ApplyWindow(w)

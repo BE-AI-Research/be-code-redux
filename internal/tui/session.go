@@ -879,6 +879,13 @@ func (s *Session) runContextLocked() context.Context {
 // a keystroke to submit. (mu is not reentrant, so there is no unlocked
 // variant to call by mistake.)
 func (s *Session) Submit(text string, from int) {
+	if s.ag.OnlineGatePending() {
+		// Nothing is accepted before the online consent question is
+		// answered (spec §2.1); the backstop would refuse it anyway.
+		name, _ := s.ag.Online()
+		s.appendEntryLocked(entry{Kind: entryErr, Text: "waiting for your answer about sending this project to " + name})
+		return
+	}
 	s.ag.BeginTypedRequest() // a person typed this (browser spec §3.6)
 	s.appendEntryLocked(entry{Kind: entryUser, Label: s.userPrefix(from), Text: text})
 	s.startTurnLocked(text)

@@ -103,7 +103,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, p provider.Provider) (*REPL, e
 	}
 	completer := readline.NewPrefixCompleter(items...)
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:            cyan("be-code> "),
+		Prompt:            cyan(MainPrompt(ag)),
 		HistoryFile:       HistoryFile(),
 		HistoryLimit:      2000,
 		AutoComplete:      completer,
@@ -226,18 +226,16 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
 	case "spend_cap":
 		fmt.Printf("%s\n%s\n", yell("spend cap reached:"), detail)
+	case "online_project":
+		fmt.Printf("%s\n%s\n", yell("online model:"), detail)
 	default:
 		fmt.Printf("%s %s\n", yell(action+":"), detail)
 	}
 	// browser_watch, shell_after_web, schedule and tool_call have no
 	// "always" (browser spec §3.2, §3.6; schedules spec §3.1): the prompt
 	// must not advertise a key that does nothing.
-	prompt := "approve? [y/N/a(lways)] "
-	noAlways := action == "browser_watch" || action == "shell_after_web" || action == "schedule" ||
-		action == "tool_call" || action == "spend_cap"
-	if noAlways {
-		prompt = "approve? [y/N] "
-	}
+	noAlways := noAlwaysAction(action)
+	prompt := approvePrompt(action)
 	answer, answered := r.promptAnswer(ctx, yell(prompt))
 	if !answered {
 		tools.MarkWithdrawn(ctx)
@@ -315,6 +313,41 @@ func (t replTerminal) Withdraw(note string) {
 	}
 }
 
+// noAlwaysAction lists the approvals with no "always": browser_watch,
+// shell_after_web, schedule, tool_call, spend_cap and online_project
+// (browser spec §3.2, §3.6; schedules spec §3.1; online spec §2.1–2.3).
+func noAlwaysAction(action string) bool {
+	switch action {
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project":
+		return true
+	}
+	return false
+}
+
+// approvePrompt is the answer line: a prompt must not advertise a key that
+// does nothing.
+func approvePrompt(action string) string {
+	if noAlwaysAction(action) {
+		return "approve? [y/N] "
+	}
+	return "approve? [y/N/a(lways)] "
+}
+
+// MainPrompt is the REPL's input prompt: "be-code (online)> " while the
+// main model is online (spec §2.1), else "be-code> ".
+func MainPrompt(ag *agent.Agent) string {
+	if ag != nil {
+		if _, online := ag.Online(); online {
+			return "be-code (online)> "
+		}
+	}
+	return "be-code> "
+}
+
+// Stop ends Run before the first line is read (OnStart: the online gate
+// refused).
+func (r *REPL) Stop() { r.quitAfter = true }
+
 // Run drives the interactive loop until /quit or EOF.
 func (r *REPL) Run(ctx context.Context) error {
 	defer r.rl.Close()
@@ -346,8 +379,14 @@ func (r *REPL) Run(ctx context.Context) error {
 	}()
 	if r.OnStart != nil {
 		r.OnStart()
+		if r.quitAfter {
+			return nil
+		}
 	}
 	for {
+		// The prompt says (online) while the main model is: a switch may
+		// have changed that since the last line.
+		r.setPrompt(cyan(MainPrompt(r.Agent)))
 		ev, ok := r.nextLine()
 		if !ok {
 			fmt.Println()
@@ -475,7 +514,7 @@ func (r *REPL) promptCtx(ctx context.Context, q string) string {
 // withdrawn, not a "no".
 func (r *REPL) promptAnswer(ctx context.Context, q string) (string, bool) {
 	r.setPrompt(q)
-	defer r.setPrompt(cyan("be-code> "))
+	defer func() { r.setPrompt(cyan(MainPrompt(r.Agent))) }()
 	r.mu.Lock()
 	busy := r.busy
 	ch := make(chan string, 1)
@@ -1049,6 +1088,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Printf("compacted; context now ~%d tokens\n", r.Agent.History.Tokens())
 	case "/stats":
 		fmt.Println(r.Agent.StatsReport(nil))
+	case "/online":
+		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
 	case "/map":
 		m := r.Agent.RepoMap()
 		if m == "" {

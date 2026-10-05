@@ -777,7 +777,7 @@ func (m *View) showAsk(a *ask) {
 	case askApproval:
 		if a.Action == "consult" || a.Action == "model_reload" || a.Action == "sub_agent_resume" ||
 			a.Action == "browser" || a.Action == "browser_watch" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" {
 			// Not a diff: a question whose first word happens to be "-" is
 			// not a deletion, and colouring it as one would say it was.
 			m.modalVP.SetContent(a.Detail)
@@ -887,7 +887,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
 		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" {
 			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
 			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
@@ -1244,8 +1244,12 @@ func (m *View) bottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
 		}
 	}
-	line := " " + m.st.Accent.Render("/menu") + " " + m.st.Accent.Render("/help") +
-		m.st.Dim.Render(" · "+shortModel(m.ag.Model)+" · ") + state
+	modelSeg := m.st.Dim.Render(" · " + shortModel(m.ag.Model) + " · ")
+	if name, online := m.ag.Online(); online {
+		// The badge replaces the plain model segment (spec §2.1).
+		modelSeg = m.st.Dim.Render(" · ") + m.st.Warn.Render("online: "+name+" · "+shortModel(m.ag.CurrentModel())) + m.st.Dim.Render(" · ")
+	}
+	line := " " + m.st.Accent.Render("/menu") + " " + m.st.Accent.Render("/help") + modelSeg + state
 	if _, online := m.ag.Online(); online && m.ag.Pricing().Known {
 		line += m.st.Dim.Render(fmt.Sprintf(" · $%.2f", m.ag.Usage().SpendUSD))
 	}
@@ -1387,6 +1391,10 @@ func (m *View) viewAsk() string {
 	case "spend_cap":
 		title = "Spend cap reached"
 		hint = "y continue · n stop · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "online_project":
+		title = "Send this project to an online model"
+		hint = "y allow for this project · n decline · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	case "tool_call":
 		title = "Tool call during a scheduled event"
@@ -1722,6 +1730,8 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			}
 			sess.finishTurn(nil, nil)
 		}()
+	case "/online":
+		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, fields[1:])})
 	case "/stats":
 		var labels []string
 		for _, c := range m.clients {

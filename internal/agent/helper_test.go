@@ -118,6 +118,7 @@ func TestChoresUseHelperWhileOnline(t *testing.T) {
 	builds := withHelper(t, helper, 32768, nil)
 	ag, dir := newTestAgent(t, primary, func(c *config.Config) { helperCfg(c); c.ReviewOnDone = true })
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-6, Completion: 1e-6, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.Session = store.NewSession("rec", "test-model", dir)
 	cp, err := checkpoint.New(dir, t.TempDir())
 	if err != nil {
@@ -209,6 +210,7 @@ func TestHelperDownFallsBackOnceWithNotice(t *testing.T) {
 	builds := withHelper(t, nil, 0, errors.New("connection refused"))
 	ag, dir := newTestAgent(t, primary, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.Session = store.NewSession("rec", "test-model", dir)
 	count := helperNotices(ag)
 
@@ -250,6 +252,7 @@ func TestHelperChatErrorRetriesOnPrimary(t *testing.T) {
 	withHelper(t, helper, 32768, nil)
 	ag, dir := newTestAgent(t, primary, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.Session = store.NewSession("rec", "test-model", dir)
 	count := helperNotices(ag)
 	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: "build the widget"})
@@ -278,6 +281,7 @@ func TestHelperPromptTrimmedToWindow(t *testing.T) {
 	withHelper(t, helper, 4096, nil)
 	ag, _ := newTestAgent(t, primary, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	seedHistory(ag, 40, 500)
 	if err := ag.Compact(context.Background()); err != nil {
 		t.Fatal(err)
@@ -313,6 +317,7 @@ func TestHelperPromptTooBigContinuesFromTaskRecord(t *testing.T) {
 	withHelper(t, helper, 2400, nil) // the header alone does not fit
 	ag, _ := newTestAgent(t, primary, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.History.Add(provider.Message{Role: provider.RoleUser, Content: strings.Repeat("t", 1900)})
 	seedHistory(ag, 10, 200)
 	_ = ag.Compact(context.Background())
@@ -328,6 +333,7 @@ func TestHelperUsageNotSpend(t *testing.T) {
 	withHelper(t, helper, 32768, nil)
 	ag, _ := newTestAgent(t, primary, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-3, Completion: 1e-3, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	seedHistory(ag, 4, 50)
 	if err := ag.Compact(context.Background()); err != nil {
 		t.Fatal(err)
@@ -356,6 +362,7 @@ func TestHelperBuiltOnceUnderConcurrency(t *testing.T) {
 	t.Cleanup(func() { HelperFactory = old })
 	ag, _ := newTestAgent(t, &recProvider{name: "primary"}, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -377,6 +384,7 @@ func TestPlanModeSpendCountedWhileOnline(t *testing.T) {
 		Usage: provider.Usage{PromptTokens: 1000, CompletionTokens: 1000}}}
 	ag, _ := newTestAgent(t, primary, func(c *config.Config) { c.MaxSpendUSD = 1 })
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-4, Completion: 1e-4, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	if _, err := ag.Plan(context.Background(), "plan it"); err != nil {
 		t.Fatal(err)
 	}
@@ -408,6 +416,7 @@ func TestHelperEmptyProviderUsesDefaultLane(t *testing.T) {
 		c.LocalHelper = config.LocalHelperConfig{Model: "helper-model"} // provider left empty
 	})
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.subs = &subAgents{lanes: subagent.NewLanes()}
 	if ag.helperLaneName() != ag.Cfg.DefaultProvider {
 		t.Fatalf("lane name %q", ag.helperLaneName())
@@ -441,6 +450,7 @@ func TestChoreOnOnlinePrimaryCountsSpend(t *testing.T) {
 		Usage: provider.Usage{PromptTokens: 1000, CompletionTokens: 500}}}
 	ag, dir := newTestAgent(t, primary, nil) // no helper configured
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-5, Completion: 1e-5, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.Session = store.NewSession("rec", "test-model", dir)
 	seedHistory(ag, 2, 20)
 	if _, err := ag.WriteHandoff(context.Background(), true); err != nil {
@@ -478,6 +488,7 @@ func TestChorePastCapRefusedWithoutApprover(t *testing.T) {
 	primary := &recProvider{name: "primary", def: provider.ChatResponse{Content: "BRIEFING"}}
 	ag, dir := newTestAgent(t, primary, func(c *config.Config) { c.MaxSpendUSD = 0.01 })
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-5, Completion: 1e-5, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.Session = store.NewSession("rec", "test-model", dir)
 	ag.addStats(Stats{SpendUSD: 0.02})
 	ag.Tools.Approve = nil
@@ -507,6 +518,7 @@ func TestHelperBuildCutShortIsNotCached(t *testing.T) {
 	t.Cleanup(func() { HelperFactory = old })
 	ag, _ := newTestAgent(t, &recProvider{name: "primary"}, helperCfg)
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.choreModel(ctx)
 	_, _, w, h := ag.choreModel(context.Background())
 	if !h || w != 8192 || builds.Load() != 2 {
@@ -527,6 +539,7 @@ func TestUnsetHelperNoticeOnceWhileOnline(t *testing.T) {
 		t.Fatal("notice in a local session")
 	}
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.choreModel(context.Background())
 	ag.choreModel(context.Background())
 	if count() != 1 {

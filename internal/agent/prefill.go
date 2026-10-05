@@ -47,6 +47,9 @@ func (a *Agent) StartPrefill() {
 	if !ok {
 		return
 	}
+	if !a.OnlineApproved() {
+		return // a prefill is a request too (spec §2.1)
+	}
 	a.stopPrefill()
 	if !a.turnMu.TryLock() {
 		return

@@ -116,7 +116,12 @@ func (m *View) compactBottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · q%d", n))
 		}
 	}
-	line := " " + m.st.Accent.Render("/menu") + m.st.Dim.Render(" · "+shortModelTo(m.ag.Model, compactModelCap)+" · ") + state
+	modelSeg := m.st.Dim.Render(" · " + shortModelTo(m.ag.Model, compactModelCap) + " · ")
+	if _, online := m.ag.Online(); online {
+		// Too narrow for the provider: the word itself is the badge.
+		modelSeg = m.st.Dim.Render(" · ") + m.st.Warn.Render("online: "+shortModelTo(m.ag.CurrentModel(), compactModelCap)) + m.st.Dim.Render(" · ")
+	}
+	line := " " + m.st.Accent.Render("/menu") + modelSeg + state
 	if m.ag.IDEName != "" {
 		line += m.st.Accent.Render(" " + m.ideMarker())
 	}

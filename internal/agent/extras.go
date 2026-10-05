@@ -41,7 +41,7 @@ func (a *Agent) planAgent() *Agent {
 	// handed back through usageTokens. The helper is shared, not rebuilt.
 	if name, online := a.Online(); online {
 		scratch.SetOnline(name, "", a.Pricing())
-		scratch.KeyEnv = a.KeyEnv
+		scratch.SetKeyEnv(a.KeyEnv())
 		scratch.spendParent = a
 	}
 	scratch.helper = a.helperSt()

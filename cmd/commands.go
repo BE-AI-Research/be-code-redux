@@ -61,6 +61,13 @@ var runCmd = &cobra.Command{
 			ag.Events = ui.Events()
 		}
 		ag.Tools.Approve = headlessApprover(cfg)
+		// Per-project consent for an online main model (spec §2.1): a
+		// headless run never asks. -y allows it for this run only and
+		// remembers nothing; without -y only a remembered yes will do.
+		if err := headlessOnlineGate(ag, flagYes); err != nil {
+			ag.Tools.Close()
+			return err
+		}
 		// Approve and Events are wired above; a dispatch before this point
 		// would ask consent of nobody and print to nobody.
 		ag.StartSubAgents()
@@ -215,6 +222,21 @@ func nextHeadlessRequest(ag *agent.Agent) (string, bool) {
 	return strings.Join(texts, "\n\n"), true
 }
 
+// headlessOnlineGate is the run command's per-project consent (spec §2.1):
+// nothing is asked. -y approves an online main model for this run only and
+// remembers nothing; without it only a remembered yes lets the run start.
+func headlessOnlineGate(ag *agent.Agent, yes bool) error {
+	name, online := ag.Online()
+	if !online || ag.OnlineApproved() {
+		return nil
+	}
+	if !yes {
+		return fmt.Errorf("this project is not approved for %s; run interactively once, or pass -y for this run", name)
+	}
+	ag.ApproveOnlineForRun()
+	return nil
+}
+
 func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 	in := bufio.NewReader(os.Stdin)
 	return func(action, detail string) bool {
@@ -225,9 +247,10 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// site, and a shell command after an untrusted page, ask every time
 		// — and an unattended -y run has nobody to ask.
 		// -y never approves a schedule (schedules spec §3.1), nor a fired
-		// turn's tool_call.
+		// turn's tool_call, nor online_project (its one -y path is the run
+		// command's own ApproveOnlineForRun, never this prompt).
 		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
-			((action == "schedule" || action == "tool_call" || action == "spend_cap") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
+			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}
@@ -238,7 +261,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 			return true
 		}
 		if !stdinIsTTY() {
-			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" {
+			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" {
 				// -y never approves these two (browser spec §3.3, §3.6), so
 				// the usual "use -y" hint would be a false promise.
 				fmt.Fprintf(os.Stderr, "denied %s (non-interactive; this action always asks a person): %.120s\n", action, detail)

@@ -26,6 +26,7 @@ func spendNotices(ag *Agent) *safeLog {
 func TestSpendAccumulatesFromUsage(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{responses: []provider.ChatResponse{usageResp(1000, 500)}}, nil)
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 3e-6, Completion: 15e-6, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	if _, _, err := ag.RunFull(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +42,7 @@ func TestUnpricedModelNoticeOnce(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{responses: []provider.ChatResponse{usageResp(10, 5), usageResp(10, 5)}}, nil)
 	l := spendNotices(ag)
 	ag.SetOnline("openrouter", "K", Pricing{})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	for i := 0; i < 2; i++ {
 		if _, _, err := ag.RunFull(context.Background(), "hi"); err != nil {
 			t.Fatal(err)
@@ -82,6 +84,7 @@ func TestLocalSessionNoSpend(t *testing.T) {
 func TestSpendCapAsksAndRaises(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.MaxSpendUSD = 0.01 })
 	ag.SetOnline("openrouter", "K", Pricing{Prompt: 1e-5, Completion: 1e-5, Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.addStats(Stats{SpendUSD: 0.012})
 	var mu sync.Mutex
 	var asked []string
@@ -112,6 +115,7 @@ func TestSpendCapAsksAndRaises(t *testing.T) {
 func TestSpendCapRefusesWithNobody(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.MaxSpendUSD = 1 })
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.addStats(Stats{SpendUSD: 1.5})
 	ag.Tools.Approve = nil
 	err := ag.checkSpendCap(context.Background())
@@ -122,6 +126,7 @@ func TestSpendCapRefusesWithNobody(t *testing.T) {
 	p := &scriptedProvider{}
 	ag2, _ := newTestAgent(t, p, func(c *config.Config) { c.MaxSpendUSD = 1 })
 	ag2.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag2.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag2.addStats(Stats{SpendUSD: 1.5})
 	ag2.Tools.Approve = func(string, string) bool { return false }
 	if _, _, err := ag2.RunFull(context.Background(), "hi"); err == nil || p.i != 0 {
@@ -132,6 +137,7 @@ func TestSpendCapRefusesWithNobody(t *testing.T) {
 func TestSpendCapInFiredTurnRefusesOnTimeout(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) { c.MaxSpendUSD = 1 })
 	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.ApproveOnlineForRun() // consent is online_consent_test.go's subject
 	ag.addStats(Stats{SpendUSD: 2})
 	ag.Tools.SetAllowance(nil, 30*time.Millisecond)
 	marked := false

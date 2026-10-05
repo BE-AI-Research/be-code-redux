@@ -113,7 +113,7 @@ func TestUnauthorizedNotRetried(t *testing.T) {
 		ag, _ := newTestAgent(t, p, nil)
 		ag.retryBase = time.Millisecond
 		sleeps := recordSleeps(ag)
-		ag.KeyEnv = "OPENROUTER_API_KEY"
+		ag.SetKeyEnv("OPENROUTER_API_KEY")
 		_, err := ag.Run(context.Background(), "do it")
 		if err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY rejected by openrouter") {
 			t.Fatalf("%d: err = %v", code, err)

@@ -171,16 +171,28 @@ type Agent struct {
 	// IDETools is how many editor tools were attached (0 when none), so a
 	// UI can report the connection once it owns the screen.
 	IDETools int
-	// KeyEnv names the environment variable the main provider's API key
-	// came from (the provider's api_key_env), so a rejected key can be
-	// named without ever printing it. Empty: "API key rejected by …".
-	KeyEnv string
 
 	// Online state (online.go): the online provider serving the main model
 	// and its prices.
 	onlineMu   sync.Mutex
 	onlineName string
 	pricing    Pricing
+	// keyEnv names the environment variable the main provider's API key
+	// came from (the provider's api_key_env), so a rejected key can be
+	// named without ever printing it. Empty: "API key rejected by …".
+	// Under onlineMu: a provider switch changes it mid-session.
+	keyEnv string
+	// Per-project consent (online_consent.go): providers approved this
+	// session, the -y run's in-memory approval, the startup gate's state,
+	// a person's switch to an unapproved provider (asked inline on the
+	// next call), the last provider/model a call went out on, and the
+	// refusal said when the gate ended the session.
+	onlineOK    map[string]bool
+	onlineRunOK bool
+	gatePending bool
+	gateInline  bool
+	lastGood    mainModel
+	gateRefusal string
 	// spendRaise is what continuing past the cap has added to it, this
 	// session only (the config is never written); unpricedSaid latches the
 	// once-per-session "not tracked" notice.
@@ -461,7 +473,9 @@ var LoaderFactory func(cfg *config.Config, p provider.Provider) ModelLoader
 // itself is synchronous — the next request uses the new model whatever the
 // backend says — and the parameter resolution runs behind it.
 func (a *Agent) SetModel(model string) {
-	if l, gen := a.applySwitch(model); l != nil {
+	l, gen := a.applySwitch(model)
+	a.resolveOnline(context.Background(), model)
+	if l != nil {
 		a.goResolve(l, model, gen)
 	}
 }
@@ -477,7 +491,9 @@ func (a *Agent) SetModel(model string) {
 // The caller bounds ctx and makes its own prompts wait on it; see
 // REPL.underPrompt.
 func (a *Agent) SetModelNow(ctx context.Context, model string) {
-	if l, gen := a.applySwitch(model); l != nil {
+	l, gen := a.applySwitch(model)
+	a.resolveOnline(ctx, model)
+	if l != nil {
 		a.resolveModel(ctx, l, model, gen)
 	}
 }
@@ -1221,6 +1237,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		}
 		// A model switch still being resolved has no window on the wire.
 		a.awaitWindow(ctx)
+		// Nothing reaches an online model before this project is approved
+		// for it (spec §2.1).
+		if err := a.checkOnlineGate(ctx, true); err != nil {
+			a.autosave(userInput)
+			return "", err
+		}
 		// An online model costs money: stop at the cap unless asked.
 		if err := a.checkSpendCap(ctx); err != nil {
 			a.autosave(userInput)
