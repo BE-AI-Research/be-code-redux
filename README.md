@@ -24,6 +24,28 @@ terminal that started it, several terminals can watch and drive the same run, th
 what the model has read and decided lives in your project as Markdown you can edit by hand, and
 since 1.2.1 it [updates itself from inside the app](#updating) when you choose to.
 
+**Install in one line** — Linux and macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh
+```
+
+Windows, in **cmd.exe**:
+
+```bat
+curl -fsSLo "%TEMP%\be-code-install.cmd" https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.cmd && "%TEMP%\be-code-install.cmd"
+```
+
+Windows, in **PowerShell**:
+
+```powershell
+irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex
+```
+
+Each downloads the current release for your platform and offers the setup wizard; the Windows
+installers also check the download against the release's `SHA256SUMS`. More options, uninstalling and installing from a checkout are under
+[Install](#install--uninstall).
+
 ## Contents
 
 **Start here** — [Requirements](#requirements) · [Install](#install--uninstall) ·
@@ -152,7 +174,7 @@ PREFIX=/opt/be ./install.sh   # custom prefix
 ./uninstall.sh --purge    # also delete ~/.be-code (config, sessions, history)
 ```
 
-Windows: `.\install.cmd` / `.\uninstall.cmd [-Purge]` (installs to
+Windows, from a checkout: `.\install.cmd` / `.\uninstall.cmd [-Purge]` (installs to
 `%LOCALAPPDATA%\Programs\be-code` and manages the user PATH; no administrator rights
 needed). The `.cmd` files are one-line launchers for `install.ps1` / `uninstall.ps1`:
 Windows refuses to run unsigned PowerShell scripts by default ("running scripts is
