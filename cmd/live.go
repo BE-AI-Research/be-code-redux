@@ -336,7 +336,7 @@ func newestLiveIn(dir, workspace string) *live.Record {
 	lives, _ := live.List(dir)
 	var newest *live.Record
 	for i := range lives {
-		if lives[i].Workspace != workspace {
+		if !live.SameWorkspace(lives[i].Workspace, workspace) {
 			continue
 		}
 		if newest == nil || lives[i].StartedAt.After(newest.StartedAt) {

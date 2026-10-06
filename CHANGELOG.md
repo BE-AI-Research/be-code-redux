@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed on Windows: a second `be-code` on the same project — say Visual Studio's terminal and
+  an SSH login — could start its own session host on a copy of the session instead of joining the
+  live one, because the two shells spelled the folder differently (case, a trailing separator, an
+  8.3 short name). Workspaces now match the way Windows does (case-insensitively, links and short
+  names resolved).
+- Fixed on Windows: a shared session started from an SSH login died when the login ended, since
+  Windows' SSH server ends every process its session started; the next launch then resumed a
+  copy from disk. The session host now breaks away from that job; where the job forbids it, the
+  launch says the session will end when you disconnect.
 - **Windows one-line install.** `install.ps1` now installs straight from GitHub when it runs
   without a checkout — `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex`
   in PowerShell, or `install.cmd` downloaded on its own with curl in cmd.exe — downloading the
