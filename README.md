@@ -103,6 +103,24 @@ release's binary for your platform, installs shell completions and offers the se
 curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh
 ```
 
+On **Windows**, one line in **cmd.exe** (curl ships with Windows 10 and 11):
+
+```bat
+curl -fsSLo "%TEMP%\be-code-install.cmd" https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.cmd && "%TEMP%\be-code-install.cmd"
+```
+
+or in **PowerShell** (where `curl` is an alias for something else, so use `irm`):
+
+```powershell
+irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex
+```
+
+Both download the current release's `be-code-windows-amd64.exe`, check it against the release's
+`SHA256SUMS`, install it to `%LOCALAPPDATA%\Programs\be-code`, add that to your user PATH (no
+administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.2.1` pins a release
+and `BE_CODE_NO_SETUP=1` skips the wizard. Uninstall with
+`irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.ps1 | iex`.
+
 `--system` and `PREFIX=` work the same way (`| sh -s -- --system`). `BE_CODE_VERSION=1.1.0`
 installs a specific release, `BE_CODE_REF=<branch|tag>` reads the version from somewhere other
 than `main`, and `BE_CODE_REPO=` points the whole thing at a fork or a mirror. When a release

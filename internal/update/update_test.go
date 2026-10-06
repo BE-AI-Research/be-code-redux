@@ -227,3 +227,14 @@ func TestInstallWindowsRollsBackOnFailedSwap(t *testing.T) {
 		t.Fatalf("binary not restored: %q %v", b, err)
 	}
 }
+
+// The "update it yourself" command names the installer for the platform:
+// Windows has no sh, so it gets the PowerShell one-liner.
+func TestInstallHintForPlatform(t *testing.T) {
+	if got := installHintFor("windows"); got != "irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex" {
+		t.Fatalf("windows: %q", got)
+	}
+	if got := installHintFor("linux"); got != "curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh" {
+		t.Fatalf("linux: %q", got)
+	}
+}

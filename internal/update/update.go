@@ -30,7 +30,14 @@ var APIBase = "https://api.github.com"
 // Repo is the repository releases are published to.
 const Repo = "BE-AI-Research/be-code-redux"
 
-const installCmd = "curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh"
+// installHintFor is the one-line install for a platform, offered when the
+// binary's folder cannot be written: Windows has no sh, so PowerShell's.
+func installHintFor(goos string) string {
+	if goos == "windows" {
+		return "irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex"
+	}
+	return "curl -fsSL https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.sh | sh"
+}
 
 // maxBinary bounds a download (the binaries are ~15 MB).
 const maxBinary = 200 << 20
@@ -46,7 +53,7 @@ var (
 type NotWritableError struct{ Dir string }
 
 func (e *NotWritableError) Error() string {
-	return fmt.Sprintf("cannot write %s; update with: %s", e.Dir, installCmd)
+	return fmt.Sprintf("cannot write %s; update with: %s", e.Dir, installHintFor(runtime.GOOS))
 }
 
 // Release is the newest published release.

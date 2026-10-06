@@ -1,5 +1,15 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- **Windows one-line install.** `install.ps1` now installs straight from GitHub when it runs
+  without a checkout — `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex`
+  in PowerShell, or `install.cmd` downloaded on its own with curl in cmd.exe — downloading the
+  current release's binary and checking it against the release's `SHA256SUMS` before installing
+  (`BE_CODE_VERSION` pins a release, `BE_CODE_NO_SETUP=1` skips the wizard). A source build from
+  a checkout now asks for Go 1.25, as `go.mod` does. When `/update` cannot write the install
+  folder on Windows, it now names the PowerShell installer instead of `curl … | sh`.
+
 ## v1.2.1 — Updates from inside the app, and long sessions that stay alive (2026-10-05)
 
 - **Updates from inside the app.** Each session start asks GitHub once, in the background,
