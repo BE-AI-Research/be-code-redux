@@ -655,3 +655,22 @@ func stubAttachOptions(t *testing.T, out *strings.Builder) func() {
 	}
 	return func() { attachOptions = prev }
 }
+
+// A second launch from a shell that spells the workspace differently (a
+// link here; on Windows another case or an 8.3 name) joins the live session
+// rather than starting a copy of it.
+func TestNewestLiveInJoinsAnotherSpellingOfTheWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("no symlinks here")
+	}
+	rec := live.Record{Code: "JOIN11", PID: os.Getpid(), Socket: filepath.Join(dir, "JOIN11.sock"), Workspace: real, StartedAt: time.Now()}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := newestLiveIn(dir, link); got == nil || got.Code != "JOIN11" {
+		t.Fatalf("newestLiveIn(%s) = %+v, want JOIN11", link, got)
+	}
+}
