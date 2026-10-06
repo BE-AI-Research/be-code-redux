@@ -2,15 +2,8 @@
 
 package ide
 
-import "os"
+import "github.com/brown-enterprises/be-code/internal/procattr"
 
-func processAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil || p == nil {
-		return false
-	}
-	// FindProcess opens a process handle on Windows; release it so a
-	// discovery sweep does not leak one handle per lock file examined.
-	defer p.Release()
-	return true
-}
+// processAlive asks procattr.Alive: an editor of another integrity level is
+// still running, and its lock must not be pruned as dead.
+func processAlive(pid int) bool { return procattr.Alive(pid) }

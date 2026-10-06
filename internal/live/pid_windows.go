@@ -5,6 +5,8 @@ package live
 import (
 	"errors"
 	"os"
+
+	"github.com/brown-enterprises/be-code/internal/procattr"
 )
 
 // Terminate stops the process. Windows has no SIGTERM, so this is the
@@ -27,16 +29,8 @@ func Terminate(pid int) error {
 // without build tags.
 func Kill(pid int) error { return Terminate(pid) }
 
-// processAlive is optimistic on Windows: OpenProcess succeeds for a pid that
-// has exited but whose handle is still around, so a caller escalating on
-// "still alive" may escalate once unnecessarily rather than miss a live host.
-func processAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil || p == nil {
-		return false
-	}
-	// FindProcess opens a process handle on Windows; release it so a
-	// discovery sweep does not leak one handle per lock file examined.
-	defer p.Release()
-	return true
-}
+// processAlive asks procattr.Alive, which tells a running process from an
+// exited one and counts a process of another integrity level (an elevated SSH
+// login's host seen from a non-elevated terminal) as alive rather than
+// deleting its record.
+func processAlive(pid int) bool { return procattr.Alive(pid) }

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed on Windows: a live session started from an elevated login (an administrator's SSH
+  session) looked dead to a non-elevated terminal (Visual Studio's), because the check asked
+  for more access than Windows grants across integrity levels; its record was deleted and a
+  second host started on a copy of the session. The check now uses the limited query Windows
+  allows, reads the exit code, and treats "access denied" as running — as Unix already did.
+  Editor-bridge locks use the same check.
 - Fixed on Windows: a second `be-code` on the same project — say Visual Studio's terminal and
   an SSH login — could start its own session host on a copy of the session instead of joining the
   live one, because the two shells spelled the folder differently (case, a trailing separator, an
