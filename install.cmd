@@ -12,11 +12,9 @@ rem Downloaded on its own (the one-line install from cmd.exe):
 rem   curl -fsSLo "%TEMP%\be-code-install.cmd" https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.cmd && "%TEMP%\be-code-install.cmd"
 rem there is no install.ps1 beside it, so it runs the published installer
 rem from GitHub, which downloads the current release and checks its checksum.
-if not exist "%~dp0install.ps1" goto remote
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
-exit /b %ERRORLEVEL%
-
-:remote
+rem No labels or ( ) blocks: GitHub serves this file with LF line endings,
+rem and cmd.exe can misread a goto label in an LF-only batch file.
+if exist "%~dp0install.ps1" powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %* & exit /b
 if /i "%~1"=="-NoSetup" set BE_CODE_NO_SETUP=1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex"
 exit /b %ERRORLEVEL%
