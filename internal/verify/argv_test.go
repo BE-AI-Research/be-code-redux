@@ -59,8 +59,8 @@ func TestArgvCheckGoesThroughTheGate(t *testing.T) {
 	proj := Project{Kind: "pack", Checks: []Check{{
 		Name: "build", Argv: []string{"ue-build", "--project", "/p"}, Timeout: time.Second,
 	}}}
-	rep := RunChecksGated(context.Background(), t.TempDir(), proj, func(cmd string) bool {
-		asked = append(asked, cmd)
+	rep := RunChecksGated(context.Background(), t.TempDir(), proj, func(c Check) bool {
+		asked = append(asked, c.Display())
 		return false
 	})
 	if len(asked) != 1 || asked[0] != "ue-build --project /p" {

@@ -12,6 +12,13 @@
   so a pack can choose one but can never run code inside the verify loop. A check that names no
   parser reports exactly as before. Ported from the be-code-packs handoff bundle; see
   `docs/packs-integration-notes.md` for what the rest of that design meets in this tree.
+- A verification check may now be written as an **argument vector** rather than a shell command
+  line, which is how a pack's verify commands are written. Nothing in it is word-split, globbed,
+  substituted or quoted away on any platform, so a project path containing spaces needs no
+  quoting and a value that happens to contain shell syntax is just a value. Such a check honours
+  the shell deny list — matched against both the command as you read it and the program it runs —
+  and is never prompted for, having been approved as a set when its pack was trusted. The
+  project's own detected checks are unchanged in both respects.
 
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 

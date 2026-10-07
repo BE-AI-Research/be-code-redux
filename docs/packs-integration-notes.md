@@ -31,17 +31,20 @@ report and the repair turn — for reading only; execution never goes near a
 shell, so a path with spaces needs no quoting and a value containing shell
 syntax is just a value.
 
-## Still to decide, before the rest of phase 2
+**`shell_deny` for argv checks (spec §10).** Decided and done:
+`Registry.CheckDenied(display, argv)` matches the deny globs against **both**
+the display form — so a rule like `*rm -rf*` holds for a value that merely
+contains it, even though no shell will read it as syntax — and `argv[0]`, so a
+rule naming a binary holds however its arguments are written. A shell-string
+check is still matched segment by segment, as the model's own shell calls are.
+`Agent.runChecks` applies it to argv checks only, and never prompts for them:
+they were approved as a set when the pack was trusted. The project's own
+detected checks stay exempt, which is the same reasoning already written down
+for a sub-agent's exact checks in `internal/tools/shell.go`.
 
-**`shell_deny` does not yet cover an argv check.** Deny globs are matched by
-splitting a command *string* into segments (`internal/tools/shell.go:134`,
-`shellSegments`), which has no meaning for an argument vector: there is no
-shell, so there are no compound commands to split. The spec wants pack verify
-commands to go through `shell_deny` (§10). The seam to use is the gate already
-threaded through `RunChecksGated`, which now receives `Check.Display()` — note
-that built-in checks do not go through deny rules today either, so this is new
-behaviour for pack checks rather than a gap in existing ones. Decide whether a
-deny glob matches the display form, `Argv[0]` alone, or both.
+One limit worth knowing: `argv[0]` is matched as given, so `sudo *` does not
+match `/usr/bin/sudo` — the same as for a shell command written with a full
+path. If that matters, match the base name too.
 
 ## Answers to the spec's CONFIRM points
 

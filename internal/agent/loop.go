@@ -2213,21 +2213,42 @@ type ReviewedReport struct {
 // Injected by cmd to avoid an import cycle; nil disables review.
 var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 
-// runChecks is RunFull's automatic verification. Once this request has
-// read an untrusted page, each check command is a command like any other
-// (browser spec §3.6): it asks as shell_after_web, and a refusal — or
-// nobody to ask — skips it. A skipped verification is no report at all:
-// not a failure, so no repair round and no auto:verify consultation.
+// runChecks is RunFull's automatic verification, with two reasons a check
+// may not run.
+//
+// A check written as an argument vector comes from a pack, which may have
+// arrived with somebody's repository, so it honours shell_deny like anything
+// else that executes (packs spec §10) — and is never prompted for, having
+// been approved as a set when the pack was trusted. The project's own
+// detected checks are deliberately exempt: the harness chose those, which is
+// the same reasoning that exempts a sub-agent's exact checks in
+// tools/shell.go.
+//
+// And once this request has read an untrusted page, every check command is a
+// command like any other (browser spec §3.6): it asks as shell_after_web, and
+// a refusal — or nobody to ask — skips it.
+//
+// A skipped verification is no report at all: not a failure, so no repair
+// round and no auto:verify consultation.
 func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Report {
-	var allow func(string) bool
-	if a.Tools.UntrustedWeb() {
-		allow = func(command string) bool {
-			return a.Tools.Approve != nil && a.Tools.Approve("shell_after_web", command)
+	denied := ""
+	allow := func(c verify.Check) bool {
+		if len(c.Argv) > 0 && a.Tools.CheckDenied(c.Display(), c.Argv) {
+			denied = c.Display()
+			return false
 		}
+		if a.Tools.UntrustedWeb() {
+			return a.Tools.Approve != nil && a.Tools.Approve("shell_after_web", c.Display())
+		}
+		return true
 	}
 	rep := verify.RunChecksGated(ctx, a.Tools.Root, proj, allow)
 	if rep.Declined != "" {
-		a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
+		if denied != "" {
+			a.notice("verification stopped: %s matches the shell deny list and will never run", denied)
+		} else {
+			a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
+		}
 		return nil
 	}
 	return rep

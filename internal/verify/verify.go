@@ -220,20 +220,26 @@ func RunChecks(ctx context.Context, root string, proj Project) *Report {
 	return RunChecksGated(ctx, root, proj, nil)
 }
 
-// RunChecksGated is RunChecks with every command — a check's own and its
-// fallback — put to allow first (nil allows everything). The first command
-// allow refuses is not run: the report stops there with Declined naming it,
-// and the checks before it are kept.
-func RunChecksGated(ctx context.Context, root string, proj Project, allow func(command string) bool) *Report {
+// RunChecksGated is RunChecks with every check put to allow first (nil
+// allows everything). The first check allow refuses is not run: the report
+// stops there with Declined naming it, and the checks before it are kept.
+//
+// allow receives the whole Check, not just its command text, because the
+// decision can depend on how the check was written: an argv check carries a
+// program to match deny rules against, which a command string does not have.
+func RunChecksGated(ctx context.Context, root string, proj Project, allow func(c Check) bool) *Report {
 	rep := &Report{Project: proj}
 	for _, c := range proj.Checks {
-		if allow != nil && !allow(c.Display()) {
+		if allow != nil && !allow(c) {
 			rep.Declined = c.Display()
 			return rep
 		}
 		out, err := c.run(ctx, root)
 		if err != nil && c.Fallback != "" {
-			if allow != nil && !allow(c.Fallback) {
+			// The fallback is a command of its own and is put to allow in its
+			// own right. Only a shell check has one (ValidateCheck refuses the
+			// pairing), so it is asked about as a shell command.
+			if allow != nil && !allow(Check{Name: c.Name, Command: c.Fallback, Timeout: c.Timeout, Parser: c.Parser}) {
 				rep.Declined = c.Fallback
 				return rep
 			}

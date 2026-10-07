@@ -247,3 +247,41 @@ func runCmd(ctx context.Context, dir string, timeout time.Duration, name string,
 	}
 	return buf.String(), err
 }
+
+// CheckDenied reports whether a verification command is refused outright by
+// the shell_deny globs. It is the deny half of classifyCommand, for commands
+// that are run by the harness rather than asked for by the model: a pack's
+// verify commands go through shell_deny like anything else that executes
+// (packs spec §10), but they never go through shell_allow prompting, because
+// they were approved as a set when the pack was trusted.
+//
+// An argv command has no shell behind it and so no segments to split. The
+// globs are matched against two things instead: the command as a person reads
+// it (Check.Display), so a rule like "*rm -rf*" still holds for a value that
+// merely contains it, and the program itself, so a rule naming a binary holds
+// however its arguments are written. Note that argv[0] is matched as given —
+// a rule written "sudo *" does not match "/usr/bin/sudo", the same way it
+// would not for a shell command written with a full path.
+//
+// A command written as a shell string is matched exactly as the model's own
+// shell calls are: every segment of a compound, so a denied command cannot
+// ride along behind an allowed one.
+func (r *Registry) CheckDenied(display string, argv []string) bool {
+	if len(r.ShellDeny) == 0 {
+		return false
+	}
+	candidates := []string{display}
+	if len(argv) > 0 {
+		candidates = append(candidates, argv[0])
+	} else {
+		candidates = shellSegments(display)
+	}
+	for _, p := range r.ShellDeny {
+		for _, c := range candidates {
+			if globMatch(p, c) {
+				return true
+			}
+		}
+	}
+	return false
+}
