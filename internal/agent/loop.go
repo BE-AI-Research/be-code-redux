@@ -224,7 +224,12 @@ type Agent struct {
 	packNotes  string
 	packChecks []verify.Check
 	packRows   []PackRow
-	handoff    string // briefing from the resumed session, kept in the system prompt
+	// packEntries are the active packs' playbooks; verifySigs counts how
+	// often each verification signature has come back within one request,
+	// which is what decides fix vs next (see playbookNote).
+	packEntries []packEntry
+	verifySigs  map[string]int
+	handoff     string // briefing from the resumed session, kept in the system prompt
 	// window is the backend context window when detected (0 = unknown),
 	// read through Window(). It is atomic because it is written off the
 	// agent goroutine — resolveModel lands a model switch's window from a
@@ -2312,6 +2317,9 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 	if a.Cfg.VerifyOnDone && a.mayHaveChangedFiles() {
 		proj := a.verifyProject()
 		if len(proj.Checks) > 0 {
+			// Per request: a failure that comes back in a later request is new
+			// again, because the files under it may have changed.
+			a.verifySigs = nil
 			for attempt := 0; attempt <= a.Cfg.MaxRepairs; attempt++ {
 				rep.Verify = a.runChecks(ctx, proj)
 				if rep.Verify == nil || rep.Verify.Passed() || attempt == a.Cfg.MaxRepairs {
@@ -2319,9 +2327,16 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 				}
 				a.notice("verification failed (%s); repair attempt %d/%d",
 					rep.Verify.FailSummary(), attempt+1, a.Cfg.MaxRepairs)
+				// A pack's playbook turns the failure the parser named into
+				// the next move, and refuses to hand back advice that has
+				// already not worked (packs spec §11.2–11.3).
+				summary := rep.Verify.ModelSummary()
+				if note := a.playbookNote(rep.Verify); note != "" {
+					summary += "\n" + note
+				}
 				repairPrompt := fmt.Sprintf(
 					"Verification failed. Fix ONLY these failures, then stop.\n\n%s\n\nRules: read the failing files before editing; make the smallest fix that makes the checks pass; do not refactor unrelated code.",
-					rep.Verify.ModelSummary())
+					summary)
 				a.addStats(Stats{Repairs: 1})
 				answer, err = a.run(ctx, repairPrompt, false)
 				if err != nil {
@@ -2336,8 +2351,14 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 			if rep.Verify != nil && !rep.Verify.Passed() && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && !a.autoVerifyUsed {
 				a.autoVerifyUsed = true
 				files := a.changedFiles()
+				evidence := rep.Verify.ModelSummary()
+				if note := a.playbookNote(rep.Verify); note != "" {
+					// Named as tried by now, which is exactly what a second
+					// opinion needs to know before it suggests the same thing.
+					evidence += "\n" + note
+				}
 				if name, advice, ok := a.autoConsult(ctx, "auto:verify",
-					"the change still fails this check; what is wrong and what minimal edit fixes it\n\n"+rep.Verify.ModelSummary(), files); ok {
+					"the change still fails this check; what is wrong and what minimal edit fixes it\n\n"+evidence, files); ok {
 					a.notice("co-worker %s advised; one more repair round", name)
 					answer, err = a.run(ctx, fmt.Sprintf("A co-worker (%s) reviewed the failing check and advises:\n\n%s\n\nApply the minimal fix, then stop.", name, advice), false)
 					if err != nil {

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/playbook"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -53,6 +54,7 @@ type Pack struct {
 	Core        string // contents of core.md, already read
 	CoreBudget  int    // budget_tokens for Core, 0 when unset
 
+	entries    []playbook.Entry
 	chunks     map[string]Chunk
 	checks     []manifestCheck
 	detect     detect
@@ -151,6 +153,25 @@ func Load(dir string) (*Pack, []string, error) {
 		p.chunks[name] = Chunk{Name: name, Summary: c.Summary, Triggers: c.Triggers, file: c.File}
 	}
 
+	// A playbook is content, so a broken one is a warning and the pack still
+	// loads: losing a fix table is worse than losing the pack's rules too.
+	for _, rel := range m.Playbooks {
+		body, rerr := p.read(rel)
+		if rerr != nil {
+			warns = append(warns, fmt.Sprintf("pack %q: playbook %q could not be read: %v", p.Name, rel, rerr))
+			continue
+		}
+		entries, pwarns, perr := playbook.Parse(body)
+		for _, w := range pwarns {
+			warns = append(warns, fmt.Sprintf("pack %q, %s: %s", p.Name, rel, w))
+		}
+		if perr != nil {
+			warns = append(warns, fmt.Sprintf("pack %q: playbook %q was not loaded: %v", p.Name, rel, perr))
+			continue
+		}
+		p.entries = append(p.entries, entries...)
+	}
+
 	// Verify entries are validated here, where the file they were written in
 	// can be named, rather than at the point one is run.
 	for i, mc := range m.Verify {
@@ -186,6 +207,10 @@ func CoreOverBudget(p *Pack) (over bool, estimate, budget int) {
 	}
 	return estimate > p.CoreBudget, estimate, p.CoreBudget
 }
+
+// Playbook is the pack's error entries, in file order: the first that
+// matches a failure wins, so order is the pack author's precedence.
+func (p *Pack) Playbook() []playbook.Entry { return p.entries }
 
 // PackName is the pack's name, as tools.PackSource asks for it. The method
 // cannot be Name: Pack already has a Name field, and the field is what every

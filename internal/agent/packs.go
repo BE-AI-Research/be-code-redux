@@ -9,6 +9,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/engine"
 
 	"github.com/brown-enterprises/be-code/internal/packs"
+	"github.com/brown-enterprises/be-code/internal/playbook"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
@@ -152,9 +153,10 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 		}
 	}
 	var (
-		active []tools.PackSource
-		blocks []string
-		checks []verify.Check
+		active  []tools.PackSource
+		blocks  []string
+		checks  []verify.Check
+		entries []packEntry
 	)
 	for _, p := range ps {
 		if p.Source == packs.SourceProject && !a.trustProjectPack(p, refuse) {
@@ -169,6 +171,9 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 		active = append(active, p)
 		blocks = append(blocks, packBlock(p))
 		checks = append(checks, p.Checks(a.Tools.Root)...)
+		if pb := p.Playbook(); len(pb) > 0 {
+			entries = append(entries, packEntry{pack: p.Name, entries: pb})
+		}
 	}
 
 	a.packNotes = ""
@@ -176,6 +181,7 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 		a.packNotes = packFrame + "\n\n" + strings.Join(blocks, "\n")
 	}
 	a.packChecks = checks
+	a.packEntries = entries
 	// SetPacks registers the pack tool, so the prompt has to be rebuilt after
 	// it: the tool list and the embedded-call parser's known names both come
 	// from the registry.
@@ -267,4 +273,75 @@ func (a *Agent) verifyProject() verify.Project {
 		proj.Kind = "pack"
 	}
 	return proj
+}
+
+// playbookNote is what a pack adds to a repair turn: the cause of this
+// failure and what to do about it, from the matching playbook entry (packs
+// spec §11.2).
+//
+// It also carries the escalation the playbook exists for. A weak model's
+// instinct, told the same compiler error twice, is to make the same edit
+// again — so a signature seen before does not get the fix repeated:
+//
+//	first time   the entry's fix
+//	seen again   the entry's next step, because the fix did not work
+//	after that   the entry named as already tried, which is the state the
+//	             co-worker consultation below already handles
+//
+// The count is per request, reset where verification starts, so a failure
+// returning in a later request is new again — the file may have changed under
+// it. Returns "" when no pack is active, nothing parsed the output, or no
+// entry matches.
+func (a *Agent) playbookNote(rep *verify.Report) string {
+	if rep == nil || len(a.packEntries) == 0 {
+		return ""
+	}
+	_, diag := rep.FirstFailure()
+	if diag == nil || diag.First == nil {
+		return ""
+	}
+	d := diag.First
+	var hit *playbook.Entry
+	var packName string
+	for _, pe := range a.packEntries {
+		if e := playbook.Match(pe.entries, d.Kind, d.Raw, d.Message); e != nil {
+			hit, packName = e, pe.pack
+			break
+		}
+	}
+	if hit == nil {
+		return ""
+	}
+	if a.verifySigs == nil {
+		a.verifySigs = map[string]int{}
+	}
+	a.verifySigs[diag.Signature]++
+	seen := a.verifySigs[diag.Signature]
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "playbook %s › %s\n", packName, hit.Title)
+	if hit.Cause != "" {
+		fmt.Fprintf(&b, "cause: %s\n", hit.Cause)
+	}
+	switch {
+	case seen == 1:
+		if hit.Fix != "" {
+			fmt.Fprintf(&b, "fix:\n%s\n", hit.Fix)
+		}
+	case seen == 2:
+		b.WriteString("This is the same failure as before, so the previous change did not fix it. Do not repeat it.\n")
+		if hit.Next != "" {
+			fmt.Fprintf(&b, "next:\n%s\n", hit.Next)
+		}
+	default:
+		fmt.Fprintf(&b, "This failure has not moved in %d attempts, and this entry's fix and next step have both already been tried. Do not repeat either; say what you think is actually wrong.\n", seen)
+	}
+	return b.String()
+}
+
+// packEntry pairs a pack's playbook with its name, so a repair turn can say
+// which pack the advice came from.
+type packEntry struct {
+	pack    string
+	entries []playbook.Entry
 }

@@ -329,6 +329,18 @@ func headTail(s string, max int) string {
 	return s[:head] + "\n... [output elided] ...\n" + s[len(s)-tail:]
 }
 
+// FirstFailure is the check that failed and the diagnosis its parser made of
+// the output, or nils. Checks stop at the first failure, so there is at most
+// one — and it is the one a playbook should be matched against.
+func (r *Report) FirstFailure() (*CheckResult, *Diagnosis) {
+	for i := range r.Results {
+		if !r.Results[i].Passed {
+			return &r.Results[i], r.Results[i].Diagnosis
+		}
+	}
+	return nil, nil
+}
+
 // Human renders the report for terminal display.
 func (r *Report) Human() string {
 	if len(r.Results) == 0 {

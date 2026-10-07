@@ -37,6 +37,12 @@
   does can fail the session: one that will not load is named and skipped. Two things are refused
   and said once — a core block past its `budget_tokens`, since the cap is what stops a pack
   eating a small model's window, and a pack from the project that nobody approved.
+- **A pack's error playbook now reaches the repair turn.** When a check fails and the pack has an
+  entry for it, the repair prompt carries that entry's cause and fix rather than only the
+  compiler line — and the escalation the playbook exists for: the same failure coming back means
+  the fix did not work, so the entry's `next` step replaces it instead of handing back advice
+  that has already failed, and after that the entry is named as already tried, which is when a
+  co-worker is consulted. The count is per request, so a failure returning later starts fresh.
 - **`/packs`** lists every pack found and why each is or is not active, and `/packs on|off|default
   <name>` switches one for this project; `/packs reload` re-reads the search path. Any of those
   rewrites the system prompt, so the reply says the next request will re-read the whole thing

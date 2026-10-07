@@ -111,13 +111,23 @@ symlinks resolved and backslashes normalised, because the path comes from the
 model. **The ue5 pack's command files should be reworded** to fetch templates
 this way rather than with `read_file`.
 
-**Repair loop and anti-loop (spec §11.3).** `Agent.RunFull`
-(`internal/agent/loop.go`) owns the verify/repair rounds and `max_repairs`,
-and the existing escalation for a still-failing verification is the
-`auto:verify` co-worker consult, not a generic anti-loop. `repeatTracker`
-(`internal/agent/repeat.go`) is about repeated *tool calls* with identical
-results, which is a different signal from a repeated verification signature.
-Phase 4 should hang the signature tracking off `RunFull`'s rounds.
+**Playbooks in repair turns (spec §11.2–11.3).** Done. `internal/playbook` is
+the ported parser and matcher (a leaf: it takes a diagnostic's pieces as
+strings). A pack's `playbooks:` files are parsed at load — a broken one is a
+warning and the pack still loads, since losing a fix table is worse than
+losing the pack's rules too — and `Agent.playbookNote` appends the matching
+entry to the repair prompt built in `RunFull`, and to the `auto:verify`
+consult's evidence.
+
+Escalation is by `Diagnosis.Signature`, counted per request in
+`Agent.verifySigs` and reset where verification starts, because a failure
+returning in a later request is new again — the files under it may have
+changed. First time the entry's `fix`; seen again its `next`, with the fix
+withheld, because a model told the same error twice will otherwise make the
+same edit again; after that the entry is named as already tried, which is the
+state `auto:verify` already handles. `repeatTracker`
+(`internal/agent/repeat.go`) is untouched — it is about repeated *tool calls*
+with identical results, a different signal.
 
 **Budget enforcement is non-deterministic as specified.** §4.1 makes
 over-budget core a hard load error, measured with "the session's
