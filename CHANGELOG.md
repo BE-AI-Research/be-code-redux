@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.2.4 — A readable terminal on Windows (2026-10-06)
 
 - Fixed on Windows: in a shared session a terminal's text slowly duplicated and became
   unreadable as the session ran, while the layout itself held together. Nothing had taken the

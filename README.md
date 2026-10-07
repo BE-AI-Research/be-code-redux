@@ -4,7 +4,7 @@ BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.2.3-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.2.4-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -139,7 +139,7 @@ irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.
 
 Both download the current release's `be-code-windows-amd64.exe`, check it against the release's
 `SHA256SUMS`, install it to `%LOCALAPPDATA%\Programs\be-code`, add that to your user PATH (no
-administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.2.3` pins a release
+administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.2.4` pins a release
 and `BE_CODE_NO_SETUP=1` skips the wizard. Uninstall with
 `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.ps1 | iex`.
 
@@ -1474,11 +1474,17 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.2.3** — a long run can no longer end in pages of half-JSON: a reply the output limit cuts
-off in the middle of a tool call is discarded and retried in smaller steps (write the file in
-parts) instead of being shown as the final answer; a second cutoff explains the output limit.
+**v1.2.4** — a hotfix for Windows shared sessions: a terminal's text no longer duplicates and
+degrades as the session runs. A client now takes its own console for the length of an attach (VT
+processing, no wrap at the last cell, UTF-8 output) and restores it on the way out, and a Windows
+terminal is no longer reported as non-UTF-8 and drawn in ASCII.
 
 Recent releases:
+
+- **v1.2.3 — A cut-off tool call is never the answer.** A long run can no longer end in pages of
+  half-JSON: a reply the output limit cuts off in the middle of a tool call is discarded and
+  retried in smaller steps (write the file in parts) instead of being shown as the final answer;
+  a second cutoff explains the output limit.
 
 - **v1.2.2 — One session on Windows, and a one-line install.** A second `be-code` on one project
   joins the live session however the shell spells the folder (case, 8.3 short names), a session
