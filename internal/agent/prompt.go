@@ -128,6 +128,23 @@ type embeddedCall struct {
 	Input      json.RawMessage `json:"input"`
 }
 
+// openEmbeddedCall reports whether content ends inside an embedded tool call
+// that never closes — the shape of a reply the output limit cut off mid-call
+// (a model writing a whole source file into one write_file argument). Both
+// layouts count: the prompt's <tool_call> JSON form and Qwen's <function=
+// XML form, which can arrive without its <tool_call> wrapper.
+func openEmbeddedCall(content string) bool {
+	for open, close := range map[string]string{
+		"<tool_call>": "</tool_call>",
+		"<function=":  "</function>",
+	} {
+		if i := strings.LastIndex(content, open); i >= 0 && !strings.Contains(content[i:], close) {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseEmbeddedCalls extracts prompt-format tool calls from assistant text.
 // It accepts <tool_call> tags and fenced JSON blocks, plus common field-name
 // variants, because local models are loose about formats. Returns the text
