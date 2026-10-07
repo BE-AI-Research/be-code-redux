@@ -1,5 +1,18 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- **Structured verification output (first step toward packs).** A check may now name an output
+  parser, and when it does the repair turn is given the single root cause instead of a slice of
+  the log. A failing Unreal build is thousands of lines of which all but the first are
+  consequences, so this is the "one failure at a time" rule applied to output the harness did not
+  previously read. Four parsers are built in — `generic` (exit code and the tail), `gcc`
+  (Clang/GCC), `msvc` (Visual C++ and the linker) and `ubt` (those plus UnrealHeaderTool and
+  UnrealBuildTool's own failures) — and a parser is always compiled in, never shipped by a pack,
+  so a pack can choose one but can never run code inside the verify loop. A check that names no
+  parser reports exactly as before. Ported from the be-code-packs handoff bundle; see
+  `docs/packs-integration-notes.md` for what the rest of that design meets in this tree.
+
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 
 - Fixed on Windows: v1.2.4 broke the look of the interface. It reported a Windows terminal as

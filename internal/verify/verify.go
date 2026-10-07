@@ -28,6 +28,12 @@ type Check struct {
 	// Fallback runs only when Command fails (e.g. a test runner flag some
 	// projects reject); it keeps shell-specific "a || b" out of check strings.
 	Fallback string
+	// Parser names a built-in output parser (see ParserNames). Empty means
+	// the failure is reported as output, the way it always has been; a name
+	// means the model is shown one root cause instead. Validate the name with
+	// ValidateParser wherever a check is configured, so a typo is caught where
+	// it was written rather than silently producing no diagnosis.
+	Parser string
 }
 
 // Project describes a detected project type and its checks.
@@ -44,6 +50,9 @@ type CheckResult struct {
 	Note    string // why it was skipped
 	Output  string
 	Err     error
+	// Diagnosis is set when the check named a parser and failed: the single
+	// root cause the repair turn should show, with a count and a signature.
+	Diagnosis *Diagnosis
 }
 
 // Report aggregates a verification run.
@@ -157,6 +166,11 @@ func RunChecksGated(ctx context.Context, root string, proj Project, allow func(c
 				res.Passed, res.Skipped, res.Note, res.Err = true, true, note, nil
 			}
 		}
+		// After skipReason: a check that was skipped did not really fail, so
+		// there is nothing to diagnose.
+		if !res.Passed {
+			res.Diagnosis = diagnose(c, out, err, root)
+		}
 		rep.Results = append(rep.Results, res)
 		if !res.Passed {
 			break
@@ -200,6 +214,16 @@ func (r *Report) ModelSummary() string {
 			continue
 		}
 		fmt.Fprintf(&b, "FAIL: %s (command: %s)\n", res.Check.Name, res.Check.Command)
+		// One failure at a time: when a parser read the output, the model is
+		// shown the root cause alone. The rest of the log is almost always a
+		// consequence of it, and on a large build it is thousands of lines.
+		if d := res.Diagnosis; d != nil && d.First != nil {
+			fmt.Fprintf(&b, "%s\n", Format(*d.First))
+			if d.Count > 1 {
+				fmt.Fprintf(&b, "(%d errors; fix this one, then run the check again)\n", d.Count)
+			}
+			continue
+		}
 		out := strings.TrimSpace(res.Output)
 		if res.Err != nil && !strings.Contains(out, res.Err.Error()) {
 			out += "\n[" + res.Err.Error() + "]"
