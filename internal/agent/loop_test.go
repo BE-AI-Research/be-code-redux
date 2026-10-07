@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/provider"
@@ -60,14 +61,19 @@ func newTestAgent(t *testing.T, p provider.Provider, mut func(*config.Config)) (
 	return New(cfg, p, "test-model", reg, ""), dir
 }
 
-// An empty reply with no tool calls is not an answer: nudge once, then use
-// the real reply.
-func TestRunRetriesEmptyReplyOnce(t *testing.T) {
+// An empty reply with no tool calls is a backend flake, not a confused
+// model: the turn is retried in place with backoff, without polluting
+// An empty reply means the model emitted EOS with nothing to say — it
+// believes it is done, or has lost the thread. The loop says so plainly
+// and asks it to continue; the real reply is then used.
+func TestRunNudgesEmptyReply(t *testing.T) {
 	p := &scriptedProvider{responses: []provider.ChatResponse{
 		{Content: "   "},
 		{Content: "the real answer"},
 	}}
 	ag, _ := newTestAgent(t, p, nil)
+	ag.retryBase = time.Millisecond
+	sleeps := recordSleeps(ag)
 	answer, err := ag.Run(context.Background(), "do the thing")
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +84,9 @@ func TestRunRetriesEmptyReplyOnce(t *testing.T) {
 	if p.i != 2 {
 		t.Fatalf("expected 2 model calls, got %d", p.i)
 	}
+	if len(*sleeps) != 1 {
+		t.Fatalf("expected 1 short wait, got %d", len(*sleeps))
+	}
 	// The nudge must be visible to the model on the second call.
 	last := p.lastReq.Messages[len(p.lastReq.Messages)-1]
 	if last.Role != provider.RoleUser || !strings.Contains(strings.ToLower(last.Content), "empty") {
@@ -85,12 +94,50 @@ func TestRunRetriesEmptyReplyOnce(t *testing.T) {
 	}
 }
 
-func TestRunFailsOnRepeatedEmptyReply(t *testing.T) {
-	p := &scriptedProvider{responses: []provider.ChatResponse{{Content: ""}, {Content: ""}}}
+func TestRunFailsAfterPersistentEmptyReplies(t *testing.T) {
+	var responses []provider.ChatResponse
+	for i := 0; i < maxEmptyNudges+1; i++ {
+		responses = append(responses, provider.ChatResponse{Content: ""})
+	}
+	p := &scriptedProvider{responses: responses}
 	ag, _ := newTestAgent(t, p, nil)
+	ag.retryBase = time.Millisecond
+	recordSleeps(ag)
 	_, err := ag.Run(context.Background(), "do the thing")
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("expected empty-reply error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "truncating") {
+		t.Fatalf("error misdiagnoses truncation: %v", err)
+	}
+	// maxEmptyNudges nudges, then the final attempt that fails.
+	if p.i != maxEmptyNudges+1 {
+		t.Fatalf("expected %d model calls, got %d", maxEmptyNudges+1, p.i)
+	}
+}
+
+
+// Sporadic empty replies separated by productive turns must not
+// accumulate into a fatal error: the streak resets on any turn with
+// content or tool calls.
+func TestEmptyStreakResetsOnProductiveTurn(t *testing.T) {
+	p := &scriptedProvider{responses: []provider.ChatResponse{
+		{Content: ""},
+		{ToolCalls: []provider.ToolCall{{ID: "1", Name: "read_file", Arguments: `{"path": "nonexistent"}`}}},
+		{Content: ""},
+		{ToolCalls: []provider.ToolCall{{ID: "2", Name: "read_file", Arguments: `{"path": "nonexistent"}`}}},
+		{Content: ""},
+		{Content: "final answer"},
+	}}
+	ag, _ := newTestAgent(t, p, nil)
+	ag.retryBase = time.Millisecond
+	recordSleeps(ag)
+	answer, err := ag.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatalf("sporadic flakes killed the run: %v", err)
+	}
+	if answer != "final answer" {
+		t.Fatalf("answer = %q", answer)
 	}
 }
 
