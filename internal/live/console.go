@@ -74,16 +74,6 @@ func prepareConsole(api consoleAPI, out uintptr) (restore func(), utf8 bool) {
 	return restore, false
 }
 
-// consoleRendersUTF8 answers, without changing anything, whether this terminal
-// will show UTF-8 once attached — a console will, because prepareConsole is
-// about to put it in UTF-8. The Hello frame carries the answer and is sent
-// before the terminal is taken, so the probe cannot be the setup itself.
-func consoleRendersUTF8(api consoleAPI, out uintptr) bool {
-	if _, err := api.Mode(out); err == nil {
-		return true
-	}
-	return api.OutputCP() == cpUTF8
-}
 
 // localeUTF8 is a POSIX terminal's own claim about its character set. Windows
 // has no such variables, which is why it gets asked about its console instead.

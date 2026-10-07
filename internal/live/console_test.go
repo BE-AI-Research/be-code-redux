@@ -108,27 +108,6 @@ func TestPrepareConsoleIgnoresNonConsole(t *testing.T) {
 	}
 }
 
-// The Hello frame is sent before the terminal is taken, so the capability it
-// carries comes from a probe that changes nothing. A console counts: attaching
-// is about to put it into UTF-8. (Windows has no LANG, so sniffing the locale
-// reported every Windows client as non-UTF-8 and drew it in ASCII.)
-func TestConsoleRendersUTF8(t *testing.T) {
-	if !consoleRendersUTF8(&fakeConsole{mode: 0x1, cp: 437}, 7) {
-		t.Error("a console we are about to put into UTF-8 should count as UTF-8")
-	}
-	if !consoleRendersUTF8(&fakeConsole{mode: 0x1, cp: cpUTF8}, 7) {
-		t.Error("a console already in UTF-8 should count as UTF-8")
-	}
-	if consoleRendersUTF8(&fakeConsole{modeErr: errNotConsole, cp: 437}, 7) {
-		t.Error("a redirected handle is not a console we can put into UTF-8")
-	}
-	// The probe must not touch the terminal: the attach has not begun.
-	f := &fakeConsole{mode: 0x1, cp: 437}
-	consoleRendersUTF8(f, 7)
-	if len(f.modeSets) != 0 || len(f.cpSets) != 0 {
-		t.Errorf("probe mutated the console: modes %v, cps %v", f.modeSets, f.cpSets)
-	}
-}
 
 // A console whose mode cannot be changed must still get UTF-8 output, and
 // restore must put back only the code page.
