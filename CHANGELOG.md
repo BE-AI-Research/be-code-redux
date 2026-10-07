@@ -1,5 +1,17 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- Fixed: the one-line install from **cmd.exe** installed nothing and said nothing. `install.cmd`
+  is one launcher for two jobs — run the `install.ps1` beside it in a checkout, or fetch the
+  published installer from GitHub when it was downloaded on its own — but the line choosing
+  between them ended `… & exit /b`, and cmd.exe runs what follows `&` whether the `if` matched
+  or not. Downloaded on its own there is no `install.ps1`, so it skipped the local branch and
+  then exited anyway, never reaching the GitHub fallback. Each `if` now governs exactly one
+  command, and a test reads `install.cmd` and fails on `&` after an `if`, on a `( )` block and on
+  a label — none of which survive the LF line endings GitHub serves the file with. The PowerShell
+  one-liner was never affected.
+
 ## v1.2.4 — A readable terminal on Windows (2026-10-06)
 
 - Fixed on Windows: in a shared session a terminal's text slowly duplicated and became
