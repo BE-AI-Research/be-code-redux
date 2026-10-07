@@ -1846,6 +1846,10 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 	case "/review":
 		m.reviewCommand(fields)
+	case "/packs":
+		// A listing, and a change that belongs between requests: /packs is
+		// not busy-safe (see ui.SlashCommandTable), so no run is in flight.
+		m.renderLocalNote(ui.PacksCommand(m.ag, fields))
 	case "/coworkers":
 		// A listing, not a shared event: the terminal that asked is the one
 		// that wants to read it.

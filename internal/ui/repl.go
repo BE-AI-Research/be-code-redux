@@ -930,6 +930,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			}
 		}
 		fmt.Printf("review: %s (resolves to %s)\n", r.Review.Mode(), r.Review.Resolve())
+	case "/packs":
+		fmt.Println(PacksCommand(r.Agent, fields))
 	case "/coworkers":
 		cws := r.Agent.Coworkers()
 		if len(cws) == 0 {

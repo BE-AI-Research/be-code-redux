@@ -74,6 +74,18 @@ func ContentHash(root string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil))[:32], nil
 }
 
+// state is what one workspace has decided about packs, in
+// engine/<key>/packs.json. Trusted maps a pack name to the content hash that
+// was approved; Forced records a pack switched on or off by hand, which
+// overrides detection either way.
+//
+// One file, because it is one subject — "what this project has decided about
+// packs" — and because a person reading it should not have to find two.
+type state struct {
+	Trusted map[string]string `json:"trusted,omitempty"`
+	Forced  map[string]bool   `json:"forced,omitempty"`
+}
+
 // trustMu serialises the read-modify-write below. Sessions on one workspace
 // share the file, so each save re-reads it rather than overwriting what
 // another session recorded.
@@ -87,21 +99,57 @@ var trustSeq int
 func TrustedHash(path, pack string) string {
 	trustMu.Lock()
 	defer trustMu.Unlock()
-	return readTrust(path)[pack]
+	return readState(path).Trusted[pack]
+}
+
+// Forced reports a pack switched on or off by hand for this workspace: on,
+// and whether any decision was recorded at all. Unset means detection
+// decides.
+func Forced(path, pack string) (on, set bool) {
+	trustMu.Lock()
+	defer trustMu.Unlock()
+	v, ok := readState(path).Forced[pack]
+	return v, ok
+}
+
+// SetForced switches a pack on or off for this workspace, overriding
+// detection until it is cleared.
+func SetForced(path, pack string, on bool) error {
+	return mutate(path, func(st *state) {
+		if st.Forced == nil {
+			st.Forced = map[string]bool{}
+		}
+		st.Forced[pack] = on
+	})
+}
+
+// ClearForced returns a pack to being decided by detection.
+func ClearForced(path, pack string) error {
+	return mutate(path, func(st *state) { delete(st.Forced, pack) })
 }
 
 // Trust records that this exact pack content is approved for this workspace.
 func Trust(path, pack, hash string) error {
+	return mutate(path, func(st *state) {
+		if st.Trusted == nil {
+			st.Trusted = map[string]string{}
+		}
+		st.Trusted[pack] = hash
+	})
+}
+
+// mutate is every write to the file: re-read, change, write atomically.
+// Re-reading matters because sessions on one workspace share this file, and
+// one of them recording a trust decision must not drop another's.
+func mutate(path string, f func(*state)) error {
 	trustMu.Lock()
 	defer trustMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	// Re-read before writing: another session on this workspace may have
-	// approved a different pack since this one looked.
-	m := readTrust(path)
-	m[pack] = hash
-	b, err := json.MarshalIndent(m, "", "  ")
+	st := readState(path)
+	f(&st)
+	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -120,16 +168,18 @@ func Trust(path, pack, hash string) error {
 	return nil
 }
 
-func readTrust(path string) map[string]string {
-	m := map[string]string{}
+// readState reads the file; missing or corrupt reads as empty. A decision
+// nobody can produce is not a decision, and this must never fail a session.
+func readState(path string) state {
+	var st state
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return m
+		return state{}
 	}
-	if json.Unmarshal(b, &m) != nil {
-		return map[string]string{}
+	if json.Unmarshal(b, &st) != nil {
+		return state{}
 	}
-	return m
+	return st
 }
 
 // TrustDetail is what the approval prompt shows: everything about the pack

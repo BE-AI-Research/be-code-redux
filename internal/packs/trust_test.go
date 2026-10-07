@@ -106,3 +106,44 @@ func TestTrustStoreRoundTrip(t *testing.T) {
 		t.Errorf("mode = %v, want 0600", st.Mode().Perm())
 	}
 }
+
+// Forcing a pack on or off is a decision about this workspace, kept beside
+// the trust decisions in the same file, and neither can disturb the other.
+func TestForcedStateLivesBesideTrust(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "packs.json")
+
+	if _, set := Forced(path, "ue5"); set {
+		t.Error("nothing is forced to begin with")
+	}
+	if err := Trust(path, "ue5", "hash1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetForced(path, "ue5", false); err != nil {
+		t.Fatal(err)
+	}
+	on, set := Forced(path, "ue5")
+	if !set || on {
+		t.Fatalf("Forced = (%v,%v), want off and set", on, set)
+	}
+	// Trust survived the write.
+	if TrustedHash(path, "ue5") != "hash1" {
+		t.Error("forcing a pack lost its trust record")
+	}
+	// And forcing on replaces forcing off.
+	if err := SetForced(path, "ue5", true); err != nil {
+		t.Fatal(err)
+	}
+	if on, set := Forced(path, "ue5"); !set || !on {
+		t.Fatalf("Forced = (%v,%v), want on", on, set)
+	}
+	// Clearing returns it to detection.
+	if err := ClearForced(path, "ue5"); err != nil {
+		t.Fatal(err)
+	}
+	if _, set := Forced(path, "ue5"); set {
+		t.Error("cleared still reads as forced")
+	}
+	if TrustedHash(path, "ue5") != "hash1" {
+		t.Error("clearing a force lost the trust record")
+	}
+}

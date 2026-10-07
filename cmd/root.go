@@ -25,7 +25,6 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/loader"
 	"github.com/brown-enterprises/be-code/internal/mcp"
-	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/schedule"
@@ -95,8 +94,9 @@ func init() {
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
+	packsCmd.AddCommand(packsValidateCmd, packsInfoCmd)
 	mcp.ClientVersion = Version
 	update.Current = Version
 	tui.Version = Version
@@ -331,7 +331,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
-	attachPacks(reg, ag)
+	attachPacks(ag)
 	if !headless && cfg.Schedules.Enabled {
 		// Scheduled events: interactive sessions only — a one-shot run has
 		// no "later" (schedules spec §1.3). The scheduler is created here but
@@ -888,26 +888,7 @@ func runInteractive(cmd *cobra.Command) error {
 // after the engine, because activating a pack rewrites the system prompt and
 // registers a tool: doing it once, here, keeps the prompt that the first
 // request sends identical to the one every later request extends.
-func attachPacks(reg *tools.Registry, ag *agent.Agent) {
-	dir, err := config.Dir()
-	if err != nil {
-		return // no dotdir, no global packs; a project pack still needs a gate
-	}
-	found, warns := packs.Discover(filepath.Join(dir, "packs"), reg.Root)
-	for _, w := range warns {
-		startupWarn(ag, w)
-	}
-	var active []*packs.Pack
-	for _, p := range found {
-		if p.Matches(reg.Root) {
-			active = append(active, p)
-		}
-	}
-	if len(active) == 0 {
-		return
-	}
-	ag.EnablePacks(active)
-}
+func attachPacks(ag *agent.Agent) { ag.LoadPacks() }
 
 func startupWarn(ag *agent.Agent, msg string) {
 	fmt.Fprintf(os.Stderr, "warn: %s\n", msg)

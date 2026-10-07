@@ -223,6 +223,7 @@ type Agent struct {
 	// by EnablePacks and stable for the session (see internal/agent/packs.go).
 	packNotes  string
 	packChecks []verify.Check
+	packRows   []PackRow
 	handoff    string // briefing from the resumed session, kept in the system prompt
 	// window is the backend context window when detected (0 = unknown),
 	// read through Window(). It is atomic because it is written off the

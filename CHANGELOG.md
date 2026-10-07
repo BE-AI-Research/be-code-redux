@@ -37,6 +37,14 @@
   does can fail the session: one that will not load is named and skipped. Two things are refused
   and said once — a core block past its `budget_tokens`, since the cap is what stops a pack
   eating a small model's window, and a pack from the project that nobody approved.
+- **`/packs`** lists every pack found and why each is or is not active, and `/packs on|off|default
+  <name>` switches one for this project; `/packs reload` re-reads the search path. Any of those
+  rewrites the system prompt, so the reply says the next request will re-read the whole thing
+  rather than leaving a slow turn unexplained. Headless, `be-code packs` lists them,
+  `be-code packs info <name>` shows one in full, and `be-code packs validate <dir>` is for a pack
+  author: it exits non-zero and names what the loader would refuse, a verify command whose
+  program is missing or not executable, and a chunk too large for the smallest context window a
+  pack is meant to help.
 - **A pack that came with a repository is asked about before it runs.** A pack you installed
   yourself in `~/.be-code/packs` needs no permission. One in a project's own `.becode/packs`
   arrived with somebody's repository, adds rules to every request and can name commands to run,

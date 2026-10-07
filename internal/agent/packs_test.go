@@ -243,3 +243,91 @@ func TestChangedToolsReAskButProseDoesNot(t *testing.T) {
 		t.Errorf("a new tool script did not re-ask (%d questions)", yes)
 	}
 }
+
+// /packs has to say what was found and why each one is or is not on —
+// "nothing happened" is the least useful answer when a pack was expected.
+func TestPackRowsExplainEveryPack(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	globalDir := filepath.Join(home, ".be-code", "packs")
+
+	// One that detects this workspace, one that does not.
+	for _, p := range []struct{ name, detect string }{
+		{"ue5", `,"detect":{"any":["*.uproject"]}`},
+		{"godot", `,"detect":{"any":["project.godot"]}`},
+	} {
+		dir := filepath.Join(globalDir, p.name)
+		if err := os.MkdirAll(filepath.Join(dir, "chunks"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"schema":1,"name":"` + p.name + `","version":"2.0.0","core":{"file":"core.md","budget_tokens":1500},
+			"chunks":{"things":{"file":"chunks/things.md","summary":"s"}}` + p.detect + `}`
+		for rel, s := range map[string]string{"pack.json": body, "core.md": "rules", "chunks/things.md": "c"} {
+			if err := os.WriteFile(filepath.Join(dir, rel), []byte(s), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	ag := packAgent(t)
+	if err := os.WriteFile(filepath.Join(ag.Tools.Root, "Shooter.uproject"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag.LoadPacks()
+
+	rows := map[string]PackRow{}
+	for _, r := range ag.PackRows() {
+		rows[r.Name] = r
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want both packs listed, got %+v", ag.PackRows())
+	}
+	if !rows["ue5"].Active || rows["ue5"].Why != "detected" {
+		t.Errorf("ue5 row = %+v", rows["ue5"])
+	}
+	if rows["godot"].Active || !strings.Contains(rows["godot"].Why, "does not match") {
+		t.Errorf("godot row = %+v", rows["godot"])
+	}
+	if rows["ue5"].CoreTokens == 0 || rows["ue5"].CoreBudget != 1500 || rows["ue5"].Version != "2.0.0" {
+		t.Errorf("ue5 row missing detail: %+v", rows["ue5"])
+	}
+
+	// Switching the undetected one on activates it; switching the detected
+	// one off takes it out.
+	if err := ag.ForcePack("godot", true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := ag.ForcePack("ue5", false, false); err != nil {
+		t.Fatal(err)
+	}
+	rows = map[string]PackRow{}
+	for _, r := range ag.PackRows() {
+		rows[r.Name] = r
+	}
+	if !rows["godot"].Active || rows["godot"].Why != "switched on" {
+		t.Errorf("godot after on = %+v", rows["godot"])
+	}
+	if rows["ue5"].Active || rows["ue5"].Why != "switched off" {
+		t.Errorf("ue5 after off = %+v", rows["ue5"])
+	}
+	// And it took effect, not just recorded: the prompt follows the decision.
+	sys := ag.composeSystem("")
+	if !strings.Contains(sys, "Pack: godot") || strings.Contains(sys, "Pack: ue5") {
+		t.Error("the system prompt does not match the switched state")
+	}
+
+	// Clearing returns it to detection.
+	if err := ag.ForcePack("ue5", false, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range ag.PackRows() {
+		if r.Name == "ue5" && (!r.Active || r.Why != "detected") {
+			t.Errorf("ue5 after clear = %+v", r)
+		}
+	}
+	// An unknown name is an error naming what there is, not a silent no-op.
+	if err := ag.ForcePack("nope", true, false); err == nil {
+		t.Error("forcing an unknown pack must say so")
+	}
+}

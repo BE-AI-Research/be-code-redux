@@ -34,7 +34,112 @@ const packFrame = "Operating rules from packs the user installed for this techno
 // Call it once, before a UI starts taking turns. A later change to the active
 // set rewrites the system prompt, which costs a full cold read of the prompt
 // cache, so it belongs at a request boundary rather than mid-run.
-func (a *Agent) EnablePacks(ps []*packs.Pack) {
+// PackRow is one pack as /packs reports it.
+type PackRow struct {
+	Name, Version string
+	Source        string // "global" or "project"
+	Active        bool
+	Why           string // why it is or is not active, in a few words
+	CoreTokens    int
+	CoreBudget    int // 0 when the pack declares none
+}
+
+// PackRows is what /packs lists: every pack found on the search path, whether
+// it is active, and why.
+func (a *Agent) PackRows() []PackRow { return a.packRows }
+
+// LoadPacks discovers the packs on the search path and activates the ones
+// that apply here: detected, or switched on by hand, minus any switched off.
+// It is the one entry point — startup and /packs reload both call it — so the
+// rules about what is active live in one place.
+//
+// It rewrites the system prompt, so it belongs between requests. /packs says
+// as much: the next request pays a full cold read of the prompt cache.
+func (a *Agent) LoadPacks() {
+	dir, err := config.Dir()
+	if err != nil {
+		return
+	}
+	found, warns := packs.Discover(filepath.Join(dir, "packs"), a.Tools.Root)
+	for _, w := range warns {
+		a.QueueNotice(w)
+		if a.Events.OnNotice != nil {
+			a.Events.OnNotice(w)
+		}
+	}
+	statePath, _ := a.packTrustPath()
+
+	var candidates []*packs.Pack
+	rows := make([]PackRow, 0, len(found))
+	for _, p := range found {
+		row := PackRow{Name: p.Name, Version: p.Version, Source: string(p.Source), CoreBudget: p.CoreBudget}
+		_, row.CoreTokens, _ = packs.CoreOverBudget(p)
+		on, set := false, false
+		if statePath != "" {
+			on, set = packs.Forced(statePath, p.Name)
+		}
+		switch {
+		case set && !on:
+			row.Why = "switched off"
+		case set && on:
+			row.Why = "switched on"
+			candidates = append(candidates, p)
+		case p.Matches(a.Tools.Root):
+			row.Why = "detected"
+			candidates = append(candidates, p)
+		default:
+			row.Why = "does not match this workspace"
+		}
+		rows = append(rows, row)
+	}
+
+	skipped := a.EnablePacks(candidates)
+	for i := range rows {
+		if rows[i].Why == "switched off" || rows[i].Why == "does not match this workspace" {
+			continue
+		}
+		if reason, ok := skipped[rows[i].Name]; ok {
+			rows[i].Why = reason
+			continue
+		}
+		rows[i].Active = true
+	}
+	a.packRows = rows
+}
+
+// ForcePack switches a pack on or off for this workspace and re-activates,
+// or returns it to detection when clear is set. The caller is between
+// requests: this rewrites the system prompt.
+func (a *Agent) ForcePack(name string, on, clear bool) error {
+	path, err := a.packTrustPath()
+	if err != nil {
+		return err
+	}
+	known := false
+	for _, r := range a.packRows {
+		if r.Name == name {
+			known = true
+		}
+	}
+	if !known {
+		return fmt.Errorf("no pack named %q was found; /packs lists what there is", name)
+	}
+	if clear {
+		err = packs.ClearForced(path, name)
+	} else {
+		err = packs.SetForced(path, name, on)
+	}
+	if err != nil {
+		return err
+	}
+	a.LoadPacks()
+	return nil
+}
+
+// EnablePacks activates exactly the packs given, and reports the ones it
+// would not, by name, with the reason. LoadPacks is the usual caller.
+func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
+	skipped := map[string]string{}
 	// Queued, not noticed: this runs while the agent is being built, before a
 	// UI has wired OnNotice, and a.notice would drop the message there. A
 	// queued one is delivered as soon as there is somewhere to put it, and
@@ -53,10 +158,12 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) {
 	)
 	for _, p := range ps {
 		if p.Source == packs.SourceProject && !a.trustProjectPack(p, refuse) {
+			skipped[p.Name] = "needs approval"
 			continue
 		}
 		if over, est, budget := packs.CoreOverBudget(p); over {
 			refuse("pack %q is not active: its core is about %d tokens against a budget of %d. Shorten core.md or raise core.budget_tokens.", p.Name, est, budget)
+			skipped[p.Name] = fmt.Sprintf("core is ~%d tokens, over its %d budget", est, budget)
 			continue
 		}
 		active = append(active, p)
@@ -74,6 +181,7 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) {
 	// from the registry.
 	a.Tools.SetPacks(active)
 	a.RefreshSystem()
+	return skipped
 }
 
 // trustProjectPack decides whether a pack that came with this repository may
