@@ -35,6 +35,8 @@ const compatToolInstructions = `
 
 Tool calling format: to call a tool, output EXACTLY one block and nothing after it:
 <tool_call>{"name": "TOOL_NAME", "arguments": {...}}</tool_call>
+Each result comes back as:
+<tool_result name="TOOL_NAME" status="ok">result text</tool_result>
 Available tools:
 %s
 When you are completely finished, reply with your summary and no tool_call block.`
