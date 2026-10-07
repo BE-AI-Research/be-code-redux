@@ -113,6 +113,8 @@ type Registry struct {
 	// commands. Deny wins; an allow match skips the approval prompt.
 	ShellAllow []string
 	ShellDeny  []string
+	// packs are the active packs the pack tool serves; see SetPacks.
+	packs []PackSource
 	// Hooks: "post_write" commands run after a successful file write
 	// ($FILE substituted); "pre_shell" run before an approved shell
 	// command ($COMMAND substituted). Hook failures are reported to the
@@ -442,6 +444,27 @@ func (r *Registry) Specs() []provider.ToolSpec {
 }
 
 // Names lists tool names.
+// Tool looks one tool up by name.
+func (r *Registry) Tool(name string) (Tool, bool) {
+	for _, t := range r.tools {
+		if t.Name() == name {
+			return t, true
+		}
+	}
+	return nil, false
+}
+
+// removeTool drops a tool by name. Used when the last pack goes away, so the
+// model is never offered a tool that can answer nothing.
+func (r *Registry) removeTool(name string) {
+	for i, t := range r.tools {
+		if t.Name() == name {
+			r.tools = append(r.tools[:i], r.tools[i+1:]...)
+			return
+		}
+	}
+}
+
 func (r *Registry) Names() []string {
 	out := make([]string, 0, len(r.tools))
 	for _, t := range r.tools {

@@ -99,13 +99,17 @@ must be classified for fired turns in `firedSelfGated` or
 Register it before the prompt is composed so embedded tool-call parsing
 accepts the name, then call `Agent.RefreshSystem`.
 
-**Templates (spec §12) do not work as written.** `Registry.resolve`
-(`internal/tools/tool.go:520-533`) refuses any path that resolves outside
-`Registry.Root`, and the file tools all go through it. A global pack lives at
-`~/.be-code/packs/<name>`, outside the workspace, so `read_file
-{pack}/templates/Actor.h.tmpl` is refused — and `packs/ue5/commands/ue-actor.md`
-tells the model to do exactly that. Serve templates through the `pack` tool
-instead; that keeps confinement intact and needs no exemption.
+**Templates (spec §12): decided and done.** `Registry.resolve`
+(`internal/tools/tool.go:520-533`) refuses any path resolving outside
+`Registry.Root`, and every file tool goes through it, so a global pack at
+`~/.be-code/packs/<name>` cannot be read with `read_file` — which is what
+`packs/ue5/commands/ue-actor.md` asks for. Templates are served by the `pack`
+tool instead (`pack ue5/template/templates/Actor.h.tmpl`), and workspace
+confinement is untouched. `packs.Pack.read` is the only path from that package
+to the filesystem and confines every read to the pack's own directory, with
+symlinks resolved and backslashes normalised, because the path comes from the
+model. **The ue5 pack's command files should be reworded** to fetch templates
+this way rather than with `read_file`.
 
 **Repair loop and anti-loop (spec §11.3).** `Agent.RunFull`
 (`internal/agent/loop.go`) owns the verify/repair rounds and `max_repairs`,

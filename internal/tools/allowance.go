@@ -320,6 +320,9 @@ func within(dir, p string) bool {
 // TestEveryBuiltinToolIsClassified fails when NewRegistry gains a tool
 // that is in neither this list nor firedGatedBuiltins.
 var firedSelfGated = map[string]bool{
+	// pack only returns text from a pack the person installed: no execution,
+	// no path outside the pack, nothing to ask about.
+	"pack":      true,
 	"read_file": true, "write_file": true, "edit_file": true, "list_dir": true,
 	"search": true, "shell": true, "process": true, "browser": true,
 	"consult": true, "schedule": true, "task": true,
@@ -340,7 +343,7 @@ func firedExempt(t Tool) bool {
 	switch t.(type) {
 	case *readFileTool, *writeFileTool, *editFileTool, *listDirTool, *searchTool,
 		*shellTool, *processTool, *BrowserTool, *consultTool, *scheduleTool,
-		*taskTool, *lookupTool, *historyTool, *showTool, *changesTool:
+		*taskTool, *lookupTool, *historyTool, *showTool, *changesTool, *packTool:
 		return true
 	}
 	return false

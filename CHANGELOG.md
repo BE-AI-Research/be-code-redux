@@ -19,6 +19,15 @@
   the shell deny list — matched against both the command as you read it and the program it runs —
   and is never prompted for, having been approved as a set when its pack was trusted. The
   project's own detected checks are unchanged in both respects.
+- **Packs can be loaded, and a `pack` tool serves what is in them.** A pack is a folder of
+  Markdown and JSON — always-on rules, knowledge in chunks the model fetches one at a time,
+  verification commands with a parser to read their output, templates. Nothing in a pack
+  executes: it names one of the compiled-in parsers and can never ship code that runs in this
+  process. The `pack` tool fetches a chunk, a pack's index, or one of its template files, with
+  forgiving name resolution like every other tool here; it appears only when a pack is active.
+  Templates are served this way because a pack normally lives outside the workspace and every
+  file tool confines reads to it — so a pack's own reads are confined to the pack's directory
+  instead, symlinks resolved, since the path comes from the model.
 
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 
