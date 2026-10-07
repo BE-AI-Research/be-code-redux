@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.2.5 — The Windows interface, restored (2026-10-06)
 
 - Fixed on Windows: v1.2.4 broke the look of the interface. It reported a Windows terminal as
   UTF-8 capable by asking the console — which says yes, because a client puts it into UTF-8 — and

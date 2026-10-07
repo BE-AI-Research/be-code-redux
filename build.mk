@@ -1,5 +1,5 @@
 BINARY := be-code
-VERSION := 1.2.4
+VERSION := 1.2.5
 LDFLAGS := -s -w -X github.com/brown-enterprises/be-code/cmd.Version=$(VERSION)
 
 .PHONY: build test vet verify clean release vscode visualstudio-test
