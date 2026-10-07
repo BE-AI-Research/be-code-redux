@@ -218,7 +218,12 @@ type Agent struct {
 	helperInit sync.Once
 
 	projectNotes string
-	handoff      string // briefing from the resumed session, kept in the system prompt
+	// packNotes is the active packs' rules and chunk index, as one block for
+	// the system prompt; packChecks are their verify commands. Both are set
+	// by EnablePacks and stable for the session (see internal/agent/packs.go).
+	packNotes  string
+	packChecks []verify.Check
+	handoff    string // briefing from the resumed session, kept in the system prompt
 	// window is the backend context window when detected (0 = unknown),
 	// read through Window(). It is atomic because it is written off the
 	// agent goroutine — resolveModel lands a model switch's window from a
@@ -1052,6 +1057,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 				}
 			}
 		}
+	}
+	// A pack's rules sit between the project's notes and the repository map,
+	// and are stable for the life of the request like the notes themselves.
+	if a.packNotes != "" && a.systemOverride == "" {
+		sys += "\n\n" + a.packNotes
 	}
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap
@@ -2299,7 +2309,7 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 	}
 	rep := &ReviewedReport{}
 	if a.Cfg.VerifyOnDone && a.mayHaveChangedFiles() {
-		proj := verify.Detect(a.Tools.Root)
+		proj := a.verifyProject()
 		if len(proj.Checks) > 0 {
 			for attempt := 0; attempt <= a.Cfg.MaxRepairs; attempt++ {
 				rep.Verify = a.runChecks(ctx, proj)
@@ -2380,7 +2390,7 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 				return "", rep, err
 			}
 			if a.Cfg.VerifyOnDone {
-				proj := verify.Detect(a.Tools.Root)
+				proj := a.verifyProject()
 				if len(proj.Checks) > 0 {
 					rep.Verify = a.runChecks(ctx, proj)
 				}

@@ -49,6 +49,7 @@ type Pack struct {
 	Version     string
 	Description string
 	Root        string // absolute path to the pack's own directory
+	Source      Source // where it came from, which decides how far it is trusted
 	Core        string // contents of core.md, already read
 	CoreBudget  int    // budget_tokens for Core, 0 when unset
 
@@ -164,6 +165,25 @@ func Load(dir string) (*Pack, []string, error) {
 		p.checks = append(p.checks, mc)
 	}
 	return p, warns, nil
+}
+
+// coreCharsPerToken is the harness's own starting estimate, before any
+// calibration from a server's reported token counts. The check uses this
+// fixed figure on purpose: the live estimate is calibrated per session, so a
+// pack whose core sat near its budget would load against one model and fail
+// against another, or load and then stop loading mid-session. A budget that
+// means something has to mean the same thing every time.
+const coreCharsPerToken = 3
+
+// CoreOverBudget reports whether a pack's core is larger than the budget it
+// declared, with the estimate and the budget for the message. A pack with no
+// budget declares no limit.
+func CoreOverBudget(p *Pack) (over bool, estimate, budget int) {
+	estimate = len(p.Core) / coreCharsPerToken
+	if p.CoreBudget <= 0 {
+		return false, estimate, 0
+	}
+	return estimate > p.CoreBudget, estimate, p.CoreBudget
 }
 
 // PackName is the pack's name, as tools.PackSource asks for it. The method

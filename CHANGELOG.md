@@ -28,6 +28,16 @@
   Templates are served this way because a pack normally lives outside the workspace and every
   file tool confines reads to it — so a pack's own reads are confined to the pack's directory
   instead, symlinks resolved, since the path comes from the model.
+- **Packs are found and switched on automatically.** `~/.be-code/packs/<name>` is read at session
+  start, and a pack whose `detect` globs fit the workspace becomes active: its rules join the
+  system prompt (between the project notes and the repository map, and framed as instructions to
+  follow, which the project notes deliberately are not), its chunks and templates become
+  reachable, and its build commands run after the project's own checks. A pack in the project's
+  own `.becode/packs` shadows a global one of the same name, and is announced. Nothing a pack
+  does can fail the session: one that will not load is named and skipped. Two things are refused
+  and said once — a core block past its `budget_tokens`, since the cap is what stops a pack
+  eating a small model's window, and for now any pack that came with the project rather than
+  being installed by hand, which needs an approval this build cannot yet ask for.
 
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 

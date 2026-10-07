@@ -25,6 +25,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/loader"
 	"github.com/brown-enterprises/be-code/internal/mcp"
+	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/schedule"
@@ -330,6 +331,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The store is keyed by workspace and needs the session id, so it opens
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
+	attachPacks(reg, ag)
 	if !headless && cfg.Schedules.Enabled {
 		// Scheduled events: interactive sessions only — a one-shot run has
 		// no "later" (schedules spec §1.3). The scheduler is created here but
@@ -877,6 +879,36 @@ func runInteractive(cmd *cobra.Command) error {
 // It goes to stderr, which is all a headless or plain run has, and is queued
 // on the agent so a TUI or hosted session — where stderr is wiped or is a log
 // file — shows it in the transcript once a UI exists.
+// attachPacks discovers the packs on the search path and activates the ones
+// that fit this workspace. Nothing here can fail the session: a pack that
+// will not load is named and skipped, and a workspace that matches no pack
+// simply has none.
+//
+// Discovery is deliberately before the schedules and editor wiring below but
+// after the engine, because activating a pack rewrites the system prompt and
+// registers a tool: doing it once, here, keeps the prompt that the first
+// request sends identical to the one every later request extends.
+func attachPacks(reg *tools.Registry, ag *agent.Agent) {
+	dir, err := config.Dir()
+	if err != nil {
+		return // no dotdir, no global packs; a project pack still needs a gate
+	}
+	found, warns := packs.Discover(filepath.Join(dir, "packs"), reg.Root)
+	for _, w := range warns {
+		startupWarn(ag, w)
+	}
+	var active []*packs.Pack
+	for _, p := range found {
+		if p.Matches(reg.Root) {
+			active = append(active, p)
+		}
+	}
+	if len(active) == 0 {
+		return
+	}
+	ag.EnablePacks(active)
+}
+
 func startupWarn(ag *agent.Agent, msg string) {
 	fmt.Fprintf(os.Stderr, "warn: %s\n", msg)
 	if ag != nil {
