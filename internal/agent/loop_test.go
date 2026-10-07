@@ -108,6 +108,55 @@ func TestRunReportsTruncatedOutput(t *testing.T) {
 	}
 }
 
+// A reply cut off mid-tool-call is not an answer: the fragment is dropped,
+// the model is told its call was cut off and to re-issue it smaller, and the
+// next reply is used. (A Qwen writing a whole source file into one write_file
+// hit the output limit mid-JSON; the raw fragment used to land in the
+// transcript as the final answer.)
+func TestRunRetriesTruncatedToolCall(t *testing.T) {
+	cut := "Writing the file now.\n\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.txt\", \"content\": \"line one\\nline tw"
+	p := &scriptedProvider{responses: []provider.ChatResponse{
+		{Content: cut, FinishReason: "length"},
+		{Content: "recovered answer"},
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.CompatToolCalls = "always" })
+	answer, err := ag.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "recovered answer" {
+		t.Fatalf("answer = %q", answer)
+	}
+	for _, m := range ag.History.Messages {
+		if m.Role == provider.RoleAssistant && strings.Contains(m.Content, "<tool_call>") {
+			t.Fatalf("truncated tool call stored as an answer: %q", m.Content)
+		}
+	}
+	// The model must be told the call was cut off, on the second call.
+	last := p.lastReq.Messages[len(p.lastReq.Messages)-1]
+	if last.Role != provider.RoleUser || !strings.Contains(strings.ToLower(last.Content), "cut off") {
+		t.Fatalf("no truncation note sent: %+v", last)
+	}
+}
+
+// A second cutoff mid-tool-call means the call cannot fit the output limit:
+// explain that, never return the fragment as the answer.
+func TestRunFailsOnRepeatedTruncatedToolCall(t *testing.T) {
+	cut := "<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.txt\", \"content\": \"never en"
+	p := &scriptedProvider{responses: []provider.ChatResponse{
+		{Content: cut, FinishReason: "length"},
+		{Content: cut, FinishReason: "length"},
+	}}
+	ag, _ := newTestAgent(t, p, func(c *config.Config) { c.CompatToolCalls = "always" })
+	_, err := ag.Run(context.Background(), "do the thing")
+	if err == nil || !strings.Contains(err.Error(), "tool call") {
+		t.Fatalf("expected a truncated-tool-call error, got %v", err)
+	}
+	if p.i != 2 {
+		t.Fatalf("should retry a truncated call exactly once, made %d calls", p.i)
+	}
+}
+
 // Server-reported prompt_tokens recalibrate the estimator mid-session.
 func TestRunCalibratesEstimateFromUsage(t *testing.T) {
 	p := &funcProvider{fn: func(req provider.ChatRequest) (*provider.ChatResponse, error) {

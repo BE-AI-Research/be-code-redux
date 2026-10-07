@@ -1,5 +1,13 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- Fixed: a reply the output limit cut off in the middle of an embedded tool call — a model
+  writing a whole source file into one `write_file` argument — was shown as the final answer,
+  which read as pages of raw half-JSON, and the run ended there. The unfinished call is now
+  discarded and the model is asked once to re-issue it in smaller steps (write the file in
+  parts); a second cutoff explains that the call cannot fit the output limit.
+
 ## v1.2.2 — One session on Windows, and a one-line install (2026-10-06)
 
 - Fixed on Windows: a live session started from an elevated login (an administrator's SSH

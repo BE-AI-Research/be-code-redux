@@ -1252,7 +1252,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		a.attachState()
 	}
 
-	emptyRetries, lengthRetries := 0, 0
+	emptyRetries, lengthRetries, cutCallRetries := 0, 0, 0
 	effort := a.Cfg.ReasoningEffort
 	overflowTried := false // one recovery from a context-window refusal per run
 	for turn := 0; turn < a.Cfg.MaxTurns; turn++ {
@@ -1370,6 +1370,22 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 				return "", fmt.Errorf("model returned an empty reply twice in a row (backend may be truncating the prompt; check its context window against context_tokens)")
 			}
 			if resp.FinishReason == "length" {
+				// A reply cut off inside an embedded tool call is not an
+				// answer: storing the fragment put 13 KB of half-JSON in a
+				// transcript as the "final answer" once. Drop it and tell
+				// the model to make the call smaller; a second cutoff means
+				// the call cannot fit the output limit at all.
+				if a.Cfg.CompatToolCalls != "never" && openEmbeddedCall(content) {
+					if cutCallRetries == 0 {
+						cutCallRetries++
+						a.notice("a tool call was cut off by the output limit; asking for it in smaller steps")
+						a.History.Add(provider.Message{Role: provider.RoleUser,
+							Content: "Your reply was cut off by the output limit in the middle of a tool call, and the unfinished call was discarded. Re-issue it with a smaller payload: write a large file in parts (write_file the first part, then extend it with edit_file), and keep each call well under the limit."})
+						continue
+					}
+					a.autosave(userInput)
+					return "", fmt.Errorf("model output was cut off (finish_reason=length) in the middle of a tool call twice: the call does not fit the output limit. Raise max_tokens or the backend window, or ask for the change in smaller steps")
+				}
 				a.notice("reply was cut off by the output limit (max_tokens or the backend's context window)")
 			}
 			// Final answer.
