@@ -74,13 +74,21 @@ func DefaultAttachOptions() AttachOptions {
 			if err != nil {
 				return nil, err
 			}
-			return func() { term.Restore(uintptr(fd), st) }, nil
+			// MakeRaw owns the input handle alone. The output console has to
+			// be taken too — VT processing, no wrap at the last cell, UTF-8 —
+			// because the served program renders into a socket and so never
+			// configures this terminal itself (see console.go).
+			unprepare, _ := prepareTerminal(os.Stdout.Fd())
+			return func() {
+				unprepare()
+				term.Restore(uintptr(fd), st)
+			}, nil
 		},
 		Size: func() (int, int) {
 			return terminalSize(func(fd uintptr) (int, int, error) { return term.GetSize(fd) },
 				os.Stdout.Fd(), os.Stderr.Fd(), os.Stdin.Fd())
 		},
-		UTF8: strings.Contains(strings.ToLower(os.Getenv("LANG")+os.Getenv("LC_ALL")+os.Getenv("LC_CTYPE")), "utf"),
+		UTF8: terminalUTF8(os.Stdout.Fd()),
 	}
 }
 

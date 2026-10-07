@@ -1,5 +1,19 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- Fixed on Windows: in a shared session a terminal's text slowly duplicated and became
+  unreadable as the session ran, while the layout itself held together. Nothing had taken the
+  client's console: a served session renders in the detached host, which has no terminal of its
+  own, so the console setup Bubble Tea does when it owns one never ran, and raw mode only covers
+  the input handle. The console kept its OEM code page, which draws every non-ASCII byte of a
+  frame as two or three cells — so lines outgrew the width they were padded to, the console
+  wrapped them, the alt screen scrolled, and each repaint after that landed one row out of step.
+  A client now takes its console's output for the length of an attach (VT processing on, no wrap
+  at the last cell, UTF-8) and puts back exactly what it changed on the way out. A Windows
+  terminal is also no longer reported as non-UTF-8 — it was asked for POSIX locale variables
+  Windows does not set, so every Windows client was drawn with ASCII glyphs.
+
 ## v1.2.3 — A cut-off tool call is never the answer (2026-10-06)
 
 - Fixed: a reply the output limit cut off in the middle of an embedded tool call — a model
