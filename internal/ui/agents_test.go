@@ -19,7 +19,7 @@ func withSubAgent(t *testing.T) (*REPL, string) {
 	r.Cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://localhost:11434"}
 	st := testStoreFor(t, r)
 	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
-		return nullProvider{}, 0, nil
+		return scriptedProvider(func(provider.ChatRequest) string { return "done" }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil; r.Agent.StopAllSubAgents("test") })
 	cws, _ := r.Cfg.ValidCoworkers()
@@ -40,7 +40,7 @@ func withAssignedSubAgent(t *testing.T) (*REPL, string) {
 	r.Cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://localhost:11434"}
 	st := testStoreFor(t, r)
 	agent.CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
-		return nullProvider{}, 0, nil
+		return scriptedProvider(func(provider.ChatRequest) string { return "done" }), 0, nil
 	}
 	t.Cleanup(func() { agent.CoworkerFactory = nil; r.Agent.StopAllSubAgents("test") })
 	cws, _ := r.Cfg.ValidCoworkers()

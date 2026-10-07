@@ -1337,6 +1337,12 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			content, calls = ParseEmbeddedCallsTyped(content, a.knownTools, SchemaParamTypes(a.Tools.Specs()))
 		}
 
+		// A productive turn resets the empty-reply streak: sporadic flakes
+		// across a long run must not accumulate into a fatal error.
+		if len(calls) > 0 || strings.TrimSpace(content) != "" {
+			emptyRetries = 0
+		}
+
 		if len(calls) == 0 {
 			if strings.TrimSpace(content) == "" {
 				// Nothing usable came back. A length cutoff with no output
@@ -1359,15 +1365,23 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 					a.autosave(userInput)
 					return "", fmt.Errorf("model output was cut off (finish_reason=length) before it produced an answer: it spent the remaining window on reasoning (%d chars), even after a retry with reasoning_effort=low. Raise the backend window (OLLAMA_CONTEXT_LENGTH), set reasoning_effort: low in config, or lower context_tokens so more of the window is reserved for generation", len(resp.Reasoning))
 				}
-				if emptyRetries == 0 {
+				// The model emitted EOS with nothing to say: it believes it is
+				// done, or has lost the thread. Say so plainly and ask it to
+				// continue or give its final answer; a transient backend
+				// flake is cured by the retry as well.
+				if emptyRetries < maxEmptyNudges {
 					emptyRetries++
-					a.notice("model returned an empty reply; asking it to continue")
+					a.notice("model returned an empty reply; asking it to continue (attempt %d/%d)",
+						emptyRetries, maxEmptyNudges)
 					a.History.Add(provider.Message{Role: provider.RoleUser,
 						Content: "Your previous reply was empty. Continue the task: either call a tool or give your final answer."})
+					if err := a.wait(ctx, a.retryBase); err != nil {
+						return "", err
+					}
 					continue
 				}
 				a.autosave(userInput)
-				return "", fmt.Errorf("model returned an empty reply twice in a row (backend may be truncating the prompt; check its context window against context_tokens)")
+				return "", fmt.Errorf("model returned an empty reply %d times in a row (no content and no tool calls); it may believe the task is complete", emptyRetries)
 			}
 			if resp.FinishReason == "length" {
 				// A reply cut off inside an embedded tool call is not an
