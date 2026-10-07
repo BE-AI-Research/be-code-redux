@@ -744,6 +744,13 @@ func runInteractive(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	// A session started where nobody can answer — piped stdin, CI, a
+	// scripted --resume — must not reach the online gate below: it would
+	// ask its question to nobody and park forever. The run command's
+	// headless consent covers it instead.
+	if err := unattendedOnlineGate(ag); err != nil {
+		return err
+	}
 
 	defer ag.Tools.Close()
 	defer ag.Checkpoints.Cleanup()

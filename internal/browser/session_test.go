@@ -265,7 +265,12 @@ func TestSessionCloseWaitsForAVoluntaryExit(t *testing.T) {
 	start := time.Now()
 	s.Close()
 	elapsed := time.Since(start)
-	if elapsed < 100*time.Millisecond {
+	// The 150ms fake-browser delay starts at launch, not at Close: under
+	// load, s.Page and setup can consume most of it before Close is even
+	// called, so the bound needs real margin. The marker file below is
+	// what proves the exit was voluntary; this just catches Close
+	// returning instantly (a kill returns in ~1ms).
+	if elapsed < 50*time.Millisecond {
 		t.Fatalf("Close returned in %s, before the fake browser could exit on its own — it must have killed the process instead of waiting for it", elapsed)
 	}
 	// No upper bound here beyond closeWaitTimeout itself: under load (a

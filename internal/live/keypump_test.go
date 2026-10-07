@@ -217,6 +217,17 @@ func TestKeyPumpEscapeRaceStress(t *testing.T) {
 		kp.Feed(client, []byte("[A"))
 
 		var msgs []tea.Msg
+		// The pump drains its input on its own goroutine, which under load
+		// may not be scheduled within the 8ms burst window below. That is
+		// scheduling, not pump behavior, so wait generously for the first
+		// message (delivery) and only then apply the 8ms gap (batching),
+		// which is what this test actually measures.
+		select {
+		case m := <-got:
+			msgs = append(msgs, m)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d (client %d): pump delivered nothing within 2s", i, client)
+		}
 	collect:
 		for {
 			select {
