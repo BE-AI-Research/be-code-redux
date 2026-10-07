@@ -44,8 +44,14 @@ func (f *funcProvider) ListModels(context.Context) ([]provider.ModelInfo, error)
 func (f *funcProvider) Ping(context.Context) (string, error)                     { return "ok", nil }
 
 func newTestAgent(t *testing.T, p provider.Provider, mut func(*config.Config)) (*Agent, string) {
+	return newTestAgentAt(t, t.TempDir(), p, mut)
+}
+
+// newTestAgentAt is newTestAgent on a workspace the caller already has, for a
+// test that needs two agents to see the same project — a second session on
+// one workspace reads the first session's decisions.
+func newTestAgentAt(t *testing.T, dir string, p provider.Provider, mut func(*config.Config)) (*Agent, string) {
 	t.Helper()
-	dir := t.TempDir()
 	reg, err := tools.NewRegistry(dir, func(a, d string) bool { return true })
 	if err != nil {
 		t.Fatal(err)

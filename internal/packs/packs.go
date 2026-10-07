@@ -53,9 +53,10 @@ type Pack struct {
 	Core        string // contents of core.md, already read
 	CoreBudget  int    // budget_tokens for Core, 0 when unset
 
-	chunks map[string]Chunk
-	checks []manifestCheck
-	detect detect
+	chunks     map[string]Chunk
+	checks     []manifestCheck
+	detect     detect
+	mcpServers map[string]any
 }
 
 type manifest struct {
@@ -126,7 +127,7 @@ func Load(dir string) (*Pack, []string, error) {
 	p := &Pack{
 		Name: m.Name, Version: m.Version, Description: m.Description,
 		Root: root, CoreBudget: m.Core.BudgetTokens,
-		chunks: map[string]Chunk{}, detect: m.Detect,
+		chunks: map[string]Chunk{}, detect: m.Detect, mcpServers: m.MCPServers,
 	}
 
 	var warns []string

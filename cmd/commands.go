@@ -265,9 +265,11 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// -y never approves a schedule (schedules spec §3.1), nor a fired
 		// turn's tool_call, nor online_project (its one -y path is the run
 		// command's own ApproveOnlineForRun, never this prompt), nor
-		// share_page (online spec §2.2: page text to an online model).
+		// share_page (online spec §2.2: page text to an online model), nor
+		// pack_trust (packs spec §10: -y means "run the commands I chose",
+		// not "trust the ones a repository brought with it").
 		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
-			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
+			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update" || action == "pack_trust") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}

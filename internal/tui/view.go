@@ -891,7 +891,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// the session" (browser spec §3.1): "a" is the same answer as "y".
 			ans = askAnswer{OK: true}
 		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
-			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" || a.Action == "update" {
+			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" || a.Action == "update" || a.Action == "pack_trust" {
 			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
 			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
@@ -1398,6 +1398,10 @@ func (m *View) viewAsk() string {
 	case "schedule":
 		title = "Scheduled event"
 		hint = "y approve · n refuse · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
+	case "pack_trust":
+		title = "Pack from this project"
+		hint = "y trust it · n leave it off · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
 	case "spend_cap":
 		title = "Spend cap reached"

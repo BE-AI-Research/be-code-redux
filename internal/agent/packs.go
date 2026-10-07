@@ -2,7 +2,11 @@ package agent
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
+
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 
 	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/tools"
@@ -48,8 +52,7 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) {
 		checks []verify.Check
 	)
 	for _, p := range ps {
-		if p.Source == packs.SourceProject {
-			refuse("pack %q comes with this project and is not active: a project pack needs approval, which this build cannot ask for yet. Copy it to ~/.be-code/packs to use it.", p.Name)
+		if p.Source == packs.SourceProject && !a.trustProjectPack(p, refuse) {
 			continue
 		}
 		if over, est, budget := packs.CoreOverBudget(p); over {
@@ -71,6 +74,60 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) {
 	// from the registry.
 	a.Tools.SetPacks(active)
 	a.RefreshSystem()
+}
+
+// trustProjectPack decides whether a pack that came with this repository may
+// run (packs spec §10).
+//
+// A global pack needs no decision: the person put it in their own dotdir. A
+// project pack arrived with somebody's repository, it adds rules to every
+// request and it can name commands to run, so it is asked about once —
+// naming every one of those commands — and the answer is remembered per
+// workspace against the hash of what was approved. Change what the pack
+// runs and it asks again; improve its prose and it does not, because a gate
+// that interrupts for paragraphs teaches people to approve without reading.
+//
+// Nobody to ask (headless without -y) is a no. An unapproved project pack is
+// disabled and said so, never trusted by default.
+func (a *Agent) trustProjectPack(p *packs.Pack, refuse func(string, ...any)) bool {
+	hash, err := packs.ContentHash(p.Root)
+	if err != nil {
+		refuse("pack %q from this project is not active: its contents could not be read to approve (%v)", p.Name, err)
+		return false
+	}
+	path, err := a.packTrustPath()
+	if err == nil && packs.TrustedHash(path, p.Name) == hash {
+		return true // the same pack, already approved for this workspace
+	}
+	if a.Tools.Approve == nil {
+		refuse("pack %q from this project is not active: it needs approval and there is nobody to ask. Run interactively, or copy the pack to ~/.be-code/packs.", p.Name)
+		return false
+	}
+	if !a.Tools.Approve("pack_trust", packs.TrustDetail(p, a.Tools.Root)) {
+		refuse("pack %q from this project is not active.", p.Name)
+		return false
+	}
+	if err != nil {
+		// Approved, but with no dotdir to write to it will ask again next
+		// session. Better that than refusing what the person just allowed.
+		refuse("pack %q is active, but the approval could not be saved (%v), so it will ask again", p.Name, err)
+		return true
+	}
+	if err := packs.Trust(path, p.Name, hash); err != nil {
+		refuse("pack %q is active, but the approval could not be saved (%v), so it will ask again", p.Name, err)
+	}
+	return true
+}
+
+// packTrustPath is ~/.be-code/engine/<key>/packs.json: the pack approvals for
+// this workspace, beside the working-memory store and the online decisions
+// (packs spec §5.5).
+func (a *Agent) packTrustPath() (string, error) {
+	base, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "engine", engine.Key(a.Tools.Root), "packs.json"), nil
 }
 
 // packBlock is one pack's contribution to the system prompt: its rules, then

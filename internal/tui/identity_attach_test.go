@@ -153,7 +153,9 @@ func TestAttachPromptWaitsForAnOpenAsk(t *testing.T) {
 	v := s.NewView(1, "l")
 	v.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	decided := make(chan bool, 1)
-	go func() { decided <- s.approveFromAgent("sub_agent_resume", "resume sub-agent work from the previous session?") }()
+	go func() {
+		decided <- s.approveFromAgent("sub_agent_resume", "resume sub-agent work from the previous session?")
+	}()
 	waitFor(t, func() bool { flush(v); return v.mode == modeAsk })
 	s.SetClients([]live.ClientInfo{{ID: 1, Label: "l", IP: "10.0.0.1"}})
 	flush(v)

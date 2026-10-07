@@ -223,6 +223,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s %s\n", yell("run shell (after reading a web page):"), detail)
 	case "schedule":
 		fmt.Printf("%s\n%s\n", yell("schedule:"), detail)
+	case "pack_trust":
+		fmt.Printf("%s\n%s\n", yell("pack from this project:"), detail)
 	case "tool_call":
 		fmt.Printf("%s\n%s\n", yell("tool call:"), detail)
 	case "spend_cap":
@@ -321,12 +323,14 @@ func (t replTerminal) Withdraw(note string) {
 }
 
 // noAlwaysAction lists the approvals with no "always": browser_watch,
-// shell_after_web, schedule, tool_call, spend_cap, online_project and
-// share_page (browser spec §3.2, §3.6; schedules spec §3.1; online spec
-// §2.1–2.3).
+// shell_after_web, schedule, tool_call, spend_cap, online_project,
+// share_page and pack_trust (browser spec §3.2, §3.6; schedules spec §3.1;
+// online spec §2.1–2.3; packs spec §10 — a pack's approval is already
+// remembered per workspace and per content hash, so the only thing an
+// "always" could mean there is "trust every repository's pack").
 func noAlwaysAction(action string) bool {
 	switch action {
-	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update":
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update", "pack_trust":
 		return true
 	}
 	return false

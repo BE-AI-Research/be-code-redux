@@ -36,8 +36,14 @@
   own `.becode/packs` shadows a global one of the same name, and is announced. Nothing a pack
   does can fail the session: one that will not load is named and skipped. Two things are refused
   and said once — a core block past its `budget_tokens`, since the cap is what stops a pack
-  eating a small model's window, and for now any pack that came with the project rather than
-  being installed by hand, which needs an approval this build cannot yet ask for.
+  eating a small model's window, and a pack from the project that nobody approved.
+- **A pack that came with a repository is asked about before it runs.** A pack you installed
+  yourself in `~/.be-code/packs` needs no permission. One in a project's own `.becode/packs`
+  arrived with somebody's repository, adds rules to every request and can name commands to run,
+  so it asks once — listing every command and server it would bring — and the answer is
+  remembered for that workspace against a fingerprint of the pack's manifest and tools. Change
+  what the pack runs and it asks again; improve its wording and it does not. There is no
+  "always" to grant, `-y` does not answer it, and with nobody to ask the pack simply stays off.
 
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 
