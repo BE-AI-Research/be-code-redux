@@ -34,7 +34,3 @@ func prepareTerminal(out uintptr) (restore func(), utf8 bool) {
 	return prepareConsole(winConsole{}, out)
 }
 
-// terminalUTF8 reports what the Hello frame should claim, without changing
-// anything — on Windows that is a question about the console, since the locale
-// variables POSIX terminals use are not set here.
-func terminalUTF8(out uintptr) bool { return consoleRendersUTF8(winConsole{}, out) }

@@ -88,7 +88,18 @@ func DefaultAttachOptions() AttachOptions {
 			return terminalSize(func(fd uintptr) (int, int, error) { return term.GetSize(fd) },
 				os.Stdout.Fd(), os.Stderr.Fd(), os.Stdin.Fd())
 		},
-		UTF8: terminalUTF8(os.Stdout.Fd()),
+		// From the locale, never from the console. 1.2.4 asked the console
+		// instead — a console is put into UTF-8 by prepareTerminal, so it
+		// said yes — and that flipped every Windows terminal from the ASCII
+		// glyph set to real box drawing, arrows and the context wheel. Those
+		// are the characters a Windows console is least likely to draw at the
+		// width lipgloss counts, and a row drawn wider than it was measured
+		// wraps, which grows the frame, which scrolls the alt screen: the top
+		// bar goes and the bottom rows ghost. The code page is still set, so
+		// UTF-8 in a model's reply or a tool's output decodes correctly; what
+		// is no longer claimed is that this terminal's glyph widths can be
+		// trusted.
+		UTF8: localeUTF8(),
 	}
 }
 

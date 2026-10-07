@@ -14,15 +14,31 @@ import (
 // program runs in the detached host with no tty of its own (WithInput(nil),
 // WithOutput(socket)), so the Windows console setup Bubble Tea does when it
 // owns a terminal never runs, and x/term's MakeRaw only touches the *input*
-// handle. Nothing else configures the client's console output. Left alone it
-// keeps its OEM code page, so every non-ASCII byte of a frame is drawn as two
-// or three cells; lines then overflow the width the renderer padded them to,
-// the console wraps them, the alt screen scrolls, and each following
-// cursor-home repaint lands out of step — text duplicating and degrading while
-// the frame's shape survives.
+// handle. Nothing else configures the client's console output.
+//
+// wrapAtEOL is the one that produced the ghost rows. Every row of a frame is
+// padded to exactly the width (padToWidth, and lipgloss pads its own), so the
+// last cell of a row is always written — and Bubble Tea appends no
+// EraseLineRight to a line that already fills the width, since it expects the
+// write itself to cover the old cells. With wrap-at-EOL on, writing that last
+// cell moves the cursor to the next row; on the bottom row that scrolls the
+// alt screen, so the next cursor-home repaint paints one row out of step and
+// whatever scrolled past the bottom is never painted over again. A frame is
+// height-1 rows, so the bottom row of the terminal is not painted even in the
+// steady state, and EraseScreenBelow only fires when a frame gets shorter —
+// nothing ever cleans those rows up. Cleared, a full-width row leaves the
+// cursor where it was and nothing scrolls.
 const (
+	wrapAtEOL    = 0x0002 // ENABLE_WRAP_AT_EOL_OUTPUT — cleared, see below
 	vtProcessing = 0x0004 // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-	noAutoReturn = 0x0008 // DISABLE_NEWLINE_AUTO_RETURN: no wrap at the last cell
+	// noAutoReturn (DISABLE_NEWLINE_AUTO_RETURN) is deliberately *not* set.
+	// It is part of the usual "enable VT output" recipe, but it makes a bare
+	// "\n" move down without returning to column 0 — and the host writes the
+	// session's closing lines, the resume code among them, as plain text
+	// through this console before the restore runs. Clearing wrapAtEOL is
+	// what stops the cursor moving off a full-width row; this would only
+	// staircase that text.
+	noAutoReturn = 0x0008
 	cpUTF8       = 65001
 )
 
@@ -58,7 +74,7 @@ func prepareConsole(api consoleAPI, out uintptr) (restore func(), utf8 bool) {
 		// about what it can draw.
 		return restore, false
 	}
-	if want := mode | vtProcessing | noAutoReturn; want != mode {
+	if want := mode&^wrapAtEOL | vtProcessing; want != mode {
 		if api.SetMode(out, want) == nil {
 			undo = append(undo, func() { api.SetMode(out, mode) })
 		}
@@ -74,16 +90,6 @@ func prepareConsole(api consoleAPI, out uintptr) (restore func(), utf8 bool) {
 	return restore, false
 }
 
-// consoleRendersUTF8 answers, without changing anything, whether this terminal
-// will show UTF-8 once attached — a console will, because prepareConsole is
-// about to put it in UTF-8. The Hello frame carries the answer and is sent
-// before the terminal is taken, so the probe cannot be the setup itself.
-func consoleRendersUTF8(api consoleAPI, out uintptr) bool {
-	if _, err := api.Mode(out); err == nil {
-		return true
-	}
-	return api.OutputCP() == cpUTF8
-}
 
 // localeUTF8 is a POSIX terminal's own claim about its character set. Windows
 // has no such variables, which is why it gets asked about its console instead.

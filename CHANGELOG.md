@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Fixed on Windows: v1.2.4 broke the look of the interface. It reported a Windows terminal as
+  UTF-8 capable by asking the console — which says yes, because a client puts it into UTF-8 — and
+  that switched every Windows terminal from the ASCII glyph set it had always used to real box
+  drawing, arrows and the context wheel. Those are the characters a Windows console is least
+  likely to draw at the width lipgloss measured, and a row drawn wider than it was measured wraps,
+  which grows the frame, which scrolls the alt screen: the top bar went and the bottom rows kept
+  stale copies of the input and status lines. Capability comes from the locale again, as it did
+  before v1.2.4. The console's code page is still set to UTF-8, so UTF-8 in a model's reply or a
+  tool's output decodes correctly; what is no longer claimed is that the terminal's glyph widths
+  can be trusted.
 - Fixed: the one-line install from **cmd.exe** installed nothing and said nothing. `install.cmd`
   is one launcher for two jobs — run the `install.ps1` beside it in a checkout, or fetch the
   published installer from GitHub when it was downloaded on its own — but the line choosing
@@ -11,6 +21,18 @@
   command, and a test reads `install.cmd` and fails on `&` after an `if`, on a `( )` block and on
   a label — none of which survive the LF line endings GitHub serves the file with. The PowerShell
   one-liner was never affected.
+- Fixed on Windows: the ghost rows v1.2.4 did not cure. Every row of a frame is padded to
+  exactly the terminal width, and Bubble Tea adds no erase to a line that already fills the
+  width — it expects the write itself to cover the old cells. With the console's
+  wrap-at-end-of-line still enabled, writing that last cell moved the cursor to the next row,
+  which on the bottom row scrolled the alt screen: the next repaint then painted one row out of
+  step, and whatever scrolled past the bottom was never painted over again. A frame is one row
+  shorter than the terminal, and the renderer only erases below a frame that has *shrunk*, so
+  nothing ever cleaned those rows up. A client now clears `ENABLE_WRAP_AT_EOL_OUTPUT` for the
+  length of an attach, so a full-width row leaves the cursor where it is and nothing scrolls.
+  v1.2.4 set `DISABLE_NEWLINE_AUTO_RETURN`, which governs line feeds rather than the wrap; it is
+  now deliberately left alone, because it staircases the plain-text closing lines — the resume
+  code among them — that the host writes through the same console.
 
 ## v1.2.4 — A readable terminal on Windows (2026-10-06)
 

@@ -10,4 +10,3 @@ func prepareTerminal(uintptr) (restore func(), utf8 bool) {
 	return func() {}, localeUTF8()
 }
 
-func terminalUTF8(uintptr) bool { return localeUTF8() }
