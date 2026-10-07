@@ -253,6 +253,20 @@ func headlessOnlineGate(ag *agent.Agent, yes bool) error {
 	return nil
 }
 
+// unattendedOnlineGate is the interactive root command's answer to the
+// same question headlessOnlineGate answers for run: when the session
+// starts where nobody can answer the online gate (piped stdin, CI, a
+// scripted --resume), the gate must not be asked — it would park the
+// session forever waiting on nobody. -y approves this run only;
+// anything else fails fast with the run command's message. On a
+// terminal nothing changes: the gate stays the UI's question.
+func unattendedOnlineGate(ag *agent.Agent) error {
+	if stdinIsTTY() {
+		return nil
+	}
+	return headlessOnlineGate(ag, flagYes)
+}
+
 func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 	in := bufio.NewReader(os.Stdin)
 	return func(action, detail string) bool {

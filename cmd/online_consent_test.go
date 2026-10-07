@@ -201,6 +201,59 @@ func waitUntil(t *testing.T, ok func() bool) {
 	t.Fatal("condition never held")
 }
 
+// A scripted --resume (or any piped/CI session) on an online provider the
+// project never approved must not reach the interactive gate: nobody can
+// answer it, so the session would park forever. unattendedOnlineGate
+// applies the run command's headless consent instead.
+func TestUnattendedOnlineGate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	t.Setenv("BE_TEST_ONLINE_KEY", "k")
+
+	oldTTY, oldYes := stdinIsTTY, flagYes
+	t.Cleanup(func() { stdinIsTTY, flagYes = oldTTY, oldYes })
+
+	// On a terminal nothing changes: the gate stays the UI's question.
+	stdinIsTTY = func() bool { return true }
+	flagYes = false
+	ag := callBuildAgent(t, cfg)
+	if err := unattendedOnlineGate(ag); err != nil {
+		t.Fatalf("terminal: %v", err)
+	}
+	if ag.OnlineApproved() {
+		t.Fatal("terminal pre-approved the gate")
+	}
+
+	// Unattended without -y: the run command's error, not a hang.
+	stdinIsTTY = func() bool { return false }
+	flagYes = false
+	ag = callBuildAgent(t, cfg)
+	err := unattendedOnlineGate(ag)
+	if err == nil || err.Error() != "this project is not approved for or; run interactively once, or pass -y for this run" {
+		t.Fatalf("unattended without -y: %v", err)
+	}
+
+	// Unattended with -y: approved for this run, nothing remembered.
+	ag = callBuildAgent(t, cfg)
+	flagYes = true
+	if err := unattendedOnlineGate(ag); err != nil {
+		t.Fatalf("unattended -y: %v", err)
+	}
+	if !ag.OnlineApproved() {
+		t.Fatal("unattended -y did not approve the run")
+	}
+	home, _ := config.Dir()
+	if entries, _ := os.ReadDir(home + "/engine"); len(entries) > 0 {
+		for _, e := range entries {
+			if _, err := os.Stat(home + "/engine/" + e.Name() + "/online.json"); err == nil {
+				t.Fatal("unattended -y wrote online.json")
+			}
+		}
+	}
+}
+
 // Final fix 10: run --json carries spend_usd while online (null when the
 // price is unknown) and leaves a local run's object as it was.
 func TestRunJSONSpend(t *testing.T) {
