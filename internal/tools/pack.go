@@ -51,7 +51,7 @@ func (t *packTool) Description() string {
 		names = append(names, p.PackName())
 	}
 	sort.Strings(names)
-	return "Fetch a pack's knowledge: a chunk by name (\"ue5/cpp-reflection\"), a pack's index of chunks (\"ue5\"), or one of its template files (\"ue5/template/templates/Actor.h.tmpl\"). Pack files cannot be read with read_file. Active packs: " + strings.Join(names, ", ") + "."
+	return "Fetch a pack's knowledge: a chunk by name (\"ue5/cpp-reflection\"), a pack's index of chunks (\"ue5\"), or one of its template files (\"ue5/template/Actor.h.tmpl\"). Pack files cannot be read with read_file. Active packs: " + strings.Join(names, ", ") + "."
 }
 
 func (t *packTool) Schema() json.RawMessage {
@@ -89,7 +89,16 @@ func (t *packTool) Run(_ context.Context, args map[string]any) Result {
 		return Result{IsError: true, Content: fmt.Sprintf("pack %q cannot be queried for playbook entries in this build", pack.PackName())}
 	default:
 		if after, ok := strings.CutPrefix(rest, "template/"); ok {
+			// The path is relative to the pack root, but a pack keeps its
+			// templates in templates/, so "template/templates/Actor.h.tmpl"
+			// says the word twice and nobody writes that. Try the path as
+			// given, then under templates/.
 			body, err := pack.Template(after)
+			if err != nil && !strings.HasPrefix(after, "templates/") {
+				if b2, err2 := pack.Template("templates/" + after); err2 == nil {
+					body, err = b2, nil
+				}
+			}
 			if err != nil {
 				return Result{IsError: true, Content: fmt.Sprintf("pack %q has no template %q: %v", pack.PackName(), after, err)}
 			}

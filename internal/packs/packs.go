@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
@@ -164,6 +165,16 @@ func Load(dir string) (*Pack, []string, error) {
 	}
 	return p, warns, nil
 }
+
+// PackName is the pack's name, as tools.PackSource asks for it. The method
+// cannot be Name: Pack already has a Name field, and the field is what every
+// caller in this package reads.
+func (p *Pack) PackName() string { return p.Name }
+
+// A loaded pack is what the pack tool serves, so the two must agree. Checked
+// here rather than in tools, which cannot import this package: it needs
+// verify, and verify needs tools.
+var _ tools.PackSource = (*Pack)(nil)
 
 // ChunkNames lists the pack's chunks, sorted, so the index and the tool's
 // listing never shuffle between turns — the prompt cache pays for churn.

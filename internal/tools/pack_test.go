@@ -79,9 +79,23 @@ func runPack(t *testing.T, r *Registry, args map[string]any) Result {
 // ("read {pack}/templates/Actor.h.tmpl") work at all.
 func TestPackToolServesATemplate(t *testing.T) {
 	r := packRegistry(t)
-	res := runPack(t, r, map[string]any{"name": "ue5/template/templates/Actor.h.tmpl"})
-	if res.IsError || !strings.Contains(res.Content, "MODULE_API") {
-		t.Fatalf("got %+v", res)
+	// Both the literal path inside the pack and the natural short form: a
+	// pack keeps its templates in templates/, so repeating the word is the
+	// mistake anyone would make, and "pack ue5/template/Actor.h.tmpl" is what
+	// a command file should be able to say.
+	for _, name := range []string{
+		"ue5/template/templates/Actor.h.tmpl",
+		"ue5/template/Actor.h.tmpl",
+		"ue5:template/Actor.h.tmpl",
+	} {
+		res := runPack(t, r, map[string]any{"name": name})
+		if res.IsError || !strings.Contains(res.Content, "MODULE_API") {
+			t.Errorf("%q did not resolve: %+v", name, res)
+		}
+	}
+	// A path that is not there still names what went wrong.
+	if res := runPack(t, r, map[string]any{"name": "ue5/template/Nope.tmpl"}); !res.IsError {
+		t.Error("a missing template must be an error")
 	}
 }
 
