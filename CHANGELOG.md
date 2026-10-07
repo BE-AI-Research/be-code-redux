@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.2.2 — One session on Windows, and a one-line install (2026-10-06)
 
 - Fixed on Windows: a live session started from an elevated login (an administrator's SSH
   session) looked dead to a non-elevated terminal (Visual Studio's), because the check asked
