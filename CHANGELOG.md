@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.2.3 — A cut-off tool call is never the answer (2026-10-06)
 
 - Fixed: a reply the output limit cut off in the middle of an embedded tool call — a model
   writing a whole source file into one `write_file` argument — was shown as the final answer,
