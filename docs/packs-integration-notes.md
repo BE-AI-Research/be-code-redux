@@ -23,18 +23,25 @@ Two deliberate departures from the spec, both local to this package: the
 spec's `Result` is `Diagnosis` (the package already has `CheckResult`), and
 `Parser` is a func type rather than an interface.
 
+**Argv checks (spec §4.1, §9).** Decided and done: `Check.Argv` is the
+program and its arguments, run through `tools.RunArgv` with no shell on any
+platform, and exactly one of `Command` and `Argv` is set (`ValidateCheck`).
+`Check.Display()` is the readable rendering used by the approval gate, the
+report and the repair turn — for reading only; execution never goes near a
+shell, so a path with spaces needs no quoting and a value containing shell
+syntax is just a value.
+
 ## Still to decide, before the rest of phase 2
 
-**`verify.Check` is a shell string, not an argument vector.** `Check.Command`
-is one string, run by `tools.RunShell(ctx, root, c.Command, c.Timeout)`
-(`verify.go:146`), and `RunChecksGated`'s gate takes that same string
-(`verify.go:142`). The spec makes argv-only a security property (§4.1, §9).
-Quoting an argv into a string reintroduces exactly what argv avoids, with
-platform-specific rules, so `Check` needs an argv field and an exec path that
-skips the shell. Note that `shell_deny` matches by splitting a command string
-into segments (`internal/tools/shell.go:134` `shellSegments`), so an argv
-command needs its own deny check rather than inheriting that one. This is the
-largest piece of work hiding behind a one-line spec sentence.
+**`shell_deny` does not yet cover an argv check.** Deny globs are matched by
+splitting a command *string* into segments (`internal/tools/shell.go:134`,
+`shellSegments`), which has no meaning for an argument vector: there is no
+shell, so there are no compound commands to split. The spec wants pack verify
+commands to go through `shell_deny` (§10). The seam to use is the gate already
+threaded through `RunChecksGated`, which now receives `Check.Display()` — note
+that built-in checks do not go through deny rules today either, so this is new
+behaviour for pack checks rather than a gap in existing ones. Decide whether a
+deny glob matches the display form, `Argv[0]` alone, or both.
 
 ## Answers to the spec's CONFIRM points
 

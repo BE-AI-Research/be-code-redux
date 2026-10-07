@@ -28,12 +28,91 @@ type Check struct {
 	// Fallback runs only when Command fails (e.g. a test runner flag some
 	// projects reject); it keeps shell-specific "a || b" out of check strings.
 	Fallback string
+	// Argv is an alternative to Command: the program and its arguments,
+	// executed with no shell between us and them. Nothing in it is ever
+	// word-split, globbed, substituted or quoted away, on any platform —
+	// which is why a pack's verify commands are written this way. A path
+	// with spaces in it ("C:\\Unreal Projects\\My Game") needs no quoting
+	// and no escaping, and a value that happens to contain shell syntax is
+	// just a value. Exactly one of Command and Argv is set.
+	Argv []string
 	// Parser names a built-in output parser (see ParserNames). Empty means
 	// the failure is reported as output, the way it always has been; a name
 	// means the model is shown one root cause instead. Validate the name with
 	// ValidateParser wherever a check is configured, so a typo is caught where
 	// it was written rather than silently producing no diagnosis.
 	Parser string
+}
+
+// Display is the check's command as a person should see it: in an approval
+// prompt, in the repair turn, in the report. An argv check is joined with
+// quotes around any argument that needs them — for reading only, never for
+// execution, which never goes near a shell.
+func (c Check) Display() string {
+	if len(c.Argv) == 0 {
+		return c.Command
+	}
+	parts := make([]string, len(c.Argv))
+	for i, a := range c.Argv {
+		if a == "" || strings.ContainsAny(a, " \t\"'") {
+			// Plain quotes, and backslashes left alone: this is read by a
+			// person, and strconv.Quote would turn a Windows path into
+			// "C:\\Unreal Projects\\My Game". Only an embedded quote needs
+			// escaping to stay readable.
+			parts[i] = `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
+			continue
+		}
+		parts[i] = a
+	}
+	return strings.Join(parts, " ")
+}
+
+// ValidateCheck reports whether a check is written correctly. Call it wherever
+// a check comes from outside this package — config, a pack manifest — so a
+// mistake is reported against the file it was written in rather than becoming
+// a check that runs the wrong thing or nothing at all.
+func ValidateCheck(c Check) error {
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("check has no name")
+	}
+	switch {
+	case c.Command == "" && len(c.Argv) == 0:
+		return fmt.Errorf("check %q has no command: set either command or argv", c.Name)
+	case c.Command != "" && len(c.Argv) > 0:
+		return fmt.Errorf("check %q sets both command and argv; set one, not both", c.Name)
+	}
+	for i, a := range c.Argv {
+		if a == "" {
+			return fmt.Errorf("check %q: argv[%d] is empty", c.Name, i)
+		}
+	}
+	// Fallback is a shell string, so pairing it with argv would quietly put a
+	// shell behind a check that asked for none.
+	if len(c.Argv) > 0 && c.Fallback != "" {
+		return fmt.Errorf("check %q cannot have a fallback: fallback is a shell command and argv runs no shell", c.Name)
+	}
+	return ValidateParser(c.Parser)
+}
+
+// program is the executable the check runs, for messages about it. An argv
+// check has no command string to take the first word of.
+func (c Check) program() string {
+	if len(c.Argv) > 0 {
+		return c.Argv[0]
+	}
+	if f := strings.Fields(c.Command); len(f) > 0 {
+		return f[0]
+	}
+	return c.Name
+}
+
+// run executes the check, with or without a shell according to how it was
+// written.
+func (c Check) run(ctx context.Context, root string) (string, error) {
+	if len(c.Argv) > 0 {
+		return tools.RunArgv(ctx, root, c.Timeout, c.Argv[0], c.Argv[1:]...)
+	}
+	return tools.RunShell(ctx, root, c.Command, c.Timeout)
 }
 
 // Project describes a detected project type and its checks.
@@ -125,10 +204,10 @@ func pythonCmd(root string) string {
 // nothing to run. Such checks are reported as skipped.
 func skipReason(c Check, out string, err error) (string, bool) {
 	if strings.Contains(out, "No module named pytest") {
-		return "pytest is not installed for the interpreter used (" + strings.Fields(c.Command)[0] + "); install it or add a .venv", true
+		return "pytest is not installed for the interpreter used (" + c.program() + "); install it or add a .venv", true
 	}
 	var exitErr *osexec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && (c.Name == "pytest" || strings.Contains(c.Command, "pytest")) {
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 && (c.Name == "pytest" || strings.Contains(c.Display(), "pytest")) {
 		return "no tests collected", true
 	}
 	return "", false
@@ -148,11 +227,11 @@ func RunChecks(ctx context.Context, root string, proj Project) *Report {
 func RunChecksGated(ctx context.Context, root string, proj Project, allow func(command string) bool) *Report {
 	rep := &Report{Project: proj}
 	for _, c := range proj.Checks {
-		if allow != nil && !allow(c.Command) {
-			rep.Declined = c.Command
+		if allow != nil && !allow(c.Display()) {
+			rep.Declined = c.Display()
 			return rep
 		}
-		out, err := tools.RunShell(ctx, root, c.Command, c.Timeout)
+		out, err := c.run(ctx, root)
 		if err != nil && c.Fallback != "" {
 			if allow != nil && !allow(c.Fallback) {
 				rep.Declined = c.Fallback
@@ -213,7 +292,7 @@ func (r *Report) ModelSummary() string {
 			fmt.Fprintf(&b, "PASS: %s\n", res.Check.Name)
 			continue
 		}
-		fmt.Fprintf(&b, "FAIL: %s (command: %s)\n", res.Check.Name, res.Check.Command)
+		fmt.Fprintf(&b, "FAIL: %s (command: %s)\n", res.Check.Name, res.Check.Display())
 		// One failure at a time: when a parser read the output, the model is
 		// shown the root cause alone. The rest of the log is almost always a
 		// consequence of it, and on a large build it is thousands of lines.
