@@ -33,4 +33,3 @@ func (winConsole) SetOutputCP(cp uint32) error { return windows.SetConsoleOutput
 func prepareTerminal(out uintptr) (restore func(), utf8 bool) {
 	return prepareConsole(winConsole{}, out)
 }
-

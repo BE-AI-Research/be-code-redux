@@ -32,7 +32,7 @@ func (RealClock) NewTimer(d time.Duration) Timer {
 type realTimer struct{ t *time.Timer }
 
 func (r realTimer) C() <-chan time.Time { return r.t.C }
-func (r realTimer) Stop() bool           { return r.t.Stop() }
+func (r realTimer) Stop() bool          { return r.t.Stop() }
 
 // FakeClock is a hand-driven clock: timers fire only on Advance or Set.
 type FakeClock struct {

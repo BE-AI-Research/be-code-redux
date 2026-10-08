@@ -186,7 +186,7 @@ func transitionNear(t time.Time) time.Time {
 }
 
 func (s Spec) Recurring() bool { return s.kind == kindEvery || s.kind == kindCron }
-func (s Spec) String() string   { return s.src }
+func (s Spec) String() string  { return s.src }
 
 // Due is a one-off's fixed time.
 func (s Spec) Due() (time.Time, bool) {

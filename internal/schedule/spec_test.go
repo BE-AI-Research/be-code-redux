@@ -145,7 +145,7 @@ func TestMonthEndsAndCronOr(t *testing.T) {
 	// Both day-of-month and day-of-week restricted: either matches (cron rule).
 	sp, _ = ParseIn("0 12 1 * 1", created, time.UTC)
 	n, _ = sp.Next(time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC)) // Saturday
-	if n.Format("2006-01-02") != "2026-09-28" { // the Monday comes before Oct 1
+	if n.Format("2006-01-02") != "2026-09-28" {                  // the Monday comes before Oct 1
 		t.Fatalf("dom|dow: %s", n)
 	}
 	// 7 is Sunday, like 0.

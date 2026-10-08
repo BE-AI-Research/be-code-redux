@@ -9,4 +9,3 @@ package live
 func prepareTerminal(uintptr) (restore func(), utf8 bool) {
 	return func() {}, localeUTF8()
 }
-

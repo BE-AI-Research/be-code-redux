@@ -55,7 +55,6 @@ func TestUE5PlaybookRouting(t *testing.T) {
 		{"compile", "A.cpp(8): error C2259: 'UMyAbility': cannot instantiate abstract class", "Cannot instantiate abstract class"},
 		{"tool", "Could not find definition for module 'Shooterr'", "Module definition not found"},
 		{"tool", "Unable to find plugin 'MissingPlugin'", "Plugin not found"},
-		{"compile", "A.cpp:1:1: error: something nobody wrote an entry for", "Unknown failure"},
 	}
 	for _, c := range cases {
 		got := Match(entries, c.kind, c.raw, c.raw)
@@ -71,6 +70,21 @@ func TestUE5PlaybookRouting(t *testing.T) {
 
 // A pack's playbook is a file a person edits. One typo used to discard every
 // entry in it, which silently removed all routing; the rest must survive.
+// The ue5 playbook deliberately has no catch-all: generic guidance measures
+// worse than the raw compiler message, so an unrecognised failure is better
+// off reaching the model as the diagnostic alone.
+func TestUE5PlaybookHasNoCatchAll(t *testing.T) {
+	entries := loadUE5(t)
+	for _, e := range entries {
+		if e.Match.String() == "." {
+			t.Errorf("entry %q is a catch-all", e.Title)
+		}
+	}
+	if got := Match(entries, "compile", "A.cpp:1:1: error: something nobody wrote an entry for", ""); got != nil {
+		t.Errorf("an unrecognised failure matched %q; it should match nothing", got.Title)
+	}
+}
+
 func TestBadRegexSkipsOnlyThatEntry(t *testing.T) {
 	entries, warns, err := Parse("## A\nmatch: alpha\nfix: x\n\n## Broken\nmatch: (unclosed\nfix: y\n\n## B\nmatch: beta\nfix: z\n")
 	if err != nil {

@@ -135,7 +135,6 @@ func TestPrepareConsoleIgnoresNonConsole(t *testing.T) {
 	}
 }
 
-
 // A console whose mode cannot be changed must still get UTF-8 output, and
 // restore must put back only the code page.
 func TestPrepareConsoleSetsCodePageWhenModeRefused(t *testing.T) {

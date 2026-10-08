@@ -110,7 +110,7 @@ func TestSameSignatureSwitchesToNextThenSaysItWasTried(t *testing.T) {
 		t.Errorf("the repeat should not repeat the fix:\n%s", second)
 	}
 	third := ag.playbookNote(rep)
-	if !strings.Contains(third, "already been tried") {
+	if !strings.Contains(third, "have both been tried") {
 		t.Errorf("the third time must say the entry was tried:\n%s", third)
 	}
 	// And it must not hand back either piece of advice again.

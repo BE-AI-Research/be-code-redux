@@ -90,7 +90,6 @@ func prepareConsole(api consoleAPI, out uintptr) (restore func(), utf8 bool) {
 	return restore, false
 }
 
-
 // localeUTF8 is a POSIX terminal's own claim about its character set. Windows
 // has no such variables, which is why it gets asked about its console instead.
 func localeUTF8() bool {

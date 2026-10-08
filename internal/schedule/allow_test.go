@@ -8,12 +8,12 @@ import (
 
 func TestParseGrant(t *testing.T) {
 	ok := map[string]string{
-		"shell: go test ./...": "shell: go test ./...",
-		"SHELL:git pull":       "shell: git pull",
-		"write: docs/":         "write: docs",
-		"write: ./docs/api":    "write: docs/api",
-		"write: .":             "write: .",
-		"browser: Example.com": "browser: example.com",
+		"shell: go test ./...":   "shell: go test ./...",
+		"SHELL:git pull":         "shell: git pull",
+		"write: docs/":           "write: docs",
+		"write: ./docs/api":      "write: docs/api",
+		"write: .":               "write: .",
+		"browser: Example.com":   "browser: example.com",
 		"browser: *.example.com": "browser: *.example.com",
 	}
 	for in, want := range ok {

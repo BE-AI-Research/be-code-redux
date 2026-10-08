@@ -334,7 +334,13 @@ func (a *Agent) playbookNote(rep *verify.Report) string {
 			fmt.Fprintf(&b, "next:\n%s\n", hit.Next)
 		}
 	default:
-		fmt.Fprintf(&b, "This failure has not moved in %d attempts, and this entry's fix and next step have both already been tried. Do not repeat either; say what you think is actually wrong.\n", seen)
+		// No plea not to repeat: a prose instruction of that kind has no
+		// measurable effect on whether a model repeats a failed action
+		// (arXiv 2608.23651). What changes behaviour is a different context,
+		// which is what the auto:verify consultation after this provides. So
+		// this rung states the situation and stops offering advice that has
+		// already not worked.
+		fmt.Fprintf(&b, "This failure has not moved in %d attempts, and this entry's fix and next step have both been tried.\n", seen)
 	}
 	return b.String()
 }

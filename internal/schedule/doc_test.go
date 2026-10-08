@@ -13,9 +13,9 @@ func sample() Schedule {
 	created := time.Date(2026, 9, 26, 10, 0, 0, 0, time.FixedZone("PDT", -7*3600))
 	return Schedule{ID: "3f2a9c1b", Name: "nightly-tests", When: "weekdays 09:00",
 		Instruction: "pull, run the tests\nand summarise what broke", Task: "3.2",
-		Allow:       Allowance{{Kind: "shell", Value: "go test ./..."}, {Kind: "write", Value: "docs"}},
-		State:       Active, CreatedBy: "person", Created: created,
-		LastRun:     created.Add(23 * time.Hour), LastOutcome: "ok", AskTimeout: 5 * time.Minute}
+		Allow: Allowance{{Kind: "shell", Value: "go test ./..."}, {Kind: "write", Value: "docs"}},
+		State: Active, CreatedBy: "person", Created: created,
+		LastRun: created.Add(23 * time.Hour), LastOutcome: "ok", AskTimeout: 5 * time.Minute}
 }
 
 func TestDocGolden(t *testing.T) {
