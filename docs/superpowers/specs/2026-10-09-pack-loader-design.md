@@ -212,16 +212,42 @@ should show the second.
 
 | Who put the pack there | What happens |
 |---|---|
-| This person, through the installer | After a successful install: `packs.Trust(path, name, hash)` and `packs.SetForced(path, name, true)` against `~/.be-code/engine/<key>/packs.json`. No trust prompt follows — the install *was* the consent — and the pack is on in this project. |
+| This person, through the installer | After a successful install: `packs.Trust(path, name, hash)` against `~/.be-code/engine/<key>/packs.json`. No trust prompt follows — the install *was* the consent. Enablement comes from the marker instead (§7a), so nothing per-workspace has to be written for the pack to be on. |
 | A clone of someone else's repository | The marker is present, the dotdir entry is not. `trustProjectPack` asks, unchanged. |
 | Anyone who edits the committed pack | `ContentHash` no longer matches, consent is void, the next activation asks. |
 
-`Forced[name] = true` rather than leaving activation to the pack's `detect`
-block, because installing a pack into a project is an unambiguous statement
-that this project wants it — and two of the three published packs
-(`assist` among them) declare no `detect` block at all, so an install that did
-not enable would appear to do nothing. `/packs default <name>` returns the
-pack to detect-driven behaviour, as it does today.
+## 7a. The marker is the project's declaration, so enablement survives a move
+
+Installing a pack into a project is an unambiguous statement that this project
+wants it, and the marker is already committed in the project. So the marker —
+not a dotdir entry — is what says the pack is wanted.
+
+**Activation precedence**, replacing today's two-step:
+
+1. An explicit per-workspace choice, if one is set: `Forced[name]` true or
+   false, from `/packs on` and `/packs off`. A person's direct instruction
+   wins over everything.
+2. Otherwise, a **valid marker** in the pack directory: the pack is wanted.
+3. Otherwise, the pack's own `detect` block, exactly as today.
+
+A marker is valid when it parses and its `pack` field is the pack's own name.
+Nothing more: the marker declares intent, and trust is a separate question
+answered by §7. `/packs default <name>` clears an explicit choice and returns
+the pack to rungs 2 and 3.
+
+This is why the rung ordering matters rather than being a detail. Without it,
+moving or renaming a project orphans its `~/.be-code/engine/<key>/` entry —
+the key is a SHA-256 of the absolute path (`internal/engine/store.go:267`) —
+and a pack with no `detect` block goes silently inactive while sitting right
+there in `.becode/packs`. `/packs` reports it as `does not match this
+workspace`, which is true and useless. With the marker as rung 2, a move costs
+one trust prompt and nothing else.
+
+**It opens no hole.** A repository can ship a marker to declare its pack
+wanted, but wanting is not trust: an untrusted pack still raises
+`pack_trust` before any of its rules reach the system prompt, and its checks
+are still withheld by §11. The marker can move a pack from "inactive" to
+"asks you", never to "active".
 
 ## 8. The install approval, and who may install
 
@@ -332,7 +358,7 @@ So the implementation has nothing to infer:
 | `/packs add` / `update` / `remove` | `internal/ui/packs.go:PacksCommand` |
 | The install picker | reuses `internal/tui`'s `picker` |
 | Menu row **Install a skill pack** | `internal/tui/palette.go:menuEntries` |
-| `.pack-source.json` marker format | written by the installer, read by `update` and the `packs` listing |
+| `.pack-source.json` marker format | written by the installer; read by `update`, the `packs` listing, and the activation precedence (§7a) |
 
 **Changed**
 
@@ -341,6 +367,7 @@ So the implementation has nothing to infer:
 | `packs.GlobalChecks(packsDir, workspace)` | becomes `packs.Checks(packsDir, workspace, trustPath)`; honours recorded trust; its note no longer suggests copying the pack anywhere |
 | `cmd/commands.go:672` | the one caller, computes the trust path |
 | `ui.IsPacksBlocking` | gains `add`, `update`, `remove` |
+| Pack activation | gains the marker as a rung between an explicit `Forced` choice and `detect` (§7a) |
 | `ui.SlashCommandTable`'s `/packs` row | gains the three verbs |
 | README config reference | gains `packs.source` |
 
@@ -415,7 +442,16 @@ Install, trust and activation (`internal/packs`, `cmd`):
 - The same pack directory with no dotdir entry — a clone — does prompt.
 - Editing one byte of the installed pack makes it prompt again.
 - Editing the marker makes it prompt again.
-- `Forced[name]` is true after install, and `/packs default` clears it.
+- After install the pack is active with **no** `Forced` entry written, because
+  the marker is what declares it wanted.
+- A pack with a marker and no `detect` block is active; the same pack with its
+  marker removed is not.
+- `/packs off` beats a marker; `/packs on` beats a pack whose `detect` does not
+  match; `/packs default` returns it to the marker.
+- A pack whose dotdir entry is deleted — the move-or-rename case — is still
+  active, and asks for trust once.
+- A marker naming a different pack than the directory is not a valid
+  declaration and does not activate anything.
 - `remove` deletes the directory and both dotdir keys.
 - `update` on a pack with no marker is refused with that reason.
 - `Checks` returns an installed project pack's checks, and withholds an
