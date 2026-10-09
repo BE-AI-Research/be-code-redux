@@ -37,12 +37,20 @@ var packsCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "warn: %s\n", w)
 		}
 		if len(found) == 0 {
-			fmt.Printf("no packs found (install one in %s)\n", filepath.Join(dir, "packs", "<name>"))
+			fmt.Printf("no packs found (install one with: be-code packs add <name>)\n")
 			return nil
 		}
+		// The same precedence a session uses (§7a), so this listing and
+		// /packs cannot disagree about which packs are wanted here: an
+		// explicit choice, else the pack's marker, else its detect block.
+		abs, aerr := filepath.Abs(root)
+		if aerr != nil {
+			abs = root
+		}
+		trustPath := filepath.Join(dir, "engine", engine.Key(abs), "packs.json")
 		for _, p := range found {
 			mark := " "
-			if p.Matches(root) {
+			if packs.Wanted(p, root, trustPath) {
 				mark = "*"
 			}
 			_, est, budget := packs.CoreOverBudget(p)
@@ -52,7 +60,7 @@ var packsCmd = &cobra.Command{
 			}
 			fmt.Printf(" tokens · %d chunks\n", len(p.ChunkNames()))
 		}
-		fmt.Println("(* matches this workspace · a session's own on/off state is shown by /packs)")
+		fmt.Println("(* wanted here: switched on, installed, or detected · /packs in a session shows the same)")
 		return nil
 	},
 }
@@ -170,19 +178,22 @@ var packsInfoCmd = &cobra.Command{
 
 var flagPackSource string
 
-// packsApprover is the person's seam for an install from the CLI. A TTY is
-// asked; a non-interactive run refuses unless -y, the same rule be-code init
-// follows — except that -y here approves only this one command the person
-// typed, which is not the same as the headless approver's blanket -y.
+// packsApprover is the person's seam for an install from the CLI, and the only
+// approver the install path reaches: headlessApprover is wired for `run` and
+// `init`, neither of which installs.
+//
+// **-y does not answer it** (spec §8, §14), like the updater's `update`. An
+// install reaches the network and then writes rules into the model's own
+// system prompt *and records trust for them*, which is the one thing writing
+// a pack directory by hand cannot do. Honouring -y here made an unattended
+// install reach the trust file — including one the model runs itself through
+// shell under AutoApproveShell, which is exactly the capability §8 withholds:
+// a model that can install a pack can rewrite its own instructions.
 func packsApprover(out io.Writer) func(string, string) bool {
 	return func(action, detail string) bool {
 		fmt.Fprintf(out, "%s\n", detail)
-		if flagYes {
-			fmt.Fprintln(out, "approved by -y")
-			return true
-		}
 		if !stdinIsTTY() {
-			fmt.Fprintln(out, "non-interactive; use -y to approve")
+			fmt.Fprintln(out, "declined: installing a pack always asks a person, and -y does not answer it")
 			return false
 		}
 		fmt.Fprint(out, "install it? [y/N] ")
@@ -195,10 +206,12 @@ func packsApprover(out io.Writer) func(string, string) bool {
 // packOptions is the workspace, the trust file and the approver, which every
 // one of the three subcommands needs.
 func packOptions(out io.Writer) (packsrc.Options, error) {
-	root, err := filepath.Abs(flagDir)
-	if err != nil {
-		return packsrc.Options{}, err
-	}
+	// mustAbs, not filepath.Abs: every other command in this package uses it,
+	// and it expands a leading ~ — which a quoted -C '~/proj' from a script
+	// or a config file otherwise turns into a literal directory named "~",
+	// silently installing into the wrong workspace and keying the trust file
+	// on that path.
+	root := mustAbs(flagDir)
 	base, err := config.Dir()
 	if err != nil {
 		return packsrc.Options{}, err

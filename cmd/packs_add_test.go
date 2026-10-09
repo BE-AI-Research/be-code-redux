@@ -8,39 +8,64 @@ import (
 	"testing"
 )
 
-// The CLI's own seam: a non-TTY stdin with no -y must refuse rather than hang
-// or silently proceed, the same rule `be-code init` follows.
-func TestPacksAddRefusesNonInteractiveWithoutYes(t *testing.T) {
-	ws := t.TempDir()
-	src := t.TempDir()
-	writePackFixture(t, filepath.Join(src, "packs", "assist"))
+// Installing always asks a person, and -y does not answer it (spec §8). A
+// non-interactive run therefore declines, whether or not -y was passed.
+func TestPacksAddAlwaysAsksAPerson(t *testing.T) {
+	for _, withYes := range []bool{false, true} {
+		ws := t.TempDir()
+		src := t.TempDir()
+		writePackFixture(t, filepath.Join(src, "packs", "assist"))
 
-	// stdinIsTTY is a var precisely so a test can stub it (cmd/root.go:113);
-	// under `go test` it reports true, which would take the interactive path
-	// and decline at EOF — the right outcome by luck, for the wrong reason,
-	// and with the wrong message.
-	saved := stdinIsTTY
-	stdinIsTTY = func() bool { return false }
-	defer func() { stdinIsTTY = saved }()
+		// stdinIsTTY is a var precisely so a test can stub it (cmd/root.go:113);
+		// under `go test` it reports true, which would take the interactive
+		// path and decline at EOF — the right outcome by luck, for the wrong
+		// reason, and with the wrong message.
+		saved := stdinIsTTY
+		stdinIsTTY = func() bool { return false }
 
-	out, err := runPacksAdd(t, []string{"assist", "--source", src, "-C", ws})
-	if err == nil {
-		t.Fatalf("a non-interactive add succeeded without -y:\n%s", out)
-	}
-	if !strings.Contains(out+err.Error(), "-y") {
-		t.Errorf("the refusal should say how to proceed: %s / %v", out, err)
-	}
-	if _, serr := os.Stat(filepath.Join(ws, ".becode", "packs", "assist")); !os.IsNotExist(serr) {
-		t.Error("a refused add installed something")
+		args := []string{"assist", "--source", src, "-C", ws}
+		if withYes {
+			args = append(args, "-y")
+		}
+		out, err := runPacksAdd(t, args)
+		stdinIsTTY = saved
+
+		if err == nil {
+			t.Fatalf("a non-interactive add succeeded (withYes=%v):\n%s", withYes, out)
+		}
+		if !strings.Contains(out, "always asks a person") {
+			t.Errorf("withYes=%v: the refusal should say installing always asks: %s", withYes, out)
+		}
+		if _, serr := os.Stat(filepath.Join(ws, ".becode", "packs", "assist")); !os.IsNotExist(serr) {
+			t.Errorf("withYes=%v: a refused add installed something", withYes)
+		}
 	}
 }
 
-func TestPacksAddInstallsWithYes(t *testing.T) {
+// The success path, through the real approver: a terminal, and a person
+// typing y. There is no other way in, which is the point.
+func TestPacksAddInstallsWhenAPersonSaysYes(t *testing.T) {
 	ws := t.TempDir()
 	src := t.TempDir()
 	writePackFixture(t, filepath.Join(src, "packs", "assist"))
 
-	out, err := runPacksAdd(t, []string{"assist", "--source", src, "-C", ws, "-y"})
+	savedTTY := stdinIsTTY
+	stdinIsTTY = func() bool { return true }
+	defer func() { stdinIsTTY = savedTTY }()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString("y\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	savedIn := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = savedIn }()
+
+	out, err := runPacksAdd(t, []string{"assist", "--source", src, "-C", ws})
 	if err != nil {
 		t.Fatalf("add failed: %v\n%s", err, out)
 	}

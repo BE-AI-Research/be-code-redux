@@ -71,6 +71,12 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 		ag.LoadPacks()
 		return PacksReport(ag.PackRows()) + "\n  reloaded; the next request re-reads the whole prompt"
 	}
+	if verb == "add" {
+		// Before the arity guard below: `/packs add` with no name is the
+		// menu's own row, and it offers what the source has rather than
+		// printing syntax at somebody who came to the menu to avoid it.
+		return packsAdd(ag, fields[2:])
+	}
 	if len(fields) < 3 {
 		return packsUsage()
 	}
@@ -83,8 +89,6 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 		err = ag.ForcePack(name, false, false)
 	case "default", "clear", "auto":
 		err = ag.ForcePack(name, false, true)
-	case "add":
-		return packsAdd(ag, fields[2:])
 	case "update", "remove":
 		return packsManage(ag, verb, name)
 	default:
@@ -118,10 +122,10 @@ func packOptionsFor(ag *agent.Agent) (packsrc.Options, error) {
 }
 
 func packsAdd(ag *agent.Agent, args []string) string {
-	if len(args) == 0 {
-		return packsUsage()
+	name, ref := "", ""
+	if len(args) > 0 {
+		name, ref, _ = strings.Cut(args[0], "@")
 	}
-	name, ref, _ := strings.Cut(args[0], "@")
 	spec := ""
 	if len(args) > 1 {
 		spec = args[1]
@@ -132,6 +136,9 @@ func packsAdd(ag *agent.Agent, args []string) string {
 	s, err := packsrc.Resolve(spec, ref)
 	if err != nil {
 		return err.Error()
+	}
+	if name == "" {
+		return packsOnOffer(s)
 	}
 	o, err := packOptionsFor(ag)
 	if err != nil {
@@ -164,4 +171,22 @@ func packsManage(ag *agent.Agent, verb, name string) string {
 	}
 	ag.LoadPacks()
 	return fmt.Sprintf("updated %s %s", res.Pack, res.Version)
+}
+
+// packsOnOffer is what `/packs add` with no name answers: the packs a source
+// has, and how to pick one. The spec asked for a picker here; a listing is
+// what this change ships, and it is what keeps the menu row from being a
+// dead end.
+func packsOnOffer(s packsrc.Source) string {
+	avail, err := packsrc.List(context.Background(), s)
+	if err != nil {
+		return err.Error()
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "packs available from %s:\n", s.Spec)
+	for _, a := range avail {
+		fmt.Fprintf(&b, "  %-12s %-8s %s\n", a.Name, a.Version, a.Description)
+	}
+	b.WriteString("  install one with /packs add <name>")
+	return b.String()
 }

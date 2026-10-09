@@ -206,3 +206,63 @@ func TestRemoveOfSomethingAbsentSaysSo(t *testing.T) {
 		t.Fatal("removing a pack that is not installed succeeded")
 	}
 }
+
+// §12: "There is no state in which .becode/packs/<name>/ holds half a pack."
+// The --force path removed the destination before moving the new pack in, and
+// RemoveAll is not atomic, so a failure part-way left the pack gutted —
+// demonstrated: pack.json, core.md and the marker all vanished. Update sets
+// Force, so this was the ordinary `packs update` path, and on Windows a file
+// an editor or a scanner holds open makes RemoveAll fail routinely.
+//
+// The invariant is about the destination, not about who wins: whether the
+// replace succeeds or fails, .becode/packs/<name> must hold a complete pack.
+func TestForceNeverLeavesHalfAPack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	src := packsRepo(t, "p")
+	s, _ := Resolve(src, "")
+	o, ws := opts(t, true)
+	if _, err := Install(context.Background(), s, "p", o); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(ws, ".becode", "packs", "p")
+
+	// A subdirectory whose contents cannot be unlinked: RemoveAll fails here.
+	sub := filepath.Join(dest, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "x"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	// Whatever path that directory ends up at, make it removable again so
+	// t.TempDir's own cleanup can finish.
+	t.Cleanup(func() {
+		filepath.WalkDir(filepath.Join(ws, ".becode", "packs"), func(p string, d os.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				os.Chmod(p, 0o755)
+			}
+			return nil
+		})
+	})
+
+	o.Force = true
+	_, ierr := Install(context.Background(), s, "p", o)
+
+	// Either outcome is acceptable; a half-pack at dest is not.
+	for _, must := range []string{"pack.json", "core.md"} {
+		if _, err := os.Stat(filepath.Join(dest, must)); err != nil {
+			t.Errorf("%s is missing after a force replace (install err: %v): the destination holds half a pack", must, ierr)
+		}
+	}
+	if _, ok := packs.ReadMarker(dest); !ok {
+		t.Errorf("the marker is missing after a force replace (install err: %v)", ierr)
+	}
+	if _, _, err := packs.Load(dest); err != nil {
+		t.Errorf("what is at dest is not a loadable pack (install err: %v): %v", ierr, err)
+	}
+}

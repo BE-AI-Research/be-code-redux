@@ -216,6 +216,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 			return true
 		}
 		fmt.Printf("%s\n%s\n", yell("browser:"), detail)
+	case "pack_install":
+		fmt.Printf("%s\n%s\n", yell("install a skill pack:"), detail)
 	case "browser_watch":
 		fmt.Printf("%s\n%s\n", yell("browser (watched site — every action asks):"), detail)
 	case "shell_after_web":

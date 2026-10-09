@@ -61,3 +61,47 @@ func TestHeadlessNonInteractivePackInstallDoesNotPromiseYes(t *testing.T) {
 		t.Errorf("the message should say this action always asks.\ngot: %s", out)
 	}
 }
+
+// Spec §8 and §14: -y never answers pack_install. packsApprover is the only
+// approver the install path actually reaches — headlessApprover is wired for
+// `run` and `init`, neither of which installs — so this is the assertion that
+// matters. Before this test, -y approved it here, which made an unattended
+// install reach the trust file: the model could run
+// `be-code packs add x --source <url> -y` through shell under
+// AutoApproveShell and end up with its own standing instructions replaced.
+func TestPacksApproverNeverAcceptsDashY(t *testing.T) {
+	savedYes, savedTTY := flagYes, stdinIsTTY
+	flagYes = true
+	stdinIsTTY = func() bool { return false }
+	defer func() { flagYes, stdinIsTTY = savedYes, savedTTY }()
+
+	var buf strings.Builder
+	if packsApprover(&buf)("pack_install", "install assist from https://example/r") {
+		t.Fatal("-y approved pack_install")
+	}
+	if strings.Contains(buf.String(), "approved by -y") {
+		t.Errorf("the output claims -y approved it: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), "use -y") {
+		t.Errorf("the refusal must not promise that -y would work: %s", buf.String())
+	}
+}
+
+// M3 re-graded: packOptions used filepath.Abs, where the rest of cmd/ uses
+// mustAbs. `-C '~/proj'` (tilde quoted, as a script or a config file would
+// have it) then installed into <cwd>/~/proj and keyed the trust file on that
+// path — silently the wrong workspace, with no error.
+func TestPackOptionsExpandsTheWorkspaceLikeEveryOtherCommand(t *testing.T) {
+	saved := flagDir
+	flagDir = "~/be-code-pack-test"
+	defer func() { flagDir = saved }()
+
+	var buf strings.Builder
+	o, err := packOptions(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(o.Workspace, "~") {
+		t.Errorf("workspace still holds a literal tilde: %q", o.Workspace)
+	}
+}

@@ -69,3 +69,26 @@ func WriteMarker(packRoot string, m Marker) error {
 func (m Marker) DeclaresWanted(pack string) bool {
 	return pack != "" && m.Pack == pack
 }
+
+// MarkerDeclares is "this pack's own marker declares it wanted in this
+// project" (design §7a). It is the middle rung of the activation precedence —
+// below an explicit /packs on|off, above the pack's detect block — and it has
+// exactly one definition because three places read it: the agent's LoadPacks,
+// Checks for callers with no agent, and the CLI's listing. When they
+// disagreed, `be-code verify` silently refused to run a check the session ran.
+func MarkerDeclares(p *Pack) bool {
+	m, ok := ReadMarker(p.Root)
+	return ok && m.DeclaresWanted(p.Name)
+}
+
+// Wanted reports whether this pack should be active in this workspace, by the
+// §7a precedence: an explicit choice, else its marker, else detection.
+// Trust is a separate question — a wanted pack still has to be approved.
+func Wanted(p *Pack, workspace, trustPath string) bool {
+	if trustPath != "" {
+		if on, set := Forced(trustPath, p.Name); set {
+			return on
+		}
+	}
+	return MarkerDeclares(p) || p.Matches(workspace)
+}

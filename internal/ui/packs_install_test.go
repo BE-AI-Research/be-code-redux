@@ -1,8 +1,14 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // Every subcommand that can raise a question must be blocking: Session.Ask
@@ -44,5 +50,49 @@ func TestSlashTableMentionsTheNewVerbs(t *testing.T) {
 		if !strings.Contains(row, want) {
 			t.Errorf("the /packs row does not mention %q: %s", want, row)
 		}
+	}
+}
+
+// The menu row "Install a skill pack" submits `/packs add` with no name. It
+// must not print a usage string: the spec's intended outcome is that a person
+// can install a pack "without knowing where packs live on disk or what a pack
+// directory has to contain", and a usage line teaches syntax to somebody who
+// came to the menu precisely to avoid it.
+func TestPacksAddWithNoNameOffersWhatTheSourceHas(t *testing.T) {
+	src := t.TempDir()
+	for _, n := range []string{"assist", "ue5"} {
+		dir := filepath.Join(src, "packs", n)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"schema":1,"name":"` + n + `","version":"0.1.0","description":"a pack for tests",
+  "core":{"file":"core.md","budget_tokens":1500}}`
+		if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "core.md"), []byte("Rules.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := config.Default()
+	cfg.Packs.Source = src
+	reg, rerr := tools.NewRegistry(t.TempDir(), nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
+
+	out := PacksCommand(ag, []string{"/packs", "add"})
+	if strings.HasPrefix(out, "usage:") {
+		t.Fatalf("the menu's own row printed a usage string:\n%s", out)
+	}
+	for _, want := range []string{"assist", "ue5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output should offer %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "/packs add") {
+		t.Errorf("the output should say how to pick one:\n%s", out)
 	}
 }

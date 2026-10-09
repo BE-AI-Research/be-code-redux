@@ -60,8 +60,6 @@ type CoworkConfig struct {
 	ConsultTimeout int `json:"consult_timeout"`
 }
 
-// SchedulesConfig tunes scheduled events (schedules spec §4.4). Durations
-// are Go duration strings; an unusable one falls back to its default.
 // PacksConfig covers installing packs. Discovery and activation need no
 // configuration: they follow the workspace.
 type PacksConfig struct {
@@ -72,6 +70,8 @@ type PacksConfig struct {
 	Source string `json:"source"`
 }
 
+// SchedulesConfig tunes scheduled events (schedules spec §4.4). Durations
+// are Go duration strings; an unusable one falls back to its default.
 type SchedulesConfig struct {
 	Enabled            bool   `json:"enabled"`
 	MinInterval        string `json:"min_interval"`

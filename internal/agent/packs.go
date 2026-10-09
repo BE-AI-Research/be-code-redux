@@ -127,7 +127,7 @@ func (a *Agent) LoadPacks() {
 			// Wanting is not trust: an untrusted pack still raises
 			// pack_trust below, so a marker can move a pack from inactive to
 			// asks-you and never to active.
-			if m, ok := packs.ReadMarker(p.Root); ok && m.DeclaresWanted(p.Name) {
+			if packs.MarkerDeclares(p) {
 				row.Why = "installed in this project"
 				candidates = append(candidates, p)
 				break

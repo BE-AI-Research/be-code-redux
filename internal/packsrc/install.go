@@ -70,6 +70,7 @@ func Install(ctx context.Context, s Source, pack string, o Options) (Result, err
 		return Result{}, err
 	}
 	previous := ""
+	aside := ""
 	if _, err := os.Stat(dest); err == nil {
 		if !o.Force {
 			return Result{}, fmt.Errorf("%s is already installed at %s; use packs update to move it, or --force to replace it",
@@ -78,15 +79,29 @@ func Install(ctx context.Context, s Source, pack string, o Options) (Result, err
 		if m, ok := packs.ReadMarker(dest); ok {
 			previous = m.Commit
 		}
-		if err := os.RemoveAll(dest); err != nil {
-			return Result{}, err
+		// Move the old pack aside rather than deleting it: RemoveAll is not
+		// atomic, so removing first left the pack gutted whenever it failed
+		// part-way — an undeletable file, or on Windows one an editor or a
+		// scanner is holding open. Update sets Force, so this is the ordinary
+		// `packs update` path and §12's "never half a pack" has to hold here.
+		aside = dest + ".replacing-" + packs.Now().Format("20060102-150405")
+		if err := os.Rename(dest, aside); err != nil {
+			return Result{}, fmt.Errorf("could not move the installed %s aside to replace it: %w", got.Pack, err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return Result{}, err
+		return Result{}, restore(aside, dest, err)
 	}
 	if err := move(got.Dir, dest); err != nil {
-		return Result{}, err
+		return Result{}, restore(aside, dest, err)
+	}
+	if aside != "" {
+		// The new pack is in place; the old one is now just litter. A failure
+		// here is not worth failing the install over, but it must be visible
+		// rather than leaving a mystery directory behind.
+		if rerr := os.RemoveAll(aside); rerr != nil {
+			fmt.Fprintf(os.Stderr, "warn: the previous %s is left at %s (%v)\n", got.Pack, aside, rerr)
+		}
 	}
 	m := packs.Marker{
 		Pack: got.Pack, Version: got.Version,
@@ -188,6 +203,22 @@ func move(src, dst string) error {
 		return err
 	}
 	return os.RemoveAll(src)
+}
+
+// restore puts the pack that was moved aside back, so a failed replace leaves
+// the project exactly as it was. The returned error is the original cause,
+// with the restore's own failure appended if it could not be undone — that
+// second case is the one a person has to know about, because the pack is then
+// only at the aside path.
+func restore(aside, dest string, cause error) error {
+	if aside == "" {
+		return cause
+	}
+	os.RemoveAll(dest)
+	if err := os.Rename(aside, dest); err != nil {
+		return fmt.Errorf("%w; and the pack that was installed could not be put back, it is at %s (%v)", cause, aside, err)
+	}
+	return cause
 }
 
 func installDetail(s Source, pack, workspace string) string {

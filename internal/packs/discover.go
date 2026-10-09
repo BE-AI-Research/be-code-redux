@@ -281,7 +281,11 @@ func Checks(packsDir, workspace, trustPath string) (checks []verify.Check, notes
 	found, warns := Discover(packsDir, workspace)
 	notes = append(notes, warns...)
 	for _, p := range found {
-		if !p.Matches(workspace) {
+		// The same precedence the session uses (§7a), not detection alone: a
+		// pack installed into this project is wanted even with no detect
+		// block, and refusing it here made `be-code verify` disagree with
+		// what the session runs.
+		if !Wanted(p, workspace, trustPath) {
 			continue
 		}
 		if p.Source != SourceGlobal && !approvedHere(p, trustPath) {

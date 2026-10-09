@@ -1415,6 +1415,13 @@ func (m *View) viewAsk() string {
 		title = "Pack from this project"
 		hint = "y trust it · n leave it off · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
+	case "pack_install":
+		// No "a": installing always asks, and -y does not answer it either
+		// (pack loader spec §8). A pack's rules become the model's standing
+		// instructions, so this is the seam the whole feature rests on.
+		title = "Install a skill pack"
+		hint = "y install · n cancel · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
 	case "spend_cap":
 		title = "Spend cap reached"
 		hint = "y continue · n stop · ↑↓ scroll"

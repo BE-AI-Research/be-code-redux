@@ -108,3 +108,40 @@ func TestChecksWithNoTrustPathWithholds(t *testing.T) {
 		t.Error("with nowhere to read approvals from, checks must be withheld")
 	}
 }
+
+// §7a made the marker the project's declaration that it wants a pack, which
+// is what lets a pack with no detect block be active at all. Checks must
+// honour the same rung, or `be-code verify` silently disagrees with what the
+// session runs — which is the disagreement verifyCmd's own comment says must
+// not exist. The real assist pack is exactly this case: no detect block.
+func TestChecksHonourTheMarkerForADetectLessPack(t *testing.T) {
+	ws := t.TempDir()
+	dir := checkPack(t, ws, "cp")
+	// Strip the detect block: this pack is wanted because it was installed.
+	body, err := os.ReadFile(filepath.Join(dir, "pack.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped := strings.Replace(string(body), `"detect":{"any":["**/*"]},`, "", 1)
+	if stripped == string(body) {
+		t.Fatal("the fixture's detect block was not where this test expects it")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(stripped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMarker(dir, Marker{Pack: "cp", Source: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := ContentHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Trust(filepath.Join(ws, "t.json"), "cp", hash); err != nil {
+		t.Fatal(err)
+	}
+
+	got, notes := Checks(filepath.Join(t.TempDir(), "globalpacks"), ws, filepath.Join(ws, "t.json"))
+	if len(got) != 1 {
+		t.Fatalf("an installed, approved, detect-less pack's checks were not returned (%d): notes %v", len(got), notes)
+	}
+}
