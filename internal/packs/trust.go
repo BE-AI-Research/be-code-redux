@@ -1,6 +1,7 @@
 package packs
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -196,19 +197,19 @@ func Trust(path, pack, hash string) error {
 	})
 }
 
-// mutate is every write to the file: re-read, change, write atomically.
-// Re-reading matters because sessions on one workspace share this file, and
-// one of them recording a trust decision must not drop another's.
-func mutate(path string, f func(*state)) error {
-	trustMu.Lock()
-	defer trustMu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	st := readState(path)
-	f(&st)
+// beforeWriteHook fires between mutate's read and its write. Nil in
+// production; a test sets it to drive the interleaving that loses a delta,
+// rather than hoping for it.
+var beforeWriteHook func()
+
+// writeState persists st atomically. Split out of mutate so a test can stand
+// in for another process's write.
+func writeState(path string, st state) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	// Written through a temp file in the same directory and renamed, the way
@@ -224,6 +225,51 @@ func mutate(path string, f func(*state)) error {
 		return err
 	}
 	return nil
+}
+
+// mutate is every write to the file: re-read, change, write atomically.
+//
+// trustMu serialises writers inside this process. It cannot serialise another
+// process — `be-code packs add` in a second terminal while a session is live
+// — so the read and the write are guarded by comparing the file against what
+// this attempt read: if it moved, the delta is applied again to the new state
+// and both writers' intent survives.
+//
+// This is the mechanical race of work-ledger spec §2, and it deliberately
+// does not prompt: both deltas were wanted, nothing is lost by retrying, and
+// a modal raised on a microsecond interleaving is noise nobody can answer.
+func mutate(path string, f func(*state)) error {
+	trustMu.Lock()
+	defer trustMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		before := rawState(path)
+		st := readState(path)
+		f(&st)
+		if beforeWriteHook != nil {
+			beforeWriteHook()
+		}
+		if !bytes.Equal(before, rawState(path)) {
+			continue // somebody else wrote between our read and our write
+		}
+		return writeState(path, st)
+	}
+	return fmt.Errorf("%s kept changing under %d attempts to update it; nothing was written",
+		filepath.Base(path), attempts)
+}
+
+// rawState is the file's exact bytes, or nil. The comparison is on bytes
+// rather than on a parsed state so a change this version does not understand
+// still counts as a change.
+func rawState(path string) []byte {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // readState reads the file; missing or corrupt reads as empty. A decision
