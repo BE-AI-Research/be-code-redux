@@ -264,6 +264,16 @@ func (l Limits) withDefaults() Limits {
 }
 
 // Key derives the store directory name for a workspace root.
+// OnDocHash is told each task document's path and the hash the engine
+// computed for it, so the work ledger can tell a later outside change from
+// the engine's own write. Nil in production until cmd/root.go assigns it.
+//
+// It is the engine's hash deliberately: this package already keeps one per
+// document "so an outside edit is recognisable", and a second hash of the
+// same bytes could disagree with it. Where they ever differ, this one wins —
+// it is the one the engine acts on.
+var OnDocHash func(path, hash string)
+
 func Key(root string) string {
 	abs, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
@@ -477,6 +487,9 @@ func (s *Store) loadDocs() {
 			continue
 		}
 		s.docs[name] = hashBytes(b)
+		if OnDocHash != nil {
+			OnDocHash(filepath.Join(dir, name), s.docs[name])
+		}
 		// base is what the disk holds, before any id repair: it is compared
 		// by text and by evidence line, never by root id.
 		s.base[name] = stripRaw(copyNodes(tr.Roots[:1]))[0]
@@ -937,6 +950,11 @@ func (s *Store) Flush() error {
 		for name, w := range written {
 			s.docs[name] = hashBytes([]byte(w.body))
 			s.base[name] = w.base
+			if OnDocHash != nil {
+				// What the engine wrote is what the session last saw, or the
+				// next write would look like somebody else's change.
+				OnDocHash(filepath.Join(s.tasksDir(), name), s.docs[name])
+			}
 		}
 	}
 	fail := func(err error) error {

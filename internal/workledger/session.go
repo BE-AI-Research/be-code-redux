@@ -118,6 +118,17 @@ func (l *Ledger) OnRead(path string, content []byte) {
 	l.seen.Note(path, content)
 }
 
+// NoteHash records a hash computed elsewhere — the engine's, for a task
+// document it already hashed. Feeding its hash rather than its bytes is
+// deliberate: two hashes of one file that could disagree is worse than one,
+// and the engine's is the one it acts on.
+func (l *Ledger) NoteHash(path, hash string) {
+	if !l.opt.Enabled || l.seen == nil {
+		return
+	}
+	l.seen.NoteHash(path, hash)
+}
+
 // OnConflict is the tools hook: has path changed since this session read it,
 // and if so what happens. true means write.
 func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, fired bool, notice func(string)) (bool, error) {

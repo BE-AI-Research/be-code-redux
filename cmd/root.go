@@ -21,6 +21,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/checkpoint"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/loader"
@@ -396,6 +397,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		return workLedger.OnConflict(ctx, path, workledger.Asker(reg.Approve), reg.Fired(), ag.QueueNotice)
 	}
 	packs.OnStateRead = workLedger.OnRead
+	store.OnSessionRead = workLedger.OnRead
+	// The engine hands its own hash rather than its bytes, so the ledger
+	// records the hash the engine acts on rather than one of its own.
+	engine.OnDocHash = func(path, hash string) { workLedger.NoteHash(path, hash) }
 	if line := workLedger.NoticeLine(); line != "" {
 		ag.QueueNotice(line)
 	}

@@ -124,6 +124,13 @@ func TitleFrom(input string) string {
 }
 
 // Save writes the session atomically.
+// OnSessionRead is told the session file's bytes whenever it is written or
+// read, so the work ledger can tell a later outside change from our own
+// write. Nil in production until cmd/root.go assigns it; a hook rather than
+// an import, because internal/workledger reads internal/live and
+// internal/gitctx and this package must not depend on either.
+var OnSessionRead func(path string, content []byte)
+
 func (s *Session) Save() error {
 	d, err := dir()
 	if err != nil {
@@ -139,7 +146,15 @@ func (s *Session) Save() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		return err
+	}
+	// What we wrote is what this session last saw, or our own next save would
+	// look like another host's change.
+	if OnSessionRead != nil {
+		OnSessionRead(p, data)
+	}
+	return nil
 }
 
 // Load reads a full session by ID or resume code. "last" resolves to the
@@ -166,6 +181,9 @@ func Load(id string) (*Session, error) {
 			return byCode, nil
 		}
 		return nil, fmt.Errorf("session %s: %w", id, err)
+	}
+	if OnSessionRead != nil {
+		OnSessionRead(filepath.Join(d, id+".json"), data)
 	}
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
