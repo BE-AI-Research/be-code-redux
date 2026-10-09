@@ -96,8 +96,26 @@ const (
 // pack somebody turns on deliberately rather than one that recognises a
 // project.
 func (p *Pack) Matches(workspace string) bool {
+	matched, _ := p.MatchesDetail(workspace)
+	return matched
+}
+
+// MatchesDetail is Matches, and also says whether the walk gave up before it
+// had seen the whole tree.
+//
+// That second answer matters because the limits are reachable: a monorepo, or
+// an Unreal project whose Content/ holds thirty thousand .uasset files (not in
+// skipDir), exhausts walkLimit before a "**/*.tsx" glob has been anywhere
+// interesting. Nothing recorded it, so /packs said "does not match this
+// workspace" — which may simply be untrue, and a person could not tell a pack
+// that does not apply from one that would have.
+//
+// It also stops as soon as the verdict is decided rather than walking the
+// rest of the tree for nothing, which is what made the limit reachable in the
+// first place and cost up to walkTime per pack at startup.
+func (p *Pack) MatchesDetail(workspace string) (matched, truncated bool) {
 	if len(p.detect.Any) == 0 && len(p.detect.All) == 0 {
-		return false
+		return false, false
 	}
 	// One walk answers every glob. Compiling first means a glob that cannot
 	// be compiled simply never matches, rather than aborting detection.
@@ -108,6 +126,25 @@ func (p *Pack) Matches(workspace string) bool {
 	seen := 0
 	anyHit := make([]bool, len(anyM))
 	allHit := make([]bool, len(allM))
+
+	// decided reports whether the remaining files can still change the
+	// answer: one "any" hit settles it, and so does every "all" glob hit.
+	decided := func() bool {
+		for _, h := range anyHit {
+			if h {
+				return true
+			}
+		}
+		if len(allM) == 0 {
+			return false
+		}
+		for _, h := range allHit {
+			if !h {
+				return false
+			}
+		}
+		return true
+	}
 
 	filepath.WalkDir(workspace, func(full string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -120,6 +157,7 @@ func (p *Pack) Matches(workspace string) bool {
 			return nil
 		}
 		if seen++; seen > walkLimit || time.Now().After(deadline) {
+			truncated = true
 			return fs.SkipAll
 		}
 		rel, rerr := filepath.Rel(workspace, full)
@@ -137,23 +175,13 @@ func (p *Pack) Matches(workspace string) bool {
 				allHit[i] = true
 			}
 		}
+		if decided() {
+			return fs.SkipAll
+		}
 		return nil
 	})
 
-	for _, h := range anyHit {
-		if h {
-			return true
-		}
-	}
-	if len(allM) == 0 {
-		return false
-	}
-	for _, h := range allHit {
-		if !h {
-			return false
-		}
-	}
-	return true
+	return decided(), truncated
 }
 
 // skipDir keeps detection out of the places a project's own files are not,

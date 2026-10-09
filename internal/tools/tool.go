@@ -134,6 +134,15 @@ type Registry struct {
 	// the sub-agent's own goroutine is reading it in checkScope, so the
 	// slice is replaced under this lock and never mutated in place.
 	scopeMu sync.RWMutex
+	// toolsMu guards tools, byName and packs. Activating a pack rewrites the
+	// tool set mid-session (SetPacks adds or removes the pack tool), and
+	// /packs runs on its own goroutine, while a prefill goroutine is reading
+	// the specs off the same slice to warm the next prompt. Before this the
+	// slice was appended to and spliced in place with no lock at all, which
+	// the race detector finds immediately; the consequence is a torn system
+	// prompt or a duplicated tool spec, and per the prompt-cache rules that
+	// also costs a cold read nobody can account for.
+	toolsMu sync.RWMutex
 	scope   []string
 	checks  []string
 	// parent is the registry Scoped was built from: a sub-agent's check
@@ -421,11 +430,15 @@ func (r *Registry) ClearUntrustedWeb() { r.untrustedWeb.Store(false) }
 
 // Browser is the registered browser tool, or nil when it is off.
 func (r *Registry) Browser() *BrowserTool {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	bt, _ := r.byName["browser"].(*BrowserTool)
 	return bt
 }
 
 func (r *Registry) add(ts ...Tool) {
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
 	for _, t := range ts {
 		r.tools = append(r.tools, t)
 		r.byName[t.Name()] = t
@@ -434,6 +447,8 @@ func (r *Registry) add(ts ...Tool) {
 
 // Specs returns provider-level tool specs.
 func (r *Registry) Specs() []provider.ToolSpec {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]provider.ToolSpec, 0, len(r.tools))
 	for _, t := range r.tools {
 		out = append(out, provider.ToolSpec{
@@ -443,9 +458,10 @@ func (r *Registry) Specs() []provider.ToolSpec {
 	return out
 }
 
-// Names lists tool names.
 // Tool looks one tool up by name.
 func (r *Registry) Tool(name string) (Tool, bool) {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	for _, t := range r.tools {
 		if t.Name() == name {
 			return t, true
@@ -457,15 +473,23 @@ func (r *Registry) Tool(name string) (Tool, bool) {
 // removeTool drops a tool by name. Used when the last pack goes away, so the
 // model is never offered a tool that can answer nothing.
 func (r *Registry) removeTool(name string) {
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
 	for i, t := range r.tools {
 		if t.Name() == name {
 			r.tools = append(r.tools[:i], r.tools[i+1:]...)
+			// byName too: Dispatch resolves through it, so a tool left here
+			// stayed callable after it had gone from the schema.
+			delete(r.byName, name)
 			return
 		}
 	}
 }
 
+// Names lists tool names.
 func (r *Registry) Names() []string {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
 	out := make([]string, 0, len(r.tools))
 	for _, t := range r.tools {
 		out = append(out, t.Name())
@@ -475,7 +499,11 @@ func (r *Registry) Names() []string {
 
 // Dispatch executes a tool call, tolerating loosely-formed arguments.
 func (r *Registry) Dispatch(ctx context.Context, call provider.ToolCall) Result {
+	// Only the lookup is under the lock: running the tool can take minutes,
+	// and holding it would stall a pack being switched on for the duration.
+	r.toolsMu.RLock()
 	t, ok := r.byName[call.Name]
+	r.toolsMu.RUnlock()
 	if !ok {
 		return Result{IsError: true, Content: fmt.Sprintf(
 			"unknown tool %q; available tools: %s", call.Name, strings.Join(r.Names(), ", "))}

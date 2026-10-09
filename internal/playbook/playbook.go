@@ -99,6 +99,21 @@ func Parse(doc string) (entries []Entry, warnings []string, err error) {
 			continue
 		}
 
+		// A heading ends an unclosed fence. Without this, inFence stayed set
+		// for the rest of the file and every later entry became body text of
+		// this one — silently, which is the one failure mode the format doc
+		// and the loader both single out as worse than a bad entry. A fence
+		// that swallows a heading is always a mistake, so recovering here
+		// costs one entry's body instead of the whole table.
+		if inFence && strings.HasPrefix(line, "## ") {
+			title := "(before the first entry)"
+			if cur != nil {
+				title = cur.Title
+			}
+			warn("playbook entry %q: unclosed code fence; it was closed at the next heading", title)
+			inFence = false
+		}
+
 		if !inFence && strings.HasPrefix(trimmed, "## ") {
 			flush()
 			cur = &Entry{Title: strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))}
@@ -122,6 +137,17 @@ func Parse(doc string) (entries []Entry, warnings []string, err error) {
 				seen[key] = true
 				switch key {
 				case "match":
+					if strings.TrimSpace(val) == "" {
+						// regexp.Compile("") succeeds and matches everything,
+						// so leaving the value off produced a silent
+						// catch-all — the one thing the format doc says in
+						// bold not to write, and the loader cannot tell it
+						// from a deliberate one.
+						warn("playbook entry %q: empty match, which would match every failure; entry skipped", cur.Title)
+						curBad = true
+						field = ""
+						continue
+					}
 					re, cerr := regexp.Compile(val)
 					if cerr != nil {
 						warn("playbook entry %q: bad match regex %q: %v; entry skipped", cur.Title, val, cerr)

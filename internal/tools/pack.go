@@ -28,7 +28,14 @@ type PackSource interface {
 // it when there are none — a tool in the schema that can answer nothing wastes
 // prompt on every request and invites the model to call it.
 func (r *Registry) SetPacks(ps []PackSource) {
+	// The slice is replaced under the lock and never mutated in place, so a
+	// reader that already has it keeps a consistent view — the same discipline
+	// scopeMu's scope follows. The lock is released before Tool/AddTool/
+	// removeTool, which take it themselves: toolsMu is not reentrant.
+	r.toolsMu.Lock()
 	r.packs = ps
+	r.toolsMu.Unlock()
+
 	_, had := r.Tool("pack")
 	switch {
 	case len(ps) > 0 && !had:
@@ -39,7 +46,11 @@ func (r *Registry) SetPacks(ps []PackSource) {
 }
 
 // Packs are the active packs, for the caller assembling the system prompt.
-func (r *Registry) Packs() []PackSource { return r.packs }
+func (r *Registry) Packs() []PackSource {
+	r.toolsMu.RLock()
+	defer r.toolsMu.RUnlock()
+	return r.packs
+}
 
 type packTool struct{ r *Registry }
 
@@ -47,7 +58,7 @@ func (t *packTool) Name() string { return "pack" }
 
 func (t *packTool) Description() string {
 	var names []string
-	for _, p := range t.r.packs {
+	for _, p := range t.r.Packs() {
 		names = append(names, p.PackName())
 	}
 	sort.Strings(names)
@@ -121,7 +132,7 @@ func (t *packTool) chunk(p PackSource, name string) Result {
 }
 
 func (t *packTool) find(name string) PackSource {
-	for _, p := range t.r.packs {
+	for _, p := range t.r.Packs() {
 		if strings.EqualFold(p.PackName(), name) {
 			return p
 		}
@@ -134,7 +145,7 @@ func (t *packTool) find(name string) PackSource {
 func (t *packTool) findChunk(name string) (PackSource, string) {
 	name = strings.TrimSuffix(strings.TrimPrefix(name, "chunks/"), ".md")
 	var found PackSource
-	for _, p := range t.r.packs {
+	for _, p := range t.r.Packs() {
 		for _, c := range p.ChunkNames() {
 			if c == name {
 				if found != nil {
@@ -149,7 +160,7 @@ func (t *packTool) findChunk(name string) (PackSource, string) {
 
 func (t *packTool) whatIsAvailable() string {
 	var parts []string
-	for _, p := range t.r.packs {
+	for _, p := range t.r.Packs() {
 		parts = append(parts, fmt.Sprintf("%s (%s)", p.PackName(), strings.Join(sorted(p.ChunkNames()), ", ")))
 	}
 	sort.Strings(parts)

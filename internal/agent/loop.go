@@ -221,6 +221,13 @@ type Agent struct {
 	// packNotes is the active packs' rules and chunk index, as one block for
 	// the system prompt; packChecks are their verify commands. Both are set
 	// by EnablePacks and stable for the session (see internal/agent/packs.go).
+	// packMu guards packNotes, packChecks and packEntries. Activation runs on
+	// whichever goroutine took the /packs command — which must not be the one
+	// holding the session lock, see view.go's packsCmd — while a prefill
+	// goroutine is composing the system prompt and reading packNotes. It is a
+	// leaf: nothing is called under it, so it orders cleanly inside modelMu,
+	// which recomposeSystem already holds when it reaches composeSystem.
+	packMu    sync.RWMutex
 	packNotes string
 	// packChecks are the active packs' verify commands, each carrying the
 	// when.changed globs it declared: the check is the harness's to run, but
@@ -1053,8 +1060,15 @@ func (a *Agent) SetProjectNotes(notes string) {
 // RefreshSystem recomposes the system prompt after tools or guidance
 // changed (used once at startup when the editor bridge attaches).
 func (a *Agent) RefreshSystem() {
+	// Under modelMu, like recomposeSystem: both write System.Content, and
+	// since activating a pack calls this from its own goroutine a prefill can
+	// be composing the prompt at the same moment. Names() is read before the
+	// lock because it takes the registry's own.
+	names := a.Tools.Names()
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
 	a.knownTools = map[string]bool{}
-	for _, n := range a.Tools.Names() {
+	for _, n := range names {
 		a.knownTools[n] = true
 	}
 	a.History.System.Content = a.composeSystem("")
@@ -1078,8 +1092,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	}
 	// A pack's rules sit between the project's notes and the repository map,
 	// and are stable for the life of the request like the notes themselves.
-	if a.packNotes != "" && a.systemOverride == "" {
-		sys += "\n\n" + a.packNotes
+	a.packMu.RLock()
+	packNotes := a.packNotes
+	a.packMu.RUnlock()
+	if packNotes != "" && a.systemOverride == "" {
+		sys += "\n\n" + packNotes
 	}
 	if a.repoMap != "" && a.systemOverride == "" {
 		sys += "\n\nRepository map (file: symbols):\n" + a.repoMap

@@ -86,11 +86,20 @@ func (a *Agent) LoadPacks() {
 		case set && on:
 			row.Why = "switched on"
 			candidates = append(candidates, p)
-		case p.Matches(a.Tools.Root):
-			row.Why = "detected"
-			candidates = append(candidates, p)
 		default:
-			row.Why = "does not match this workspace"
+			matched, truncated := p.MatchesDetail(a.Tools.Root)
+			switch {
+			case matched:
+				row.Why = "detected"
+				candidates = append(candidates, p)
+			case truncated:
+				// Not the same as "no": detection stopped before it had seen
+				// the whole tree, so saying it does not match would be a
+				// statement of fact that may well be false.
+				row.Why = "gave up looking on a large workspace; /packs on " + p.Name + " switches it on"
+			default:
+				row.Why = "does not match this workspace"
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -240,12 +249,15 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 		}
 	}
 
-	a.packNotes = ""
+	notes := ""
 	if len(blocks) > 0 {
-		a.packNotes = packFrame + "\n\n" + strings.Join(blocks, "\n")
+		notes = packFrame + "\n\n" + strings.Join(blocks, "\n")
 	}
-	a.packChecks = checks
-	a.packEntries = entries
+	// Under packMu, and released before SetPacks/RefreshSystem take their own
+	// locks: a prefill goroutine reads these while /packs writes them.
+	a.packMu.Lock()
+	a.packNotes, a.packChecks, a.packEntries = notes, checks, entries
+	a.packMu.Unlock()
 	// SetPacks registers the pack tool, so the prompt has to be rebuilt after
 	// it: the tool list and the embedded-call parser's known names both come
 	// from the registry.
@@ -383,12 +395,15 @@ func (a *Agent) verifyProject() verify.Project {
 // filtered either way, so a pack can never suppress them.
 func (a *Agent) verifyProjectFor(changed []string) verify.Project {
 	proj := verify.Detect(a.Tools.Root)
-	if len(a.packChecks) == 0 {
+	a.packMu.RLock()
+	packChecks := a.packChecks
+	a.packMu.RUnlock()
+	if len(packChecks) == 0 {
 		return proj
 	}
 	checks := append([]verify.Check(nil), proj.Checks...)
 	added := 0
-	for _, pc := range a.packChecks {
+	for _, pc := range packChecks {
 		if len(changed) > 0 && len(pc.changed) > 0 && !packs.MatchesAnyGlob(pc.changed, changed) {
 			continue
 		}
@@ -422,7 +437,10 @@ func (a *Agent) verifyProjectFor(changed []string) verify.Project {
 // it. Returns "" when no pack is active, nothing parsed the output, or no
 // entry matches.
 func (a *Agent) playbookNote(rep *verify.Report) string {
-	if rep == nil || len(a.packEntries) == 0 {
+	a.packMu.RLock()
+	packEntries := a.packEntries
+	a.packMu.RUnlock()
+	if rep == nil || len(packEntries) == 0 {
 		return ""
 	}
 	_, diag := rep.FirstFailure()
@@ -432,7 +450,7 @@ func (a *Agent) playbookNote(rep *verify.Report) string {
 	d := diag.First
 	var hit *playbook.Entry
 	var packName string
-	for _, pe := range a.packEntries {
+	for _, pe := range packEntries {
 		if e := playbook.Match(pe.entries, d.Kind, d.Raw, d.Message); e != nil {
 			hit, packName = e, pe.pack
 			break
