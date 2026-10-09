@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,7 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/packs"
+	"github.com/brown-enterprises/be-code/internal/packsrc"
 )
 
 var packsCmd = &cobra.Command{
@@ -162,4 +166,145 @@ var packsInfoCmd = &cobra.Command{
 		}
 		return fmt.Errorf("no pack named %q; be-code packs lists what there is", args[0])
 	},
+}
+
+var flagPackSource string
+
+// packsApprover is the person's seam for an install from the CLI. A TTY is
+// asked; a non-interactive run refuses unless -y, the same rule be-code init
+// follows — except that -y here approves only this one command the person
+// typed, which is not the same as the headless approver's blanket -y.
+func packsApprover(out io.Writer) func(string, string) bool {
+	return func(action, detail string) bool {
+		fmt.Fprintf(out, "%s\n", detail)
+		if flagYes {
+			fmt.Fprintln(out, "approved by -y")
+			return true
+		}
+		if !stdinIsTTY() {
+			fmt.Fprintln(out, "non-interactive; use -y to approve")
+			return false
+		}
+		fmt.Fprint(out, "install it? [y/N] ")
+		r := bufio.NewReader(os.Stdin)
+		line, _ := r.ReadString('\n')
+		return strings.EqualFold(strings.TrimSpace(line), "y")
+	}
+}
+
+// packOptions is the workspace, the trust file and the approver, which every
+// one of the three subcommands needs.
+func packOptions(out io.Writer) (packsrc.Options, error) {
+	root, err := filepath.Abs(flagDir)
+	if err != nil {
+		return packsrc.Options{}, err
+	}
+	base, err := config.Dir()
+	if err != nil {
+		return packsrc.Options{}, err
+	}
+	return packsrc.Options{
+		Workspace: root,
+		TrustPath: filepath.Join(base, "engine", engine.Key(root), "packs.json"),
+		Approve:   packsApprover(out),
+	}, nil
+}
+
+var packsAddCmd = &cobra.Command{
+	Use:   "add [name[@ref]]",
+	Short: "Install a skill pack into this project",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out := cmd.OutOrStdout()
+		name, ref := "", ""
+		if len(args) == 1 {
+			name, ref, _ = strings.Cut(args[0], "@")
+		}
+		spec := flagPackSource
+		if spec == "" {
+			if cfg, err := config.Load(); err == nil && cfg.Packs.Source != "" {
+				spec = cfg.Packs.Source
+			}
+		}
+		s, err := packsrc.Resolve(spec, ref)
+		if err != nil {
+			return err
+		}
+		o, err := packOptions(out)
+		if err != nil {
+			return err
+		}
+		o.Force, _ = cmd.Flags().GetBool("force")
+		if name == "" {
+			avail, lerr := packsrc.List(cmd.Context(), s)
+			if lerr != nil {
+				return lerr
+			}
+			var names []string
+			for _, a := range avail {
+				fmt.Fprintf(out, "  %-12s %-8s %s\n", a.Name, a.Version, a.Description)
+				names = append(names, a.Name)
+			}
+			return fmt.Errorf("name the pack to install: %s", strings.Join(names, ", "))
+		}
+		res, err := packsrc.Install(cmd.Context(), s, name, o)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "installed %s %s into %s\n", res.Pack, res.Version, res.Dir)
+		if res.Commit != "" {
+			fmt.Fprintf(out, "  from %s at %s\n", s.Spec, short(res.Commit))
+		}
+		fmt.Fprintf(out, "  commit it so the project carries its own pack setup\n")
+		return nil
+	},
+}
+
+var packsUpdateCmd = &cobra.Command{
+	Use:   "update <name>",
+	Short: "Re-fetch an installed pack at the ref it was installed from",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out := cmd.OutOrStdout()
+		o, err := packOptions(out)
+		if err != nil {
+			return err
+		}
+		res, err := packsrc.Update(cmd.Context(), args[0], o)
+		if err != nil {
+			return err
+		}
+		switch {
+		case res.Previous == res.Commit:
+			fmt.Fprintf(out, "%s is already at %s\n", res.Pack, short(res.Commit))
+		default:
+			fmt.Fprintf(out, "updated %s %s: %s → %s\n", res.Pack, res.Version, short(res.Previous), short(res.Commit))
+		}
+		return nil
+	},
+}
+
+var packsRemoveCmd = &cobra.Command{
+	Use:   "remove <name>",
+	Short: "Delete a pack from this project and forget its approval",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		out := cmd.OutOrStdout()
+		o, err := packOptions(out)
+		if err != nil {
+			return err
+		}
+		if err := packsrc.Remove(args[0], o); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "removed %s from %s\n", args[0], packsrc.PacksDir(o.Workspace))
+		return nil
+	},
+}
+
+func short(commit string) string {
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+	return commit
 }

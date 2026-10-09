@@ -96,7 +96,9 @@ func init() {
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
 	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
-	packsCmd.AddCommand(packsValidateCmd, packsInfoCmd)
+	packsCmd.AddCommand(packsValidateCmd, packsInfoCmd, packsAddCmd, packsUpdateCmd, packsRemoveCmd)
+	packsAddCmd.Flags().StringVar(&flagPackSource, "source", "", "a directory or git URL to fetch from (default: packs.source)")
+	packsAddCmd.Flags().Bool("force", false, "replace a pack that is already installed")
 	mcp.ClientVersion = Version
 	update.Current = Version
 	tui.Version = Version
