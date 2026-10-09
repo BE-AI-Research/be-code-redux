@@ -265,22 +265,28 @@ func MatchesAnyGlob(globs, paths []string) bool {
 	return false
 }
 
-// GlobalChecks is the verify commands of every installed global pack that
-// matches this workspace, for a caller with no agent: `be-code verify`.
+// Checks is the verify commands of every installed pack that matches this
+// workspace, for a caller with no agent: `be-code verify`.
 //
-// Global packs only, deliberately. A pack that arrived inside the repository
-// needs the trust decision, and a command that runs and exits has nobody to
-// ask — so it is left out and named in the returned notes, rather than being
-// run unapproved or silently dropped.
-func GlobalChecks(packsDir, workspace string) (checks []verify.Check, notes []string) {
+// A global pack is the person's own, so its checks run. A project pack's need
+// the trust decision — and since a pack can now be installed into a project
+// deliberately (design §11), a recorded approval for exactly this content is
+// that decision, readable here without an agent. One that has no approval is
+// named in the notes rather than run unapproved or silently dropped.
+//
+// trustPath is a parameter rather than computed here so this package does not
+// import internal/engine and stays a leaf; its caller knows the workspace and
+// can build it.
+func Checks(packsDir, workspace, trustPath string) (checks []verify.Check, notes []string) {
 	found, warns := Discover(packsDir, workspace)
 	notes = append(notes, warns...)
 	for _, p := range found {
 		if !p.Matches(workspace) {
 			continue
 		}
-		if p.Source != SourceGlobal {
-			notes = append(notes, fmt.Sprintf("pack %q came with this project; its checks need approval, so run be-code interactively once or copy the pack to %s", p.Name, packsDir))
+		if p.Source != SourceGlobal && !approvedHere(p, trustPath) {
+			notes = append(notes, fmt.Sprintf("pack %q came with this project and has not been approved here, "+
+				"so its checks are not run; run be-code interactively once to approve it", p.Name))
 			continue
 		}
 		if over, est, budget := CoreOverBudget(p); over {
@@ -290,4 +296,18 @@ func GlobalChecks(packsDir, workspace string) (checks []verify.Check, notes []st
 		checks = append(checks, p.Checks(workspace)...)
 	}
 	return checks, notes
+}
+
+// approvedHere reports whether this exact pack content is approved for this
+// workspace. An unreadable pack, or nowhere to read approvals from, is not an
+// approval: this decides whether to run somebody else's commands.
+func approvedHere(p *Pack, trustPath string) bool {
+	if trustPath == "" {
+		return false
+	}
+	hash, err := ContentHash(p.Root)
+	if err != nil {
+		return false
+	}
+	return hash != "" && TrustedHash(trustPath, p.Name) == hash
 }

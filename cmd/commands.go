@@ -20,6 +20,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/bench"
 	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/packs"
@@ -666,10 +667,13 @@ var verifyCmd = &cobra.Command{
 		// The installed packs' checks are part of this workspace's
 		// verification too, or `be-code verify` disagrees with what the
 		// session actually runs. This command has no agent and nobody to ask,
-		// so global packs only: a pack that came with the repository needs the
-		// trust decision and is named in the notes instead.
+		// so a project pack's checks run only when an approval for exactly
+		// its content is already recorded for this workspace — which is what
+		// installing it deliberately writes. One without is named in the
+		// notes instead.
 		if dir, err := config.Dir(); err == nil {
-			packChecks, notes := packs.GlobalChecks(filepath.Join(dir, "packs"), root)
+			trustPath := filepath.Join(dir, "engine", engine.Key(root), "packs.json")
+			packChecks, notes := packs.Checks(filepath.Join(dir, "packs"), root, trustPath)
 			for _, n := range notes {
 				fmt.Fprintln(os.Stderr, "note: "+n)
 			}
