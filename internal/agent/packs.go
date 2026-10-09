@@ -115,6 +115,23 @@ func (a *Agent) LoadPacks() {
 			row.Why = "switched on"
 			candidates = append(candidates, p)
 		default:
+			// The marker is the project's declaration that it wants this
+			// pack (design §7a). It sits above detection and below an
+			// explicit /packs on|off, so a pack installed into a project
+			// stays wanted even when the project is moved or renamed —
+			// ~/.be-code/engine/<key>/ keys on a hash of the absolute
+			// workspace path, so a move orphans the per-workspace entry and
+			// a pack with no detect block would otherwise go silently
+			// inactive while sitting in .becode/packs.
+			//
+			// Wanting is not trust: an untrusted pack still raises
+			// pack_trust below, so a marker can move a pack from inactive to
+			// asks-you and never to active.
+			if m, ok := packs.ReadMarker(p.Root); ok && m.DeclaresWanted(p.Name) {
+				row.Why = "installed in this project"
+				candidates = append(candidates, p)
+				break
+			}
 			matched, truncated := p.MatchesDetail(a.Tools.Root)
 			switch {
 			case matched:
