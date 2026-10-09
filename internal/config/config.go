@@ -62,6 +62,16 @@ type CoworkConfig struct {
 
 // SchedulesConfig tunes scheduled events (schedules spec §4.4). Durations
 // are Go duration strings; an unusable one falls back to its default.
+// PacksConfig covers installing packs. Discovery and activation need no
+// configuration: they follow the workspace.
+type PacksConfig struct {
+	// Source is where `packs add` fetches from when no --source is given. A
+	// team pointing this at their own mirror makes every install in every
+	// workspace come from it. Empty means the built-in default, so clearing
+	// the key is not a way to break installs.
+	Source string `json:"source"`
+}
+
 type SchedulesConfig struct {
 	Enabled            bool   `json:"enabled"`
 	MinInterval        string `json:"min_interval"`
@@ -351,6 +361,7 @@ type Config struct {
 	// Schedules tunes scheduled events: timed requests a running session
 	// queues for the model under an allowance a person approved.
 	Schedules SchedulesConfig `json:"schedules"`
+	Packs     PacksConfig     `json:"packs"`
 
 	// KeepAlive is how long the backend should keep the model resident after
 	// each request (Ollama keep_alive; Go duration, "0" disables). Refreshed
@@ -461,6 +472,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10, ChromeChannel: "stable"},
+		Packs:            PacksConfig{Source: "https://github.com/BE-AI-Research/be-skill-packs"},
 		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3, ConfirmOnStart: true, Allow: []string{}},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",

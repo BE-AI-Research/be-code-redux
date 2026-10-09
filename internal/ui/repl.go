@@ -329,7 +329,7 @@ func (t replTerminal) Withdraw(note string) {
 // "always" could mean there is "trust every repository's pack").
 func noAlwaysAction(action string) bool {
 	switch action {
-	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update", "pack_trust":
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update", "pack_trust", "pack_install":
 		return true
 	}
 	return false

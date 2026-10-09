@@ -1290,6 +1290,10 @@ hand; `/config` prints what the running session actually resolved.
   is online; an online helper is refused.
 - `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
   (`spend_cap`).
+- `packs.source` (`https://github.com/BE-AI-Research/be-skill-packs`) — where
+  `be-code packs add` fetches from when `--source` is not given. Point it at your own
+  mirror to make every install in every workspace come from there; an empty value means
+  the built-in default rather than an error.
 - `update_check` (true) — the quiet check for a newer release at session start, which only
   lights the `⬆ vX.Y.Z available` notice; `false` turns it off (also **Update check** in `/menu`,
   or `/update check on|off`). `/update` works either way.

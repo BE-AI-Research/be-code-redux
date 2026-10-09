@@ -1,6 +1,7 @@
 package packsrc
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,6 +84,30 @@ func TestValidNamesStayOneElement(t *testing.T) {
 		joined := filepath.Join("/base", n)
 		if filepath.Dir(joined) != "/base" {
 			t.Errorf("%q escaped its directory: %s", n, joined)
+		}
+	}
+}
+
+// Spec §8: the model cannot install a pack. The protection is that no tool
+// exists, and the structural guarantee is that this package cannot build one
+// — it does not import the registry. A future import of internal/tools here
+// is the moment that stops being true, so it fails this test instead.
+func TestPacksrcCannotRegisterATool(t *testing.T) {
+	srcs, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range srcs {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "internal/tools") {
+			t.Errorf("%s imports internal/tools: installing a pack must stay unreachable from the model, "+
+				"because a model that can install a pack can rewrite its own system prompt", f)
 		}
 	}
 }
