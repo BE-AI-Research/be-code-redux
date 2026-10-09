@@ -307,6 +307,22 @@ func (r *Report) ModelSummary() string {
 			if d.Count > 1 {
 				fmt.Fprintf(&b, "(%d errors; fix this one, then run the check again)\n", d.Count)
 			}
+			// A parser that recognised nothing still produces a diagnostic
+			// ("tool error EXIT: … no recognisable error line"), and a command
+			// that could not start produces no output at all — so the exec
+			// error is the only information that exists. Dropping it left the
+			// model with a sentence it could not act on, and the repair loop
+			// spent every round plus a consultation on it. A pack installs by
+			// copying a folder and a copy does not always keep the executable
+			// bit, so this is the likeliest way a pack check ever fails.
+			//
+			// Only when the output is empty: beside a real parsed diagnostic
+			// an "exit status 2" adds nothing and the point of the parsers is
+			// one clean root cause.
+			if res.Err != nil && strings.TrimSpace(res.Output) == "" &&
+				!strings.Contains(Format(*d.First), res.Err.Error()) {
+				fmt.Fprintf(&b, "[%s]\n", res.Err.Error())
+			}
 			continue
 		}
 		out := strings.TrimSpace(res.Output)

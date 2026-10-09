@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -233,7 +232,10 @@ func runCmd(ctx context.Context, dir string, timeout time.Duration, name string,
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	var buf bytes.Buffer
+	// Bounded, not unbounded: a pack's verify command is usually a build on a
+	// 30-minute timeout, and a failing verbose one emits hundreds of
+	// megabytes. The head and tail are kept and the middle is counted out.
+	var buf cappedBuffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	// Kill the whole process group on timeout/cancel, and stop waiting on

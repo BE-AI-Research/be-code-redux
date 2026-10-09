@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/setup"
@@ -661,6 +663,23 @@ var verifyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root := mustAbs(flagDir)
 		proj := verify.Detect(root)
+		// The installed packs' checks are part of this workspace's
+		// verification too, or `be-code verify` disagrees with what the
+		// session actually runs. This command has no agent and nobody to ask,
+		// so global packs only: a pack that came with the repository needs the
+		// trust decision and is named in the notes instead.
+		if dir, err := config.Dir(); err == nil {
+			packChecks, notes := packs.GlobalChecks(filepath.Join(dir, "packs"), root)
+			for _, n := range notes {
+				fmt.Fprintln(os.Stderr, "note: "+n)
+			}
+			if len(packChecks) > 0 {
+				proj.Checks = append(proj.Checks, packChecks...)
+				if proj.Kind == "none" || proj.Kind == "" {
+					proj.Kind = "pack"
+				}
+			}
+		}
 		rep := verify.RunChecks(cmd.Context(), root, proj)
 		fmt.Println(rep.Human())
 		if len(rep.Results) > 0 && !rep.Passed() {

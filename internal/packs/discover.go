@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
 // Source says where a pack came from, which decides how much it is trusted.
@@ -233,4 +235,31 @@ func MatchesAnyGlob(globs, paths []string) bool {
 		}
 	}
 	return false
+}
+
+// GlobalChecks is the verify commands of every installed global pack that
+// matches this workspace, for a caller with no agent: `be-code verify`.
+//
+// Global packs only, deliberately. A pack that arrived inside the repository
+// needs the trust decision, and a command that runs and exits has nobody to
+// ask — so it is left out and named in the returned notes, rather than being
+// run unapproved or silently dropped.
+func GlobalChecks(packsDir, workspace string) (checks []verify.Check, notes []string) {
+	found, warns := Discover(packsDir, workspace)
+	notes = append(notes, warns...)
+	for _, p := range found {
+		if !p.Matches(workspace) {
+			continue
+		}
+		if p.Source != SourceGlobal {
+			notes = append(notes, fmt.Sprintf("pack %q came with this project; its checks need approval, so run be-code interactively once or copy the pack to %s", p.Name, packsDir))
+			continue
+		}
+		if over, est, budget := CoreOverBudget(p); over {
+			notes = append(notes, fmt.Sprintf("pack %q is not active: its core is about %d tokens against a budget of %d", p.Name, est, budget))
+			continue
+		}
+		checks = append(checks, p.Checks(workspace)...)
+	}
+	return checks, notes
 }

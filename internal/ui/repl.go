@@ -24,7 +24,6 @@ import (
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
-	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
 // REPL is the plain inline session: readline editing, persistent history,
@@ -911,9 +910,11 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Println(dim("no handoff briefing in this session"))
 		}
 	case "/verify":
-		proj := verify.Detect(r.Agent.Tools.Root)
-		rep := verify.RunChecks(ctx, r.Agent.Tools.Root, proj)
-		fmt.Println(rep.Human())
+		// The agent's own path, so pack checks are included and the deny
+		// list and shell_after_web gate apply (a nil report means declined).
+		if rep := r.Agent.VerifyNow(ctx); rep != nil {
+			fmt.Println(rep.Human())
+		}
 	case "/tools":
 		for _, n := range r.Agent.Tools.Names() {
 			fmt.Printf("  %s\n", n)

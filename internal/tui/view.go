@@ -27,7 +27,6 @@ import (
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
 	"github.com/brown-enterprises/be-code/internal/ui"
-	"github.com/brown-enterprises/be-code/internal/verify"
 )
 
 // ---- messages from the agent goroutine ------------------------------------
@@ -1706,9 +1705,12 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/verify":
 		m.setRunStateLocked(true, "verifying")
 		ctx := m.runContextLocked()
+		ag := m.ag
 		go func() {
-			proj := verify.Detect(m.ag.Tools.Root)
-			rep := verify.RunChecks(ctx, m.ag.Tools.Root, proj)
+			// The agent's own path: the active packs' checks are part of this
+			// workspace's verification, and the deny list and shell_after_web
+			// gate apply here exactly as they do in the repair loop.
+			rep := ag.VerifyNow(ctx)
 			m.finishTurn(&agent.ReviewedReport{Verify: rep}, nil)
 		}()
 	case "/model":

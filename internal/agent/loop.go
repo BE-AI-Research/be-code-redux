@@ -233,6 +233,9 @@ type Agent struct {
 	// assigned Registry.Approve. StartPacks, which every UI calls once its
 	// approver is wired, is what turns that into a question.
 	packPending bool
+	// denyNoted remembers which deny-matched checks have already been
+	// reported, so a standing rule is explained once rather than every request.
+	denyNoted map[string]bool
 	// packEntries are the active packs' playbooks; verifySigs counts how
 	// often each verification signature has come back within one request,
 	// which is what decides fix vs next (see playbookNote).
@@ -2255,25 +2258,51 @@ var ReviewerFactory func(cfg *config.Config) (provider.Provider, string, error)
 //
 // A skipped verification is no report at all: not a failure, so no repair
 // round and no auto:verify consultation.
+//
+// The two refusals are not the same answer and must not share a path. A
+// shell_after_web prompt is a decision about this one request, so declining
+// it declines the verification. A shell_deny glob is a standing rule that
+// will never change its mind: the check is dropped from this run with a note
+// and everything else still runs. Treating the second like the first threw
+// away the project's own passing checks over one denied pack check, stopped
+// every repair round, and said so again on every request.
 func (a *Agent) runChecks(ctx context.Context, proj verify.Project) *verify.Report {
-	denied := ""
-	allow := func(c verify.Check) bool {
+	// A deny match is decided before anything runs, so it partitions the
+	// checks rather than interrupting them.
+	runnable := make([]verify.Check, 0, len(proj.Checks))
+	var skipped []verify.CheckResult
+	for _, c := range proj.Checks {
 		if len(c.Argv) > 0 && a.Tools.CheckDenied(c.Display(), c.Argv) {
-			denied = c.Display()
-			return false
+			skipped = append(skipped, verify.CheckResult{
+				Check: c, Passed: true, Skipped: true,
+				Note: "matches the shell deny list and will never run",
+			})
+			if a.denyNoted == nil {
+				a.denyNoted = map[string]bool{}
+			}
+			if !a.denyNoted[c.Display()] {
+				a.denyNoted[c.Display()] = true
+				a.notice("verification skips %s: it matches the shell deny list and will never run", c.Display())
+			}
+			continue
 		}
+		runnable = append(runnable, c)
+	}
+	gated := proj
+	gated.Checks = runnable
+
+	allow := func(c verify.Check) bool {
 		if a.Tools.UntrustedWeb() {
 			return a.Tools.Approve != nil && a.Tools.Approve("shell_after_web", c.Display())
 		}
 		return true
 	}
-	rep := verify.RunChecksGated(ctx, a.Tools.Root, proj, allow)
+	rep := verify.RunChecksGated(ctx, a.Tools.Root, gated, allow)
+	// Skipped checks are reported so the person can see what did not run;
+	// they count as passed, so they start no repair round.
+	rep.Results = append(rep.Results, skipped...)
 	if rep.Declined != "" {
-		if denied != "" {
-			a.notice("verification stopped: %s matches the shell deny list and will never run", denied)
-		} else {
-			a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
-		}
+		a.notice("verification skipped: a web page was read this request and nobody approved running %s", rep.Declined)
 		return nil
 	}
 	return rep

@@ -116,3 +116,28 @@ func TestProjectChecksAreNeverFilteredByPackGlobs(t *testing.T) {
 		t.Errorf("the pack check should have been skipped: %v", names)
 	}
 }
+
+// /verify, the REPL's /verify and be-code verify all called verify.Detect
+// directly, so an explicit verification reported "no verification checks
+// apply (unrecognized project type)" on an Unreal workspace while the
+// automatic repair loop was running a full UBT build on the same files. They
+// also passed no gate, so neither shell_deny nor shell_after_web applied.
+// VerifyNow is the one path, and it is the agent's own.
+func TestVerifyNowIncludesPackChecks(t *testing.T) {
+	ag := packAgent(t)
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", nil)})
+
+	proj := ag.VerifyProjectNow()
+	var found bool
+	for _, c := range proj.Checks {
+		if c.Name == "packbuild" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an explicit verification left the pack's checks out: %+v", proj.Checks)
+	}
+	if proj.Kind == "none" || proj.Kind == "" {
+		t.Errorf("a workspace with pack checks is not an unrecognised project: kind=%q", proj.Kind)
+	}
+}

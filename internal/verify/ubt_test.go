@@ -224,6 +224,13 @@ func TestFallbackSignatureDistinguishesFailures(t *testing.T) {
 // lines. Only the best one and the count are ever used, so nothing else may
 // be kept.
 func TestLargeFailingLogStaysBounded(t *testing.T) {
+	if raceEnabled {
+		// The race detector accounts for every allocation it instruments, so
+		// the ratio this test measures comes out around 530x rather than 2x.
+		// The bound is real and is asserted on an uninstrumented build; left
+		// in, this made `go test -race ./...` fail for everyone.
+		t.Skip("allocation ratios are not measurable under -race")
+	}
 	var b []byte
 	for i := 0; i < 200000; i++ {
 		b = append(b, []byte("A.cpp(1,1): error C2065: 'x': undeclared identifier\r\n")...)

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -325,6 +326,26 @@ func packBlock(p *packs.Pack) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// VerifyProjectNow is what an explicitly requested verification covers: the
+// detected project plus every active pack's checks, unfiltered. A person who
+// typed /verify asked for all of it, and the changed-file list is not the
+// question they asked.
+//
+// It exists because /verify in both UIs and be-code verify called
+// verify.Detect directly, so an Unreal workspace with the ue5 pack active was
+// told "no verification checks apply (unrecognized project type)" while the
+// automatic repair loop was running a full UnrealBuildTool build on the same
+// files. Those call sites also passed no gate, so a denied check ran and
+// shell_after_web never applied — VerifyNow routes through runChecks, which
+// is where both of those live.
+func (a *Agent) VerifyProjectNow() verify.Project { return a.verifyProject() }
+
+// VerifyNow runs VerifyProjectNow through the same gate the automatic loop
+// uses. A nil report means the verification was declined, not that it passed.
+func (a *Agent) VerifyNow(ctx context.Context) *verify.Report {
+	return a.runChecks(ctx, a.verifyProject())
 }
 
 // packCheck is one pack's verify command plus the when.changed globs it
