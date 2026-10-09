@@ -28,7 +28,7 @@ func TestWriteStopsWhenTheConflictHookSaysKeepTheirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	asked := ""
-	r.OnConflict = func(_ context.Context, p string) (bool, error) {
+	r.OnConflict = func(_ context.Context, p string, _ []byte) (bool, error) {
 		asked = p
 		return false, nil
 	}
@@ -55,7 +55,7 @@ func TestWriteProceedsWhenTheHookSaysKeepMine(t *testing.T) {
 	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r.OnConflict = func(context.Context, string) (bool, error) { return true, nil }
+	r.OnConflict = func(context.Context, string, []byte) (bool, error) { return true, nil }
 
 	if res := r.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "mine\n"}`)); res.IsError {
 		t.Fatalf("the write was refused: %s", res.Content)
@@ -74,7 +74,7 @@ func TestWriteStopsWhenTheHookErrors(t *testing.T) {
 	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r.OnConflict = func(context.Context, string) (bool, error) {
+	r.OnConflict = func(context.Context, string, []byte) (bool, error) {
 		return false, errors.New("the old version could not be kept")
 	}
 	res := r.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "mine\n"}`))
@@ -114,7 +114,7 @@ func TestEditAsksTheConflictHookToo(t *testing.T) {
 		t.Fatal(err)
 	}
 	called := false
-	r.OnConflict = func(context.Context, string) (bool, error) { called = true; return false, nil }
+	r.OnConflict = func(context.Context, string, []byte) (bool, error) { called = true; return false, nil }
 	r.Dispatch(context.Background(), call("edit_file", `{"path": "a.txt", "old": "theirs", "new": "mine"}`))
 	if !called {
 		t.Error("edit_file did not go through the conflict gate")
@@ -168,7 +168,7 @@ func TestSubsetKeepsTheConflictGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	asked, noted := false, false
-	r.OnConflict = func(context.Context, string) (bool, error) { asked = true; return false, nil }
+	r.OnConflict = func(context.Context, string, []byte) (bool, error) { asked = true; return false, nil }
 	r.OnRead = func(string, []byte) { noted = true }
 
 	sub := r.Subset("write_file", "read_file")

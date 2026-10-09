@@ -1420,8 +1420,10 @@ func (m *View) viewAsk() string {
 		// session-wide "always keep mine" loses work silently — the thing
 		// the work ledger exists to stop.
 		title = "Another session changed this file"
-		hint = "y keep mine · n keep theirs · d show me · ↑↓ scroll"
-		compactHint = "y/n/d · ↑↓"
+		// The difference is in the detail, so there is no third key: a hint
+		// must never name one no handler has.
+		hint = "y keep mine · n keep theirs · ↑↓ scroll"
+		compactHint = "y/n · ↑↓"
 	case "pack_install":
 		// No "a": installing always asks, and -y does not answer it either
 		// (pack loader spec §8). A pack's rules become the model's standing

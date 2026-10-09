@@ -26,11 +26,11 @@ func (r *Registry) beforeWrite(absPath string) error {
 // matters: after approval, so a person is not asked twice about a write they
 // already declined, and before beforeWrite, so the checkpointer does not
 // snapshot a file this write is about to abandon.
-func (r *Registry) conflict(ctx context.Context, absPath string) (Result, bool) {
+func (r *Registry) conflict(ctx context.Context, absPath string, newContent []byte) (Result, bool) {
 	if r.OnConflict == nil {
 		return Result{}, true
 	}
-	keepMine, err := r.OnConflict(ctx, absPath)
+	keepMine, err := r.OnConflict(ctx, absPath, newContent)
 	rel, relErr := filepath.Rel(r.Root, absPath)
 	if relErr != nil {
 		rel = absPath
@@ -221,7 +221,7 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if res, ok := t.r.approveWrite(ctx, p, content); !ok {
 		return res
 	}
-	if res, ok := t.r.conflict(ctx, p); !ok {
+	if res, ok := t.r.conflict(ctx, p, []byte(content)); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {
@@ -289,7 +289,7 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if res, ok := t.r.approveWrite(ctx, p, updated); !ok {
 		return res
 	}
-	if res, ok := t.r.conflict(ctx, p); !ok {
+	if res, ok := t.r.conflict(ctx, p, []byte(updated)); !ok {
 		return res
 	}
 	if err := t.r.beforeWrite(p); err != nil {

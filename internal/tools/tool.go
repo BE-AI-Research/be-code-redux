@@ -95,7 +95,9 @@ type Registry struct {
 	// and internal/gitctx, and this package must not depend on either. It is
 	// assigned in cmd/root.go, the same seam ReviewerFactory and
 	// LoaderFactory use.
-	OnConflict func(ctx context.Context, absPath string) (keepMine bool, err error)
+	// newContent is what the write is about to put there, so the question can
+	// show the difference rather than naming a key that shows it.
+	OnConflict func(ctx context.Context, absPath string, newContent []byte) (keepMine bool, err error)
 
 	// OnRead records what this session last saw at a path — after a read, and
 	// after a write, because what we wrote is what we last saw. Without it

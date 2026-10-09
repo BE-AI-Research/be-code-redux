@@ -68,7 +68,7 @@ func TestDisabledWritesNothing(t *testing.T) {
 	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	keepMine, err := l.OnConflict(context.Background(), f, nil, Attended, nil)
+	keepMine, err := l.OnConflict(context.Background(), f, []byte("mine\n"), nil, Attended, nil)
 	if err != nil || !keepMine {
 		t.Errorf("a disabled ledger must never block a write: %v %v", keepMine, err)
 	}
@@ -123,7 +123,7 @@ func TestConflictEndToEnd(t *testing.T) {
 	}
 
 	asked := 0
-	keepMine, err := l.OnConflict(context.Background(), f,
+	keepMine, err := l.OnConflict(context.Background(), f, []byte("mine\n"),
 		func(string, string) bool { asked++; return true }, Attended, func(string) {})
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +146,7 @@ func TestNoConflictAsksNothing(t *testing.T) {
 	}
 	l.OnRead(f, []byte("v1\n"))
 
-	keepMine, err := l.OnConflict(context.Background(), f,
+	keepMine, err := l.OnConflict(context.Background(), f, []byte("mine\n"),
 		func(string, string) bool { t.Fatal("asked about a file nobody changed"); return false },
 		Attended, nil)
 	if err != nil || !keepMine {

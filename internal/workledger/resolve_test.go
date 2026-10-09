@@ -126,7 +126,9 @@ func TestDetailNamesTheFileTheOptionsAndWhoChangedIt(t *testing.T) {
 		Others:    []Record{{PID: 48231, Branch: "feat/thing", Task: "003"}},
 	}
 	d := c.Detail()
-	for _, want := range []string{"003-thing.md", "48231", "feat/thing", "keep mine", "keep theirs", "show me"} {
+	// "show me" is deliberately absent: it named a key no UI handled, so the
+	// difference is in the detail instead (TestDetailShowsTheDifference...).
+	for _, want := range []string{"003-thing.md", "48231", "feat/thing", "keep mine", "keep theirs"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("the detail should mention %q:\n%s", want, d)
 		}
@@ -228,5 +230,54 @@ func TestAttendedYesSaysSoWhenTheOldVersionCouldNotBeKept(t *testing.T) {
 	joined := strings.Join(notices, " ")
 	if !strings.Contains(joined, "could not be kept") {
 		t.Errorf("the person was told theirs would be kept and it was not; say so: %q", joined)
+	}
+}
+
+// I5: the detail advertised "d show me", which no UI handles — a dead key in
+// the TUI and, in plain mode, read as "no", so pressing it abandoned the
+// write. The spec's reason for making this an approval rather than a yes/no
+// was that it carries a diff; so it carries one, and the key that promised
+// one and did nothing is gone.
+func TestDetailShowsTheDifferenceAndAdvertisesNoDeadKey(t *testing.T) {
+	c := Conflict{
+		Path:      "/w/a.go",
+		Workspace: "/w",
+		Theirs:    []byte("package main\n\nfunc theirs() {}\n"),
+		Mine:      []byte("package main\n\nfunc mine() {}\n"),
+	}
+	d := c.Detail()
+
+	if !strings.Contains(d, "theirs()") || !strings.Contains(d, "mine()") {
+		t.Errorf("the detail must show both sides of the change:\n%s", d)
+	}
+	if !strings.Contains(d, "-") || !strings.Contains(d, "+") {
+		t.Errorf("the detail must render it as a difference:\n%s", d)
+	}
+	// No key that no UI handles.
+	if strings.Contains(d, "show me") || strings.Contains(d, "d  ") {
+		t.Errorf("the detail still advertises a key no UI handles:\n%s", d)
+	}
+	for _, want := range []string{"keep mine", "keep theirs"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("the detail should still spell out %q:\n%s", want, d)
+		}
+	}
+}
+
+// A huge change must not put thousands of lines into an approval modal.
+func TestDetailBoundsTheDifference(t *testing.T) {
+	var theirs, mine strings.Builder
+	for i := 0; i < 500; i++ {
+		theirs.WriteString("theirs line\n")
+		mine.WriteString("mine line\n")
+	}
+	c := Conflict{Path: "/w/a.go", Workspace: "/w",
+		Theirs: []byte(theirs.String()), Mine: []byte(mine.String())}
+	d := c.Detail()
+	if n := strings.Count(d, "\n"); n > 60 {
+		t.Errorf("the detail is %d lines; a modal cannot show that", n)
+	}
+	if !strings.Contains(d, "more") {
+		t.Errorf("a truncated difference must say it was truncated:\n%s", d)
 	}
 }

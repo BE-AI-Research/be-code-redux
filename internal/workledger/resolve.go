@@ -3,6 +3,7 @@ package workledger
 import (
 	"context"
 	"fmt"
+	"github.com/brown-enterprises/be-code/internal/diff"
 	"path/filepath"
 	"strings"
 )
@@ -46,6 +47,9 @@ type Conflict struct {
 	Path      string
 	Workspace string
 	Theirs    []byte
+	// Mine is what this session is about to write, so the detail can show
+	// the difference rather than advertising a key that shows it.
+	Mine []byte
 	// Others is the live work records for this workspace, so the detail can
 	// say who changed it when that is knowable.
 	Others []Record
@@ -77,11 +81,36 @@ func (c Conflict) Detail() string {
 	default:
 		b.WriteString("  no other session is recorded, so it was changed outside BE-Code\n")
 	}
+	if d := difference(rel, c.Theirs, c.Mine); d != "" {
+		b.WriteString("\n" + d)
+	}
 	b.WriteString("\n  y  keep mine   — write this session's version; theirs is kept and the\n")
 	b.WriteString("                   notice says where\n")
 	b.WriteString("  n  keep theirs — abandon this write\n")
-	b.WriteString("  d  show me     — print the difference and ask again\n")
 	return b.String()
+}
+
+// diffLines bounds the difference shown in an approval modal. A conflict on a
+// generated file can be thousands of lines, and a modal cannot show them.
+const diffLines = 24
+
+// difference is theirs → mine, bounded. It is in the detail rather than
+// behind a key because the spec's reason for making this an approval rather
+// than a yes/no was that it carries a diff — and the key that promised one
+// ("d show me") was handled by no UI: dead in the TUI, and read as "no" in
+// plain mode, so pressing it abandoned the write.
+func difference(rel string, theirs, mine []byte) string {
+	if len(mine) == 0 {
+		return ""
+	}
+	out := diff.Preview(rel, string(theirs), string(mine), false)
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) > diffLines {
+		kept := lines[:diffLines]
+		return strings.Join(kept, "\n") + fmt.Sprintf("\n  … %d more lines of difference\n",
+			len(lines)-diffLines)
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // Resolve decides what happens to one conflict.

@@ -207,7 +207,7 @@ func (l *Ledger) NoteHash(path, hash string) {
 
 // OnConflict is the tools hook: has path changed since this session read it,
 // and if so what happens. true means write.
-func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, who Attendance, notice func(string)) (bool, error) {
+func (l *Ledger) OnConflict(ctx context.Context, path string, mine []byte, ask Asker, who Attendance, notice func(string)) (bool, error) {
 	if !l.opt.Enabled || l.seen == nil {
 		return true, nil
 	}
@@ -218,7 +218,7 @@ func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, who Att
 		return true, nil
 	}
 	d, rerr := Resolve(ctx, Conflict{
-		Path: path, Workspace: l.ws, Theirs: theirs, Others: l.Others(),
+		Path: path, Workspace: l.ws, Theirs: theirs, Mine: mine, Others: l.Others(),
 	}, ask, who, notice)
 	if rerr != nil {
 		return false, rerr

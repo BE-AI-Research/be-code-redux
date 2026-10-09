@@ -437,9 +437,9 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The conflict gate needs ag for its notice sink, so it is assigned here
 	// rather than with the read hooks above.
 	workLedger.SetWarn(noticeSink(ag, reg))
-	reg.OnConflict = func(ctx context.Context, path string) (bool, error) {
+	reg.OnConflict = func(ctx context.Context, path string, mine []byte) (bool, error) {
 		who := conflictAttendance(reg.Fired(), headless, stdinIsTTY())
-		return workLedger.OnConflict(ctx, path, workledger.Asker(reg.Approve), who, noticeSink(ag, reg))
+		return workLedger.OnConflict(ctx, path, mine, workledger.Asker(reg.Approve), who, noticeSink(ag, reg))
 	}
 	if line := workLedger.NoticeLine(); line != "" {
 		ag.QueueNotice(line)
