@@ -45,6 +45,21 @@ func (r *Registry) conflict(ctx context.Context, absPath string) (Result, bool) 
 	return Result{}, true
 }
 
+// noteWritten records what is at absPath after a write and its post_write
+// hooks. It reads the file back rather than trusting what was passed in,
+// because a hook's whole purpose can be to rewrite it; only if the read fails
+// does it fall back to the bytes we sent.
+func (r *Registry) noteWritten(absPath string, wrote []byte) {
+	if r.OnRead == nil {
+		return
+	}
+	if onDisk, err := os.ReadFile(absPath); err == nil {
+		r.OnRead(absPath, onDisk)
+		return
+	}
+	r.OnRead(absPath, wrote)
+}
+
 // noteRead tells the work ledger what this session has seen at absPath.
 func (r *Registry) noteRead(absPath string, content []byte) {
 	if r.OnRead != nil {
@@ -218,14 +233,15 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
-	// What we wrote is what we last saw, or our own next write would look
-	// like somebody else's change.
-	t.r.noteRead(p, []byte(content))
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("wrote %d bytes to %s", len(content), rel)
 	if note := t.r.runHooks(ctx, "post_write", "FILE", rel); note != "" {
 		msg += "\n" + note
 	}
+	// After the hooks, not before: a post_write hook exists to rewrite the
+	// file (gofmt -w, prettier --write), so recording what we passed in made
+	// this session's own next edit a conflict nobody else caused.
+	t.r.noteWritten(p, []byte(content))
 	return Result{Content: msg}
 }
 
@@ -282,14 +298,12 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if err := os.WriteFile(p, []byte(updated), 0o644); err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
-	// What we wrote is what we last saw, or our own next write would look
-	// like somebody else's change.
-	t.r.noteRead(p, []byte(updated))
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("edited %s (1 replacement)", rel)
 	if note := t.r.runHooks(ctx, "post_write", "FILE", rel); note != "" {
 		msg += "\n" + note
 	}
+	t.r.noteWritten(p, []byte(updated))
 	return Result{Content: msg}
 }
 

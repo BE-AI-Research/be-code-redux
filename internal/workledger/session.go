@@ -1,8 +1,11 @@
 package workledger
 
 import (
+	"sync"
+
 	"context"
 	"fmt"
+	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,13 +27,19 @@ type Options struct {
 // Nothing here may fail a session. A record that cannot be written costs the
 // notice and nothing else; detection carries on in memory.
 type Ledger struct {
-	opt    Options
-	ws     string
-	dir    string
-	rec    Record
-	seen   *Seen
-	warned bool
-	Warn   func(string) // where a "could not write the record" notice goes
+	// mu guards rec and lastTouch: the ledger is reached from the agent
+	// goroutine and from tool dispatch.
+	mu        sync.Mutex
+	lastTouch time.Time
+
+	opt     Options
+	ws      string
+	dir     string
+	rec     Record
+	seen    *Seen
+	warned  bool
+	pending string       // a notice from before Warn existed
+	Warn    func(string) // where a "could not write the record" notice goes
 }
 
 // Open starts this session's ledger. A disabled ledger is inert: no record,
@@ -43,8 +52,9 @@ func Open(workspace string, opt Options) (*Ledger, error) {
 	dir, err := Dir()
 	if err != nil {
 		// Not fatal: in-memory detection still works, and the caller is told
-		// once through Warn.
+		// once, through SetWarn, as soon as there is somewhere to say it.
 		l.seen = NewSeen(filepath.Join(os.TempDir(), fmt.Sprintf("be-code-seen-%d.json", opt.PID)))
+		l.note("no record of this session's work: " + err.Error())
 		return l, nil
 	}
 	l.dir = dir
@@ -55,22 +65,46 @@ func Open(workspace string, opt Options) (*Ledger, error) {
 		Session:   opt.Session,
 		Model:     opt.Model,
 	}
+	// The branch is worth one subprocess at startup: without it the notice
+	// can only say a pid, which §14 names as the thing that makes it
+	// ignorable. Task and writing need a turn boundary and are not set here.
+	l.rec.Branch = currentBranch(workspace)
 	l.seen = NewSeen(strings.TrimSuffix(l.rec.Path(dir), ".json") + ".seen.json")
 	if err := Save(dir, l.rec); err != nil {
 		l.note("could not record this session's work: " + err.Error())
 	}
 	if opt.KeepOverwritten > 0 {
-		PruneSidecars(dir, opt.KeepOverwritten)
+		// Beside each overwritten file, not here: no sidecar is ever written
+		// into ~/.be-code/work, so pruning this directory did nothing.
+		KeepSidecarsFor = opt.KeepOverwritten
 	}
 	return l, nil
 }
 
+// note says something once. The pending string matters: Warn is assigned by
+// the caller *after* Open returns, so a failure during Open had nowhere to go
+// and was dropped — and the early return before setting warned meant it was
+// not even remembered as said.
 func (l *Ledger) note(s string) {
-	if l.warned || l.Warn == nil {
+	if l.warned {
 		return
 	}
 	l.warned = true // one notice, not one per attempt
+	if l.Warn == nil {
+		l.pending = s // delivered by SetWarn, once there is somewhere to put it
+		return
+	}
 	l.Warn(s)
+}
+
+// SetWarn gives the ledger somewhere to put a notice, and delivers anything
+// Open could not report at the time.
+func (l *Ledger) SetWarn(f func(string)) {
+	l.Warn = f
+	if l.pending != "" && f != nil {
+		f(l.pending)
+		l.pending = ""
+	}
 }
 
 // Others is every other live session in this workspace.
@@ -110,12 +144,54 @@ func (l *Ledger) NoticeLine() string {
 	return b.String()
 }
 
-// OnRead records what this session last saw at path.
+// OnRead records what this session last saw at path, and doubles as the
+// heartbeat: Updated was written once, at Open, so with StaleAfter at an hour
+// every genuinely live session older than that was marked Suspect and
+// announced as possibly-unrelated. Reading a file is the plainest evidence a
+// session is working.
 func (l *Ledger) OnRead(path string, content []byte) {
 	if !l.opt.Enabled || l.seen == nil {
 		return
 	}
 	l.seen.Note(path, content)
+	l.touch()
+}
+
+// heartbeat is how often activity rewrites the record. A record is read at
+// human timescales — a startup notice and a conflict's detail — so a write
+// per file read would be disk traffic inside the tool loop for nothing.
+const heartbeat = time.Minute
+
+// touch refreshes Updated, at most once per heartbeat.
+func (l *Ledger) touch() {
+	if l.dir == "" {
+		return
+	}
+	l.mu.Lock()
+	if time.Since(l.lastTouch) < heartbeat {
+		l.mu.Unlock()
+		return
+	}
+	l.lastTouch = time.Now()
+	rec := l.rec
+	rec.Updated = time.Now().UTC().Format(time.RFC3339)
+	l.rec = rec
+	dir := l.dir
+	l.mu.Unlock()
+	if err := Save(dir, rec); err != nil {
+		l.note("could not update this session's work record: " + err.Error())
+	}
+}
+
+// currentBranch is the workspace's branch, or "" outside a repository. One
+// subprocess, at startup only.
+func currentBranch(workspace string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if !gitctx.IsRepo(ctx, workspace) {
+		return ""
+	}
+	return gitctx.Branch(ctx, workspace)
 }
 
 // NoteHash records a hash computed elsewhere — the engine's, for a task
@@ -131,7 +207,7 @@ func (l *Ledger) NoteHash(path, hash string) {
 
 // OnConflict is the tools hook: has path changed since this session read it,
 // and if so what happens. true means write.
-func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, fired bool, notice func(string)) (bool, error) {
+func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, who Attendance, notice func(string)) (bool, error) {
 	if !l.opt.Enabled || l.seen == nil {
 		return true, nil
 	}
@@ -143,7 +219,7 @@ func (l *Ledger) OnConflict(ctx context.Context, path string, ask Asker, fired b
 	}
 	d, rerr := Resolve(ctx, Conflict{
 		Path: path, Workspace: l.ws, Theirs: theirs, Others: l.Others(),
-	}, ask, fired, notice)
+	}, ask, who, notice)
 	if rerr != nil {
 		return false, rerr
 	}

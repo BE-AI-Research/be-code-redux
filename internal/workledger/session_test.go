@@ -68,7 +68,7 @@ func TestDisabledWritesNothing(t *testing.T) {
 	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	keepMine, err := l.OnConflict(context.Background(), f, nil, false, nil)
+	keepMine, err := l.OnConflict(context.Background(), f, nil, Attended, nil)
 	if err != nil || !keepMine {
 		t.Errorf("a disabled ledger must never block a write: %v %v", keepMine, err)
 	}
@@ -124,7 +124,7 @@ func TestConflictEndToEnd(t *testing.T) {
 
 	asked := 0
 	keepMine, err := l.OnConflict(context.Background(), f,
-		func(string, string) bool { asked++; return true }, false, func(string) {})
+		func(string, string) bool { asked++; return true }, Attended, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +148,50 @@ func TestNoConflictAsksNothing(t *testing.T) {
 
 	keepMine, err := l.OnConflict(context.Background(), f,
 		func(string, string) bool { t.Fatal("asked about a file nobody changed"); return false },
-		false, nil)
+		Attended, nil)
 	if err != nil || !keepMine {
 		t.Errorf("an unchanged file must pass: %v %v", keepMine, err)
+	}
+}
+
+// I1: Updated was written once, at Open, and StaleAfter is an hour — so every
+// genuinely live session older than an hour was marked Suspect and announced
+// as "the process may be unrelated". The pid-reuse defence was implemented
+// and then miscalibrated into a permanent false positive.
+func TestActivityKeepsTheRecordFresh(t *testing.T) {
+	ws := t.TempDir()
+	l := openFor(t, ws)
+	dir, _ := Dir()
+
+	// Backdate the record as a long-running session's would be.
+	l.rec.Updated = time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339)
+	if err := Save(dir, l.rec); err != nil {
+		t.Fatal(err)
+	}
+
+	f := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l.OnRead(f, []byte("v1\n")) // ordinary activity
+
+	stubAlive(t, map[int]bool{4242: true})
+	got := Others(dir, ws, 1)
+	if len(got) != 1 {
+		t.Fatalf("got %d records, want this session's one", len(got))
+	}
+	if got[0].Suspect {
+		t.Error("a session that just read a file was reported as possibly-dead; activity must refresh the record")
+	}
+}
+
+// The branch is known at Open, so the notice can say what the other session
+// is on rather than a bare pid — §5's example, and §14's named mitigation for
+// the notice being ignorable.
+func TestTheRecordNamesTheBranch(t *testing.T) {
+	ws := gitRepo(t)
+	l := openFor(t, ws)
+	if l.rec.Branch == "" {
+		t.Error("the record does not name the branch, so the notice can only say a pid")
 	}
 }

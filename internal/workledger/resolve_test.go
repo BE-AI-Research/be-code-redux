@@ -22,7 +22,7 @@ func TestResolveAsksAndKeepsMineOnYes(t *testing.T) {
 	var asked string
 	ask := func(action, detail string) bool { asked = action; return true }
 
-	got, err := Resolve(context.Background(), conflictOn(t, ws), ask, false, func(string) {})
+	got, err := Resolve(context.Background(), conflictOn(t, ws), ask, Attended, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestResolveAsksAndKeepsMineOnYes(t *testing.T) {
 func TestResolveKeepsTheirsOnNo(t *testing.T) {
 	ws := gitRepo(t)
 	got, err := Resolve(context.Background(), conflictOn(t, ws),
-		func(string, string) bool { return false }, false, func(string) {})
+		func(string, string) bool { return false }, Attended, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestResolveDuringAFiredTurnWritesAfterKeepingTheOldVersion(t *testing.T) {
 	var notices []string
 	got, err := Resolve(context.Background(), conflictOn(t, ws),
 		func(string, string) bool { t.Fatal("a fired turn must not be asked"); return false },
-		true, func(s string) { notices = append(notices, s) })
+		Unattended, func(s string) { notices = append(notices, s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestResolveDuringAFiredTurnWritesAfterKeepingTheOldVersion(t *testing.T) {
 func TestResolveWithNoAskerWritesAfterKeepingTheOldVersion(t *testing.T) {
 	ws := gitRepo(t)
 	var notices []string
-	got, err := Resolve(context.Background(), conflictOn(t, ws), nil, false,
+	got, err := Resolve(context.Background(), conflictOn(t, ws), nil, Unattended,
 		func(s string) { notices = append(notices, s) })
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestResolveUnattendedRefusesWhenNothingCanBeKept(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(sub, 0o755) })
 
 	c := Conflict{Path: f, Workspace: ws, Theirs: []byte("theirs\n")}
-	_, err := Resolve(context.Background(), c, nil, true, func(string) {})
+	_, err := Resolve(context.Background(), c, nil, Unattended, func(string) {})
 	if err == nil {
 		t.Fatal("an unattended overwrite proceeded with nowhere to keep the old version")
 	}
@@ -146,5 +146,87 @@ func TestDetailWithNoRecordStillSaysWhatHappened(t *testing.T) {
 	}
 	if !strings.Contains(d, "changed since") {
 		t.Errorf("the detail must say what happened:\n%s", d)
+	}
+}
+
+// C2: the owner's ruling is "write last, never refuse" wherever nobody can be
+// asked. Headless installs an approver unconditionally, so `ask == nil` is the
+// wrong test for "nobody to ask" — it never holds in `be-code run`, and the
+// README this branch adds promises the unattended path for exactly that case.
+// Unattended is a fact the caller knows, so the caller passes it in.
+func TestResolveUnattendedByFlagWritesAfterKeepingTheOldVersion(t *testing.T) {
+	ws := gitRepo(t)
+	var notices []string
+	// An approver that is present but cannot reach a person — headlessApprover
+	// under -y, which refuses work_conflict by design.
+	refuser := func(string, string) bool { return false }
+
+	got, err := Resolve(context.Background(), conflictOn(t, ws), refuser,
+		Unattended, func(s string) { notices = append(notices, s) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != KeepMine {
+		t.Errorf("decision = %v, want KeepMine: an unattended run finishes its work", got)
+	}
+	if len(notices) == 0 {
+		t.Error("an unattended overwrite must say where the old version went")
+	}
+}
+
+// And an attended run still asks, even though the same parameter carries it.
+func TestResolveAttendedStillAsks(t *testing.T) {
+	ws := gitRepo(t)
+	asked := 0
+	got, err := Resolve(context.Background(), conflictOn(t, ws),
+		func(string, string) bool { asked++; return false }, Attended, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked != 1 {
+		t.Errorf("asked %d times, want 1", asked)
+	}
+	if got != KeepTheirs {
+		t.Errorf("decision = %v, want KeepTheirs", got)
+	}
+}
+
+// I9: the detail a person reads says "keep mine — write this session's
+// version; theirs is kept and the notice says where". When KeepOld fails
+// nothing is kept, and saying nothing makes that sentence a lie. The write
+// still proceeds — they chose it, having seen the difference — but they are
+// told.
+func TestAttendedYesSaysSoWhenTheOldVersionCouldNotBeKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the directory permissions this test relies on")
+	}
+	ws := t.TempDir() // not a repo, so a sidecar is the only route
+	sub := filepath.Join(ws, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "doc.md")
+	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(sub, 0o755) })
+
+	var notices []string
+	got, err := Resolve(context.Background(),
+		Conflict{Path: f, Workspace: ws, Theirs: []byte("theirs\n")},
+		func(string, string) bool { return true }, Attended,
+		func(s string) { notices = append(notices, s) })
+	if err != nil {
+		t.Fatalf("a person's yes must still write: %v", err)
+	}
+	if got != KeepMine {
+		t.Errorf("decision = %v, want KeepMine", got)
+	}
+	joined := strings.Join(notices, " ")
+	if !strings.Contains(joined, "could not be kept") {
+		t.Errorf("the person was told theirs would be kept and it was not; say so: %q", joined)
 	}
 }

@@ -61,6 +61,44 @@ var (
 // the headless run command) on exit.
 var ideSession *ide.Session
 
+// conflictAttendance decides whether anybody can answer a work_conflict.
+//
+// Nobody can when the turn was fired by a schedule (the question would have
+// no deadline), when this is a headless run, or when stdin is not a terminal.
+// It is computed here and passed down rather than inferred inside the ledger
+// from a nil approver: `be-code run` installs headlessApprover
+// unconditionally, so a nil approver never happens there, and inferring from
+// it refused the write in exactly the runs the "write last, never refuse"
+// ruling is about.
+func conflictAttendance(fired, headless, tty bool) workledger.Attendance {
+	if fired || headless || !tty {
+		return workledger.Unattended
+	}
+	return workledger.Attended
+}
+
+// noticeSink is where the work ledger's mid-run notices go.
+//
+// ag.QueueNotice only buffers: FlushQueuedNotices runs from ResolveModel, so
+// once per session at UI start and on a /model switch. A notice queued from
+// inside a tool call — "wrote X over a change this session did not make; the
+// old version is at <branch>" — was therefore never delivered, which made
+// every recoverable overwrite indistinguishable from silent loss. That is the
+// one outcome this feature exists to prevent.
+//
+// Registry.OnNotice is the seam both UIs already wire for exactly this, and
+// the browser tool already uses. The queue stays as the fallback for anything
+// said before a UI exists.
+func noticeSink(ag *agent.Agent, reg *tools.Registry) func(string) {
+	return func(msg string) {
+		if reg.OnNotice != nil {
+			reg.OnNotice(msg)
+			return
+		}
+		ag.QueueNotice(msg)
+	}
+}
+
 // workLedger records what this session is working on and decides what happens
 // when a write collides with somebody else's change. Per-run like ideSession,
 // and closed by finishSession.
@@ -326,6 +364,28 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		return cp, secondaryLoad(ctx, c, cp, cw.Model, ag), nil
 	}
 
+	// The work ledger's read hooks go in before anything reads: store.Load
+	// below, attachEngine's loadDocs and attachPacks all happen inside
+	// buildAgent, and assigning these at the end left three of the spec's
+	// five read sites inert — loadDocs runs once per session, so a hook set
+	// afterwards never saw it at all.
+	keep := 168 * time.Hour
+	if d, derr := time.ParseDuration(cfg.Work.KeepOverwritten); derr == nil && d > 0 {
+		keep = d
+	}
+	workLedger, _ = workledger.Open(reg.Root, workledger.Options{
+		Enabled:         cfg.Work.Enabled,
+		KeepOverwritten: keep,
+		PID:             os.Getpid(),
+		Model:           model,
+	})
+	reg.OnRead = workLedger.OnRead
+	packs.OnStateRead = workLedger.OnRead
+	store.OnSessionRead = workLedger.OnRead
+	// The engine hands its own hash rather than its bytes, so the ledger
+	// records the hash the engine acts on rather than one of its own.
+	engine.OnDocHash = func(path, hash string) { workLedger.NoteHash(path, hash) }
+
 	if flagResume != "" {
 		s, err := store.Load(flagResume)
 		if err != nil {
@@ -374,33 +434,13 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
 		resolveOnline(ctx, cfg, a.CurrentProviderClient(), a, name, model, false)
 	}
-	// The work ledger: this session's record, and the gate on a write that
-	// would overwrite a change which arrived since this session read the
-	// file. The registry reaches it through hooks rather than an import,
-	// because internal/workledger reads internal/live and internal/gitctx.
-	keep := 168 * time.Hour
-	if d, derr := time.ParseDuration(cfg.Work.KeepOverwritten); derr == nil && d > 0 {
-		keep = d
-	}
-	workLedger, _ = workledger.Open(reg.Root, workledger.Options{
-		Enabled:         cfg.Work.Enabled,
-		KeepOverwritten: keep,
-		PID:             os.Getpid(),
-		Model:           model,
-	})
-	workLedger.Warn = func(msg string) { ag.QueueNotice(msg) }
-	reg.OnRead = workLedger.OnRead
+	// The conflict gate needs ag for its notice sink, so it is assigned here
+	// rather than with the read hooks above.
+	workLedger.SetWarn(noticeSink(ag, reg))
 	reg.OnConflict = func(ctx context.Context, path string) (bool, error) {
-		// reg.Approve is whichever UI is running; a fired turn has nobody to
-		// ask and takes the unattended path, which keeps the old version
-		// first and says where it went.
-		return workLedger.OnConflict(ctx, path, workledger.Asker(reg.Approve), reg.Fired(), ag.QueueNotice)
+		who := conflictAttendance(reg.Fired(), headless, stdinIsTTY())
+		return workLedger.OnConflict(ctx, path, workledger.Asker(reg.Approve), who, noticeSink(ag, reg))
 	}
-	packs.OnStateRead = workLedger.OnRead
-	store.OnSessionRead = workLedger.OnRead
-	// The engine hands its own hash rather than its bytes, so the ledger
-	// records the hash the engine acts on rather than one of its own.
-	engine.OnDocHash = func(path, hash string) { workLedger.NoteHash(path, hash) }
 	if line := workLedger.NoticeLine(); line != "" {
 		ag.QueueNotice(line)
 	}

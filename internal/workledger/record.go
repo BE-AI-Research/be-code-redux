@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -36,6 +37,12 @@ var Alive = processAlive
 // live pid plus an old record may be a reused pid rather than a working
 // session, and this package cannot prove which.
 var StaleAfter = time.Hour
+
+// recordName is what Others will open: a pid and an RFC3339 start time with
+// its punctuation stripped, exactly as Record.Path writes it. Anything else
+// in this directory belongs to somebody else and is never touched — the seen
+// store lives here too.
+var recordName = regexp.MustCompile(`^\d+-\d{8}T\d{6}Z\.json$`)
 
 // Record is one running session's work. Written at turn boundaries, not per
 // tool call: the only consumers are another session's startup notice and a
@@ -113,7 +120,13 @@ func Others(dir, workspace string, selfPID int) []Record {
 	}
 	var out []Record
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		// A positive filter, and nothing outside it is ever removed. A
+		// ".json" suffix also matches the seen store (<pid>-<stamp>.seen.json)
+		// in this same directory, and {"path":"hash"} unmarshals into Record
+		// without error (PID 0) — so a name filter plus a "not a record"
+		// delete was removing every session's seen file, including this
+		// session's own, on every call.
+		if e.IsDir() || !recordName.MatchString(e.Name()) {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
@@ -123,8 +136,7 @@ func Others(dir, workspace string, selfPID int) []Record {
 		}
 		var r Record
 		if err := json.Unmarshal(b, &r); err != nil || r.PID == 0 {
-			os.Remove(p) // not a record; nothing reads it again
-			continue
+			continue // named like a record but is not one; leave it alone
 		}
 		if !Alive(r.PID) {
 			os.Remove(p)

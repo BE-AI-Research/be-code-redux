@@ -23,6 +23,24 @@ const (
 // direction, since tools reaches this through an injected hook.
 type Asker func(action, detail string) bool
 
+// Attendance is whether a person can actually answer a question right now.
+//
+// It is a parameter rather than an inference. "ask == nil" was the obvious
+// test and it is the wrong one: `be-code run` installs headlessApprover
+// unconditionally, so the approver is never nil headless, and that approver
+// refuses work_conflict by design — so inferring attendance from it turned
+// the owner's "write last, never refuse" ruling into a refusal in every
+// headless and -y run, which is precisely where it was meant to apply.
+type Attendance bool
+
+const (
+	// Attended: a person is at a terminal and will see the question.
+	Attended Attendance = false
+	// Unattended: a fired scheduled turn, a headless run, a non-TTY stdin,
+	// or no approver at all. Nobody is going to answer, so nothing is asked.
+	Unattended Attendance = true
+)
+
 // Conflict is one file that changed since this session read it.
 type Conflict struct {
 	Path      string
@@ -68,21 +86,28 @@ func (c Conflict) Detail() string {
 
 // Resolve decides what happens to one conflict.
 //
-// With a person there, it asks. With nobody there — a fired scheduled turn,
-// or no approver at all — it writes, but only after the old version is
-// recoverable, and it says where that is. Refusing was the alternative and
+// With a person there, it asks. With nobody there — a fired scheduled turn, a
+// headless run, a non-TTY stdin, or no approver at all — it writes, but only
+// after the old version is recoverable, and it says where that is. Refusing was the alternative and
 // the owner ruled against it: an unattended turn should finish its work, and
 // nothing should be unrecoverable.
 //
 // The one case it refuses is the one where that promise cannot be kept: if
 // nothing can be saved, the write does not proceed.
-func Resolve(ctx context.Context, c Conflict, ask Asker, fired bool, notice func(string)) (Decision, error) {
-	if ask != nil && !fired {
+func Resolve(ctx context.Context, c Conflict, ask Asker, who Attendance, notice func(string)) (Decision, error) {
+	if ask != nil && who == Attended {
 		if ask("work_conflict", c.Detail()) {
 			// A person chose to overwrite, having seen what they were
-			// overwriting. Keep the old version anyway when it is free to do
-			// so, but a failure here is not worth refusing their choice.
-			if r, err := KeepOld(ctx, c.Workspace, c.Path); err == nil && r.Kind != RestoreNone && notice != nil {
+			// overwriting, so a failure to keep the old version is not worth
+			// refusing their choice. It is worth telling them: the detail
+			// they just read promised "theirs is kept and the notice says
+			// where", and silence would make that sentence a lie.
+			r, err := KeepOld(ctx, c.Workspace, c.Path)
+			switch {
+			case err != nil && notice != nil:
+				notice(fmt.Sprintf("wrote %s over a change this session did not make, "+
+					"but the old version could not be kept: %v", filepath.Base(c.Path), err))
+			case err == nil && r.Kind != RestoreNone && notice != nil:
 				notice(keptNotice(c.Path, r))
 			}
 			return KeepMine, nil

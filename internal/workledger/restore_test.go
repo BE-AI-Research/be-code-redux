@@ -168,3 +168,42 @@ func TestPruneSidecarsDropsOldOnesOnly(t *testing.T) {
 		}
 	}
 }
+
+// C1: git add -A honours .gitignore, so a snapshot does not contain an
+// ignored file — and `.be-code/` is gitignored in BE-Code's own repository,
+// which makes a task document the spec's own worked example of a conflict.
+// Reporting RestoreGit for a path the branch does not hold loses the old
+// version while telling the caller it is recoverable, which is the one thing
+// §12 forbids.
+func TestKeepOldOfAGitignoredFileUsesASidecar(t *testing.T) {
+	ws := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(ws, ".gitignore"), []byte(".be-code/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(ws, ".be-code", "tasks")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "003-thing.md")
+	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := KeepOld(context.Background(), ws, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind == RestoreGit {
+		t.Fatalf("an ignored file was reported as recoverable from %s, which cannot hold it", got.Branch)
+	}
+	if got.Kind != RestoreSidecar {
+		t.Fatalf("kind = %v, want RestoreSidecar", got.Kind)
+	}
+	body, rerr := os.ReadFile(got.Sidecar)
+	if rerr != nil {
+		t.Fatalf("the sidecar is not there: %v", rerr)
+	}
+	if string(body) != "theirs\n" {
+		t.Errorf("the sidecar holds %q", body)
+	}
+}

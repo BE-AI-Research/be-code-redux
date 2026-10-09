@@ -36,6 +36,11 @@ type Restore struct {
 	HowTo   string // the command a person can run
 }
 
+// KeepSidecarsFor is how long a sidecar is kept, set from
+// work.keep_overwritten. Pruning happens beside a file as one is written
+// there, which is the only directory that ever holds them.
+var KeepSidecarsFor = 168 * time.Hour
+
 // KeepOld makes the current contents of path recoverable before a caller
 // overwrites them without asking.
 //
@@ -55,14 +60,24 @@ func KeepOld(ctx context.Context, workspace, path string) (Restore, error) {
 		}
 		return Restore{}, err
 	}
-	if inside(workspace, path) && gitctx.IsRepo(ctx, workspace) {
+	// The git route only exists for a file a snapshot can actually hold.
+	// SnapshotTo runs `git add -A`, which honours .gitignore, so an ignored
+	// file is not in the commit — and `.be-code/` is ignored in BE-Code's own
+	// repository, which makes a task document (the spec's own worked example
+	// of a conflict) exactly this case. Reporting a branch that cannot hold
+	// the file would lose the old version while promising it is recoverable,
+	// which is the one thing §12 forbids. Checked before the snapshot so an
+	// ignored file does not pay for a whole-tree commit it cannot use.
+	if inside(workspace, path) && gitctx.IsRepo(ctx, workspace) && !gitctx.Ignored(ctx, workspace, path) {
+		rel, rerr := filepath.Rel(workspace, path)
+		if rerr != nil {
+			rel = "."
+		}
 		branch, err := gitctx.SnapshotTo(ctx, workspace, gitctx.SnapshotPrefixOverwrite,
 			"be-code: before overwriting a change this session did not make")
-		if err == nil {
-			rel, rerr := filepath.Rel(workspace, path)
-			if rerr != nil {
-				rel = "."
-			}
+		// And verify rather than assume: anything else that keeps a path out
+		// of the commit leaves the same empty promise.
+		if err == nil && gitctx.InTree(ctx, workspace, branch, filepath.ToSlash(rel)) {
 			return Restore{
 				Kind:   RestoreGit,
 				Branch: branch,
@@ -70,8 +85,8 @@ func KeepOld(ctx context.Context, workspace, path string) (Restore, error) {
 					branch, filepath.ToSlash(rel)),
 			}, nil
 		}
-		// Fall through: a repository that cannot be snapshotted still has a
-		// directory the old bytes can go in.
+		// Fall through: a repository that cannot snapshot this path still has
+		// a directory the old bytes can go in.
 	}
 	return sidecar(path)
 }
@@ -94,11 +109,21 @@ func sidecar(path string) (Restore, error) {
 	if err := os.WriteFile(name, b, 0o600); err != nil {
 		return Restore{}, fmt.Errorf("nowhere to keep the old %s: %w", filepath.Base(path), err)
 	}
+	pruneBeside(path, KeepSidecarsFor)
 	return Restore{
 		Kind:    RestoreSidecar,
 		Sidecar: name,
 		HowTo:   fmt.Sprintf("cp %s %s", name, path),
 	}, nil
+}
+
+// pruneBeside drops sidecars older than keep in the directory a sidecar was
+// just written to. Open pruned ~/.be-code/work instead, where no sidecar is
+// ever written, so work.keep_overwritten did nothing at all.
+func pruneBeside(path string, keep time.Duration) {
+	if keep > 0 {
+		PruneSidecars(filepath.Dir(path), keep)
+	}
 }
 
 // inside reports whether path is under workspace. A dotdir file is not, and

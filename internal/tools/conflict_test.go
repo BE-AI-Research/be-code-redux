@@ -156,3 +156,53 @@ func TestWriteFeedsTheLedgerWhatItWrote(t *testing.T) {
 		t.Errorf("after a write the ledger saw %q, want what we wrote", sawBody)
 	}
 }
+
+// I4: a sub-agent's registry comes from Subset, which copied OnBeforeWrite but
+// not these two — so a sub-agent wrote over another *session's* change with no
+// prompt, no snapshot and no notice. The other writer there is another
+// process, which is this feature's remit, not a sub-agent question.
+func TestSubsetKeepsTheConflictGate(t *testing.T) {
+	r, root := regWithHooks(t)
+	f := filepath.Join(root, "a.txt")
+	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	asked, noted := false, false
+	r.OnConflict = func(context.Context, string) (bool, error) { asked = true; return false, nil }
+	r.OnRead = func(string, []byte) { noted = true }
+
+	sub := r.Subset("write_file", "read_file")
+	res := sub.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "mine\n"}`))
+	if !asked {
+		t.Error("a subset's write bypassed the conflict gate")
+	}
+	if !res.IsError {
+		t.Error("the declined write was reported as done")
+	}
+	if body, _ := os.ReadFile(f); string(body) != "theirs\n" {
+		t.Errorf("the file was overwritten: %q", body)
+	}
+	sub.Dispatch(context.Background(), call("read_file", `{"path": "a.txt"}`))
+	if !noted {
+		t.Error("a subset's read noted nothing, so it can never protect anything")
+	}
+}
+
+// I6: post_write hooks exist to rewrite the file (gofmt -w, prettier --write).
+// Recording the hash before they run made the session's own next edit a
+// conflict titled "Another session changed this file" when nobody else had.
+func TestAPostWriteHookDoesNotCreateAFalseConflict(t *testing.T) {
+	r, root := regWithHooks(t)
+	var seen []byte
+	r.OnRead = func(_ string, b []byte) { seen = b }
+	// A hook that rewrites the file, as a formatter does.
+	r.Hooks = map[string][]string{"post_write": {"sh -c 'printf formatted > " + filepath.Join(root, "a.txt") + "'"}}
+
+	if res := r.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "mine\n"}`)); res.IsError {
+		t.Fatalf("write failed: %s", res.Content)
+	}
+	if string(seen) != "formatted" {
+		t.Errorf("the ledger recorded %q; it must record what is on disk after post_write hooks, "+
+			"or the next edit to this file prompts about a change nobody else made", seen)
+	}
+}

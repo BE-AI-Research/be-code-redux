@@ -13,8 +13,12 @@ import (
 // The fixture goes through the real write path: plan a task (which writes a
 // document), flush, then reopen the same workspace so loadDocs reads it.
 func TestLoadDocsReportsItsHashes(t *testing.T) {
-	ws, dot := t.TempDir(), t.TempDir()
-	first, err := OpenAt(ws, dot, "s1", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	// OpenAt is (dir, root): the dotdir first, the workspace second. Passing
+	// them the other way round put the task documents in the dotdir and the
+	// state in the workspace — the test passed, but not against the layout
+	// production uses.
+	dot, ws := t.TempDir(), t.TempDir()
+	first, err := OpenAt(dot, ws, "s1", false, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +32,7 @@ func TestLoadDocsReportsItsHashes(t *testing.T) {
 	OnDocHash = func(path, hash string) { seen[path] = hash }
 	t.Cleanup(func() { OnDocHash = saved })
 
-	if _, err := OpenAt(ws, dot, "s2", true, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768}); err != nil {
+	if _, err := OpenAt(dot, ws, "s2", true, Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768}); err != nil {
 		t.Fatal(err)
 	}
 	if len(seen) == 0 {

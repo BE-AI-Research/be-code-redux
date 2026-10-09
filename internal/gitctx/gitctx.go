@@ -229,3 +229,35 @@ func Porcelain(ctx context.Context, root string) string {
 	out, _ := git(ctx, root, "status", "--porcelain")
 	return out
 }
+
+// Ignored reports whether .gitignore excludes path. It matters to anything
+// that treats a snapshot as a restore point: SnapshotTo runs `git add -A`,
+// which honours .gitignore, so an ignored file is not in the commit — and
+// `.be-code/` is ignored in BE-Code's own repository, which makes a task
+// document exactly this case.
+func Ignored(ctx context.Context, root, path string) bool {
+	_, err := gitEnv(ctx, root, nil, "check-ignore", "-q", "--", path)
+	return err == nil
+}
+
+// InTree reports whether branch's commit holds path (root-relative, slashes).
+// The guarantee behind a restore point: a branch that does not hold the file
+// cannot restore it.
+func InTree(ctx context.Context, root, branch, rel string) bool {
+	out, err := gitEnv(ctx, root, nil, "ls-tree", "--name-only", branch, "--", rel)
+	return err == nil && strings.TrimSpace(out) != ""
+}
+
+// Branch is the checked-out branch's name, "(detached)" on a detached HEAD,
+// or "" when it cannot be read.
+func Branch(ctx context.Context, root string) string {
+	out, err := git(ctx, root, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(out)
+	if name == "HEAD" {
+		return "(detached)"
+	}
+	return name
+}

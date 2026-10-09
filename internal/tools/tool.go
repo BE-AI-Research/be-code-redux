@@ -217,6 +217,12 @@ func (r *Registry) Subset(names ...string) *Registry {
 	sub := &Registry{
 		Root: r.Root, Approve: r.Approve, ApproveWrites: r.ApproveWrites,
 		OnBeforeWrite: r.OnBeforeWrite, ShellAllow: r.ShellAllow,
+		// The work ledger's seams travel with a subset for the same reason
+		// OnBeforeWrite does: a sub-agent's write is this process's write,
+		// and the writer it can collide with is another *session*. Without
+		// these two a scoped registry wrote over another session's change
+		// with no prompt, no restore point and no notice.
+		OnConflict: r.OnConflict, OnRead: r.OnRead,
 		ShellDeny: r.ShellDeny, Hooks: r.Hooks,
 		ReviewWrite: r.ReviewWrite, ReviewInvolvesEditor: r.ReviewInvolvesEditor,
 		EditorName: r.EditorName, OnStatus: r.OnStatus,

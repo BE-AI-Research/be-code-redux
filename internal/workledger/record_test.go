@@ -175,3 +175,33 @@ func TestOthersOnAMissingDirectoryIsEmptyNotAnError(t *testing.T) {
 		t.Errorf("got %+v, want nothing", got)
 	}
 }
+
+// I2: the seen store lives in the same directory and is named
+// <pid>-<started>.seen.json, which matches a ".json" filter — and
+// unmarshalling {"path":"hash"} into Record succeeds with PID 0, so a
+// name-based filter took the "not a record" branch and deleted it. Every
+// Others() call was removing every session's seen file, including its own.
+func TestOthersLeavesFilesItDoesNotRecognise(t *testing.T) {
+	dir := t.TempDir()
+	stubAlive(t, map[int]bool{42: true})
+	if err := Save(dir, rec(42, "/w")); err != nil {
+		t.Fatal(err)
+	}
+	seen := filepath.Join(dir, "4242-20261009T120000Z.seen.json")
+	if err := os.WriteFile(seen, []byte(`{"/w/a.go":"abc"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stray := filepath.Join(dir, "notes.json")
+	if err := os.WriteFile(stray, []byte(`{"anything":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := Others(dir, "/w", 1); len(got) != 1 {
+		t.Fatalf("got %d records, want 1: %+v", len(got), got)
+	}
+	for _, p := range []string{seen, stray} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was deleted; Others must never remove a file it cannot classify", filepath.Base(p))
+		}
+	}
+}
