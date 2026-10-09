@@ -1270,6 +1270,22 @@ Your own commands are markdown prompt templates in `.becode/commands/*.md` (work
 `~/.be-code/commands/*.md` (global), with `$ARGS` substitution — they appear in the palette
 beside the built-ins.
 
+### Another session is working here
+
+BE-Code records what each running session is doing — workspace, branch, the
+task it is on — under `~/.be-code/work/`, and says so once when you open a
+second session in the same workspace. The records are advisory, not locks: a
+lock that outlives a crashed process is worse than a lost update.
+
+When a write would overwrite a change that arrived since this session read the
+file, it asks: **keep mine**, **keep theirs**, or **show me** the difference.
+With nobody to ask — a scheduled event, or a headless run — it writes, but
+first makes the old version recoverable: a `be-code/pre-overwrite/<stamp>`
+branch for a file in the workspace, a timestamped copy beside it for anything
+else, and the notice names which and gives the command that restores it. The
+one time it refuses is when the old version could not be kept at all, because
+overwriting unattended is only acceptable while it is recoverable.
+
 ## Config reference
 
 Everything lives in `~/.be-code/config.json`, written by `be-code setup` and safe to edit by
@@ -1290,6 +1306,14 @@ hand; `/config` prints what the running session actually resolved.
   is online; an online helper is refused.
 - `max_spend_usd` (0 = off) — caps a session's estimated online spend; reaching it asks
   (`spend_cap`).
+- `work.enabled` (true) — records what this session is working on under
+  `~/.be-code/work/`, says once at startup when another session is working in
+  the same workspace, and asks before a write would overwrite a change that
+  arrived since this session read the file. `false` is the behaviour before
+  the work ledger: no record, no notice, no detection.
+- `work.keep_overwritten` (`168h`) — how long a copy of an overwritten dotdir
+  file is kept beside it. Workspace files go to a `be-code/pre-overwrite/…`
+  git branch instead, which is never pruned.
 - `packs.source` (`https://github.com/BE-AI-Research/be-skill-packs`) — where
   `be-code packs add` fetches from when `--source` is not given. Point it at your own
   mirror to make every install in every workspace come from there; an empty value means
