@@ -1871,6 +1871,12 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/packs":
 		// A listing, and a change that belongs between requests: /packs is
 		// not busy-safe (see ui.SlashCommandTable), so no run is in flight.
+		// `/packs add` with no name is the picker, not a usage line: the
+		// point of this surface is that a person need not know a pack's
+		// name. Plain mode keeps the listing, which is all it can offer.
+		if len(fields) == 2 && strings.EqualFold(fields[1], "add") {
+			return m.openPackPicker()
+		}
 		if ui.IsPacksBlocking(fields[1:]) {
 			// Never inline: reload and on/off/default re-run activation, and
 			// an unapproved project pack raises the "pack_trust" approval

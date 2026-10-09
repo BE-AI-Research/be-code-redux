@@ -294,7 +294,15 @@ review. `/packs add` with no name opens the picker.
 
 **The picker** reuses the existing `picker` component, built from
 `packsrc.List`. Rows are name, version and description, read from each
-`pack.json` in the source's `packs/` directory.
+`pack.json` in the source's `packs/` directory. Its loader runs on
+`openPicker`'s Cmd — Bubble Tea's goroutine, not `Update` — which is what
+makes the clone inside it safe, and a pick hands the install to `packsCmd`,
+the same off-thread path `/packs add <name>` takes, because the install
+raises `pack_install` through `Session.Ask`.
+
+Plain mode has no picker, so there `/packs add` with no name lists what the
+source offers and says how to pick one. Both UIs answer the same question;
+only the TUI can answer it with a cursor.
 
 **`ui.SlashCommandTable`**: the `/packs` row's description gains the three
 verbs, so the palette, the menu's autocomplete and both UIs stay in sync.
