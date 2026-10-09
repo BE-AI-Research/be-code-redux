@@ -37,6 +37,26 @@ func PacksReport(rows []agent.PackRow) string {
 // Any of these rewrites the system prompt, which costs the next request a
 // full cold read of the prompt cache — said out loud, because an unexplained
 // slow turn after a command looks like a bug.
+// IsPacksBlocking reports whether a /packs subcommand can raise the pack
+// trust approval. Everything that re-runs activation can: a project pack that
+// has not been approved yet is asked about the moment it becomes a candidate.
+// A bare listing cannot, so it stays inline where it is cheapest.
+//
+// This exists for the same reason IsScheduleBlocking does, and the cost of
+// getting it wrong is worse: Session.Ask relocks the session mutex that
+// Update already holds, so an inline question froze every attached terminal
+// with the alt screen up and Ctrl-C unable to reach the program.
+func IsPacksBlocking(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch strings.ToLower(args[0]) {
+	case "reload", "on", "off", "default", "clear", "auto":
+		return true
+	}
+	return false
+}
+
 func PacksCommand(ag *agent.Agent, fields []string) string {
 	if len(fields) < 2 {
 		return PacksReport(ag.PackRows())

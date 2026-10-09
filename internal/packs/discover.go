@@ -212,3 +212,25 @@ func compileGlob(glob string) *regexp.Regexp {
 	}
 	return re
 }
+
+// MatchesAnyGlob reports whether any of the given workspace-relative paths
+// matches any of the globs. It is the matcher a check's when.changed field is
+// read with, exported because the decision belongs where the changed-file
+// list is known — the agent — and this package cannot import that one.
+//
+// Glob semantics are the same as detection's: "*" does not cross a separator
+// and "**/" also matches no directory at all, so "**/*.tsx" finds a file at
+// the root as well as a nested one. An empty glob list matches nothing, which
+// is why the caller treats "no globs" as unconditional before calling.
+func MatchesAnyGlob(globs, paths []string) bool {
+	res := compileGlobs(globs)
+	for _, p := range paths {
+		slash := filepath.ToSlash(p)
+		for _, re := range res {
+			if re != nil && re.MatchString(slash) {
+				return true
+			}
+		}
+	}
+	return false
+}

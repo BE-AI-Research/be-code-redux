@@ -332,6 +332,18 @@ func (m *View) agentsCmd(args []string) tea.Cmd {
 	}
 }
 
+// packsCmd runs a /packs subcommand that can raise the pack trust approval
+// off the Update goroutine, for the same reason scheduleCmd exists below:
+// Session.Ask relocks the session mutex, so waiting on it under Update's lock
+// deadlocks every attached terminal. It reuses agentsMsg to render the result,
+// since a note and a lines slice need the same handling on the way back.
+func (m *View) packsCmd(fields []string) tea.Cmd {
+	ag := m.ag
+	return func() tea.Msg {
+		return agentsMsg{lines: strings.Split(ui.PacksCommand(ag, fields), "\n")}
+	}
+}
+
 // scheduleCmd runs a /schedule subcommand that can raise a prompt off the
 // Update goroutine: Session.Ask may not be waited on under the session lock.
 // It reuses agentsMsg (already rendered locally as a lines slice) since the
@@ -1849,6 +1861,13 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 	case "/packs":
 		// A listing, and a change that belongs between requests: /packs is
 		// not busy-safe (see ui.SlashCommandTable), so no run is in flight.
+		if ui.IsPacksBlocking(fields[1:]) {
+			// Never inline: reload and on/off/default re-run activation, and
+			// an unapproved project pack raises the "pack_trust" approval
+			// there. Session.Ask must not be waited on under the session lock
+			// Update is already holding — the same rule /schedule follows.
+			return m, m.packsCmd(fields)
+		}
 		m.renderLocalNote(ui.PacksCommand(m.ag, fields))
 	case "/coworkers":
 		// A listing, not a shared event: the terminal that asked is the one

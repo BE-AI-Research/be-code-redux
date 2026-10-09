@@ -221,9 +221,18 @@ type Agent struct {
 	// packNotes is the active packs' rules and chunk index, as one block for
 	// the system prompt; packChecks are their verify commands. Both are set
 	// by EnablePacks and stable for the session (see internal/agent/packs.go).
-	packNotes  string
-	packChecks []verify.Check
+	packNotes string
+	// packChecks are the active packs' verify commands, each carrying the
+	// when.changed globs it declared: the check is the harness's to run, but
+	// whether this request touched anything it watches is only knowable where
+	// the changed-file list is, which is verifyProjectFor.
+	packChecks []packCheck
 	packRows   []PackRow
+	// packPending is set when a project pack needed consent and there was
+	// nobody to ask yet: LoadPacks runs inside buildAgent, before any UI has
+	// assigned Registry.Approve. StartPacks, which every UI calls once its
+	// approver is wired, is what turns that into a question.
+	packPending bool
 	// packEntries are the active packs' playbooks; verifySigs counts how
 	// often each verification signature has come back within one request,
 	// which is what decides fix vs next (see playbookNote).
@@ -2315,7 +2324,9 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 	}
 	rep := &ReviewedReport{}
 	if a.Cfg.VerifyOnDone && a.mayHaveChangedFiles() {
-		proj := a.verifyProject()
+		// The changed files decide which pack checks apply: one that declares
+		// when.changed is skipped when nothing it watches moved.
+		proj := a.verifyProjectFor(a.changedFiles())
 		if len(proj.Checks) > 0 {
 			// Per request: a failure that comes back in a later request is new
 			// again, because the files under it may have changed.
@@ -2412,7 +2423,7 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 				return "", rep, err
 			}
 			if a.Cfg.VerifyOnDone {
-				proj := a.verifyProject()
+				proj := a.verifyProjectFor(a.changedFiles())
 				if len(proj.Checks) > 0 {
 					rep.Verify = a.runChecks(ctx, proj)
 				}

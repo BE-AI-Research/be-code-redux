@@ -156,6 +156,8 @@ func runSessionHost(code string) error {
 		// Scheduled events start under the same rule: their startup prompt is a
 		// shared ask, so it waits on a goroutine of its own for a terminal.
 		ag.StartSchedulesAsync()
+		// And the pack trust question, for the same reason.
+		ag.StartPacksAsync()
 	})
 
 	// The hosted case is the one that most needed this. Here stdio is the

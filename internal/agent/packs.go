@@ -108,6 +108,67 @@ func (a *Agent) LoadPacks() {
 	a.packRows = rows
 }
 
+// StartPacks asks the question LoadPacks could not. A project pack needs
+// consent, LoadPacks runs inside buildAgent where Registry.Approve is still
+// nil, and a UI assigns its approver only once buildAgent has returned — so
+// without this the gate was unreachable in every mode and a pack that came
+// with a repository could never be switched on at all.
+//
+// Every UI calls it once, after wiring Approve, alongside ResolveModel and
+// StartSubAgents, which exist for the same reason and are documented as such
+// in cmd/root.go. It is a no-op when nothing is pending, so a session with no
+// project pack pays nothing and asks nothing. A caller that must go on to
+// start a served program wants StartPacksAsync.
+func (a *Agent) StartPacks() {
+	if !a.packPending {
+		return
+	}
+	if a.Tools.Approve == nil {
+		// Headless without -y: there genuinely is nobody, and now we know it
+		// rather than assuming it during buildAgent.
+		a.packPending = false
+		a.noteNoApprover()
+		return
+	}
+	// LoadPacks re-runs discovery and the gate, which is what raises the
+	// question. This is still startup — before the first request — so
+	// rewriting the system prompt here costs no cache read.
+	a.LoadPacks()
+}
+
+// StartPacksAsync is StartPacks on a goroutine of its own, for a caller whose
+// own goroutine must go on to start a served program. The trust prompt can
+// block for as long as a person takes to answer, and a TUI that waited for it
+// here would never start the program the question has to be shown in —
+// Session.Ask stores it and a view that starts afterwards is shown it.
+func (a *Agent) StartPacksAsync() {
+	if !a.packPending {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.notice("pack activation failed: %v", r)
+			}
+		}()
+		a.StartPacks()
+	}()
+}
+
+// noteNoApprover says the one true thing about a run that will never have
+// somebody to ask: a headless session without -y.
+func (a *Agent) noteNoApprover() {
+	for _, r := range a.packRows {
+		if r.Source == string(packs.SourceProject) && !r.Active {
+			msg := fmt.Sprintf("pack %q came with this project and needs approval, and this run has nobody to ask. Run it interactively once to decide, or copy the pack to ~/.be-code/packs.", r.Name)
+			a.QueueNotice(msg)
+			if a.Events.OnNotice != nil {
+				a.Events.OnNotice(msg)
+			}
+		}
+	}
+}
+
 // ForcePack switches a pack on or off for this workspace and re-activates,
 // or returns it to detection when clear is set. The caller is between
 // requests: this rewrites the system prompt.
@@ -155,7 +216,7 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 	var (
 		active  []tools.PackSource
 		blocks  []string
-		checks  []verify.Check
+		checks  []packCheck
 		entries []packEntry
 	)
 	for _, p := range ps {
@@ -170,7 +231,9 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 		}
 		active = append(active, p)
 		blocks = append(blocks, packBlock(p))
-		checks = append(checks, p.Checks(a.Tools.Root)...)
+		for _, c := range p.Checks(a.Tools.Root) {
+			checks = append(checks, packCheck{check: c, changed: p.Changed(c.Name)})
+		}
 		if pb := p.Playbook(); len(pb) > 0 {
 			entries = append(entries, packEntry{pack: p.Name, entries: pb})
 		}
@@ -214,7 +277,14 @@ func (a *Agent) trustProjectPack(p *packs.Pack, refuse func(string, ...any)) boo
 		return true // the same pack, already approved for this workspace
 	}
 	if a.Tools.Approve == nil {
-		refuse("pack %q from this project is not active: it needs approval and there is nobody to ask. Run interactively, or copy the pack to ~/.be-code/packs.", p.Name)
+		// Not a refusal: LoadPacks runs inside buildAgent, before any UI has
+		// assigned Registry.Approve, so "nobody to ask" is almost always
+		// "nobody to ask *yet*". Saying so here told a person running
+		// interactively to run interactively, and left the pack off for good.
+		// StartPacks asks once the approver exists; only a run that never
+		// gets one — headless without -y — stays unapproved, and
+		// noteNoApprover below is what tells that person.
+		a.packPending = true
 		return false
 	}
 	if !a.Tools.Approve("pack_trust", packs.TrustDetail(p, a.Tools.Root)) {
@@ -257,17 +327,55 @@ func packBlock(p *packs.Pack) string {
 	return b.String()
 }
 
-// verifyProject is what this session verifies: the project the harness
-// detects, with the active packs' checks appended in manifest order (packs
-// spec §8.1), so the built-in checks still run first and still stop the
-// sequence at the first failure.
+// packCheck is one pack's verify command plus the when.changed globs it
+// declared. The globs are kept beside the check rather than inside
+// verify.Check because internal/verify must not import internal/packs — the
+// dependency runs the other way — and because the decision needs the changed
+// file list, which only the agent has.
+type packCheck struct {
+	check   verify.Check
+	changed []string // when.changed globs; empty means unconditional
+}
+
+// verifyProject is what this session verifies, for a request whose changed
+// files are not known. It runs every pack check, which is the safe answer:
+// see verifyProjectFor.
 func (a *Agent) verifyProject() verify.Project {
+	return a.verifyProjectFor(nil)
+}
+
+// verifyProjectFor is what this session verifies given the files this request
+// changed: the project the harness detects, with the active packs' checks
+// appended in manifest order (packs spec §8.1), so the built-in checks still
+// run first and still stop the sequence at the first failure.
+//
+// A pack check that declares when.changed is skipped when nothing it watches
+// changed. Both shipped packs declare it precisely because their checks are
+// builds: without this, editing a README ran a full UnrealBuildTool build on
+// a 30-minute timeout, or all three of the ui-web node checks, on every turn
+// that touched any file at all.
+//
+// `changed` being nil means "not known" rather than "nothing changed", and
+// then every check runs. Skipping verification because the harness could not
+// work out what moved would be a silent loss of the whole safety net, which
+// is worse than a slow build; the project's own detected checks are never
+// filtered either way, so a pack can never suppress them.
+func (a *Agent) verifyProjectFor(changed []string) verify.Project {
 	proj := verify.Detect(a.Tools.Root)
 	if len(a.packChecks) == 0 {
 		return proj
 	}
-	proj.Checks = append(append([]verify.Check(nil), proj.Checks...), a.packChecks...)
-	if proj.Kind == "none" || proj.Kind == "" {
+	checks := append([]verify.Check(nil), proj.Checks...)
+	added := 0
+	for _, pc := range a.packChecks {
+		if len(changed) > 0 && len(pc.changed) > 0 && !packs.MatchesAnyGlob(pc.changed, changed) {
+			continue
+		}
+		checks = append(checks, pc.check)
+		added++
+	}
+	proj.Checks = checks
+	if added > 0 && (proj.Kind == "none" || proj.Kind == "") {
 		// A pack's checks are real verification even where nothing was
 		// detected: an Unreal project is not a project type the harness knows.
 		proj.Kind = "pack"

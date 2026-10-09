@@ -72,6 +72,9 @@ var runCmd = &cobra.Command{
 		// Approve and Events are wired above; a dispatch before this point
 		// would ask consent of nobody and print to nobody.
 		ag.StartSubAgents()
+		// Same rule for a project pack's trust question: headless has an
+		// approver only under -y, and StartPacks says so plainly otherwise.
+		ag.StartPacks()
 		defer ag.Tools.Close()
 		defer ag.Checkpoints.Cleanup()
 		defer finishSession(ag, false, os.Stderr)

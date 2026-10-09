@@ -861,6 +861,9 @@ func runInteractive(cmd *cobra.Command) error {
 		ag.StartSubAgentsAsync()
 		// Scheduled events: the same shape — the startup prompt is a shared ask.
 		ag.StartSchedulesAsync()
+		// And the trust question for a pack that came with this repository,
+		// which LoadPacks could not ask during buildAgent.
+		ag.StartPacksAsync()
 	})
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
