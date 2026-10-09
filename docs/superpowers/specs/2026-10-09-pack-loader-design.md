@@ -424,7 +424,47 @@ Install, trust and activation (`internal/packs`, `cmd`):
 - `-y` does not answer `pack_install`; `headlessApprover` refuses it.
 - A fired turn refuses an install.
 
-## 15. Risks
+## 15. Shelved: per-user pack profiles
+
+Raised during design and **deliberately out of scope for v1**: a per-user
+"profile" — a save file referenced only by that user on the system — recording
+which packs they want, so the choice survives a workspace moving and follows
+them between projects. PAM was suggested as the way to identify the user.
+
+Kept out of v1, with the reasoning, because it will come up again:
+
+- **The dotdir is already per-user.** `config.Dir()` is `os.UserHomeDir()` +
+  `.be-code`, so `packs.json` is already a file only that OS user reads. The
+  separation the idea asks for exists; what it would add is a different *key*,
+  not a different owner.
+- **PAM is a poor fit here.** It means cgo and a platform-specific dependency
+  in a tool that is offline-first, stdlib-leaning, and cross-compiled to
+  linux/amd64, linux/arm64, windows/amd64 and darwin/arm64 from one `make
+  release`. And it would re-authenticate someone the OS has already
+  authenticated to reach `$HOME`.
+- **BE-Code's existing notion of a "user" is not an auth principal.**
+  `internal/inbox`'s identity is derived from a terminal's IP with the ARP
+  table consulted best-effort (`internal/inbox/mac.go`). It exists to address
+  chat messages, and it is explicitly not a basis for a trust decision.
+- **A per-user trust grant would be a real hole.** Pack names are neither
+  unique nor authenticated. "This user trusts a pack called `assist`" applied
+  across projects would mean cloning any repository containing a pack of that
+  name inherits the grant. Trust has to stay bound to content, which is what
+  `ContentHash` does today.
+- **Per-client packs are impossible by construction.** A pack's rules live in
+  the system prompt, and a shared live session has one system prompt for one
+  agent however many terminals are attached. Two people in one session cannot
+  have different packs; only separate sessions can.
+
+What remains worth solving, if the idea returns: `~/.be-code/engine/<key>/`
+keys on a SHA-256 of the **absolute workspace path**
+(`internal/engine/store.go:267`), so moving or renaming a project orphans its
+entry. The fix is a stable project key — the repository's root-commit SHA, with
+the path hash as the fallback outside a repository — and it is independent of
+users, profiles and PAM. The same orphaning affects the task engine, so it is
+its own change rather than part of this one.
+
+## 16. Risks
 
 - **A clone's pack is trusted by its author, not by you.** The design's whole
   safety rests on the dotdir not travelling. A future change that put trust
