@@ -218,6 +218,8 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 		fmt.Printf("%s\n%s\n", yell("browser:"), detail)
 	case "pack_install":
 		fmt.Printf("%s\n%s\n", yell("install a skill pack:"), detail)
+	case "work_conflict":
+		fmt.Printf("%s\n%s\n", yell("another session changed this file:"), detail)
 	case "browser_watch":
 		fmt.Printf("%s\n%s\n", yell("browser (watched site — every action asks):"), detail)
 	case "shell_after_web":
@@ -331,7 +333,7 @@ func (t replTerminal) Withdraw(note string) {
 // "always" could mean there is "trust every repository's pack").
 func noAlwaysAction(action string) bool {
 	switch action {
-	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update", "pack_trust", "pack_install":
+	case "browser_watch", "shell_after_web", "schedule", "tool_call", "spend_cap", "online_project", "share_page", "switch_to_local", "update", "pack_trust", "pack_install", "work_conflict":
 		return true
 	}
 	return false

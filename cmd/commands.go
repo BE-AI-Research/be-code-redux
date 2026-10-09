@@ -275,9 +275,12 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 		// pack_trust (packs spec §10: -y means "run the commands I chose",
 		// not "trust the ones a repository brought with it"), nor
 		// pack_install (pack loader spec §8: it reaches the network and then
-		// writes rules into the model's own system prompt).
+		// writes rules into the model's own system prompt), nor work_conflict
+		// (work ledger spec §8: with nobody to ask, Resolve writes after
+		// making the old version recoverable, so there is no answer for -y to
+		// give — only a record to keep).
 		if (action == "browser_watch" && cfg.AutoApproveBrowser) || (action == "shell_after_web" && cfg.AutoApproveShell) ||
-			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update" || action == "pack_trust" || action == "pack_install") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
+			((action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update" || action == "pack_trust" || action == "pack_install" || action == "work_conflict") && (cfg.AutoApproveShell || cfg.AutoApproveBrowser)) {
 			fmt.Fprintf(os.Stderr, "refused %s (unattended run): %.120s\n", action, detail)
 			return false
 		}
@@ -288,7 +291,7 @@ func headlessApprover(cfg *config.Config) tools.ApproveFunc {
 			return true
 		}
 		if !stdinIsTTY() {
-			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update" || action == "pack_install" {
+			if action == "browser_watch" || action == "shell_after_web" || action == "schedule" || action == "tool_call" || action == "spend_cap" || action == "online_project" || action == "share_page" || action == "switch_to_local" || action == "update" || action == "pack_install" || action == "work_conflict" {
 				// -y never approves these two (browser spec §3.3, §3.6), so
 				// the usual "use -y" hint would be a false promise.
 				fmt.Fprintf(os.Stderr, "denied %s (non-interactive; this action always asks a person): %.120s\n", action, detail)

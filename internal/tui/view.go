@@ -903,7 +903,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			ans = askAnswer{OK: true}
 		} else if a.Action == "browser_watch" || a.Action == "shell_after_web" || a.Action == "schedule" ||
 			a.Action == "tool_call" || a.Action == "spend_cap" || a.Action == "online_project" || a.Action == "share_page" || a.Action == "switch_to_local" || a.Action == "update" || a.Action == "pack_trust" ||
-			a.Action == "pack_install" {
+			a.Action == "pack_install" || a.Action == "work_conflict" {
 			// No "always" to grant (browser spec §3.2, §3.6; schedules spec
 			// §3.1; tool_call is a fired turn's, which no shortcut answers).
 			// Falling through would disable file-write previews.
@@ -1415,6 +1415,13 @@ func (m *View) viewAsk() string {
 		title = "Pack from this project"
 		hint = "y trust it · n leave it off · ↑↓ scroll"
 		compactHint = "y/n · ↑↓"
+	case "work_conflict":
+		// No "a": each conflict is a specific pair of changes, and a
+		// session-wide "always keep mine" loses work silently — the thing
+		// the work ledger exists to stop.
+		title = "Another session changed this file"
+		hint = "y keep mine · n keep theirs · d show me · ↑↓ scroll"
+		compactHint = "y/n/d · ↑↓"
 	case "pack_install":
 		// No "a": installing always asks, and -y does not answer it either
 		// (pack loader spec §8). A pack's rules become the model's standing
