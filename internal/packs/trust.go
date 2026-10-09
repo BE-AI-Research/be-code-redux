@@ -178,6 +178,14 @@ func ClearForced(path, pack string) error {
 	return mutate(path, func(st *state) { delete(st.Forced, pack) })
 }
 
+// Untrust forgets a pack's approval for this workspace. Removing a pack
+// without it leaves an approval recorded for content that is no longer there,
+// which a later reinstall — or a different pack that happens to share the
+// name — would inherit.
+func Untrust(path, pack string) error {
+	return mutate(path, func(st *state) { delete(st.Trusted, pack) })
+}
+
 // Trust records that this exact pack content is approved for this workspace.
 func Trust(path, pack, hash string) error {
 	return mutate(path, func(st *state) {
