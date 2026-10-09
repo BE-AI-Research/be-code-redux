@@ -22,6 +22,36 @@ func (r *Registry) beforeWrite(absPath string) error {
 	return r.OnBeforeWrite(absPath)
 }
 
+// conflict asks the work ledger about absPath before a write. The order
+// matters: after approval, so a person is not asked twice about a write they
+// already declined, and before beforeWrite, so the checkpointer does not
+// snapshot a file this write is about to abandon.
+func (r *Registry) conflict(ctx context.Context, absPath string) (Result, bool) {
+	if r.OnConflict == nil {
+		return Result{}, true
+	}
+	keepMine, err := r.OnConflict(ctx, absPath)
+	rel, relErr := filepath.Rel(r.Root, absPath)
+	if relErr != nil {
+		rel = absPath
+	}
+	if err != nil {
+		return Result{IsError: true, Content: fmt.Sprintf("%s was not written: %v", rel, err)}, false
+	}
+	if !keepMine {
+		return Result{IsError: true, Content: fmt.Sprintf(
+			"%s was not written: it changed since this session read it and the other version was kept", rel)}, false
+	}
+	return Result{}, true
+}
+
+// noteRead tells the work ledger what this session has seen at absPath.
+func (r *Registry) noteRead(absPath string, content []byte) {
+	if r.OnRead != nil {
+		r.OnRead(absPath, content)
+	}
+}
+
 // approveWrite shows a diff preview through the approval hook when write
 // approvals are enabled. Returns (denialResult, false) when the user says no.
 // ctx is the tool call's context: it bounds an editor-side review, so a
@@ -120,6 +150,10 @@ func (t *readFileTool) Run(_ context.Context, args map[string]any) Result {
 	if err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
+	// The whole file's bytes, not the range this call returns: the hash is of
+	// the file, and a ranged read that recorded only its slice would make
+	// every later write look like a conflict.
+	t.r.noteRead(p, data)
 	lines := strings.Split(string(data), "\n")
 	offset := argInt(args, 1, "offset", "start")
 	limit := argInt(args, 400, "limit", "count")
@@ -172,6 +206,9 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if res, ok := t.r.approveWrite(ctx, p, content); !ok {
 		return res
 	}
+	if res, ok := t.r.conflict(ctx, p); !ok {
+		return res
+	}
 	if err := t.r.beforeWrite(p); err != nil {
 		return Result{IsError: true, Content: "checkpoint failed: " + err.Error()}
 	}
@@ -181,6 +218,9 @@ func (t *writeFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
+	// What we wrote is what we last saw, or our own next write would look
+	// like somebody else's change.
+	t.r.noteRead(p, []byte(content))
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("wrote %d bytes to %s", len(content), rel)
 	if note := t.r.runHooks(ctx, "post_write", "FILE", rel); note != "" {
@@ -233,11 +273,15 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if res, ok := t.r.approveWrite(ctx, p, updated); !ok {
 		return res
 	}
+	if res, ok := t.r.conflict(ctx, p); !ok {
+		return res
+	}
 	if err := t.r.beforeWrite(p); err != nil {
 		return Result{IsError: true, Content: "checkpoint failed: " + err.Error()}
 	}
 	if err := os.WriteFile(p, []byte(updated), 0o644); err != nil {
 		return Result{IsError: true, Content: err.Error()}
+		t.r.noteRead(p, []byte(updated))
 	}
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("edited %s (1 replacement)", rel)

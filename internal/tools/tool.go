@@ -85,6 +85,23 @@ type Registry struct {
 	// is what "accept all / don't ask again" must do. Shell approval is
 	// separate and always on unless the approver auto-approves.
 	ApproveWrites bool
+	// OnConflict is asked before a write when the work ledger is on: the
+	// file changed since this session read it. true writes, false does not,
+	// and an error means the old version could not be kept so the write must
+	// not proceed. Nil is "no work ledger", which is the behaviour before
+	// that feature.
+	//
+	// A hook rather than an import: internal/workledger reads internal/live
+	// and internal/gitctx, and this package must not depend on either. It is
+	// assigned in cmd/root.go, the same seam ReviewerFactory and
+	// LoaderFactory use.
+	OnConflict func(ctx context.Context, absPath string) (keepMine bool, err error)
+
+	// OnRead records what this session last saw at a path — after a read, and
+	// after a write, because what we wrote is what we last saw. Without it
+	// the conflict check can never fire.
+	OnRead func(absPath string, content []byte)
+
 	// OnBeforeWrite runs after approval, before a file is modified —
 	// the checkpoint hook. A returned error aborts the write.
 	OnBeforeWrite func(absPath string) error
