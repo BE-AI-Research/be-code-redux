@@ -1,10 +1,15 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/packsrc"
 )
 
 // PacksReport is what /packs prints: every pack found on the search path,
@@ -51,7 +56,7 @@ func IsPacksBlocking(args []string) bool {
 		return false
 	}
 	switch strings.ToLower(args[0]) {
-	case "reload", "on", "off", "default", "clear", "auto":
+	case "reload", "on", "off", "default", "clear", "auto", "add", "update", "remove":
 		return true
 	}
 	return false
@@ -67,7 +72,7 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 		return PacksReport(ag.PackRows()) + "\n  reloaded; the next request re-reads the whole prompt"
 	}
 	if len(fields) < 3 {
-		return "usage: /packs · /packs on <name> · /packs off <name> · /packs default <name> · /packs reload"
+		return packsUsage()
 	}
 	name := fields[2]
 	var err error
@@ -78,11 +83,85 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 		err = ag.ForcePack(name, false, false)
 	case "default", "clear", "auto":
 		err = ag.ForcePack(name, false, true)
+	case "add":
+		return packsAdd(ag, fields[2:])
+	case "update", "remove":
+		return packsManage(ag, verb, name)
 	default:
-		return "usage: /packs · /packs on <name> · /packs off <name> · /packs default <name> · /packs reload"
+		return packsUsage()
 	}
 	if err != nil {
 		return err.Error()
 	}
 	return PacksReport(ag.PackRows()) + "\n  changed; the next request re-reads the whole prompt"
+}
+
+func packsUsage() string {
+	return "usage: /packs · /packs add <name>[@<ref>] · /packs update <name> · /packs remove <name> · " +
+		"/packs on <name> · /packs off <name> · /packs default <name> · /packs reload"
+}
+
+// packOptionsFor is the agent's own workspace, trust file and approval seam.
+// The approver is Tools.Approve, so an install asks through whichever UI is
+// running — and a nil one is a refusal, which packsrc enforces.
+func packOptionsFor(ag *agent.Agent) (packsrc.Options, error) {
+	base, err := config.Dir()
+	if err != nil {
+		return packsrc.Options{}, err
+	}
+	root := ag.Tools.Root
+	return packsrc.Options{
+		Workspace: root,
+		TrustPath: filepath.Join(base, "engine", engine.Key(root), "packs.json"),
+		Approve:   ag.Tools.Approve,
+	}, nil
+}
+
+func packsAdd(ag *agent.Agent, args []string) string {
+	if len(args) == 0 {
+		return packsUsage()
+	}
+	name, ref, _ := strings.Cut(args[0], "@")
+	spec := ""
+	if len(args) > 1 {
+		spec = args[1]
+	}
+	if spec == "" && ag.Cfg != nil {
+		spec = ag.Cfg.Packs.Source
+	}
+	s, err := packsrc.Resolve(spec, ref)
+	if err != nil {
+		return err.Error()
+	}
+	o, err := packOptionsFor(ag)
+	if err != nil {
+		return err.Error()
+	}
+	res, err := packsrc.Install(context.Background(), s, name, o)
+	if err != nil {
+		return err.Error()
+	}
+	ag.LoadPacks()
+	return fmt.Sprintf("installed %s %s into %s\n  commit it so the project carries its own pack setup",
+		res.Pack, res.Version, res.Dir)
+}
+
+func packsManage(ag *agent.Agent, verb, name string) string {
+	o, err := packOptionsFor(ag)
+	if err != nil {
+		return err.Error()
+	}
+	if verb == "remove" {
+		if err := packsrc.Remove(name, o); err != nil {
+			return err.Error()
+		}
+		ag.LoadPacks()
+		return "removed " + name
+	}
+	res, err := packsrc.Update(context.Background(), name, o)
+	if err != nil {
+		return err.Error()
+	}
+	ag.LoadPacks()
+	return fmt.Sprintf("updated %s %s", res.Pack, res.Version)
 }

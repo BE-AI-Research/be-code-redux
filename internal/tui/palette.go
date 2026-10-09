@@ -254,6 +254,8 @@ func (m *View) menuEntries() []menuEntry {
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},
 		{"Tools", "Run verification", "build/lint/test checks for this workspace", cmd("/verify")},
 		{"Tools", "Undo last turn", "roll back the last turn's file changes", cmd("/undo")},
+		{"Packs", "Install a skill pack", "fetch a pack from the packs repository into this project", cmd("/packs add")},
+		{"Packs", "Installed packs", "what is installed and which are active", cmd("/packs")},
 		{"Context", "Compact now", "summarize older conversation with the model", cmd("/compact")},
 		{"Context", "Repo map", "symbol outline in the system prompt", cmd("/map")},
 		{"Context", "Usage stats", "requests, tool calls, tokens", cmd("/stats")},
