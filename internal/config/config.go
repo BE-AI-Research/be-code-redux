@@ -60,6 +60,18 @@ type CoworkConfig struct {
 	ConsultTimeout int `json:"consult_timeout"`
 }
 
+// WorkConfig covers the record of what other sessions are doing, and what
+// happens when two writers meet.
+type WorkConfig struct {
+	// Enabled writes this session's record and reads others'. Off means no
+	// record, no startup notice and no conflict detection — the behaviour
+	// before this feature.
+	Enabled bool `json:"enabled"`
+	// KeepOverwritten is how long a dotdir sidecar of an overwritten file is
+	// kept, as a duration. Empty means the default.
+	KeepOverwritten string `json:"keep_overwritten"`
+}
+
 // PacksConfig covers installing packs. Discovery and activation need no
 // configuration: they follow the workspace.
 type PacksConfig struct {
@@ -362,6 +374,7 @@ type Config struct {
 	// queues for the model under an allowance a person approved.
 	Schedules SchedulesConfig `json:"schedules"`
 	Packs     PacksConfig     `json:"packs"`
+	Work      WorkConfig      `json:"work"`
 
 	// KeepAlive is how long the backend should keep the model resident after
 	// each request (Ollama keep_alive; Go duration, "0" disables). Refreshed
@@ -472,6 +485,7 @@ func Default() *Config {
 			Provider: "google", APIKeyEnv: "GOOGLE_PSE_API_KEY", MaxResults: 5, AllowFetch: true,
 		},
 		Browser:          BrowserConfig{Address: "127.0.0.1:9222", Launch: true, SnapshotChars: 12000, SettleTimeout: 10, ChromeChannel: "stable"},
+		Work:             WorkConfig{Enabled: true, KeepOverwritten: "168h"},
 		Packs:            PacksConfig{Source: "https://github.com/BE-AI-Research/be-skill-packs"},
 		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3, ConfirmOnStart: true, Allow: []string{}},
 		KeepAlive:        "30m",

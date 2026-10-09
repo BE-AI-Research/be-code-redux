@@ -281,8 +281,10 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	if err := os.WriteFile(p, []byte(updated), 0o644); err != nil {
 		return Result{IsError: true, Content: err.Error()}
-		t.r.noteRead(p, []byte(updated))
 	}
+	// What we wrote is what we last saw, or our own next write would look
+	// like somebody else's change.
+	t.r.noteRead(p, []byte(updated))
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("edited %s (1 replacement)", rel)
 	if note := t.r.runHooks(ctx, "post_write", "FILE", rel); note != "" {

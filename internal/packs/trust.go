@@ -274,11 +274,21 @@ func rawState(path string) []byte {
 
 // readState reads the file; missing or corrupt reads as empty. A decision
 // nobody can produce is not a decision, and this must never fail a session.
+// OnStateRead is told the trust file's bytes whenever it is read, so the work
+// ledger can tell a later outside change from our own write. Nil in
+// production until cmd/root.go assigns it; a hook rather than an import,
+// because internal/workledger reads internal/live and internal/gitctx and
+// this package must not depend on either.
+var OnStateRead func(path string, content []byte)
+
 func readState(path string) state {
 	var st state
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return state{}
+	}
+	if OnStateRead != nil {
+		OnStateRead(path, b)
 	}
 	if json.Unmarshal(b, &st) != nil {
 		return state{}

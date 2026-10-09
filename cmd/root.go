@@ -25,6 +25,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/loader"
 	"github.com/brown-enterprises/be-code/internal/mcp"
+	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/review"
 	"github.com/brown-enterprises/be-code/internal/schedule"
@@ -34,6 +35,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/tui"
 	"github.com/brown-enterprises/be-code/internal/ui"
+	"github.com/brown-enterprises/be-code/internal/workledger"
 )
 
 var (
@@ -57,6 +59,11 @@ var (
 // attachIDE during buildAgent and closed by the caller (runInteractive or
 // the headless run command) on exit.
 var ideSession *ide.Session
+
+// workLedger records what this session is working on and decides what happens
+// when a write collides with somebody else's change. Per-run like ideSession,
+// and closed by finishSession.
+var workLedger *workledger.Ledger
 
 var rootCmd = &cobra.Command{
 	Use:   "be-code",
@@ -366,6 +373,33 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
 		resolveOnline(ctx, cfg, a.CurrentProviderClient(), a, name, model, false)
 	}
+	// The work ledger: this session's record, and the gate on a write that
+	// would overwrite a change which arrived since this session read the
+	// file. The registry reaches it through hooks rather than an import,
+	// because internal/workledger reads internal/live and internal/gitctx.
+	keep := 168 * time.Hour
+	if d, derr := time.ParseDuration(cfg.Work.KeepOverwritten); derr == nil && d > 0 {
+		keep = d
+	}
+	workLedger, _ = workledger.Open(reg.Root, workledger.Options{
+		Enabled:         cfg.Work.Enabled,
+		KeepOverwritten: keep,
+		PID:             os.Getpid(),
+		Model:           model,
+	})
+	workLedger.Warn = func(msg string) { ag.QueueNotice(msg) }
+	reg.OnRead = workLedger.OnRead
+	reg.OnConflict = func(ctx context.Context, path string) (bool, error) {
+		// reg.Approve is whichever UI is running; a fired turn has nobody to
+		// ask and takes the unattended path, which keeps the old version
+		// first and says where it went.
+		return workLedger.OnConflict(ctx, path, workledger.Asker(reg.Approve), reg.Fired(), ag.QueueNotice)
+	}
+	packs.OnStateRead = workLedger.OnRead
+	if line := workLedger.NoticeLine(); line != "" {
+		ag.QueueNotice(line)
+	}
+
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
 }
@@ -602,6 +636,11 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
 	ag.StopAllSubAgents("session ended")
 	ag.StopSchedules()
+	if workLedger != nil {
+		// Ahead of the early returns below: a session with a record must
+		// never leave it behind, even one that wrote no history.
+		_ = workLedger.Close()
+	}
 	s := ag.Session
 	if s == nil || len(ag.History.Messages) == 0 {
 		return
