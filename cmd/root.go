@@ -380,6 +380,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		Model:           model,
 	})
 	reg.OnRead = workLedger.OnRead
+	reg.OnWrote = workLedger.OnWrote
 	packs.OnStateRead = workLedger.OnRead
 	store.OnSessionRead = workLedger.OnRead
 	// The engine hands its own hash rather than its bytes, so the ledger
@@ -434,6 +435,16 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	agent.OnlineResolver = func(ctx context.Context, a *agent.Agent, name, model string) {
 		resolveOnline(ctx, cfg, a.CurrentProviderClient(), a, name, model, false)
 	}
+	// What this session is working on, pulled when the record is written.
+	// Read through ag at call time, not captured now: attachEngine runs after
+	// this, and the engine can be replaced by /task clear.
+	workLedger.SetState(func() (string, int) {
+		if ag.Engine == nil {
+			return "", 0 // no engine, so no turn boundary; the list is capped instead
+		}
+		return ag.Engine.ActiveRootID(), ag.Engine.Turn()
+	})
+
 	// The conflict gate needs ag for its notice sink, so it is assigned here
 	// rather than with the read hooks above.
 	workLedger.SetWarn(noticeSink(ag, reg))

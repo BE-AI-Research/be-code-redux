@@ -32,6 +32,14 @@ type Ledger struct {
 	mu        sync.Mutex
 	lastTouch time.Time
 
+	// state is pulled when the record is written rather than pushed at a turn
+	// boundary: Events is owned by the UIs, so anything buildAgent assigned
+	// there would be overwritten. It returns the doing task and the engine's
+	// turn counter; nil means the engine is off.
+	state    func() (task string, turn int)
+	lastTurn int
+	written  []string
+
 	opt     Options
 	ws      string
 	dir     string
@@ -137,6 +145,16 @@ func (l *Ledger) NoticeLine() string {
 		if o.Task != "" {
 			fmt.Fprintf(&b, ", task %s", o.Task)
 		}
+		if len(o.Writing) > 0 {
+			verb := ", writing "
+			if o.Recent {
+				// No turn counter behind it, so this is the last few paths
+				// rather than what it is doing now. Different claim,
+				// different wording.
+				verb = ", recently wrote "
+			}
+			b.WriteString(verb + strings.Join(o.Writing, ", "))
+		}
 		if o.Suspect {
 			b.WriteString(" (its record is stale; the process may be unrelated)")
 		}
@@ -173,6 +191,14 @@ func (l *Ledger) touch() {
 		return
 	}
 	l.lastTouch = time.Now()
+	// Branch is refreshed, not just read at Open: `git checkout` happens
+	// mid-session, and a notice naming the branch somebody left an hour ago
+	// is worse than naming none.
+	l.rec.Branch = currentBranch(l.ws)
+	if l.state != nil {
+		task, _ := l.state()
+		l.rec.Task = task
+	}
 	rec := l.rec
 	rec.Updated = time.Now().UTC().Format(time.RFC3339)
 	l.rec = rec
@@ -192,6 +218,61 @@ func currentBranch(workspace string) string {
 		return ""
 	}
 	return gitctx.Branch(ctx, workspace)
+}
+
+// writingCap bounds what the record carries. With a turn counter the list is
+// one turn's; without one it is the last few paths, and either way a record a
+// person reads in a notice does not want fifty.
+const writingCap = 10
+
+// SetState gives the ledger a way to read what this session is working on when
+// it writes its record. buildAgent supplies it from the agent's engine.
+func (l *Ledger) SetState(f func() (task string, turn int)) {
+	l.mu.Lock()
+	l.state = f
+	l.mu.Unlock()
+}
+
+// OnWrote records that this session wrote path. The list resets when the
+// engine's turn counter moves, which is the turn boundary — no UI hook
+// needed, and none would survive one.
+func (l *Ledger) OnWrote(path string) {
+	if !l.opt.Enabled || l.dir == "" {
+		return
+	}
+	rel := path
+	if r, err := filepath.Rel(l.ws, path); err == nil && !strings.HasPrefix(r, "..") {
+		rel = filepath.ToSlash(r)
+	}
+
+	l.mu.Lock()
+	recent := true
+	if l.state != nil {
+		_, turn := l.state()
+		recent = false
+		if turn != l.lastTurn {
+			l.lastTurn = turn
+			l.written = nil
+		}
+	}
+	seen := false
+	for _, p := range l.written {
+		if p == rel {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		l.written = append(l.written, rel)
+		if len(l.written) > writingCap {
+			l.written = l.written[len(l.written)-writingCap:] // keep the newest
+		}
+	}
+	l.rec.Writing = append([]string(nil), l.written...)
+	l.rec.Recent = recent
+	l.mu.Unlock()
+
+	l.touch()
 }
 
 // NoteHash records a hash computed elsewhere — the engine's, for a task

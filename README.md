@@ -1273,8 +1273,13 @@ beside the built-ins.
 ### Another session is working here
 
 BE-Code records what each running session is doing — workspace, branch, the
-task it is on — under `~/.be-code/work/`, and says so once when you open a
-second session in the same workspace. The records are advisory, not locks: a
+task it is on, and the files it wrote this turn — under `~/.be-code/work/`,
+and says so once when you open a second session in the same workspace:
+
+```
+note> another session is working in this workspace:
+        pid 48231 on feat/thing, task 003, writing internal/tui/chat.go
+``` The records are advisory, not locks: a
 lock that outlives a crashed process is worse than a lost update.
 
 When a write would overwrite a change that arrived since this session read the

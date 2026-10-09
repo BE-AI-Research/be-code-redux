@@ -50,6 +50,9 @@ func (r *Registry) conflict(ctx context.Context, absPath string, newContent []by
 // because a hook's whole purpose can be to rewrite it; only if the read fails
 // does it fall back to the bytes we sent.
 func (r *Registry) noteWritten(absPath string, wrote []byte) {
+	if r.OnWrote != nil {
+		r.OnWrote(absPath)
+	}
 	if r.OnRead == nil {
 		return
 	}

@@ -104,6 +104,11 @@ type Registry struct {
 	// the conflict check can never fire.
 	OnRead func(absPath string, content []byte)
 
+	// OnWrote names each path this session wrote, separately from OnRead:
+	// "what is this session working on" is the work record's whole point, and
+	// a read is not work on a file.
+	OnWrote func(absPath string)
+
 	// OnBeforeWrite runs after approval, before a file is modified —
 	// the checkpoint hook. A returned error aborts the write.
 	OnBeforeWrite func(absPath string) error
@@ -224,7 +229,7 @@ func (r *Registry) Subset(names ...string) *Registry {
 		// and the writer it can collide with is another *session*. Without
 		// these two a scoped registry wrote over another session's change
 		// with no prompt, no restore point and no notice.
-		OnConflict: r.OnConflict, OnRead: r.OnRead,
+		OnConflict: r.OnConflict, OnRead: r.OnRead, OnWrote: r.OnWrote,
 		ShellDeny: r.ShellDeny, Hooks: r.Hooks,
 		ReviewWrite: r.ReviewWrite, ReviewInvolvesEditor: r.ReviewInvolvesEditor,
 		EditorName: r.EditorName, OnStatus: r.OnStatus,

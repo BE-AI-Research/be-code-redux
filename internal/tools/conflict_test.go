@@ -206,3 +206,45 @@ func TestAPostWriteHookDoesNotCreateAFalseConflict(t *testing.T) {
 			"or the next edit to this file prompts about a change nobody else made", seen)
 	}
 }
+
+// The work ledger needs to know which paths this session wrote, separately
+// from what it read: "what is this session working on" is the record's whole
+// point, and OnRead cannot tell a read from a write.
+func TestWritesAreReportedSeparatelyFromReads(t *testing.T) {
+	r, root := regWithHooks(t)
+	var wrote []string
+	r.OnWrote = func(p string) { wrote = append(wrote, p) }
+
+	if res := r.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "x\n"}`)); res.IsError {
+		t.Fatalf("write failed: %s", res.Content)
+	}
+	if res := r.Dispatch(context.Background(), call("read_file", `{"path": "a.txt"}`)); res.IsError {
+		t.Fatalf("read failed: %s", res.Content)
+	}
+	if res := r.Dispatch(context.Background(), call("edit_file", `{"path": "a.txt", "old": "x", "new": "y"}`)); res.IsError {
+		t.Fatalf("edit failed: %s", res.Content)
+	}
+
+	if len(wrote) != 2 {
+		t.Fatalf("OnWrote fired %d times, want 2 (the write and the edit, not the read): %v", len(wrote), wrote)
+	}
+	want := filepath.Join(root, "a.txt")
+	for _, p := range wrote {
+		if p != want {
+			t.Errorf("OnWrote saw %q, want %q", p, want)
+		}
+	}
+}
+
+// And a subset carries it, like the other two seams.
+func TestSubsetKeepsTheWroteHook(t *testing.T) {
+	r, root := regWithHooks(t)
+	fired := false
+	r.OnWrote = func(string) { fired = true }
+	sub := r.Subset("write_file")
+	sub.Dispatch(context.Background(), call("write_file", `{"path": "a.txt", "content": "x\n"}`))
+	if !fired {
+		t.Error("a subset's write was not reported, so a sub-agent's work never reaches the record")
+	}
+	_ = root
+}

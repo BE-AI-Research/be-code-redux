@@ -57,6 +57,11 @@ type Record struct {
 	Model     string   `json:"model,omitempty"`
 	Task      string   `json:"task,omitempty"`
 	Writing   []string `json:"writing,omitempty"`
+	// Recent marks a Writing list that is the last few paths rather than this
+	// turn's: there was no engine, so no turn counter to reset on. The notice
+	// words it differently, because "writing" and "wrote recently" are
+	// different claims.
+	Recent bool `json:"recent,omitempty"`
 
 	// Suspect is set by Others, never stored: the record went untouched for
 	// longer than StaleAfter while its pid is alive, so the pid may have been
