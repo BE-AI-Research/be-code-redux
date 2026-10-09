@@ -90,8 +90,18 @@ func DiffStat(ctx context.Context, root string) string {
 	return stat + "\n\n" + diff
 }
 
-// SnapshotPrefix is the branch namespace Snapshot creates under.
-const SnapshotPrefix = "be-code/pre-init/"
+const (
+	// SnapshotPrefixInit is the branch namespace /init's restore point uses.
+	SnapshotPrefixInit = "be-code/pre-init/"
+	// SnapshotPrefixOverwrite is the namespace for a restore point taken
+	// before an unattended write overwrites somebody else's change (work
+	// ledger spec §9).
+	SnapshotPrefixOverwrite = "be-code/pre-overwrite/"
+
+	// SnapshotPrefix is the original name, kept so existing callers and the
+	// comment in internal/ui/initflow.go do not have to move.
+	SnapshotPrefix = SnapshotPrefixInit
+)
 
 // gitEnv runs git directly (not through a shell) with extra environment, for
 // the few operations that need a private index.
@@ -119,7 +129,16 @@ func gitEnv(ctx context.Context, root string, env []string, args ...string) (str
 // ref is created — HEAD, the real index and the working tree never move. In a
 // repository with no commits yet the snapshot simply has no parent. Every call
 // makes a fresh branch, so the earliest one stays as the initial restore point.
+// Snapshot is SnapshotTo under the init prefix: /init's restore point.
 func Snapshot(ctx context.Context, root, message string) (string, error) {
+	return SnapshotTo(ctx, root, SnapshotPrefixInit, message)
+}
+
+// SnapshotTo commits the whole working tree — tracked and untracked,
+// honouring .gitignore — as one commit on a new branch under prefix, through
+// a private GIT_INDEX_FILE so HEAD, the real index and the checkout never
+// move. It returns the branch name.
+func SnapshotTo(ctx context.Context, root, prefix, message string) (string, error) {
 	if !IsRepo(ctx, root) {
 		return "", fmt.Errorf("not a git repository")
 	}
@@ -162,12 +181,12 @@ func Snapshot(ctx context.Context, root, message string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	branch := SnapshotPrefix + time.Now().Format("20060102-150405")
+	branch := prefix + time.Now().Format("20060102-150405")
 	for i := 2; ; i++ {
 		if _, err := gitEnv(ctx, root, nil, "rev-parse", "--verify", "-q", "refs/heads/"+branch); err != nil {
 			break // free
 		}
-		branch = fmt.Sprintf("%s%s-%d", SnapshotPrefix, time.Now().Format("20060102-150405"), i)
+		branch = fmt.Sprintf("%s%s-%d", prefix, time.Now().Format("20060102-150405"), i)
 	}
 	if _, err := gitEnv(ctx, root, nil, "update-ref", "refs/heads/"+branch, commit); err != nil {
 		return "", err
