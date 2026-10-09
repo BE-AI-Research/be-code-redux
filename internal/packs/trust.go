@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -14,17 +15,29 @@ import (
 	"sync"
 )
 
-// ContentHash fingerprints the part of a pack that decides what runs: the
-// manifest, and every file under tools/.
+// ContentHash fingerprints the part of a pack that decides what runs:
+// everything in it except the prose.
 //
-// Not the prose. A pack's chunks and core are text the model reads, and
-// re-asking for approval because somebody improved a paragraph would train
-// the person to approve without looking — which is the only way this gate
-// can actually fail. A changed verify command or a rewritten build script is
-// a different matter, and re-asks.
+// Not the prose. A pack's core, chunks, playbooks and README are text the
+// model reads, and re-asking for approval because somebody improved a
+// paragraph would train the person to approve without looking — which is the
+// only way this gate can actually fail. core.md is the sharpest case, since
+// it is injected as standing instructions; it is handled by showing it in the
+// approval prompt and saying plainly that it is not covered, rather than by
+// hashing it. See TrustDetail.
 //
-// The file mode is part of it: making a script executable changes what the
-// pack can do without changing a byte of its contents.
+// Everything else is covered, which is a deny-list and used to be an
+// allow-list of pack.json plus tools/. That was the wrong shape: a tools/
+// script is free to exec ../scripts/real-build, so approving one command
+// covered the wrapper and not the code it actually ran, and a later commit
+// could rewrite that with no further prompt. A config a script reads, a
+// template the model copies and a command file telling it what to do are all
+// in the same position.
+//
+// An executable is never prose, wherever it sits: a program dropped into
+// chunks/ is not text the model reads. The file mode is part of the hash for
+// the same reason — making a script executable changes what the pack can do
+// without changing a byte of its contents.
 func ContentHash(root string) (string, error) {
 	h := sha256.New()
 	add := func(label string, b []byte, mode fs.FileMode) {
@@ -32,30 +45,49 @@ func ContentHash(root string) (string, error) {
 		h.Write(b)
 	}
 
-	manifest := filepath.Join(root, "pack.json")
-	b, err := os.ReadFile(manifest)
-	if err != nil {
-		return "", err
-	}
-	st, err := os.Stat(manifest)
-	if err != nil {
-		return "", err
-	}
-	add("pack.json", b, st.Mode())
-
-	toolsDir := filepath.Join(root, "tools")
 	var paths []string
-	err = filepath.WalkDir(toolsDir, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // no tools/ at all is normal
+			return nil
 		}
-		if !d.IsDir() {
-			paths = append(paths, p)
+		if d.IsDir() {
+			// Version-control metadata is not part of what a pack does, and
+			// a pack installed with `git clone` would otherwise hash
+			// thousands of objects and change its fingerprint on every
+			// commit — re-asking for approval each session, which is the
+			// habit this gate most needs to avoid.
+			switch d.Name() {
+			case ".git", ".hg", ".svn":
+				if p != root {
+					return fs.SkipDir
+				}
+			}
+			return nil
 		}
+		rel, rerr := filepath.Rel(root, p)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if isProse(rel) {
+			// Exempt unless it can be executed, which prose cannot.
+			info, ierr := d.Info()
+			if ierr != nil || info.Mode().Perm()&0o111 == 0 {
+				return nil
+			}
+		}
+		paths = append(paths, p)
 		return nil
 	})
 	if err != nil {
 		return "", err
+	}
+	if len(paths) == 0 {
+		// No manifest and nothing else: let the caller's own load error say so
+		// rather than returning a hash of nothing that would match anything.
+		if _, serr := os.Stat(filepath.Join(root, "pack.json")); serr != nil {
+			return "", serr
+		}
 	}
 	// Sorted: a directory listing's order is not part of what was approved.
 	sort.Strings(paths)
@@ -72,6 +104,24 @@ func ContentHash(root string) (string, error) {
 		add(filepath.ToSlash(rel), b, info.Mode())
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32], nil
+}
+
+// isProse reports whether a pack-relative path is text the model reads rather
+// than something that decides what runs. Kept deliberately short: anything
+// not named here is covered by the trust hash, so a new kind of file in a pack
+// errs toward re-asking rather than toward being changed unnoticed.
+func isProse(rel string) bool {
+	switch {
+	case rel == "core.md":
+		return true
+	case strings.HasPrefix(rel, "chunks/"):
+		return true
+	case strings.HasPrefix(rel, "playbooks/"):
+		return true
+	}
+	base := strings.ToUpper(path.Base(rel))
+	return strings.HasPrefix(base, "README") || strings.HasPrefix(base, "LICENSE") ||
+		strings.HasPrefix(base, "CHANGELOG")
 }
 
 // state is what one workspace has decided about packs, in
@@ -182,16 +232,49 @@ func readState(path string) state {
 	return st
 }
 
+// coreExcerptLines bounds how much of core.md the approval prompt shows. Core
+// is budgeted at up to 1500 tokens — well over a hundred lines — and a modal
+// that long is one people scroll past rather than read, which defeats the
+// point of showing it at all.
+const coreExcerptLines = 15
+
 // TrustDetail is what the approval prompt shows: everything about the pack
 // that decides what it can do. The commands are listed in full, because
 // approving a pack is approving these to run without being asked again.
+//
+// And the rules, because they are the other half of what is being authorised
+// and the prompt used to describe them in four words. A pack's core goes into
+// the system prompt introduced as instructions to follow — the inverse of the
+// framing BECODE.md gets, which says explicitly that project notes are not
+// instructions — so a person approving a pack on the strength of a build
+// command is also consenting to arbitrary standing instructions for the
+// model. That is worth seeing.
+//
+// The prompt says plainly that the rules are not covered by the approval.
+// They are deliberately outside the trust hash (see ContentHash) so that
+// improving a paragraph does not re-ask, which means a repository can change
+// them later without another prompt. Relying on that silently is the part
+// that was wrong; saying it is the fix.
 func TrustDetail(p *Pack, workspace string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pack %q (%s) came with this project, in %s\n", p.Name, p.Version, p.Root)
 	if p.Description != "" {
 		fmt.Fprintf(&b, "%s\n", p.Description)
 	}
-	b.WriteString("\nIt adds rules to every request, and may run these commands when verifying:\n")
+
+	b.WriteString("\nIt adds rules to every request. They are given to the model as\n")
+	b.WriteString("instructions, and they are NOT covered by this approval -- the\n")
+	b.WriteString("repository can change them later without asking again.\n")
+	if excerpt, total, shown := coreExcerpt(p.Core); shown > 0 {
+		b.WriteString("\n")
+		b.WriteString(excerpt)
+		if total > shown {
+			fmt.Fprintf(&b, "  ... (%d of %d lines)\n", shown, total)
+		}
+		fmt.Fprintf(&b, "\nFull text: be-code packs info %s\n", p.Name)
+	}
+
+	b.WriteString("\nIt may run these commands when verifying:\n")
 	checks := p.Checks(workspace)
 	if len(checks) == 0 {
 		b.WriteString("  (none)\n")
@@ -207,6 +290,29 @@ func TrustDetail(p *Pack, workspace string) string {
 	}
 	b.WriteString("\nApprove only if you trust this repository.")
 	return b.String()
+}
+
+// coreExcerpt is the first coreExcerptLines non-empty lines of a pack's core,
+// indented so they read as quoted material rather than as the prompt's own
+// words, with the count so the reader knows what is missing.
+//
+// Blank lines are skipped and are not counted in the total either. Counting
+// them made the prompt say "5 of 7 lines" when it had in fact shown every
+// rule there was, which understates the pack in the one place a person is
+// deciding whether to trust it.
+func coreExcerpt(core string) (excerpt string, total, shown int) {
+	var b strings.Builder
+	for _, l := range strings.Split(strings.TrimSpace(core), "\n") {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		total++
+		if shown < coreExcerptLines {
+			fmt.Fprintf(&b, "  %s\n", l)
+			shown++
+		}
+	}
+	return b.String(), total, shown
 }
 
 func sortedKeys(m map[string]any) []string {
