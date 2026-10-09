@@ -1,11 +1,13 @@
 package verify
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A pack installs by copying a folder, and a copy does not always keep the
@@ -72,5 +74,35 @@ Result: Failed`
 	}
 	if strings.Contains(got, "Building...") {
 		t.Errorf("summary carries the whole log again:\n%s", got)
+	}
+}
+
+// A check built without a timeout used to expire the instant it started,
+// reporting "[timed out after 0s]" for a command that never ran — which reads
+// as a broken build rather than a missing field. ValidateCheck deliberately
+// does not reject it (a timeout is a runtime concern, not a shape error), so
+// the default belongs where the check runs.
+func TestCheckWithNoTimeoutDoesNotFailInstantly(t *testing.T) {
+	c := Check{Name: "echo", Argv: []string{"echo", "hello"}} // no Timeout
+	out, err := c.run(context.Background(), os.TempDir())
+	if err != nil {
+		t.Fatalf("a check with no timeout failed: %v (output %q)", err, out)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Errorf("the command did not run: %q", out)
+	}
+}
+
+// And an explicit timeout is still honoured, so the default cannot mask one
+// somebody chose deliberately.
+func TestAnExplicitTimeoutIsStillHonoured(t *testing.T) {
+	c := Check{Name: "sleep", Argv: []string{"sleep", "5"}, Timeout: 50 * time.Millisecond}
+	start := time.Now()
+	_, err := c.run(context.Background(), os.TempDir())
+	if err == nil {
+		t.Fatal("a check that outlasts its timeout must fail")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("the explicit timeout was ignored: took %s", elapsed)
 	}
 }

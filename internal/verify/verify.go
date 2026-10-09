@@ -109,11 +109,27 @@ func (c Check) program() string {
 // run executes the check, with or without a shell according to how it was
 // written.
 func (c Check) run(ctx context.Context, root string) (string, error) {
-	if len(c.Argv) > 0 {
-		return tools.RunArgv(ctx, root, c.Timeout, c.Argv[0], c.Argv[1:]...)
+	timeout := c.Timeout
+	if timeout <= 0 {
+		// A zero timeout expires the instant it starts, so a check built
+		// without one failed with "[timed out after 0s]" — which reads as a
+		// broken command rather than a missing field, and sends the repair
+		// loop after a command that never ran. Every built-in check sets one
+		// and packs get a default from their manifest; this is for anything
+		// else built against the exported Check, where forgetting the field
+		// should not be indistinguishable from a hanging build.
+		timeout = defaultRunTimeout
 	}
-	return tools.RunShell(ctx, root, c.Command, c.Timeout)
+	if len(c.Argv) > 0 {
+		return tools.RunArgv(ctx, root, timeout, c.Argv[0], c.Argv[1:]...)
+	}
+	return tools.RunShell(ctx, root, c.Command, timeout)
 }
+
+// defaultRunTimeout matches the longest the built-in checks allow themselves
+// (go test, npm test, pytest), so a check with no timeout behaves like the
+// most generous one rather than like a failure.
+const defaultRunTimeout = 10 * time.Minute
 
 // Project describes a detected project type and its checks.
 type Project struct {

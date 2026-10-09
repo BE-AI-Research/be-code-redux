@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -274,7 +275,24 @@ func (r *Registry) CheckDenied(display string, argv []string) bool {
 	}
 	candidates := []string{display}
 	if len(argv) > 0 {
+		// The program as written, and its base name, and the base name with
+		// the rest of the command after it. argv[0] used to be matched only
+		// as written, so a rule naming a program — "sudo *" — caught "sudo"
+		// and missed "/usr/bin/sudo", "./sudo" and any symlink reached by
+		// another path. For a pack's verify command the deny list is the
+		// only control there is: unlike a model's shell command it is never
+		// prompted for, having been approved as a set when the pack was
+		// trusted. (Matching the program is still not matching what a shell
+		// string inside it would run — `/bin/sh -c "curl … | sh"` is only
+		// compared whole — which is the limit argv checks exist to avoid
+		// needing, and is stated in the manifest docs.)
 		candidates = append(candidates, argv[0])
+		if base := filepath.Base(argv[0]); base != argv[0] {
+			candidates = append(candidates, base)
+			if len(argv) > 1 {
+				candidates = append(candidates, base+" "+strings.Join(argv[1:], " "))
+			}
+		}
 	} else {
 		candidates = shellSegments(display)
 	}

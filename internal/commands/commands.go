@@ -69,3 +69,23 @@ func Names(cmds map[string]Command) []string {
 	sort.Strings(out)
 	return out
 }
+
+// Merge adds a pack's commands to a person's own, which always win. A pack
+// comes with somebody's repository or a dotdir install; neither may redefine
+// a command the person wrote. The source is recorded as "pack" so /commands
+// can say where each one came from.
+func Merge(own map[string]Command, packCmds map[string]string) map[string]Command {
+	if len(packCmds) == 0 {
+		return own
+	}
+	if own == nil {
+		own = map[string]Command{}
+	}
+	for name, tmpl := range packCmds {
+		if _, taken := own[name]; taken {
+			continue
+		}
+		own[name] = Command{Name: name, Template: tmpl, Source: "pack"}
+	}
+	return own
+}

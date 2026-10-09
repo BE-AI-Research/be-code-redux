@@ -208,7 +208,7 @@ func NewSession(cfg *config.Config, ag *agent.Agent, _ provider.Provider) *Sessi
 		cfg: cfg, ag: ag,
 		now:      time.Now,
 		histFile: loadInputHistory(ui.HistoryFile()),
-		custom:   commands.Load(ag.Tools.Root),
+		custom:   commands.Merge(commands.Load(ag.Tools.Root), ag.PackCommands()),
 
 		liveCodes:   liveSessionCodes,
 		liveRecords: liveSessionRecords,

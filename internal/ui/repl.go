@@ -96,7 +96,7 @@ func HistoryFile() string {
 // NewREPL builds the REPL with readline configured.
 // The provider argument is not kept: the REPL reads the agent's current one.
 func NewREPL(cfg *config.Config, ag *agent.Agent, _ provider.Provider) (*REPL, error) {
-	custom := commands.Load(ag.Tools.Root)
+	custom := commands.Merge(commands.Load(ag.Tools.Root), ag.PackCommands())
 	items := slashCompleterItems()
 	for _, n := range commands.Names(custom) {
 		items = append(items, readline.PcItem("/"+n))

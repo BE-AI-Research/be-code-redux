@@ -447,10 +447,21 @@ func (r *Registry) add(ts ...Tool) {
 
 // Specs returns provider-level tool specs.
 func (r *Registry) Specs() []provider.ToolSpec {
+	// Snapshot under the lock, then build outside it. A tool's own
+	// Description or Schema may read registry state — packTool's lists the
+	// active packs — so calling them while holding the lock meant a
+	// recursive RLock, and Go blocks that as soon as a writer is queued: a
+	// pack being switched on at the wrong moment deadlocked the process with
+	// no error anywhere. Nothing is called back into the registry from under
+	// the lock any more, which is the invariant rather than an ordering to
+	// remember.
 	r.toolsMu.RLock()
-	defer r.toolsMu.RUnlock()
-	out := make([]provider.ToolSpec, 0, len(r.tools))
-	for _, t := range r.tools {
+	snapshot := make([]Tool, len(r.tools))
+	copy(snapshot, r.tools)
+	r.toolsMu.RUnlock()
+
+	out := make([]provider.ToolSpec, 0, len(snapshot))
+	for _, t := range snapshot {
 		out = append(out, provider.ToolSpec{
 			Name: t.Name(), Description: t.Description(), Parameters: t.Schema(),
 		})
@@ -461,8 +472,10 @@ func (r *Registry) Specs() []provider.ToolSpec {
 // Tool looks one tool up by name.
 func (r *Registry) Tool(name string) (Tool, bool) {
 	r.toolsMu.RLock()
-	defer r.toolsMu.RUnlock()
-	for _, t := range r.tools {
+	snapshot := make([]Tool, len(r.tools))
+	copy(snapshot, r.tools)
+	r.toolsMu.RUnlock()
+	for _, t := range snapshot {
 		if t.Name() == name {
 			return t, true
 		}
@@ -488,10 +501,15 @@ func (r *Registry) removeTool(name string) {
 
 // Names lists tool names.
 func (r *Registry) Names() []string {
+	// Snapshotted for the same reason as Specs: Name is trivial today, but
+	// the rule is that no tool method runs under the registry's lock.
 	r.toolsMu.RLock()
-	defer r.toolsMu.RUnlock()
-	out := make([]string, 0, len(r.tools))
-	for _, t := range r.tools {
+	snapshot := make([]Tool, len(r.tools))
+	copy(snapshot, r.tools)
+	r.toolsMu.RUnlock()
+
+	out := make([]string, 0, len(snapshot))
+	for _, t := range snapshot {
 		out = append(out, t.Name())
 	}
 	return out

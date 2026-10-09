@@ -52,3 +52,47 @@ func TestWorkspaceShadowsGlobal(t *testing.T) {
 		t.Fatalf("shadowing broken: %+v", cmds["deploy"])
 	}
 }
+
+// A pack's commands join a person's own, and a person's own always win: a
+// pack arrives with somebody's repository or a dotdir install, and neither
+// may redefine a command the person wrote themselves.
+func TestMergeKeepsAPersonsOwnCommands(t *testing.T) {
+	own := map[string]Command{
+		"deploy": {Name: "deploy", Template: "my own deploy", Source: "workspace"},
+	}
+	got := Merge(own, map[string]string{
+		"deploy":   "the pack's deploy",
+		"ue-actor": "Create an Actor called $ARGS.",
+	})
+	if got["deploy"].Template != "my own deploy" {
+		t.Errorf("a pack overrode a person's command: %q", got["deploy"].Template)
+	}
+	if got["deploy"].Source != "workspace" {
+		t.Errorf("source changed: %q", got["deploy"].Source)
+	}
+	c, ok := got["ue-actor"]
+	if !ok {
+		t.Fatal("the pack's own command was not offered")
+	}
+	if c.Source != "pack" {
+		t.Errorf("source = %q, want pack so /commands can say where it came from", c.Source)
+	}
+	if c.Expand("MyActor") != "Create an Actor called MyActor." {
+		t.Errorf("a pack command does not expand $ARGS: %q", c.Expand("MyActor"))
+	}
+}
+
+// No packs, nothing changes — including the nil map a session with no
+// commands at all starts from.
+func TestMergeWithNoPackCommandsIsInert(t *testing.T) {
+	own := map[string]Command{"x": {Name: "x", Template: "t", Source: "global"}}
+	if got := Merge(own, nil); len(got) != 1 || got["x"].Template != "t" {
+		t.Errorf("got %+v", got)
+	}
+	if got := Merge(nil, nil); len(got) != 0 {
+		t.Errorf("got %+v, want empty", got)
+	}
+	if got := Merge(nil, map[string]string{"a": "b"}); len(got) != 1 {
+		t.Errorf("got %+v", got)
+	}
+}

@@ -50,6 +50,34 @@ type PackRow struct {
 // it is active, and why.
 func (a *Agent) PackRows() []PackRow { return a.packRows }
 
+// PackCommands are the slash commands the active packs offer, keyed by the
+// name a person types. A pack ships them as prompt templates; the harness
+// already loads exactly that shape from ~/.be-code/commands, so a pack's go
+// into the same map.
+//
+// A person's own command of the same name wins — see the merge at the call
+// sites. A pack arrives with somebody's repository or from a dotdir install,
+// and neither should be able to redefine a command somebody wrote themselves.
+func (a *Agent) PackCommands() map[string]string {
+	out := map[string]string{}
+	for _, src := range a.Tools.Packs() {
+		p, ok := src.(*packs.Pack)
+		if !ok {
+			continue
+		}
+		for name, tmpl := range p.Commands() {
+			if _, taken := out[name]; taken {
+				continue // first active pack wins, in manifest order
+			}
+			out[name] = tmpl
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // LoadPacks discovers the packs on the search path and activates the ones
 // that apply here: detected, or switched on by hand, minus any switched off.
 // It is the one entry point — startup and /packs reload both call it — so the
@@ -300,6 +328,11 @@ func (a *Agent) trustProjectPack(p *packs.Pack, refuse func(string, ...any)) boo
 		a.packPending = true
 		return false
 	}
+	// Approve, not ApproveCtx: this runs at startup or from /packs, neither
+	// of which is inside a turn, so there is no deadline to carry and no
+	// fired-turn mark to set. If activation ever becomes reachable from a
+	// turn, this has to become ApproveCtx with the turn's context — a
+	// question with no deadline would hang a scheduled event.
 	if !a.Tools.Approve("pack_trust", packs.TrustDetail(p, a.Tools.Root)) {
 		refuse("pack %q from this project is not active.", p.Name)
 		return false

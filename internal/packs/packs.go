@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -59,6 +60,7 @@ type Pack struct {
 	checks     []manifestCheck
 	detect     detect
 	mcpServers map[string]any
+	commands   string // manifest.Commands: a pack-relative directory, or ""
 }
 
 type manifest struct {
@@ -120,7 +122,10 @@ func Load(dir string) (*Pack, []string, error) {
 		return nil, nil, fmt.Errorf("pack.json in %s is not valid JSON: %w", root, err)
 	}
 	if m.Schema != schemaVersion {
-		return nil, nil, fmt.Errorf("pack %q declares schema %d; this build understands schema %d", m.Name, m.Schema, schemaVersion)
+		// The directory, not m.Name: a manifest broken enough to have the
+		// wrong schema usually has no name either, and `pack "" declares
+		// schema 0` tells a person nothing about which pack to go and look at.
+		return nil, nil, fmt.Errorf("pack in %q declares schema %d; this build understands schema %d", filepath.Base(root), m.Schema, schemaVersion)
 	}
 	if !nameRe.MatchString(m.Name) {
 		return nil, nil, fmt.Errorf("pack name %q is not usable: lower-case letters, digits and hyphens only", m.Name)
@@ -130,6 +135,7 @@ func Load(dir string) (*Pack, []string, error) {
 		Name: m.Name, Version: m.Version, Description: m.Description,
 		Root: root, CoreBudget: m.Core.BudgetTokens,
 		chunks: map[string]Chunk{}, detect: m.Detect, mcpServers: m.MCPServers,
+		commands: m.Commands,
 	}
 
 	var warns []string
@@ -146,7 +152,12 @@ func Load(dir string) (*Pack, []string, error) {
 			warns = append(warns, fmt.Sprintf("pack %q: chunk name %q is not usable; dropped", p.Name, name))
 			continue
 		}
-		if _, err := p.read(c.File); err != nil {
+		// Readable, not read: Load runs at startup and the body is fetched
+		// on demand later, so reading every chunk in full here only to
+		// discard it is work for nothing. The path checks in readable are the
+		// same ones read applies, so a chunk outside the pack is still
+		// dropped here rather than at first use.
+		if err := p.readable(c.File); err != nil {
 			warns = append(warns, fmt.Sprintf("pack %q: chunk %q (%s) could not be read: %v; dropped", p.Name, name, c.File, err))
 			continue
 		}
@@ -178,11 +189,26 @@ func Load(dir string) (*Pack, []string, error) {
 		if len(mc.Cmd) == 0 {
 			return nil, warns, fmt.Errorf("pack %q: verify[%d] (%s) has no cmd", p.Name, i, mc.Name)
 		}
-		if err := verify.ValidateParser(mc.Parser); err != nil {
-			return nil, warns, fmt.Errorf("pack %q: verify[%d] (%s): %w", p.Name, i, mc.Name, err)
-		}
 		if _, err := parseTimeout(mc.Timeout); err != nil {
 			return nil, warns, fmt.Errorf("pack %q: verify[%d] (%s): timeout %q: %w", p.Name, i, mc.Name, mc.Timeout, err)
+		}
+		// The harness's own validation, which this path never called: it
+		// checks the parser name, and also an empty name or an empty argv
+		// element — both of which produce a check that fails in a way nobody
+		// can read (an exec of "", or an instant "[timed out after 0s]")
+		// rather than one that refuses to load. Validated against a built
+		// check so the argv is the one that would actually run; the
+		// placeholders are irrelevant to what is being checked and the
+		// workspace is unknown at load time.
+		timeout, _ := parseTimeout(mc.Timeout)
+		argv := mc.Cmd
+		if runtimeIsWindows() && len(mc.CmdWindows) > 0 {
+			argv = mc.CmdWindows
+		}
+		if err := verify.ValidateCheck(verify.Check{
+			Name: mc.Name, Argv: argv, Parser: mc.Parser, Timeout: timeout,
+		}); err != nil {
+			return nil, warns, fmt.Errorf("pack %q: verify[%d] (%s): %w", p.Name, i, mc.Name, err)
 		}
 		p.checks = append(p.checks, mc)
 	}
@@ -272,12 +298,100 @@ func (p *Pack) Template(rel string) (string, error) {
 	return p.read(rel)
 }
 
+// DeclaresUnstartedServers reports whether the pack declares mcp_servers,
+// which this build parses and does not start. It is for `packs validate` —
+// where a pack author looks — rather than a load warning, which would appear
+// every session for a pack that is otherwise fine and teach the person to
+// read past warnings.
+func (p *Pack) DeclaresUnstartedServers() []string {
+	if len(p.mcpServers) == 0 {
+		return nil
+	}
+	return sortedKeys(p.mcpServers)
+}
+
+// Commands are the pack's slash commands: the name a person types and the
+// prompt template it expands to, from the directory the manifest's "commands"
+// field names.
+//
+// The field was parsed and never used, so the four commands/*.md files the
+// ue5 pack ships were inert — /ue-actor simply did not exist, though the pack
+// and the format doc both describe it. The harness already has the mechanism
+// the format doc assumes ("prompt templates for whatever slash-command
+// mechanism the harness has"): the same $ARGS templates it loads from
+// ~/.be-code/commands.
+//
+// {pack} is substituted here, as it is in a verify command, because a
+// template that still says {pack} tells the model to read a path that does
+// not exist. Every file goes through read, so a manifest naming a directory
+// outside the pack reaches nothing.
+func (p *Pack) Commands() map[string]string {
+	if p.commands == "" {
+		return nil
+	}
+	dir := filepath.Join(p.Root, filepath.FromSlash(p.commands))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // a declared directory that is absent is nothing to offer
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		rel := path.Join(p.commands, e.Name())
+		body, err := p.read(rel)
+		if err != nil {
+			continue // outside the pack, or unreadable: offer nothing for it
+		}
+		name := strings.TrimSuffix(e.Name(), ".md")
+		out[name] = strings.ReplaceAll(body, "{pack}", p.Root)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// readable is read's path check plus an open, without the body: it answers
+// "could this be read" for Load's sake without pulling every chunk into
+// memory to throw it away.
+func (p *Pack) readable(rel string) error {
+	full, err := p.resolve(rel)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
 // read resolves one of the pack's own files and reads it. Every path that
 // reaches the filesystem from this package goes through here: a path is
 // refused unless it stays inside the pack, with symlinks resolved, so neither
 // "../../.ssh/id_rsa" nor an absolute path nor a link planted in the pack can
 // read anything the pack does not own.
 func (p *Pack) read(rel string) (string, error) {
+	full, err := p.resolve(rel)
+	if err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(full)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// resolve turns one of the pack's own relative paths into an absolute one,
+// refusing anything that does not stay inside the pack. Every path that
+// reaches the filesystem from this package goes through here: a path is
+// refused unless it stays inside the pack, with symlinks resolved, so neither
+// "../../.ssh/id_rsa" nor an absolute path nor a link planted in the pack can
+// read anything the pack does not own.
+func (p *Pack) resolve(rel string) (string, error) {
 	if strings.TrimSpace(rel) == "" {
 		return "", fmt.Errorf("no file named")
 	}
@@ -288,11 +402,21 @@ func (p *Pack) read(rel string) (string, error) {
 	if filepath.IsAbs(clean) {
 		return "", fmt.Errorf("%q must be a path inside the pack, not an absolute one", rel)
 	}
-	full := filepath.Join(p.Root, clean)
+	// Resolve the root once and build the path from it, so a pack reached
+	// through a symlink compares like with like. Building from p.Root and
+	// comparing against the resolved root meant EvalSymlinks' failure on a
+	// path that does not exist left an unresolved path beside a resolved
+	// root — and under the natural dev install
+	// (~/.be-code/packs/ue5 -> ~/dev/be-skill-packs/packs/ue5) a merely
+	// missing file was then reported as "outside pack". A file that is absent
+	// and a file that escapes the pack are very different things to tell
+	// somebody, and the alarming one was the wrong answer.
 	root := p.Root
 	if r, err := filepath.EvalSymlinks(p.Root); err == nil {
 		root = r
 	}
+	full := filepath.Join(root, clean)
+	// A link planted inside the pack is still followed and still checked.
 	real := full
 	if r, err := filepath.EvalSymlinks(full); err == nil {
 		real = r
@@ -301,11 +425,7 @@ func (p *Pack) read(rel string) (string, error) {
 	if err != nil || in == ".." || strings.HasPrefix(in, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("%q is outside pack %q", rel, p.Name)
 	}
-	b, err := os.ReadFile(full)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	return full, nil
 }
 
 // Checks turns the pack's verify entries into checks the verify package can
@@ -320,9 +440,17 @@ func (p *Pack) Checks(workspace string) []verify.Check {
 		}
 		expanded := make([]string, len(argv))
 		for i, a := range argv {
-			a = strings.ReplaceAll(a, "{pack}", p.Root)
-			a = strings.ReplaceAll(a, "{workspace}", workspace)
-			expanded[i] = filepath.FromSlash(a)
+			sub := strings.ReplaceAll(a, "{pack}", p.Root)
+			sub = strings.ReplaceAll(sub, "{workspace}", workspace)
+			if sub != a {
+				// Only a substituted element is a path. FromSlash was applied
+				// to every element, so on Windows a glob argument like
+				// "**/*.ts" became "**\*.ts" — and a flag or a pattern is
+				// not a path. (Invisible on Unix, where FromSlash is the
+				// identity, which is why it survived review.)
+				sub = filepath.FromSlash(sub)
+			}
+			expanded[i] = sub
 		}
 		timeout, _ := parseTimeout(mc.Timeout)
 		out = append(out, verify.Check{

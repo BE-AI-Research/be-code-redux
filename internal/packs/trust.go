@@ -283,7 +283,12 @@ func TrustDetail(p *Pack, workspace string) string {
 		fmt.Fprintf(&b, "  %s: %s\n", c.Name, c.Display())
 	}
 	if len(p.mcpServers) > 0 {
-		b.WriteString("\nAnd would start these servers:\n")
+		// Said accurately. mcp_servers is parsed and nothing starts it, so
+		// "would start these servers" described behaviour this build does not
+		// have — in the one prompt where a person is deciding what to trust,
+		// which is the worst place to overstate anything. When they are
+		// wired, this wording changes with the code.
+		b.WriteString("\nIt declares these tool servers, which this version does not start:\n")
 		for _, n := range sortedKeys(p.mcpServers) {
 			fmt.Fprintf(&b, "  %s\n", n)
 		}

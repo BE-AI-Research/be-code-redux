@@ -93,6 +93,12 @@ var packsValidateCmd = &cobra.Command{
 				problems = append(problems, fmt.Sprintf("check %q: %s is not executable (chmod +x it)", c.Name, prog))
 			}
 		}
+		// mcp_servers is parsed and nothing starts it, so a pack author who
+		// declares one would otherwise wait for a server that never arrives.
+		if servers := p.DeclaresUnstartedServers(); len(servers) > 0 {
+			problems = append(problems, fmt.Sprintf("mcp_servers declares %s, which this version does not start",
+				strings.Join(servers, ", ")))
+		}
 		// A chunk larger than the smallest tool-output cap is truncated on a
 		// small window, which is where packs matter most.
 		for _, n := range p.ChunkNames() {
