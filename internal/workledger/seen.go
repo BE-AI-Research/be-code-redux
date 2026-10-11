@@ -29,8 +29,10 @@ type Seen struct {
 	dirty bool
 }
 
-// NewSeen loads what a previous run of this session recorded, if any. A
-// missing or corrupt store is simply nothing seen yet.
+// NewSeen opens the store at path, loading whatever is there. In production
+// nothing is: the path is this process's own and Close removes it, so the
+// store is in-memory for the life of the process. The file form stays for a
+// caller that wants to carry one across a restart.
 func NewSeen(path string) *Seen {
 	s := &Seen{path: path, hash: map[string]string{}}
 	if b, err := os.ReadFile(path); err == nil {
@@ -90,9 +92,10 @@ func (s *Seen) Changed(file string) (bool, []byte, error) {
 // looking unseen.
 func (s *Seen) Forget(file string) { s.NoteHash(file, deleted) }
 
-// Flush persists the hashes so a resumed session does not treat every file as
-// unseen. A failure is returned but never fatal: in-memory detection is
-// unaffected.
+// Flush persists the hashes. Ledger.Close does not call it — a store named
+// by pid and start time has no reader in a later process — so this is for a
+// caller that keys the path by something that survives. A failure is returned
+// but never fatal: in-memory detection is unaffected.
 func (s *Seen) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,12 @@ var StaleAfter = time.Hour
 // in this directory belongs to somebody else and is never touched — the seen
 // store lives here too.
 var recordName = regexp.MustCompile(`^\d+-\d{8}T\d{6}Z\.json$`)
+
+// seenName is a session's seen store, <pid>-<stamp>.seen.json. Builds before
+// 1.2.6 flushed one at Close and never removed it, so a machine that has run
+// sessions since the work ledger shipped holds one per session; Others prunes
+// one whose pid is gone, by the pid in its own name and nothing else.
+var seenName = regexp.MustCompile(`^(\d+)-\d{8}T\d{6}Z\.seen\.json$`)
 
 // Record is one running session's work. Written at turn boundaries, not per
 // tool call: the only consumers are another session's startup notice and a
@@ -131,7 +138,16 @@ func Others(dir, workspace string, selfPID int) []Record {
 		// without error (PID 0) — so a name filter plus a "not a record"
 		// delete was removing every session's seen file, including this
 		// session's own, on every call.
-		if e.IsDir() || !recordName.MatchString(e.Name()) {
+		if e.IsDir() {
+			continue
+		}
+		if m := seenName.FindStringSubmatch(e.Name()); m != nil {
+			if pid, perr := strconv.Atoi(m[1]); perr == nil && !Alive(pid) {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
+			continue
+		}
+		if !recordName.MatchString(e.Name()) {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())

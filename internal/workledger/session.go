@@ -286,6 +286,17 @@ func (l *Ledger) NoteHash(path, hash string) {
 	l.seen.NoteHash(path, hash)
 }
 
+// Changed reports whether path moved since this session last saw it, and
+// resolves nothing. It is what edit_file asks, whose write already carries the
+// other version and so has no conflict to resolve.
+func (l *Ledger) Changed(path string) bool {
+	if !l.opt.Enabled || l.seen == nil {
+		return false
+	}
+	changed, _, err := l.seen.Changed(path)
+	return err == nil && changed
+}
+
 // OnConflict is the tools hook: has path changed since this session read it,
 // and if so what happens. true means write.
 func (l *Ledger) OnConflict(ctx context.Context, path string, mine []byte, ask Asker, who Attendance, notice func(string)) (bool, error) {
@@ -328,17 +339,18 @@ func (l *Ledger) Turn(branch, task string, writing []string) {
 	}
 }
 
-// Close removes this session's record and persists what it saw, so a resumed
-// session does not treat every file as unseen.
+// Close removes this session's record and its seen store. The store is not
+// flushed: it is named by this process's pid and start time, which no later
+// process ever has, so a flushed file had no reader and only accumulated —
+// one per session, forever. What this session saw lives for this process.
 func (l *Ledger) Close() error {
-	if !l.opt.Enabled {
+	if !l.opt.Enabled || l.dir == "" {
 		return nil
 	}
 	if l.seen != nil {
-		_ = l.seen.Flush()
-	}
-	if l.dir == "" {
-		return nil
+		if err := os.Remove(l.seen.path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return Remove(l.dir, l.rec.PID, l.rec.Started)
 }

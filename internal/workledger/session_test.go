@@ -40,8 +40,30 @@ func TestOpenWritesThisSessionsRecordAndCloseRemovesIt(t *testing.T) {
 	}
 	entries, _ = os.ReadDir(dir)
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".seen.json") {
-			t.Errorf("Close left %s behind", e.Name())
+		t.Errorf("Close left %s behind", e.Name())
+	}
+}
+
+// The seen store is this process's own: it is named by pid and start time,
+// which no later process ever has again, so a file flushed at Close could
+// never be read back — it only accumulated, one per session, forever. A
+// session that read files and closed leaves nothing in the work directory.
+func TestCloseLeavesNoSeenStoreBehind(t *testing.T) {
+	ws := t.TempDir()
+	l := openFor(t, ws)
+	f := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l.OnRead(f, []byte("v1\n"))
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := Dir()
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".seen.json") {
+			t.Errorf("Close left the seen store %s behind; nothing can ever read it", e.Name())
 		}
 	}
 }

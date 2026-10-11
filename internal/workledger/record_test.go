@@ -187,7 +187,7 @@ func TestOthersLeavesFilesItDoesNotRecognise(t *testing.T) {
 	if err := Save(dir, rec(42, "/w")); err != nil {
 		t.Fatal(err)
 	}
-	seen := filepath.Join(dir, "4242-20261009T120000Z.seen.json")
+	seen := filepath.Join(dir, "42-20261009T120000Z.seen.json") // the live session's own
 	if err := os.WriteFile(seen, []byte(`{"/w/a.go":"abc"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -203,5 +203,28 @@ func TestOthersLeavesFilesItDoesNotRecognise(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("%s was deleted; Others must never remove a file it cannot classify", filepath.Base(p))
 		}
+	}
+}
+
+// A seen store whose process is gone is an orphan — earlier builds flushed one
+// at Close and never removed it, so a machine that has run sessions since the
+// work ledger shipped has one per session. Others prunes it exactly as it
+// prunes a dead record: by the pid in its own name, and only that.
+func TestOthersPrunesASeenStoreWhoseProcessIsGone(t *testing.T) {
+	dir := t.TempDir()
+	stubAlive(t, map[int]bool{42: true})
+	dead := filepath.Join(dir, "4242-20261009T120000Z.seen.json")
+	live := filepath.Join(dir, "42-20261009T120000Z.seen.json")
+	for _, p := range []string{dead, live} {
+		if err := os.WriteFile(p, []byte(`{"/w/a.go":"abc"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	Others(dir, "/w", 1)
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Error("the orphaned seen store of a dead process was left behind")
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Error("a live session's seen store was removed")
 	}
 }
