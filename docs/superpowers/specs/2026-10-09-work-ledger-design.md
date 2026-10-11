@@ -161,9 +161,14 @@ Once per session, at the end of `buildAgent` where `ExplainBudget` already
 speaks, and only when there is something to say:
 
 ```
-note> another session is working in this workspace: pid 48231 on feat/thing,
-      task 003, started 21 minutes ago (be-code sessions lists them)
+note> another session is working in this workspace:
+        pid 48231 on feat/thing, task 003, writing internal/tui/chat.go
 ```
+
+(*Amended 2026-10-10.* The design's draft ended the line "(be-code sessions
+lists them)"; it does not — `be-code sessions` lists saved sessions and live
+hosts, not work records — so the hint was dropped rather than made true. The
+record is read only here and in a conflict's detail.)
 
 It is a **notice, not a question**. Opening a second session in a workspace is
 an ordinary thing to do — the owner does it from an SSH login every day — and

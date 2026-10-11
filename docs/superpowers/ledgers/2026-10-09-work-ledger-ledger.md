@@ -263,3 +263,72 @@ repository, so no base), `TestDispatchSnapshotsTheTreeAndTellsTheSubAgent`
 system prompt names it, HEAD and the checkout did not move),
 `TestRenderDispatchNamesTheBaseBranch`, `TestHandBackLineNamesWhatChangedUnderneath`,
 and the five `Run` tests. Each watched RED first.
+
+---
+
+# Deferred minors, resolved (2026-10-10, branch `chore/deferred-minors`)
+
+Every `minor (deferred)` line in this ledger and in the pack loader's, taken
+up at the owner's request. Each behavioural change has a test that failed
+first; comment and document changes do not.
+
+**Work ledger.** The seen store is in memory only: `NewSeen()` takes no path,
+`Flush`, the on-disk load, `Forget` and the `deleted` sentinel are gone (a seen
+file that is now missing is simply a change), and the `os.TempDir()` fallback
+path with it. `Open` returns `*Ledger` alone. `Close` marks the ledger closed
+and every hook — `OnRead`, `OnWrote`, `NoteHash`, `Changed`, `OnConflict`,
+the heartbeat — is a no-op after it, so a `store.Save` after `finishSession`
+cannot write the record back (`TestAClosedLedgerIgnoresLateHooks`; the ghost
+record that test guards against was a worse bug than the stale map the minor
+named). `be-code init` closes its ledger. `Record.Session` is pulled through
+`SetSession` (`store.CodeFor(ag.Session.ID)`) when the record is next written
+(`TestTheRecordNamesTheSessionOnceKnown`). `Conflict.Detail` says when the
+other record is stale (`TestDetailSaysWhenTheRecordIsStale`). The dead `Turn`
+method is removed. Spec §5's "(be-code sessions lists them)" is withdrawn in
+the spec rather than made true. README's `keep_overwritten` says what a
+sidecar actually covers.
+
+Ruling: `KeepOld`'s whole-tree snapshot per conflict and the unpruned
+`pre-overwrite` branches stand. A restore point that is a branch is what the
+owner asked for, and pruning restore points is a decision about how long a
+mistake stays recoverable, which is not mine. Cost if wrong: branch litter in a
+busy workspace.
+
+**Trust file.** `mutate` reads the file once per attempt (`parseState` over the
+bytes it compares) so `OnStateRead` sees exactly what was used; `writeState`
+notes its own bytes (`TestMutateNotesWhatItWrote`); the comment says the
+window is narrowed, not closed. The pack loader's "lost update newly
+reachable" minor was already answered by this compare-and-retry.
+
+**Pack loader.** `Resolve` refuses a source beginning with `-`, and both
+`clone` forms put `--` before their positionals
+(`TestResolveRefusesALeadingDash`, `TestClonePutsADoubleDashBeforeItsPositionals`).
+`Install` refuses a workspace that does not exist
+(`TestInstallRefusesAWorkspaceThatDoesNotExist`). `locate` errors on two
+directories claiming one name (`TestLocateRefusesTwoDirectoriesClaimingOneName`).
+A failure after the move says the pack is at its path without a marker or an
+approval and what to do. `/packs add` and `/packs update` run under the
+session's context (`ui.PacksCommand(ctx, …)`, `Session.baseCtx`;
+`TestPacksAddHonoursACancelledContext`). `packs remove` in a repository says
+`git checkout -- .becode/packs/<name>` brings a committed pack back, in both
+UIs through `ui.RemoveHint`. `/packs add <name>[@ref] [source]` is in the
+usage and the palette row. `packs.Now` has a test. The unreachable
+`ValidPackName` case is gone.
+
+Ruling: `/packs add` with no name still clones before any approval. The
+listing *is* the clone, the source is the one the person configured or named,
+and an approval to contact a host before showing what it offers would be a
+second prompt on the surface built to need fewer. Cost if wrong: a network
+round trip to a host the person already chose, before a prompt.
+
+Ruling: `locate` still matches the manifest's name rather than the directory's.
+The name is what the person asked for and what the pack calls itself; the
+duplicate case, which was the harm, is now an error.
+
+**Documentation.** CHANGELOG entries for the pack loader, the work ledger and
+the sub-agent drift. README gains a **Skill packs** section (install, update,
+remove, the picker, the marker/consent split, the two dot-directories). The
+repo-root CLAUDE.md gains a packs section — outside git, as always.
+
+Not done, and raised to the owner: the prose exemption in `ContentHash`
+(pack loader I5), which is a trust policy for every published pack.

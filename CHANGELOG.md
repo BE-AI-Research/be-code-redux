@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+- **Skill packs can be installed into a project** — `be-code packs add <name>[@ref]`, the
+  **Install a skill pack** row in `/menu`, or `/packs add` with no name, which opens a picker of
+  what the packs repository offers (plain mode lists them). A pack is fetched from
+  `packs.source` (the public `be-skill-packs` repository by default; `--source` or a second
+  argument names a directory or any git URL instead), validated in a temporary directory, and
+  only then moved into `.becode/packs/<name>` with a `.pack-source.json` marker recording where
+  it came from and at which commit. Commit the pack: the marker is the project's declaration that
+  it wants it, so it stays wanted when the project is moved or cloned, and `packs update <name>`
+  re-fetches it at the ref the marker names. What never travels with the project is consent —
+  a pack that arrives in a clone still asks `pack_trust` on that machine before a rule of its
+  reaches the model. Installing always asks a person (`pack_install`, no "always"); `-y` does not
+  answer it, because an install records trust and a model that could install a pack could
+  rewrite its own instructions. `packs remove <name>` deletes the directory and forgets its
+  approval, and `be-code verify` runs a project pack's checks only when exactly that content was
+  approved here.
+- **A session knows what other sessions are doing in the same workspace, and a write that would
+  overwrite somebody else's change stops.** Every interactive session records what it is working
+  on — workspace, branch, task, the files it wrote this turn — under `~/.be-code/work/`, and a
+  second session opened in the same workspace is told once: `another session is working in this
+  workspace: pid 48231 on feat/thing, task 003, writing internal/tui/chat.go`. The records are
+  advisory, not locks. Detection is by content: each file is remembered as this session last read
+  or wrote it, and a `write_file` to one that changed since asks `work_conflict` with the
+  difference in front of you — keep mine (theirs is kept and the notice says where) or keep
+  theirs. With nobody to ask — a scheduled event, a headless run — it writes, but first makes the
+  old version recoverable: a `be-code/pre-overwrite/<stamp>` branch for a file in the workspace,
+  a timestamped copy beside it for a workspace that is not a repository, and the notice gives the
+  command that restores it; if the old version cannot be kept at all, the write does not proceed.
+  An `edit_file` to a file that moved is not a conflict — its replacement is applied to the
+  current contents, so nothing is lost — and the model is told the file changed and to read it
+  again before editing further. The trust file's own read-modify-write is guarded by compare and
+  retry and never prompts: a microsecond interleaving is nobody's decision. `work.enabled`
+  (true) turns the whole thing off; `work.keep_overwritten` (`168h`) is how long a sidecar copy
+  is kept.
+- **A sub-agent's hand-back names what changed under it, and where the tree it began from is.**
+  Before a sub-agent's first request the working tree is committed to a fresh
+  `be-code/sub-agent/<stamp>` branch (HEAD, the index and the checkout never move) and the
+  sub-agent is told, so it can read any file as it was when it began with the `show` tool. Each
+  run keeps its own record of what it read, and the hand-back lists every such file that
+  somebody else — another session, or this session's own main model — changed before it
+  finished, with the branch: `…; changed under it: internal/scan/a.go (the tree it began from is
+  on be-code/sub-agent/…)`. Both the main model and the sub-agent are told and neither is
+  stopped; which reading matters is theirs to decide. Two sub-agents can still never hold
+  overlapping scopes.
+
 - **Structured verification output (first step toward packs).** A check may now name an output
   parser, and when it does the repair turn is given the single root cause instead of a slice of
   the log. A failing Unreal build is thousands of lines of which all but the first are

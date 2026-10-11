@@ -1129,6 +1129,46 @@ providers have presets (`be-code setup` writes them); see [Online providers](#on
 echo "fix the failing test" | ./be-code run -y   # pipeline mode (auto-approve shell)
 ```
 
+## Skill packs
+
+A pack is a folder of Markdown and JSON that teaches the model one kind of project: always-on
+rules for the system prompt, knowledge in chunks it fetches one at a time, verification commands
+with a parser that reads their output, an error playbook for the repair turn. Nothing in a pack
+executes inside BE-Code; a check it names runs like the project's own checks and is approved
+as a set. The public packs live at `https://github.com/BE-AI-Research/be-skill-packs`.
+
+```bash
+be-code packs                          # what is found, and which packs are wanted here (*)
+be-code packs add assist               # fetch a pack into .becode/packs/assist (asks first)
+be-code packs add assist@v0.1.0        # at a tag, branch or commit
+be-code packs add mine --source ../my-packs   # a directory, or any git URL
+be-code packs update assist            # re-fetch at the ref it was installed from
+be-code packs remove assist            # delete it and forget its approval here
+be-code packs validate ./my-pack       # for a pack author: what the loader would refuse
+```
+
+In a session, `/packs` lists them, `/packs add` with no name opens a picker of what the source
+offers (the **Install a skill pack** row in `/menu` is the same thing), `/packs add <name>[@ref]
+[source]`, `/packs update <name>` and `/packs remove <name>` do what the commands above do, and
+`/packs on|off|default <name>` switches one for this project. Installing always asks a person
+and `-y` never answers it.
+
+**Where a pack lives decides who vouches for it.** A pack in `~/.be-code/packs/<name>` is your
+own and needs no permission. A pack in a project's `.becode/packs/<name>` arrived with the
+repository — or you installed it there — and its rules go into every request, so it asks once
+per workspace (`pack_trust`) listing every command it would run, and the answer is remembered
+against a fingerprint of the pack's manifest and tools. Installing a pack records that approval
+for you, which is what writing the directory by hand cannot do. The install also writes
+`.pack-source.json` beside the pack: where it came from, at which commit, when. **Commit it with
+the pack.** The marker is the project's declaration that it wants the pack, so it stays active
+when the project is moved or cloned and `packs update` knows where to fetch from; what never
+travels is consent — a clone on another machine still asks there. `packs remove` deletes the
+directory outside the write seam, so `/undo` cannot bring it back; a committed pack comes back
+with `git checkout -- .becode/packs/<name>`.
+
+Note the two dot-directories: `.becode/` holds packs and custom commands, `.be-code/` holds the
+task engine's documents. `packs.source` in the config points `packs add` at your own mirror.
+
 ## Project memory
 
 Drop a `BECODE.md` in the workspace root (falls back to `CLAUDE.md`) — build commands,
@@ -1318,9 +1358,11 @@ hand; `/config` prints what the running session actually resolved.
   the same workspace, and asks before a write would overwrite a change that
   arrived since this session read the file. `false` is the behaviour before
   the work ledger: no record, no notice, no detection.
-- `work.keep_overwritten` (`168h`) — how long a copy of an overwritten dotdir
-  file is kept beside it. Workspace files go to a `be-code/pre-overwrite/…`
-  git branch instead, which is never pruned.
+- `work.keep_overwritten` (`168h`) — how long the timestamped copy of an
+  overwritten file is kept beside it, where a copy is what the restore point
+  has to be: a workspace that is not a git repository, or a file `.gitignore`
+  excludes. Anything else goes to a `be-code/pre-overwrite/…` branch, which is
+  never pruned.
 - `packs.source` (`https://github.com/BE-AI-Research/be-skill-packs`) — where
   `be-code packs add` fetches from when `--source` is not given. Point it at your own
   mirror to make every install in every workspace come from there; an empty value means
