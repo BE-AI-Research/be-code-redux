@@ -30,6 +30,11 @@ type Dispatch struct {
 	MaxTurns    int
 	Interrupted bool
 	Touched     []string
+	// Base is the git branch holding the working tree as it was when the
+	// step was dispatched ("" outside a repository, or when the snapshot
+	// failed). The sub-agent can read any file as it was then with the
+	// show tool, and the main model can diff against it.
+	Base string
 }
 
 // HandBack is what comes back when the sub-agent's run ends.
@@ -42,6 +47,13 @@ type HandBack struct {
 	Files   []string
 	Elapsed time.Duration
 	Calls   int
+	// Drifted is every file the sub-agent read that somebody else — another
+	// session, or this session's own main model — changed before the run
+	// ended, workspace-relative. Its summary was written against the older
+	// versions of these. A file the sub-agent itself wrote is never here.
+	Drifted []string
+	// Base is Dispatch.Base: where the tree it began from is.
+	Base string
 }
 
 // Ask is one question from a sub-agent to the main model.

@@ -97,6 +97,11 @@ const (
 	// before an unattended write overwrites somebody else's change (work
 	// ledger spec §9).
 	SnapshotPrefixOverwrite = "be-code/pre-overwrite/"
+	// SnapshotPrefixSubAgent is the namespace for the tree as it was when a
+	// step was handed to a sub-agent, so the sub-agent and the main model can
+	// both read what a file looked like before anything moved under it
+	// (sub-agent spec §1.6, §2.6; work ledger spec §3, sub-project B).
+	SnapshotPrefixSubAgent = "be-code/sub-agent/"
 
 	// SnapshotPrefix is the original name, kept so existing callers and the
 	// comment in internal/ui/initflow.go do not have to move.

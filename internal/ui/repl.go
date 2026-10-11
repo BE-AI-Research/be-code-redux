@@ -1319,7 +1319,11 @@ func Events() agent.Events {
 				if len(hb.Files) > 0 {
 					files = strings.Join(hb.Files, ", ")
 				}
-				fmt.Println(dim(fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, files)))
+				line := fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, files)
+				if drift := agent.HandBackDrift(hb); drift != "" {
+					line += "; " + drift
+				}
+				fmt.Println(dim(line))
 			case "interrupted":
 				fmt.Println(dim(label + " interrupted"))
 			default:

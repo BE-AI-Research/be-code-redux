@@ -194,6 +194,7 @@ type Dispatch struct {
     MaxTurns  int
     Interrupted bool   // re-dispatched after a session ended mid-step (§3.6)
     Touched   []string // files its earlier attempt wrote, when Interrupted
+    Base      string   // git branch holding the tree as it was at dispatch; "" outside a repo (added 2026-10-10)
 }
 
 type HandBack struct {
@@ -205,6 +206,8 @@ type HandBack struct {
     Files    []string      // files written
     Elapsed  time.Duration
     Calls    int
+    Drifted  []string      // files it read that somebody else changed before it finished (added 2026-10-10)
+    Base     string        // Dispatch.Base
 }
 
 type Ask struct {   // one question, one answer
@@ -385,8 +388,29 @@ sub-agent big finished 3.2 (done, 14m, 22 tool calls; wrote internal/scan/token.
 <summary>
 ```
 
-or `sub-agent big stopped on 3.2 (blocked: turn cap of 40 reached): …`. The
-queue already lands it after the tool results the main model was waiting on,
+or `sub-agent big stopped on 3.2 (blocked: turn cap of 40 reached): …`.
+
+*Amended 2026-10-10 (work ledger spec §3, sub-project B).* Before the
+sub-agent's first request, the dispatch commits the working tree to a fresh
+`be-code/sub-agent/<stamp>` branch (`gitctx.SnapshotTo`; HEAD, the index and
+the checkout never move) and names it to the sub-agent, which can read any
+file as it was then with the `show` tool. The run keeps its own record of
+what it read (`workledger.Run` — its own, not the session's, because the
+main model's write to a file the sub-agent read would update the session's
+record and read as "no change"), and the hand-back names every such file
+that changed before the run ended, with the branch:
+
+```
+sub-agent big finished 3.2 (done, 14m, 22 tool calls; wrote internal/scan/token.go; changed under it: internal/scan/a.go (the tree it began from is on be-code/sub-agent/20261010-120000)):
+```
+
+Both the sub-agent and the main model are told, and neither is stopped: the
+sub-agent's summary was written against the older version, and which of the
+two readings matters is theirs to decide. Outside a repository there is no
+branch, and the hand-back still names what moved. Overlapping scopes are
+refused at dispatch (§2.1, "scope overlaps"), which is the other half of B.
+
+The queue already lands it after the tool results the main model was waiting on,
 and if the main model is idle the existing leftover-queue rule starts a turn
 with it — the main model then verifies (`RunFull`'s loop runs on that request
 as on any other), marks the parent, and carries on. The line is also posted

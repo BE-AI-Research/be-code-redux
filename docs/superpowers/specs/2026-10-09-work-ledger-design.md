@@ -65,7 +65,7 @@ This spec is sub-project **A**. Agreed decomposition and order:
 | | What | Status |
 |---|---|---|
 | **A** | The record of active work, and conflict on shared files (sessions on this machine, plus the dotdir files) | this spec |
-| **B** | Sub-agents and co-workers inside one session: refusing or prompting on overlapping scope, and naming in a hand-back what changed underneath it | next, reads A's record |
+| **B** | Sub-agents and co-workers inside one session: refusing or prompting on overlapping scope, and naming in a hand-back what changed underneath it | built 2026-10-10: overlap was already refused at dispatch; the hand-back now names what moved under the run and the `be-code/sub-agent/<stamp>` branch holding the tree it began from (sub-agent spec §1.6, §2.6) |
 | **C** | Teammates through the repo | a separate decision, after A ships |
 
 C is deferred with a reason, not forgotten: a committed record is stale by

@@ -205,3 +205,61 @@ Post-merge: minor (deferred): CHANGELOG.md has no entry for the pack loader
 or the work ledger.
 Post-merge: minor (deferred): the `Seen` file form (`NewSeen` load, `Flush`)
 now has no production caller.
+
+---
+
+# Sub-project B: what moved under a sub-agent (2026-10-10)
+
+Branch `feat/subagent-drift`, on top of `fix/review-importants`. No plan
+document: the owner approved the approach in conversation — a per-run record
+of what the sub-agent read, *and* a git snapshot of the tree at dispatch "so
+the agent can always refer to the existing code … both solutions work, and
+the primary and agent can then decide which is relevant".
+
+B: Ruling: overlap between sub-agents needs nothing new — `subagent.Ready`
+refuses a candidate whose scope overlaps a running root, and
+`engine.Store.SetScope` refuses an overlapping scope — so B is the drift half
+only. Cost if wrong: none; both refusals have tests.
+
+B: Ruling: the run's record (`workledger.Run`) is its own, never the
+session's `Seen`. The main model writing a file the sub-agent had read
+updates `Seen` and reads as "no change" — true of the session, wrong for the
+sub-agent, and the case where a hand-back's advice is most likely stale.
+`TestRunCountsAWriteByThisSessionToo` pins it. The first read is the
+baseline; a later read of a file that already moved does not quietly become
+one. Cost if wrong: a sub-agent that re-reads a file after it moved, and
+whose summary rests on the second read, is still reported as drifted — the
+honest over-report.
+
+B: Ruling: `Run.Wrote(path)` forgets the baseline and the registry's
+following `OnRead(path, on-disk)` re-sets it — the order `noteWritten`
+already uses, so a post_write hook's rewrite is the run's own result and a
+path only written and never read back is never drift. The earlier WIP took
+the content directly; the hooks do not carry it. Cost if wrong: none seen;
+`TestRunDoesNotReportItsOwnWrites` and `TestRunNeverReportsAFileItOnlyWrote`.
+
+B: Ruling: the snapshot is taken in `runSub` after consent, on the run's own
+goroutine, not in `dispatchPicked` on the agent goroutine: a whole-tree
+`git add -A` into a private index is seconds on a large repository, and a
+dispatch from inside `run()` should not pay them. A failed snapshot is one
+notice and the step runs without a base — orientation, never a gate. Cost if
+wrong: a snapshot that fails leaves `Dispatch.Base` empty and the hand-back
+names drift without a branch.
+
+B: Ruling: one `be-code/sub-agent/<stamp>` branch per dispatch, never
+pruned — the same shape as `pre-overwrite` and `pre-init`, and the same
+deferred cost (a branch list that grows). The dispatch tells the sub-agent
+that files `.gitignore` excludes are not on it, the lesson `KeepOld` paid
+for. Cost if wrong: litter.
+
+B: `HandBackDrift` is the one definition both UIs and the queued line use for
+the drift clause, so they cannot disagree. `run --json` rows carry `drifted`
+and `base`.
+
+B: tests: `TestHandBackNamesFilesThatMovedUnderTheSubAgent` (a hooked
+provider moves a file between the sub-agent's read and its next request; no
+repository, so no base), `TestDispatchSnapshotsTheTreeAndTellsTheSubAgent`
+(a real repository: the branch holds the pre-dispatch file, the sub-agent's
+system prompt names it, HEAD and the checkout did not move),
+`TestRenderDispatchNamesTheBaseBranch`, `TestHandBackLineNamesWhatChangedUnderneath`,
+and the five `Run` tests. Each watched RED first.

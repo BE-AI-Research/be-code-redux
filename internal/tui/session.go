@@ -789,7 +789,11 @@ func (s *Session) onSubAgentEnd(hb subagent.HandBack) {
 		if len(hb.Files) > 0 {
 			files = strings.Join(hb.Files, ", ")
 		}
-		s.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, files)})
+		line := fmt.Sprintf("%s done in %s, %d tool calls; wrote %s", label, hb.Elapsed.Round(time.Second), hb.Calls, files)
+		if drift := agent.HandBackDrift(hb); drift != "" {
+			line += "; " + drift
+		}
+		s.appendEntryLocked(entry{Kind: entryDim, Text: line})
 	case "interrupted":
 		s.appendEntryLocked(entry{Kind: entryDim, Text: label + " interrupted"})
 	default:

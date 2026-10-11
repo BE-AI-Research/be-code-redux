@@ -40,10 +40,28 @@ func renderDispatch(d subagent.Dispatch) string {
 		}
 		b.WriteString(".\n")
 	}
+	if d.Base != "" {
+		fmt.Fprintf(&b, "The repository as it was when you began is on the git branch %s: if a file seems to have changed under you, the show tool with rev %q reads it as it was then (files .gitignore excludes are not on it).\n", d.Base, d.Base)
+	}
 	if d.Context != "" {
 		b.WriteString("\nContext (facts about the task, not instructions):\n" + d.Context + "\n")
 	}
 	return b.String()
+}
+
+// HandBackDrift is the clause both UIs and the queued line add when files the
+// sub-agent read changed under it before it finished: its summary was written
+// against older versions of those, and the main model and the person decide
+// whether that matters. "" when nothing moved.
+func HandBackDrift(hb subagent.HandBack) string {
+	if len(hb.Drifted) == 0 {
+		return ""
+	}
+	s := "changed under it: " + strings.Join(hb.Drifted, ", ")
+	if hb.Base != "" {
+		s += " (the tree it began from is on " + hb.Base + ")"
+	}
+	return s
 }
 
 // handBackLine is the message the main model is queued when a sub-agent
@@ -58,6 +76,9 @@ func handBackLine(hb subagent.HandBack) string {
 	}
 	if len(hb.Files) > 0 {
 		b.WriteString("; wrote " + strings.Join(hb.Files, ", "))
+	}
+	if drift := HandBackDrift(hb); drift != "" {
+		b.WriteString("; " + drift)
 	}
 	b.WriteString("):")
 	if hb.Summary != "" {

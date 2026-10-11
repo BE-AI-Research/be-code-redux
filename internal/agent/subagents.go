@@ -12,11 +12,13 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/subagent"
 	"github.com/brown-enterprises/be-code/internal/tools"
 	"github.com/brown-enterprises/be-code/internal/verify"
+	"github.com/brown-enterprises/be-code/internal/workledger"
 )
 
 // subAgents is the runner behind spec §2: one goroutine per dispatched
@@ -131,6 +133,13 @@ type subRun struct {
 	stopReason string // set by an operator stop
 	interrupt  bool   // reset the node instead of closing it
 	timedOut   bool
+	// drift is this run's own record of what it read, so the hand-back can
+	// name the files that changed under it. Its own, not the session's: the
+	// session's Seen is shared with the main model, whose write to a file
+	// the sub-agent read would update it and read as "no change" — true of
+	// the session and exactly wrong for the sub-agent. Set at dispatch, read
+	// only through its own mutex.
+	drift *workledger.Run
 }
 
 // SubAgentState is one row of /agents.
@@ -736,7 +745,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	// a context calls into neither the store nor a notice.
 	ctx, cancel := context.WithCancel(s.root)
 	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(),
-		reply: make(chan string, 1), done: make(chan struct{})}
+		reply: make(chan string, 1), done: make(chan struct{}), drift: workledger.NewRun(a.Tools.Root)}
 	s.runs[c.ID] = run
 	s.wg.Add(1)
 	s.mu.Unlock()
@@ -778,6 +787,7 @@ func (a *Agent) runSub(run *subRun) {
 			return
 		}
 		a.noteSharedServer(run.cw)
+		a.snapshotBase(run)
 		scratch := a.subAgent(cp, run, window)
 		s.mu.Lock()
 		run.scratch = scratch
@@ -827,6 +837,32 @@ func (a *Agent) runSub(run *subRun) {
 	s.wg.Done()
 }
 
+// snapshotBase commits the working tree as it is right now to a fresh
+// be-code/sub-agent/<stamp> branch and records it on the dispatch, so the
+// sub-agent can read any file as it was when it began and the main model can
+// diff a hand-back against it (work ledger spec §3, B). On the run's own
+// goroutine, after consent: a whole-tree `git add -A` into a private index
+// is seconds on a large repository, and the agent goroutine should not pay
+// them. Outside a repository there is no base; a failed snapshot is said
+// once and the step runs without one — this is orientation, never a gate.
+func (a *Agent) snapshotBase(run *subRun) {
+	root := a.Tools.Root
+	if !gitctx.IsRepo(run.ctx, root) {
+		return
+	}
+	branch, err := gitctx.SnapshotTo(run.ctx, root, gitctx.SnapshotPrefixSubAgent,
+		fmt.Sprintf("be-code: tree before sub-agent %s began %s", run.d.Owner, run.d.Node))
+	if err != nil {
+		if run.ctx.Err() == nil {
+			a.notice("%s: could not snapshot the tree before %s began (%v); it runs without a base branch", run.d.Node, run.d.Owner, err)
+		}
+		return
+	}
+	a.subs.mu.Lock()
+	run.d.Base = branch
+	a.subs.mu.Unlock()
+}
+
 // unDispatch gives back a run that never started because a scheduled
 // event's turn began between its dispatch and its consent: nobody refused
 // anything, so the node is not closed — it stays todo, its dispatched mark
@@ -855,10 +891,15 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	s.mu.Lock()
 	scratch, question, stopReason := run.scratch, run.question, run.stopReason
 	interrupt, timedOut := run.interrupt, run.timedOut
+	hb.Base = run.d.Base
 	s.mu.Unlock()
 	if scratch != nil {
 		hb.Calls = scratch.Usage().ToolCalls
 	}
+	// What moved under it, read from disk now — after the run, so a file the
+	// main model rewrote during the step is counted, which is the case where
+	// the summary is most likely to be stale. Its own mutex, not s.mu.
+	hb.Drifted = run.drift.Drifted()
 	switch {
 	case interrupt:
 		hb.Status = "interrupted"
@@ -949,6 +990,24 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 	a.subs.mu.Unlock()
 	label := fmt.Sprintf("%s (%s)", d.Owner, d.Node)
 	reg := a.Tools.Scoped(d.Scope, d.Checks, label)
+	// The session's hooks stay (Scoped copies them: a sub-agent's write is
+	// this process's write against another session), and the run's own
+	// record rides behind them. The registry reports a write as OnWrote(path)
+	// then OnRead(path, what is on disk after post_write hooks), in that
+	// order, which is what lets Run tell its own write from drift.
+	parentRead, parentWrote, drift := reg.OnRead, reg.OnWrote, run.drift
+	reg.OnRead = func(p string, b []byte) {
+		if parentRead != nil {
+			parentRead(p, b)
+		}
+		drift.Read(p, b)
+	}
+	reg.OnWrote = func(p string) {
+		if parentWrote != nil {
+			parentWrote(p)
+		}
+		drift.Wrote(p)
+	}
 	reg.AddTool(tools.NewAskMain(func(ctx context.Context, q string) (string, error) { return a.askMain(run, ctx, q) }))
 	reg.AddTool(tools.NewTaskUnder(a.TaskLedger(), d.Node))
 	cfg := *a.Cfg

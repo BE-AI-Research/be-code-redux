@@ -171,7 +171,8 @@ func subAgentRows(ag *agent.Agent) []map[string]any {
 	rows := []map[string]any{}
 	for _, hb := range ag.SubAgentReport() {
 		rows = append(rows, map[string]any{"node": hb.Node, "owner": hb.Owner, "status": hb.Status,
-			"reason": hb.Reason, "elapsed_seconds": hb.Elapsed.Seconds(), "tool_calls": hb.Calls, "files": hb.Files})
+			"reason": hb.Reason, "elapsed_seconds": hb.Elapsed.Seconds(), "tool_calls": hb.Calls, "files": hb.Files,
+			"drifted": hb.Drifted, "base": hb.Base})
 	}
 	return rows
 }
