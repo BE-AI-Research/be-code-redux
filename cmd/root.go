@@ -77,6 +77,16 @@ func conflictAttendance(fired, headless, tty bool) workledger.Attendance {
 	return workledger.Attended
 }
 
+// attendedHere is whether a person can see this process's questions: a
+// terminal on stdin, or a session host, whose terminals are attached through
+// its socket. The host's own stdin is nil — /dev/null, which stdinIsTTY
+// counts as a character device — so the hosted session, the default
+// interactive mode, was Attended only by that accident; a correct TTY check
+// would have turned every hosted session Unattended with nobody told.
+func attendedHere() bool {
+	return flagSessionHost != "" || stdinIsTTY()
+}
+
 // noticeSink is where the work ledger's mid-run notices go.
 //
 // ag.QueueNotice only buffers: FlushQueuedNotices runs from ResolveModel, so
@@ -448,8 +458,9 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// The conflict gate needs ag for its notice sink, so it is assigned here
 	// rather than with the read hooks above.
 	workLedger.SetWarn(noticeSink(ag, reg))
+	reg.OnChanged = workLedger.Changed
 	reg.OnConflict = func(ctx context.Context, path string, mine []byte) (bool, error) {
-		who := conflictAttendance(reg.Fired(), headless, stdinIsTTY())
+		who := conflictAttendance(reg.Fired(), headless, attendedHere())
 		return workLedger.OnConflict(ctx, path, mine, workledger.Asker(reg.Approve), who, noticeSink(ag, reg))
 	}
 	if line := workLedger.NoticeLine(); line != "" {

@@ -45,6 +45,22 @@ func (r *Registry) conflict(ctx context.Context, absPath string, newContent []by
 	return Result{}, true
 }
 
+// movedNote is edit_file's word to the model when the file it is editing has
+// changed since this session last saw it. The edit was applied to the current
+// contents, so nothing of the other writer's is lost — which is why this is a
+// note and not the conflict gate — but the model decided the edit against an
+// older version and should look again before editing further.
+func (r *Registry) movedNote(absPath string) string {
+	if r.OnChanged == nil || !r.OnChanged(absPath) {
+		return ""
+	}
+	rel, err := filepath.Rel(r.Root, absPath)
+	if err != nil {
+		rel = absPath
+	}
+	return fmt.Sprintf("note: %s changed since this session last read it; the edit was applied to the current contents, so read it again before editing further", rel)
+}
+
 // noteWritten records what is at absPath after a write and its post_write
 // hooks. It reads the file back rather than trusting what was passed in,
 // because a hook's whole purpose can be to rewrite it; only if the read fails
@@ -292,9 +308,11 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	if res, ok := t.r.approveWrite(ctx, p, updated); !ok {
 		return res
 	}
-	if res, ok := t.r.conflict(ctx, p, []byte(updated)); !ok {
-		return res
-	}
+	// Not the conflict gate: the replacement was made in what is on disk
+	// *now*, so the other writer's change is already in `updated` and there
+	// is nothing to choose between. Asked before the write so the answer is
+	// about the file the edit was made against.
+	moved := t.r.movedNote(p)
 	if err := t.r.beforeWrite(p); err != nil {
 		return Result{IsError: true, Content: "checkpoint failed: " + err.Error()}
 	}
@@ -303,6 +321,9 @@ func (t *editFileTool) Run(ctx context.Context, args map[string]any) Result {
 	}
 	rel, _ := filepath.Rel(t.r.Root, p)
 	msg := fmt.Sprintf("edited %s (1 replacement)", rel)
+	if moved != "" {
+		msg += "\n" + moved
+	}
 	if note := t.r.runHooks(ctx, "post_write", "FILE", rel); note != "" {
 		msg += "\n" + note
 	}

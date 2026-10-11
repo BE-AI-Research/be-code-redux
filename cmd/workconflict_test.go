@@ -50,3 +50,39 @@ func TestHeadlessApproverDoesNotSpecialCaseWorkConflict(t *testing.T) {
 			"and refusing it when a person is there is what broke the write-last ruling")
 	}
 }
+
+// Every ledger hook the registry offers is wired, including the one edit_file
+// asks: a hook left unassigned is a detection that silently never fires.
+func TestBuildAgentWiresTheChangedHook(t *testing.T) {
+	b, err := os.ReadFile("root.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "reg.OnChanged = workLedger.Changed") {
+		t.Error("buildAgent does not wire Registry.OnChanged, so edit_file can never say a file moved")
+	}
+}
+
+// The session host is a detached process whose stdin is nil — /dev/null, a
+// character device — so stdinIsTTY happened to say "terminal" and the default
+// interactive mode was Attended by accident. A host serves terminals through
+// its socket, and that is what makes it attended, not its own stdin.
+func TestAttendedHereCountsAServedHost(t *testing.T) {
+	savedTTY, savedHost := stdinIsTTY, flagSessionHost
+	t.Cleanup(func() { stdinIsTTY, flagSessionHost = savedTTY, savedHost })
+	stdinIsTTY = func() bool { return false }
+
+	flagSessionHost = ""
+	if attendedHere() {
+		t.Error("a pipe on stdin and no host is unattended")
+	}
+	flagSessionHost = "ABC123"
+	if !attendedHere() {
+		t.Error("a session host has terminals attached; it is attended whatever its own stdin is")
+	}
+	flagSessionHost = ""
+	stdinIsTTY = func() bool { return true }
+	if !attendedHere() {
+		t.Error("a terminal on stdin is attended")
+	}
+}

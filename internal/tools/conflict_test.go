@@ -106,18 +106,55 @@ func TestNoHookWritesAsBefore(t *testing.T) {
 	}
 }
 
-// edit_file goes through the same gate: it is a write.
-func TestEditAsksTheConflictHookToo(t *testing.T) {
+// edit_file applies its replacement to what is on disk *now*, so the other
+// writer's change is already in what it writes: nothing is overwritten, and
+// a "keep mine / keep theirs" prompt would ask a person to choose between two
+// things that are not in conflict. It never raises the gate. What it does owe
+// is a word to the model, whose edit was decided against an older version.
+func TestEditNeverPromptsButTellsTheModelTheFileMoved(t *testing.T) {
 	r, root := regWithHooks(t)
 	f := filepath.Join(root, "a.txt")
 	if err := os.WriteFile(f, []byte("hello theirs\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	called := false
-	r.OnConflict = func(context.Context, string, []byte) (bool, error) { called = true; return false, nil }
-	r.Dispatch(context.Background(), call("edit_file", `{"path": "a.txt", "old": "theirs", "new": "mine"}`))
-	if !called {
-		t.Error("edit_file did not go through the conflict gate")
+	r.OnConflict = func(context.Context, string, []byte) (bool, error) {
+		t.Error("edit_file raised the conflict gate; its write already holds the other version")
+		return false, nil
+	}
+	r.OnChanged = func(string) bool { return true }
+	res := r.Dispatch(context.Background(), call("edit_file", `{"path": "a.txt", "old": "theirs", "new": "mine"}`))
+	if res.IsError {
+		t.Fatalf("edit failed: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "changed since") {
+		t.Errorf("the model was not told the file moved under it: %q", res.Content)
+	}
+	body, _ := os.ReadFile(f)
+	if string(body) != "hello mine\n" {
+		t.Errorf("the edit did not land on the current contents: %q", body)
+	}
+}
+
+// And an edit to a file that did not move says nothing extra.
+func TestEditOfAnUnchangedFileSaysNothingExtra(t *testing.T) {
+	r, root := regWithHooks(t)
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.OnChanged = func(string) bool { return false }
+	res := r.Dispatch(context.Background(), call("edit_file", `{"path": "a.txt", "old": "x", "new": "y"}`))
+	if res.IsError || strings.Contains(res.Content, "changed since") {
+		t.Errorf("unexpected result: %q", res.Content)
+	}
+}
+
+// Subset carries OnChanged with the other seams, or a sub-agent's edit is
+// never told the file moved.
+func TestSubsetKeepsTheChangedHook(t *testing.T) {
+	r, _ := regWithHooks(t)
+	r.OnChanged = func(string) bool { return true }
+	if r.Subset("edit_file").OnChanged == nil {
+		t.Error("Subset dropped OnChanged")
 	}
 }
 

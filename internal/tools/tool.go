@@ -104,6 +104,13 @@ type Registry struct {
 	// the conflict check can never fire.
 	OnRead func(absPath string, content []byte)
 
+	// OnChanged answers "has this file moved since this session last saw
+	// it?" without resolving anything. edit_file asks it: an edit is applied
+	// to what is on disk now, so the other writer's change is already in
+	// what it writes and there is nothing to choose between — but the model
+	// decided its edit against an older version and is owed a word.
+	OnChanged func(absPath string) bool
+
 	// OnWrote names each path this session wrote, separately from OnRead:
 	// "what is this session working on" is the work record's whole point, and
 	// a read is not work on a file.
@@ -229,7 +236,7 @@ func (r *Registry) Subset(names ...string) *Registry {
 		// and the writer it can collide with is another *session*. Without
 		// these two a scoped registry wrote over another session's change
 		// with no prompt, no restore point and no notice.
-		OnConflict: r.OnConflict, OnRead: r.OnRead, OnWrote: r.OnWrote,
+		OnConflict: r.OnConflict, OnRead: r.OnRead, OnWrote: r.OnWrote, OnChanged: r.OnChanged,
 		ShellDeny: r.ShellDeny, Hooks: r.Hooks,
 		ReviewWrite: r.ReviewWrite, ReviewInvolvesEditor: r.ReviewInvolvesEditor,
 		EditorName: r.EditorName, OnStatus: r.OnStatus,
