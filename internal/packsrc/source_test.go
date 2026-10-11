@@ -111,3 +111,15 @@ func TestPacksrcCannotRegisterATool(t *testing.T) {
 		}
 	}
 }
+
+// A source that git would read as an option is refused before any argument
+// list is built. Not exploitable through clone as far as anyone found — the
+// only other positional is our own empty temp directory — but a URL does not
+// begin with a dash, and refusing one costs nothing.
+func TestResolveRefusesALeadingDash(t *testing.T) {
+	for _, spec := range []string{"--upload-pack=touch x://", "-c://x", "-"} {
+		if _, err := Resolve(spec, ""); err == nil {
+			t.Errorf("Resolve(%q) accepted a source that looks like an option", spec)
+		}
+	}
+}

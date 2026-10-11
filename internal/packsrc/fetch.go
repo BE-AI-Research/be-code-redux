@@ -145,11 +145,13 @@ var sha = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 // `clone --branch`, which only takes a branch or tag and which most servers
 // refuse a SHA for; that case clones and then checks the commit out.
 func clone(ctx context.Context, s Source, dir string) error {
+	// "--" ends the options: whatever Resolve let through is a positional and
+	// nothing else. The SHA form's checkout is already bounded by the regex.
 	if s.Ref != "" && sha.MatchString(s.Ref) {
-		if _, err := runGit(ctx, "", "clone", "--quiet", s.Spec, dir); err != nil {
+		if _, err := runGit(ctx, "", "clone", "--quiet", "--", s.Spec, dir); err != nil {
 			return err
 		}
-		if _, err := runGit(ctx, dir, "checkout", "--quiet", s.Ref); err != nil {
+		if _, err := runGit(ctx, dir, "checkout", "--quiet", s.Ref, "--"); err != nil {
 			return fmt.Errorf("%s has no commit %s: %w", s.Spec, s.Ref, err)
 		}
 		return nil
@@ -158,7 +160,7 @@ func clone(ctx context.Context, s Source, dir string) error {
 	if s.Ref != "" {
 		argv = append(argv, "--branch", s.Ref)
 	}
-	argv = append(argv, s.Spec, dir)
+	argv = append(argv, "--", s.Spec, dir)
 	if _, err := runGit(ctx, "", argv...); err != nil {
 		if s.Ref != "" {
 			return fmt.Errorf("could not fetch %s at %q: %w", s.Spec, s.Ref, err)
@@ -217,11 +219,25 @@ func locate(root, pack string) (string, error) {
 	type candidate struct{ dir, name string }
 	var found []candidate
 	var names []string
+	byName := map[string]string{}
 	for _, d := range packDirs(root) {
 		m, err := readManifest(d)
 		if err != nil || m.Name == "" {
 			continue // not a pack; a source may hold other things
 		}
+		if first, dup := byName[m.Name]; dup {
+			// Never the first in ReadDir order: the name is what the person
+			// asked for, and two directories claiming it is the source's
+			// problem to fix, not ours to guess at.
+			rel := func(p string) string {
+				if r, err := filepath.Rel(root, p); err == nil {
+					return filepath.ToSlash(r)
+				}
+				return p
+			}
+			return "", fmt.Errorf("two directories here claim the pack %q: %s and %s", m.Name, rel(first), rel(d))
+		}
+		byName[m.Name] = d
 		found = append(found, candidate{d, m.Name})
 		names = append(names, m.Name)
 	}

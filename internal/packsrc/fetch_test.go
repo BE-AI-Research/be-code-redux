@@ -235,3 +235,27 @@ func TestEveryExecCommandIsHidden(t *testing.T) {
 		}
 	}
 }
+
+// Both clone forms put "--" before their positionals, so a spec or a ref that
+// git would otherwise read as an option is a positional and nothing else.
+func TestClonePutsADoubleDashBeforeItsPositionals(t *testing.T) {
+	b, err := os.ReadFile("fetch.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), `"--", s.Spec`); n < 2 {
+		t.Errorf("clone passes s.Spec after \"--\" in %d place(s); both the SHA form and the branch form must", n)
+	}
+}
+
+// Two directories whose manifests claim one name are an error, never a pick
+// by ReadDir order: installing the wrong one writes somebody else's rules into
+// the system prompt.
+func TestLocateRefusesTwoDirectoriesClaimingOneName(t *testing.T) {
+	dir := packsRepo(t, "assist")
+	packFiles(t, filepath.Join(dir, "packs", "other"), "assist", "0.2.0")
+	_, err := Fetch(context.Background(), Source{Spec: dir, Kind: KindPath}, "assist")
+	if err == nil || !strings.Contains(err.Error(), "assist") || !strings.Contains(err.Error(), "packs/other") {
+		t.Fatalf("want an error naming both directories, got %v", err)
+	}
+}

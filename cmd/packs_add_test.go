@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -153,4 +154,34 @@ func runPacksAdd(t *testing.T, args []string) (string, error) {
 	}
 	err := cmd.RunE(cmd, positional)
 	return buf.String(), err
+}
+
+// `packs remove` deletes a directory outside the write seam and the
+// checkpointer, so /undo cannot bring it back. In a repository where the pack
+// was committed, git can, and the output says how.
+func TestPacksRemoveSaysHowToGetACommittedPackBack(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	writePackFixture(t, filepath.Join(ws, ".becode", "packs", "assist"))
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "pack"}} {
+		c := exec.Command("git", args...)
+		c.Dir = ws
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	var buf strings.Builder
+	cmd := packsRemoveCmd
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetContext(context.Background())
+	savedDir := flagDir
+	flagDir = ws
+	defer func() { flagDir = savedDir }()
+	if err := cmd.RunE(cmd, []string{"assist"}); err != nil {
+		t.Fatalf("remove: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "git checkout -- .becode/packs/assist") {
+		t.Errorf("the output does not say how a committed pack comes back:\n%s", buf.String())
+	}
 }

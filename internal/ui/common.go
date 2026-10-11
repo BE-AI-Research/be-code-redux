@@ -84,7 +84,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/coworkers", "list co-working models and how often each was consulted", false},
-	{"/packs", "list installed packs and which are active; /packs add|update|remove <name> · /packs on|off|default <name> · /packs reload", false},
+	{"/packs", "list installed packs and which are active; /packs add <name>[@ref] [source] · /packs update|remove <name> · /packs on|off|default <name> · /packs reload", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
 	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
 	{"/browser", "the browser: status, /browser forget <host>, /browser close, /browser attach (your Chrome), /browser tabs, /browser tab <id>, /browser untab <id|all>", true},

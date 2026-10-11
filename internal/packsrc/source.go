@@ -55,6 +55,12 @@ func Resolve(spec, ref string) (Source, error) {
 	if spec == "" {
 		return Source{Spec: DefaultSource, Kind: KindGit, Ref: ref}, nil
 	}
+	if strings.HasPrefix(spec, "-") {
+		// A URL does not begin with a dash; an option does. Refused here so
+		// nothing option-shaped is ever put in git's argument list, whatever
+		// clone's own "--" would make of it.
+		return Source{}, fmt.Errorf("source %q looks like an option, not a path or a URL", spec)
+	}
 	if st, err := os.Stat(spec); err == nil && st.IsDir() {
 		abs, err := filepath.Abs(spec)
 		if err != nil {
@@ -80,10 +86,10 @@ func ValidPackName(name string) error {
 	case name == "":
 		return fmt.Errorf("no pack name given")
 	case !packName.MatchString(name):
+		// The first character class excludes a dot, so "." and ".." and every
+		// hidden name are refused here too.
 		return fmt.Errorf("pack name %q is not usable: a pack name is 1-64 characters of letters, "+
 			"digits, dot, dash or underscore, starting with a letter or digit", name)
-	case name == "." || name == ".." || strings.HasPrefix(name, "."):
-		return fmt.Errorf("pack name %q is not usable: it must not start with a dot", name)
 	}
 	return nil
 }

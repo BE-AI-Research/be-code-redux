@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestMarkerRoundTrip(t *testing.T) {
@@ -106,5 +107,21 @@ func TestContentHashCoversTheMarker(t *testing.T) {
 	}
 	if before == after {
 		t.Error("editing the marker did not change the content hash, so a forged provenance claim would keep its approval")
+	}
+}
+
+// Now is the clock the marker is stamped with, a var so a test can fix it —
+// and none did, so nothing proved the seam was honoured.
+func TestWriteMarkerStampsWithNow(t *testing.T) {
+	saved := Now
+	Now = func() time.Time { return time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { Now = saved })
+	root := t.TempDir()
+	if err := WriteMarker(root, Marker{Pack: "p", Source: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := ReadMarker(root)
+	if !ok || m.Installed != "2026-10-10T12:00:00Z" {
+		t.Errorf("installed = %q, ok=%v; want the fixed clock", m.Installed, ok)
 	}
 }

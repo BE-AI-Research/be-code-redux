@@ -52,6 +52,11 @@ func packPath(workspace, pack string) (string, error) {
 // loader would refuse from ever existing at its final path; hashing after the
 // marker is what puts the marker inside the hash.
 func Install(ctx context.Context, s Source, pack string, o Options) (Result, error) {
+	if st, err := os.Stat(o.Workspace); err != nil || !st.IsDir() {
+		// A mistyped -C is a path, not a project: creating /typo/.becode/packs
+		// and installing there, silently, keyed the trust file on the typo.
+		return Result{}, fmt.Errorf("workspace %s does not exist; a pack is installed into an existing project", o.Workspace)
+	}
 	detail := installDetail(s, pack, o.Workspace)
 	if o.Approve == nil || !o.Approve("pack_install", detail) {
 		return Result{}, fmt.Errorf("install declined")
@@ -108,11 +113,16 @@ func Install(ctx context.Context, s Source, pack string, o Options) (Result, err
 		Source: s.Spec, Ref: s.Ref, Commit: got.Commit,
 		Installed: packs.Now().Format(time.RFC3339),
 	}
+	// Past this point the pack is at its final path. A failure below leaves it
+	// there without a marker or an approval — it fails safe, since neither
+	// is inferred — but the error has to say a directory now exists.
 	if err := packs.WriteMarker(dest, m); err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%s is at %s but its marker could not be written (%w); "+
+			"it is not approved and packs update cannot see where it came from: remove it, or re-run with --force", got.Pack, dest, err)
 	}
 	if err := record(dest, got.Pack, o.TrustPath); err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%s is at %s but its approval could not be recorded (%w); "+
+			"a session will ask before using it, or re-run with --force", got.Pack, dest, err)
 	}
 	return Result{Pack: got.Pack, Version: got.Version, Commit: got.Commit, Dir: dest, Previous: previous}, nil
 }

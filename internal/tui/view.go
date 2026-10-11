@@ -337,9 +337,9 @@ func (m *View) agentsCmd(args []string) tea.Cmd {
 // deadlocks every attached terminal. It reuses agentsMsg to render the result,
 // since a note and a lines slice need the same handling on the way back.
 func (m *View) packsCmd(fields []string) tea.Cmd {
-	ag := m.ag
+	ag, ctx := m.ag, m.Session.baseCtx()
 	return func() tea.Msg {
-		return agentsMsg{lines: strings.Split(ui.PacksCommand(ag, fields), "\n")}
+		return agentsMsg{lines: strings.Split(ui.PacksCommand(ctx, ag, fields), "\n")}
 	}
 }
 
@@ -1893,7 +1893,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			// Update is already holding — the same rule /schedule follows.
 			return m, m.packsCmd(fields)
 		}
-		m.renderLocalNote(ui.PacksCommand(m.ag, fields))
+		m.renderLocalNote(ui.PacksCommand(m.Session.baseCtx(), m.ag, fields))
 	case "/coworkers":
 		// A listing, not a shared event: the terminal that asked is the one
 		// that wants to read it.

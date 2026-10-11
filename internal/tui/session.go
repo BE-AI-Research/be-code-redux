@@ -775,6 +775,16 @@ func (s *Session) onSubAgentAsk(a subagent.Ask) {
 	s.startQueuedLocked()
 }
 
+// baseCtx is the session's root context, or Background where none was set
+// (RunLocal, tests): what an off-Update command that reaches the network runs
+// under, so the session ending reaches it.
+func (s *Session) baseCtx() context.Context {
+	if s.rootCtx == nil {
+		return context.Background()
+	}
+	return s.rootCtx
+}
+
 // onSubAgentEnd is Events.OnSubAgentEnd: the sub-agent's hand-back — done,
 // blocked or interrupted.
 func (s *Session) onSubAgentEnd(hb subagent.HandBack) {

@@ -266,3 +266,18 @@ func TestForceNeverLeavesHalfAPack(t *testing.T) {
 		t.Errorf("what is at dest is not a loadable pack (install err: %v): %v", ierr, err)
 	}
 }
+
+// `packs add -C /typo` must not create /typo/.becode/packs and install there:
+// a workspace that does not exist is a mistyped path, not a project.
+func TestInstallRefusesAWorkspaceThatDoesNotExist(t *testing.T) {
+	src := packsRepo(t, "assist")
+	ws := filepath.Join(t.TempDir(), "typo")
+	_, err := Install(context.Background(), Source{Spec: src, Kind: KindPath}, "assist",
+		Options{Workspace: ws, Approve: func(string, string) bool { return true }})
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("want a refusal naming the missing workspace, got %v", err)
+	}
+	if _, serr := os.Stat(ws); !os.IsNotExist(serr) {
+		t.Error("the missing workspace was created")
+	}
+}

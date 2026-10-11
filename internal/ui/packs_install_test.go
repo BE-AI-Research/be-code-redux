@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,7 +85,7 @@ func TestPacksAddWithNoNameOffersWhatTheSourceHas(t *testing.T) {
 	}
 	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
 
-	out := PacksCommand(ag, []string{"/packs", "add"})
+	out := PacksCommand(context.Background(), ag, []string{"/packs", "add"})
 	if strings.HasPrefix(out, "usage:") {
 		t.Fatalf("the menu's own row printed a usage string:\n%s", out)
 	}
@@ -94,5 +96,63 @@ func TestPacksAddWithNoNameOffersWhatTheSourceHas(t *testing.T) {
 	}
 	if !strings.Contains(out, "/packs add") {
 		t.Errorf("the output should say how to pick one:\n%s", out)
+	}
+}
+
+// A hung clone must be cancellable: the install runs under the session's own
+// context, not context.Background(), so Esc or the session ending reaches it.
+func TestPacksAddHonoursACancelledContext(t *testing.T) {
+	cfg := config.Default()
+	reg, rerr := tools.NewRegistry(t.TempDir(), func(string, string) bool { return true })
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	ag := agent.New(cfg, nullProvider{}, "m", reg, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out := PacksCommand(ctx, ag, []string{"/packs", "add", "assist", "https://example.invalid/packs.git"})
+	if !strings.Contains(out, "context canceled") {
+		t.Errorf("a cancelled context did not stop the install: %q", out)
+	}
+}
+
+// `/packs add <name> <source>` has always worked; now it is said somewhere.
+func TestPacksUsageDocumentsThePositionalSource(t *testing.T) {
+	if !strings.Contains(packsUsage(), "[source]") {
+		t.Errorf("usage does not mention the positional source: %s", packsUsage())
+	}
+	for _, c := range SlashCommandTable {
+		if c.Name == "/packs" && !strings.Contains(c.Desc, "[source]") {
+			t.Errorf("the /packs row does not mention the positional source: %s", c.Desc)
+		}
+	}
+}
+
+// The same line from /packs remove in a session.
+func TestPacksRemoveHintsAtGitInARepository(t *testing.T) {
+	ws := t.TempDir()
+	dir := filepath.Join(ws, ".becode", "packs", "assist")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(`{"schema":1,"name":"assist","version":"0.1.0","core":{"file":"core.md","budget_tokens":1500}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "pack"}} {
+		c := exec.Command("git", args...)
+		c.Dir = ws
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	t.Setenv("HOME", t.TempDir())
+	reg, rerr := tools.NewRegistry(ws, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	ag := agent.New(config.Default(), nullProvider{}, "m", reg, "")
+	out := PacksCommand(context.Background(), ag, []string{"/packs", "remove", "assist"})
+	if !strings.Contains(out, "git checkout -- .becode/packs/assist") {
+		t.Errorf("no hint at how a committed pack comes back: %q", out)
 	}
 }

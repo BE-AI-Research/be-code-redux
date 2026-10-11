@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,11 +31,7 @@ func (m *View) openPackPicker() (tea.Model, tea.Cmd) {
 	title := fmt.Sprintf("Install a skill pack — from %s", s.Spec)
 	return m.openPicker(title,
 		func() ([]pickItem, error) {
-			ctx := m.Session.rootCtx
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			avail, err := packsrc.List(ctx, s)
+			avail, err := packsrc.List(m.Session.baseCtx(), s)
 			if err != nil {
 				return nil, err
 			}

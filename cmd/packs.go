@@ -15,6 +15,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/packsrc"
+	"github.com/brown-enterprises/be-code/internal/ui"
 )
 
 var packsCmd = &cobra.Command{
@@ -310,7 +311,8 @@ var packsRemoveCmd = &cobra.Command{
 		if err := packsrc.Remove(args[0], o); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "removed %s from %s\n", args[0], packsrc.PacksDir(o.Workspace))
+		fmt.Fprintf(out, "removed %s from %s%s\n", args[0], packsrc.PacksDir(o.Workspace),
+			ui.RemoveHint(cmd.Context(), o.Workspace, args[0]))
 		return nil
 	},
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/gitctx"
 	"github.com/brown-enterprises/be-code/internal/packsrc"
 )
 
@@ -62,7 +63,10 @@ func IsPacksBlocking(args []string) bool {
 	return false
 }
 
-func PacksCommand(ag *agent.Agent, fields []string) string {
+// PacksCommand runs a /packs line. ctx is the session's own: an install or
+// update clones over the network, and a hung clone must be cancellable by Esc
+// or by the session ending.
+func PacksCommand(ctx context.Context, ag *agent.Agent, fields []string) string {
 	if len(fields) < 2 {
 		return PacksReport(ag.PackRows())
 	}
@@ -75,7 +79,7 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 		// Before the arity guard below: `/packs add` with no name is the
 		// menu's own row, and it offers what the source has rather than
 		// printing syntax at somebody who came to the menu to avoid it.
-		return packsAdd(ag, fields[2:])
+		return packsAdd(ctx, ag, fields[2:])
 	}
 	if len(fields) < 3 {
 		return packsUsage()
@@ -90,7 +94,7 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 	case "default", "clear", "auto":
 		err = ag.ForcePack(name, false, true)
 	case "update", "remove":
-		return packsManage(ag, verb, name)
+		return packsManage(ctx, ag, verb, name)
 	default:
 		return packsUsage()
 	}
@@ -101,7 +105,7 @@ func PacksCommand(ag *agent.Agent, fields []string) string {
 }
 
 func packsUsage() string {
-	return "usage: /packs · /packs add <name>[@<ref>] · /packs update <name> · /packs remove <name> · " +
+	return "usage: /packs · /packs add <name>[@<ref>] [source] · /packs update <name> · /packs remove <name> · " +
 		"/packs on <name> · /packs off <name> · /packs default <name> · /packs reload"
 }
 
@@ -121,7 +125,7 @@ func packOptionsFor(ag *agent.Agent) (packsrc.Options, error) {
 	}, nil
 }
 
-func packsAdd(ag *agent.Agent, args []string) string {
+func packsAdd(ctx context.Context, ag *agent.Agent, args []string) string {
 	name, ref := "", ""
 	if len(args) > 0 {
 		name, ref, _ = strings.Cut(args[0], "@")
@@ -138,13 +142,13 @@ func packsAdd(ag *agent.Agent, args []string) string {
 		return err.Error()
 	}
 	if name == "" {
-		return packsOnOffer(s)
+		return packsOnOffer(ctx, s)
 	}
 	o, err := packOptionsFor(ag)
 	if err != nil {
 		return err.Error()
 	}
-	res, err := packsrc.Install(context.Background(), s, name, o)
+	res, err := packsrc.Install(ctx, s, name, o)
 	if err != nil {
 		return err.Error()
 	}
@@ -153,7 +157,7 @@ func packsAdd(ag *agent.Agent, args []string) string {
 		res.Pack, res.Version, res.Dir)
 }
 
-func packsManage(ag *agent.Agent, verb, name string) string {
+func packsManage(ctx context.Context, ag *agent.Agent, verb, name string) string {
 	o, err := packOptionsFor(ag)
 	if err != nil {
 		return err.Error()
@@ -163,9 +167,9 @@ func packsManage(ag *agent.Agent, verb, name string) string {
 			return err.Error()
 		}
 		ag.LoadPacks()
-		return "removed " + name
+		return "removed " + name + RemoveHint(ctx, o.Workspace, name)
 	}
-	res, err := packsrc.Update(context.Background(), name, o)
+	res, err := packsrc.Update(ctx, name, o)
 	if err != nil {
 		return err.Error()
 	}
@@ -177,8 +181,8 @@ func packsManage(ag *agent.Agent, verb, name string) string {
 // has, and how to pick one. The spec asked for a picker here; a listing is
 // what this change ships, and it is what keeps the menu row from being a
 // dead end.
-func packsOnOffer(s packsrc.Source) string {
-	avail, err := packsrc.List(context.Background(), s)
+func packsOnOffer(ctx context.Context, s packsrc.Source) string {
+	avail, err := packsrc.List(ctx, s)
 	if err != nil {
 		return err.Error()
 	}
@@ -189,4 +193,15 @@ func packsOnOffer(s packsrc.Source) string {
 	}
 	b.WriteString("  install one with /packs add <name>")
 	return b.String()
+}
+
+// RemoveHint is the line both UIs add after a pack is removed inside a git
+// repository: the directory went outside the write seam and the checkpointer,
+// so /undo cannot bring it back, and a committed pack comes back with git.
+func RemoveHint(ctx context.Context, workspace, name string) string {
+	if !gitctx.IsRepo(ctx, workspace) {
+		return ""
+	}
+	return fmt.Sprintf("\n  if it was committed, git checkout -- %s brings it back",
+		filepath.ToSlash(filepath.Join(".becode", "packs", name)))
 }
