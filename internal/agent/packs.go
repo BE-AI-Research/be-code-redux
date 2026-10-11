@@ -332,7 +332,10 @@ func (a *Agent) trustProjectPack(p *packs.Pack, refuse func(string, ...any)) boo
 	}
 	path, err := a.packTrustPath()
 	if err == nil && packs.TrustedHash(path, p.Name) == hash {
-		return true // the same pack, already approved for this workspace
+		// The same commands, already approved for this workspace. The rules
+		// are not part of that hash, so a change to them is said here.
+		a.noteProseChange(path, p, hash)
+		return true
 	}
 	if a.Tools.Approve == nil {
 		// Not a refusal: LoadPacks runs inside buildAgent, before any UI has
@@ -360,10 +363,35 @@ func (a *Agent) trustProjectPack(p *packs.Pack, refuse func(string, ...any)) boo
 		refuse("pack %q is active, but the approval could not be saved (%v), so it will ask again", p.Name, err)
 		return true
 	}
-	if err := packs.Trust(path, p.Name, hash); err != nil {
+	prose, _ := packs.ProseFiles(p.Root) // nil on error: recorded as empty, compared next time
+	if err := packs.TrustWithProse(path, p.Name, hash, prose); err != nil {
 		refuse("pack %q is active, but the approval could not be saved (%v), so it will ask again", p.Name, err)
 	}
 	return true
+}
+
+// noteProseChange says, once, when an approved pack's rules changed since the
+// approval — core, chunks, playbooks — naming the files. The pack stays
+// active: the approval covers what runs and that is unchanged, and re-asking
+// on a paragraph edit would train people to approve blind. Said once because
+// the record is moved up to the current prose. An approval recorded before
+// prose was tracked has nothing to compare against and gains a record
+// silently; a change after that speaks.
+func (a *Agent) noteProseChange(trustPath string, p *packs.Pack, hash string) {
+	now, err := packs.ProseFiles(p.Root)
+	if err != nil {
+		return
+	}
+	prev := packs.TrustedProse(trustPath, p.Name)
+	if prev != nil {
+		changed := packs.ProseDiff(prev, now)
+		if len(changed) == 0 {
+			return
+		}
+		a.notice("pack %q's rules changed since you approved it: %s (its commands are unchanged; be-code packs info %s shows the text)",
+			p.Name, strings.Join(changed, ", "), p.Name)
+	}
+	_ = packs.TrustWithProse(trustPath, p.Name, hash, now)
 }
 
 // packTrustPath is ~/.be-code/engine/<key>/packs.json: the pack approvals for

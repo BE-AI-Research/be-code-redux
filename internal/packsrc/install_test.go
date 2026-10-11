@@ -281,3 +281,18 @@ func TestInstallRefusesAWorkspaceThatDoesNotExist(t *testing.T) {
 		t.Error("the missing workspace was created")
 	}
 }
+
+// An install is consent for exactly this content; it records the prose too, so
+// the session can say when a later commit changes the rules it installed.
+func TestInstallRecordsTheProse(t *testing.T) {
+	src := packsRepo(t, "assist")
+	ws := t.TempDir()
+	trust := filepath.Join(t.TempDir(), "packs.json")
+	if _, err := Install(context.Background(), Source{Spec: src, Kind: KindPath}, "assist",
+		Options{Workspace: ws, TrustPath: trust, Approve: func(string, string) bool { return true }}); err != nil {
+		t.Fatal(err)
+	}
+	if packs.TrustedProse(trust, "assist")["core.md"] == "" {
+		t.Errorf("the install did not record the pack's prose: %v", packs.TrustedProse(trust, "assist"))
+	}
+}

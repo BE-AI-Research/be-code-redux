@@ -1157,7 +1157,9 @@ and `-y` never answers it.
 own and needs no permission. A pack in a project's `.becode/packs/<name>` arrived with the
 repository — or you installed it there — and its rules go into every request, so it asks once
 per workspace (`pack_trust`) listing every command it would run, and the answer is remembered
-against a fingerprint of the pack's manifest and tools. Installing a pack records that approval
+against a fingerprint of the pack's manifest and tools. Its rules are not in that fingerprint, so
+improving a paragraph never re-asks, but a later change to them is said once, naming the files
+(`pack "assist"'s rules changed since you approved it: core.md`). Installing a pack records that approval
 for you, which is what writing the directory by hand cannot do. The install also writes
 `.pack-source.json` beside the pack: where it came from, at which commit, when. **Commit it with
 the pack.** The marker is the project's declaration that it wants the pack, so it stays active

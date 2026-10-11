@@ -141,3 +141,22 @@ Final: minor (deferred): `/packs add <name> <source>` accepts a positional sourc
 Final: minor (deferred): the three new subcommands and three new slash verbs are documented nowhere in README beyond the `packs.source` key, and the repo-root CLAUDE.md has no packs section, so none of this feature's invariants (the marker/consent split, `.becode` vs `.be-code`, "no -y") are written where the next session reads them.
 Final: Note: `stdinIsTTY()` returns true for `/dev/null` (it has ModeCharDevice), so `packs add … -y < /dev/null` takes the interactive path and declines at EOF rather than printing the non-interactive message. It fails safe, and the check is used repo-wide, so it is pre-existing rather than this branch's.
 Final: fix pass complete, `make -f build.mk verify` green (33 packages, exit 0), ~/.be-code/config.json mtime 1791327107 unchanged throughout. No second review dispatched: every fix has a test that failed first, and the suite answers "broke nothing".
+
+---
+
+# I5 resolved (2026-10-10): the prose exemption
+
+Owner's ruling, asked as one question: **notice, stay active** — not re-ask,
+and not re-ask for `core.md` alone. `packs.ProseFiles` records each prose
+file's hash beside the approval (`state.Prose`; `TrustWithProse` from the
+`pack_trust` yes and from `packs add`); `Agent.noteProseChange` says once when
+an approved pack's prose differs from the record, names the files, moves the
+record up and leaves the pack active. An approval from before this gains a
+record silently (`TestAnOlderApprovalGainsAProseRecordSilently`). The second
+half of the reviewer's proposal is in too: a file a check names in its argv is
+never prose, so `sh {pack}/chunks/run.md` re-asks when that chunk changes
+(`TestContentHashCoversAFileACheckNames`). `TrustDetail` now says what the
+approval covers and that a later change will be said, instead of "NOT
+covered". Cost if wrong: a person who misses the notice is instructed by rules
+they did not read; the alternative, a prompt per wording edit, is the habit the
+gate most needs to avoid.

@@ -198,7 +198,11 @@ func record(dest, pack, trustPath string) error {
 	if err != nil {
 		return err
 	}
-	return packs.Trust(trustPath, pack, hash)
+	prose, err := packs.ProseFiles(dest)
+	if err != nil {
+		return err
+	}
+	return packs.TrustWithProse(trustPath, pack, hash, prose)
 }
 
 // move puts the validated pack at its final path in one step where it can,

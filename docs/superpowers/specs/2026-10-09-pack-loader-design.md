@@ -204,6 +204,20 @@ Install order is therefore fixed: write the pack, write the marker, hash the
 result, record the hash. Any later edit to either the pack or its marker
 breaks the match.
 
+*Amended 2026-10-10 (the prose exemption, review finding I5).* `ContentHash`
+still leaves the prose out, so a wording edit never re-asks. But the prose is
+no longer invisible: `packs.ProseFiles` records each prose file's hash beside
+the approval (`state.Prose`, written by `TrustWithProse` from both the
+`pack_trust` yes and `packs add`), and when an approved pack activates with
+the same content hash and a different prose record, the session says so once
+— `pack "assist"'s rules changed since you approved it: core.md, chunks/x.md`
+— names the files, moves the record up, and keeps the pack active. An
+approval recorded before this gains a prose record silently. And a file a
+check names in its argv (`sh {pack}/chunks/run.md`) is never prose, whatever
+directory it sits in: it is what runs, so it is in the content hash and
+re-asks. Owner's ruling: notice, not re-ask; the stated policy that improving
+wording never prompts stands, and the silence it had is gone.
+
 `ref` is kept alongside `commit` because a ref is what a person asked for and
 a commit is what they got; `packs update` needs the first and `packs` listing
 should show the second.

@@ -100,8 +100,10 @@
   arrived with somebody's repository, adds rules to every request and can name commands to run,
   so it asks once — listing every command and server it would bring — and the answer is
   remembered for that workspace against a fingerprint of the pack's manifest and tools. Change
-  what the pack runs and it asks again; improve its wording and it does not. There is no
-  "always" to grant, `-y` does not answer it, and with nobody to ask the pack simply stays off.
+  what the pack runs and it asks again; improve its wording and it does not — but it says so, once,
+  naming the files whose rules changed since you approved them, and a file a check runs is never
+  "wording" wherever it sits. There is no "always" to grant, `-y` does not answer it, and with
+  nobody to ask the pack simply stays off.
 
 ## v1.2.5 — The Windows interface, restored (2026-10-06)
 

@@ -22,10 +22,10 @@ import (
 // Not the prose. A pack's core, chunks, playbooks and README are text the
 // model reads, and re-asking for approval because somebody improved a
 // paragraph would train the person to approve without looking — which is the
-// only way this gate can actually fail. core.md is the sharpest case, since
-// it is injected as standing instructions; it is handled by showing it in the
-// approval prompt and saying plainly that it is not covered, rather than by
-// hashing it. See TrustDetail.
+// only way this gate can actually fail. The prose is recorded separately
+// (ProseFiles) so a change to it is *said* when the pack next activates;
+// core.md, injected as standing instructions, is also shown in the approval
+// prompt. See TrustDetail.
 //
 // Everything else is covered, which is a deny-list and used to be an
 // allow-list of pack.json plus tools/. That was the wrong shape: a tools/
@@ -40,15 +40,87 @@ import (
 // the same reason — making a script executable changes what the pack can do
 // without changing a byte of its contents.
 func ContentHash(root string) (string, error) {
+	content, _, err := walkPack(root)
+	if err != nil {
+		return "", err
+	}
+	if len(content) == 0 {
+		// No manifest and nothing else: let the caller's own load error say so
+		// rather than returning a hash of nothing that would match anything.
+		if _, serr := os.Stat(filepath.Join(root, "pack.json")); serr != nil {
+			return "", serr
+		}
+	}
 	h := sha256.New()
-	add := func(label string, b []byte, mode fs.FileMode) {
-		fmt.Fprintf(h, "%s\x00%d\x00%o\x00", label, len(b), mode.Perm())
+	for _, p := range content {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Lstat(p)
+		if err != nil {
+			return "", err
+		}
+		rel, _ := filepath.Rel(root, p)
+		// The file mode is part of the hash: making a script executable
+		// changes what the pack can do without changing a byte of it.
+		fmt.Fprintf(h, "%s\x00%d\x00%o\x00", filepath.ToSlash(rel), len(b), info.Mode().Perm())
 		h.Write(b)
 	}
+	return hex.EncodeToString(h.Sum(nil))[:32], nil
+}
 
-	var paths []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+// ProseFiles is the other half of the pack: each prose file, pack-relative,
+// with the hash of its bytes. It is recorded beside the approval so a later
+// change to the rules can be *said* — never so it can re-ask, which is
+// exactly what ContentHash leaves prose out for. A file ContentHash covers
+// is never here, so the two together cover every file in the pack.
+func ProseFiles(root string) (map[string]string, error) {
+	_, prose, err := walkPack(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(prose))
+	for _, p := range prose {
+		b, err := os.ReadFile(p)
 		if err != nil {
+			return nil, err
+		}
+		rel, _ := filepath.Rel(root, p)
+		sum := sha256.Sum256(b)
+		out[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])[:32]
+	}
+	return out, nil
+}
+
+// ProseDiff is every prose path that differs between two ProseFiles results
+// — changed, added or removed — sorted, for a notice to name.
+func ProseDiff(before, now map[string]string) []string {
+	var out []string
+	for rel, h := range now {
+		if before[rel] != h {
+			out = append(out, rel)
+		}
+	}
+	for rel := range before {
+		if _, still := now[rel]; !still {
+			out = append(out, rel)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// walkPack sorts every file in a pack into what decides what runs (content)
+// and what the model reads (prose). Sorted paths: a directory listing's order
+// is not part of what was approved. Three things make a file content whatever
+// its name: it is not on isProse's short list, it is executable (a program
+// dropped into chunks/ is not text the model reads), or a check names it in
+// its argv (`sh {pack}/chunks/run.md` makes that chunk a program).
+func walkPack(root string) (content, prose []string, err error) {
+	named := checkNamedFiles(root)
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
 			return nil
 		}
 		if d.IsDir() {
@@ -70,41 +142,55 @@ func ContentHash(root string) (string, error) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		if isProse(rel) {
-			// Exempt unless it can be executed, which prose cannot.
+		if isProse(rel) && !named[rel] {
 			info, ierr := d.Info()
 			if ierr != nil || info.Mode().Perm()&0o111 == 0 {
+				prose = append(prose, p)
 				return nil
 			}
 		}
-		paths = append(paths, p)
+		content = append(content, p)
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return nil, nil, err
 	}
-	if len(paths) == 0 {
-		// No manifest and nothing else: let the caller's own load error say so
-		// rather than returning a hash of nothing that would match anything.
-		if _, serr := os.Stat(filepath.Join(root, "pack.json")); serr != nil {
-			return "", serr
+	sort.Strings(content)
+	sort.Strings(prose)
+	return content, prose, nil
+}
+
+// checkNamedFiles is every pack-relative file a verify check names in its
+// argv, read straight from pack.json so ContentHash needs no loaded Pack. A
+// manifest that will not parse names nothing, and the loader's own error
+// says why.
+func checkNamedFiles(root string) map[string]bool {
+	b, err := os.ReadFile(filepath.Join(root, "pack.json"))
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		Verify []struct {
+			Cmd        []string `json:"cmd"`
+			CmdWindows []string `json:"cmd_windows"`
+		} `json:"verify"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, c := range m.Verify {
+		for _, a := range append(append([]string(nil), c.Cmd...), c.CmdWindows...) {
+			rel := path.Clean(filepath.ToSlash(strings.TrimPrefix(a, "{pack}/")))
+			if rel == "." || path.IsAbs(rel) || strings.HasPrefix(rel, "../") {
+				continue
+			}
+			if st, serr := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); serr == nil && !st.IsDir() {
+				out[rel] = true
+			}
 		}
 	}
-	// Sorted: a directory listing's order is not part of what was approved.
-	sort.Strings(paths)
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return "", err
-		}
-		info, err := os.Lstat(p)
-		if err != nil {
-			return "", err
-		}
-		rel, _ := filepath.Rel(root, p)
-		add(filepath.ToSlash(rel), b, info.Mode())
-	}
-	return hex.EncodeToString(h.Sum(nil))[:32], nil
+	return out
 }
 
 // isProse reports whether a pack-relative path is text the model reads rather
@@ -135,6 +221,11 @@ func isProse(rel string) bool {
 type state struct {
 	Trusted map[string]string `json:"trusted,omitempty"`
 	Forced  map[string]bool   `json:"forced,omitempty"`
+	// Prose is each approved pack's ProseFiles as of the approval (or the
+	// last time a change was announced), so the next activation can name what
+	// changed. Absent for an approval recorded before 1.2.6, which then gains
+	// one silently.
+	Prose map[string]map[string]string `json:"prose,omitempty"`
 }
 
 // trustMu serialises the read-modify-write below. Sessions on one workspace
@@ -151,6 +242,14 @@ func TrustedHash(path, pack string) string {
 	trustMu.Lock()
 	defer trustMu.Unlock()
 	return readState(path).Trusted[pack]
+}
+
+// TrustedProse is the prose record kept beside a pack's approval, or nil when
+// there is none — an approval from before prose was recorded, or no approval.
+func TrustedProse(path, pack string) map[string]string {
+	trustMu.Lock()
+	defer trustMu.Unlock()
+	return readState(path).Prose[pack]
 }
 
 // Forced reports a pack switched on or off by hand for this workspace: on,
@@ -184,16 +283,39 @@ func ClearForced(path, pack string) error {
 // which a later reinstall — or a different pack that happens to share the
 // name — would inherit.
 func Untrust(path, pack string) error {
-	return mutate(path, func(st *state) { delete(st.Trusted, pack) })
+	return mutate(path, func(st *state) {
+		delete(st.Trusted, pack)
+		delete(st.Prose, pack)
+	})
 }
 
 // Trust records that this exact pack content is approved for this workspace.
+// The prose record, if any, is left as it was.
 func Trust(path, pack, hash string) error {
 	return mutate(path, func(st *state) {
 		if st.Trusted == nil {
 			st.Trusted = map[string]string{}
 		}
 		st.Trusted[pack] = hash
+	})
+}
+
+// TrustWithProse is Trust plus the prose record the next activation compares
+// against. Every approval — a person's yes, an install — goes through this;
+// Trust alone is for callers that have no prose to record.
+func TrustWithProse(path, pack, hash string, prose map[string]string) error {
+	return mutate(path, func(st *state) {
+		if st.Trusted == nil {
+			st.Trusted = map[string]string{}
+		}
+		st.Trusted[pack] = hash
+		if st.Prose == nil {
+			st.Prose = map[string]map[string]string{}
+		}
+		if prose == nil {
+			prose = map[string]string{}
+		}
+		st.Prose[pack] = prose
 	})
 }
 
@@ -325,11 +447,11 @@ const coreExcerptLines = 15
 // command is also consenting to arbitrary standing instructions for the
 // model. That is worth seeing.
 //
-// The prompt says plainly that the rules are not covered by the approval.
-// They are deliberately outside the trust hash (see ContentHash) so that
-// improving a paragraph does not re-ask, which means a repository can change
-// them later without another prompt. Relying on that silently is the part
-// that was wrong; saying it is the fix.
+// The prompt says plainly what the approval covers. The rules are outside the
+// trust hash (see ContentHash) so that improving a paragraph does not re-ask;
+// a change to them is recorded (ProseFiles) and said at the next activation,
+// so a repository can change them later without a prompt but never without a
+// word.
 func TrustDetail(p *Pack, workspace string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "pack %q (%s) came with this project, in %s\n", p.Name, p.Version, p.Root)
@@ -338,8 +460,9 @@ func TrustDetail(p *Pack, workspace string) string {
 	}
 
 	b.WriteString("\nIt adds rules to every request. They are given to the model as\n")
-	b.WriteString("instructions, and they are NOT covered by this approval -- the\n")
-	b.WriteString("repository can change them later without asking again.\n")
+	b.WriteString("instructions. This approval covers what the pack RUNS; the repository\n")
+	b.WriteString("can change the rules later without asking again, and the session\n")
+	b.WriteString("will say so when it happens.\n")
 	if excerpt, total, shown := coreExcerpt(p.Core); shown > 0 {
 		b.WriteString("\n")
 		b.WriteString(excerpt)

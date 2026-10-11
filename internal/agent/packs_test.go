@@ -244,6 +244,76 @@ func TestChangedToolsReAskButProseDoesNot(t *testing.T) {
 	}
 }
 
+// Changed prose is said, once, and the pack stays active: the approval covers
+// what runs, the person is told what they are now being instructed by, and
+// nobody is trained to press y on a paragraph edit.
+func TestChangedProseIsNoticedAndStaysActive(t *testing.T) {
+	ag := packAgent(t)
+	yes := 0
+	ag.Tools.Approve = func(string, string) bool { yes++; return true }
+	var notes []string
+	ag.Events.OnNotice = func(s string) { notes = append(notes, s) }
+	p := loadTestPack(t, "fromrepo", "rules", "", packs.SourceProject)
+	ag.EnablePacks([]*packs.Pack{p})
+	if yes != 1 || len(notes) != 0 {
+		t.Fatalf("first activation: %d questions, notes %v", yes, notes)
+	}
+
+	if err := os.WriteFile(filepath.Join(p.Root, "chunks", "things.md"), []byte("rewritten"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag.EnablePacks([]*packs.Pack{p})
+	if yes != 1 {
+		t.Errorf("editing a chunk re-asked (%d questions)", yes)
+	}
+	joined := strings.Join(notes, "\n")
+	if !strings.Contains(joined, "fromrepo") || !strings.Contains(joined, "chunks/things.md") {
+		t.Errorf("the change was not said, naming the file: %v", notes)
+	}
+	if !strings.Contains(ag.composeSystem(""), "rules") {
+		t.Error("a pack whose prose changed must stay active")
+	}
+
+	// Said once: the next activation with nothing new says nothing.
+	notes = nil
+	ag.EnablePacks([]*packs.Pack{p})
+	if len(notes) != 0 {
+		t.Errorf("an unchanged pack was announced again: %v", notes)
+	}
+}
+
+// An approval recorded before prose was tracked has nothing to compare
+// against; it gains a prose record silently, and only a later change speaks.
+func TestAnOlderApprovalGainsAProseRecordSilently(t *testing.T) {
+	ag := packAgent(t)
+	ag.Tools.Approve = func(string, string) bool { t.Error("asked"); return false }
+	var notes []string
+	ag.Events.OnNotice = func(s string) { notes = append(notes, s) }
+	p := loadTestPack(t, "fromrepo", "rules", "", packs.SourceProject)
+	hash, err := packs.ContentHash(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := ag.packTrustPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := packs.Trust(path, "fromrepo", hash); err != nil { // the pre-prose record
+		t.Fatal(err)
+	}
+	ag.EnablePacks([]*packs.Pack{p})
+	if len(notes) != 0 {
+		t.Fatalf("an upgrade announced a change nobody can see: %v", notes)
+	}
+	if err := os.WriteFile(filepath.Join(p.Root, "core.md"), []byte("new rules"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag.EnablePacks([]*packs.Pack{p})
+	if !strings.Contains(strings.Join(notes, "\n"), "core.md") {
+		t.Errorf("the change after the upgrade was not said: %v", notes)
+	}
+}
+
 // /packs has to say what was found and why each one is or is not on —
 // "nothing happened" is the least useful answer when a pack was expected.
 func TestPackRowsExplainEveryPack(t *testing.T) {
