@@ -281,3 +281,13 @@ func TestDetailBoundsTheDifference(t *testing.T) {
 		t.Errorf("a truncated difference must say it was truncated:\n%s", d)
 	}
 }
+
+// A record Others marked Suspect — alive pid, hour-old record — reads with
+// the same confidence as a fresh one unless the detail says otherwise.
+func TestDetailSaysWhenTheRecordIsStale(t *testing.T) {
+	c := Conflict{Path: "/w/a.go", Workspace: "/w", Theirs: []byte("t\n"), Mine: []byte("m\n"),
+		Others: []Record{{PID: 7, Branch: "main", Suspect: true}}}
+	if got := c.Detail(); !strings.Contains(got, "stale") {
+		t.Errorf("a stale record is not marked in the detail:\n%s", got)
+	}
+}

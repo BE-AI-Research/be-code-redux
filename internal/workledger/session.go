@@ -1,15 +1,14 @@
 package workledger
 
 import (
-	"sync"
-
 	"context"
 	"fmt"
-	"github.com/brown-enterprises/be-code/internal/gitctx"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/gitctx"
 )
 
 // Options is what a session tells the ledger about itself.
@@ -37,8 +36,14 @@ type Ledger struct {
 	// there would be overwritten. It returns the doing task and the engine's
 	// turn counter; nil means the engine is off.
 	state    func() (task string, turn int)
+	session  func() string // the resume code, known only after the store loads
 	lastTurn int
 	written  []string
+	// closed is set by Close. The hooks in packs, store and engine are
+	// package vars nobody unassigns, so a save after finishSession still
+	// reaches here; a closed ledger must do nothing, above all not write its
+	// record back and leave a ghost until the process dies.
+	closed bool
 
 	opt     Options
 	ws      string
@@ -51,19 +56,20 @@ type Ledger struct {
 }
 
 // Open starts this session's ledger. A disabled ledger is inert: no record,
-// no detection, no notice — the behaviour before this feature.
-func Open(workspace string, opt Options) (*Ledger, error) {
-	l := &Ledger{opt: opt, ws: workspace}
+// no detection, no notice — the behaviour before this feature. Nothing here
+// can fail the caller: a work directory that cannot be made costs the record
+// and a notice, and detection carries on in memory.
+func Open(workspace string, opt Options) *Ledger {
+	l := &Ledger{opt: opt, ws: workspace, seen: NewSeen()}
 	if !opt.Enabled {
-		return l, nil
+		return l
 	}
 	dir, err := Dir()
 	if err != nil {
-		// Not fatal: in-memory detection still works, and the caller is told
-		// once, through SetWarn, as soon as there is somewhere to say it.
-		l.seen = NewSeen(filepath.Join(os.TempDir(), fmt.Sprintf("be-code-seen-%d.json", opt.PID)))
+		// The caller is told once, through SetWarn, as soon as there is
+		// somewhere to say it.
 		l.note("no record of this session's work: " + err.Error())
-		return l, nil
+		return l
 	}
 	l.dir = dir
 	l.rec = Record{
@@ -77,7 +83,6 @@ func Open(workspace string, opt Options) (*Ledger, error) {
 	// can only say a pid, which §14 names as the thing that makes it
 	// ignorable. Task and writing need a turn boundary and are not set here.
 	l.rec.Branch = currentBranch(workspace)
-	l.seen = NewSeen(strings.TrimSuffix(l.rec.Path(dir), ".json") + ".seen.json")
 	if err := Save(dir, l.rec); err != nil {
 		l.note("could not record this session's work: " + err.Error())
 	}
@@ -86,7 +91,14 @@ func Open(workspace string, opt Options) (*Ledger, error) {
 		// into ~/.be-code/work, so pruning this directory did nothing.
 		KeepSidecarsFor = opt.KeepOverwritten
 	}
-	return l, nil
+	return l
+}
+
+// active is whether the hooks should do anything: enabled and not closed.
+func (l *Ledger) active() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.opt.Enabled && !l.closed
 }
 
 // note says something once. The pending string matters: Warn is assigned by
@@ -168,7 +180,7 @@ func (l *Ledger) NoticeLine() string {
 // announced as possibly-unrelated. Reading a file is the plainest evidence a
 // session is working.
 func (l *Ledger) OnRead(path string, content []byte) {
-	if !l.opt.Enabled || l.seen == nil {
+	if !l.active() {
 		return
 	}
 	l.seen.Note(path, content)
@@ -186,7 +198,7 @@ func (l *Ledger) touch() {
 		return
 	}
 	l.mu.Lock()
-	if time.Since(l.lastTouch) < heartbeat {
+	if l.closed || time.Since(l.lastTouch) < heartbeat {
 		l.mu.Unlock()
 		return
 	}
@@ -198,6 +210,9 @@ func (l *Ledger) touch() {
 	if l.state != nil {
 		task, _ := l.state()
 		l.rec.Task = task
+	}
+	if l.session != nil {
+		l.rec.Session = l.session()
 	}
 	rec := l.rec
 	rec.Updated = time.Now().UTC().Format(time.RFC3339)
@@ -233,11 +248,21 @@ func (l *Ledger) SetState(f func() (task string, turn int)) {
 	l.mu.Unlock()
 }
 
+// SetSession gives the ledger a way to read the session's resume code when it
+// writes its record. Pulled, like the task: the store loads after the ledger
+// opens, and the id can change when the save guard moves a run to a new
+// session.
+func (l *Ledger) SetSession(f func() string) {
+	l.mu.Lock()
+	l.session = f
+	l.mu.Unlock()
+}
+
 // OnWrote records that this session wrote path. The list resets when the
 // engine's turn counter moves, which is the turn boundary — no UI hook
 // needed, and none would survive one.
 func (l *Ledger) OnWrote(path string) {
-	if !l.opt.Enabled || l.dir == "" {
+	if !l.active() || l.dir == "" {
 		return
 	}
 	rel := path
@@ -280,7 +305,7 @@ func (l *Ledger) OnWrote(path string) {
 // deliberate: two hashes of one file that could disagree is worse than one,
 // and the engine's is the one it acts on.
 func (l *Ledger) NoteHash(path, hash string) {
-	if !l.opt.Enabled || l.seen == nil {
+	if !l.active() {
 		return
 	}
 	l.seen.NoteHash(path, hash)
@@ -290,7 +315,7 @@ func (l *Ledger) NoteHash(path, hash string) {
 // resolves nothing. It is what edit_file asks, whose write already carries the
 // other version and so has no conflict to resolve.
 func (l *Ledger) Changed(path string) bool {
-	if !l.opt.Enabled || l.seen == nil {
+	if !l.active() {
 		return false
 	}
 	changed, _, err := l.seen.Changed(path)
@@ -300,7 +325,7 @@ func (l *Ledger) Changed(path string) bool {
 // OnConflict is the tools hook: has path changed since this session read it,
 // and if so what happens. true means write.
 func (l *Ledger) OnConflict(ctx context.Context, path string, mine []byte, ask Asker, who Attendance, notice func(string)) (bool, error) {
-	if !l.opt.Enabled || l.seen == nil {
+	if !l.active() {
 		return true, nil
 	}
 	changed, theirs, err := l.seen.Changed(path)
@@ -325,32 +350,15 @@ func (l *Ledger) OnConflict(ctx context.Context, path string, mine []byte, ask A
 	return true, nil
 }
 
-// Turn updates the record at a turn boundary. Not per tool call: the only
-// consumers read it at human timescales, and a record rewritten inside the
-// tool loop is a disk write for nothing.
-func (l *Ledger) Turn(branch, task string, writing []string) {
-	if !l.opt.Enabled || l.dir == "" {
-		return
-	}
-	l.rec.Branch, l.rec.Task, l.rec.Writing = branch, task, writing
-	l.rec.Updated = time.Now().UTC().Format(time.RFC3339)
-	if err := Save(l.dir, l.rec); err != nil {
-		l.note("could not update this session's work record: " + err.Error())
-	}
-}
-
-// Close removes this session's record and its seen store. The store is not
-// flushed: it is named by this process's pid and start time, which no later
-// process ever has, so a flushed file had no reader and only accumulated —
-// one per session, forever. What this session saw lives for this process.
+// Close removes this session's record and stops the hooks: what this session
+// saw lives for this process and no longer. Idempotent.
 func (l *Ledger) Close() error {
-	if !l.opt.Enabled || l.dir == "" {
+	l.mu.Lock()
+	wasClosed := l.closed
+	l.closed = true
+	l.mu.Unlock()
+	if wasClosed || !l.opt.Enabled || l.dir == "" {
 		return nil
-	}
-	if l.seen != nil {
-		if err := os.Remove(l.seen.path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
 	}
 	return Remove(l.dir, l.rec.PID, l.rec.Started)
 }

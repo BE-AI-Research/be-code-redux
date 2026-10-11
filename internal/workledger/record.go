@@ -41,14 +41,14 @@ var StaleAfter = time.Hour
 
 // recordName is what Others will open: a pid and an RFC3339 start time with
 // its punctuation stripped, exactly as Record.Path writes it. Anything else
-// in this directory belongs to somebody else and is never touched — the seen
-// store lives here too.
+// in this directory belongs to somebody else and is never touched.
 var recordName = regexp.MustCompile(`^\d+-\d{8}T\d{6}Z\.json$`)
 
-// seenName is a session's seen store, <pid>-<stamp>.seen.json. Builds before
-// 1.2.6 flushed one at Close and never removed it, so a machine that has run
-// sessions since the work ledger shipped holds one per session; Others prunes
-// one whose pid is gone, by the pid in its own name and nothing else.
+// seenName is a seen store an earlier build left behind: builds before 1.2.6
+// flushed <pid>-<stamp>.seen.json at Close and never removed it, so a machine
+// that ran sessions then holds one per session. Nothing writes one any more;
+// Others prunes one whose pid is gone, by the pid in its own name and nothing
+// else.
 var seenName = regexp.MustCompile(`^(\d+)-\d{8}T\d{6}Z\.seen\.json$`)
 
 // Record is one running session's work. Written at turn boundaries, not per

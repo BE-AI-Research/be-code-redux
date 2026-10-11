@@ -224,16 +224,22 @@ func writeState(path string, st state) error {
 		os.Remove(tmp)
 		return err
 	}
+	// What we wrote is what this session last saw, or the work ledger's
+	// record of this file is stale from the moment it is written.
+	if OnStateRead != nil {
+		OnStateRead(path, b)
+	}
 	return nil
 }
 
-// mutate is every write to the file: re-read, change, write atomically.
+// mutate is every write to the file: read, change, write atomically.
 //
 // trustMu serialises writers inside this process. It cannot serialise another
 // process — `be-code packs add` in a second terminal while a session is live
-// — so the read and the write are guarded by comparing the file against what
-// this attempt read: if it moved, the delta is applied again to the new state
-// and both writers' intent survives.
+// — so before writing, the file is compared against the bytes this attempt
+// read: if it moved, the delta is applied again to the new state. That
+// narrows the window to the instant between the comparison and the rename;
+// it does not close it, and nothing short of a lock could.
 //
 // This is the mechanical race of work-ledger spec §2, and it deliberately
 // does not prompt: both deltas were wanted, nothing is lost by retrying, and
@@ -247,7 +253,7 @@ func mutate(path string, f func(*state)) error {
 	const attempts = 3
 	for i := 0; i < attempts; i++ {
 		before := rawState(path)
-		st := readState(path)
+		st := parseState(path, before)
 		f(&st)
 		if beforeWriteHook != nil {
 			beforeWriteHook()
@@ -272,24 +278,29 @@ func rawState(path string) []byte {
 	return b
 }
 
-// readState reads the file; missing or corrupt reads as empty. A decision
-// nobody can produce is not a decision, and this must never fail a session.
-// OnStateRead is told the trust file's bytes whenever it is read, so the work
-// ledger can tell a later outside change from our own write. Nil in
-// production until cmd/root.go assigns it; a hook rather than an import,
+// OnStateRead is told the trust file's bytes whenever it is read or written,
+// so the work ledger can tell a later outside change from our own write. Nil
+// in production until cmd/root.go assigns it; a hook rather than an import,
 // because internal/workledger reads internal/live and internal/gitctx and
 // this package must not depend on either.
 var OnStateRead func(path string, content []byte)
 
+// readState reads the file; missing or corrupt reads as empty. A decision
+// nobody can produce is not a decision, and this must never fail a session.
 func readState(path string) state {
-	var st state
-	b, err := os.ReadFile(path)
-	if err != nil {
+	return parseState(path, rawState(path))
+}
+
+// parseState is readState over bytes already in hand, so mutate reads the
+// file once per attempt and the hook sees exactly the bytes that were used.
+func parseState(path string, b []byte) state {
+	if b == nil {
 		return state{}
 	}
 	if OnStateRead != nil {
 		OnStateRead(path, b)
 	}
+	var st state
 	if json.Unmarshal(b, &st) != nil {
 		return state{}
 	}

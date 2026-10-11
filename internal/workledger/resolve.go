@@ -3,9 +3,10 @@ package workledger
 import (
 	"context"
 	"fmt"
-	"github.com/brown-enterprises/be-code/internal/diff"
 	"path/filepath"
 	"strings"
+
+	"github.com/brown-enterprises/be-code/internal/diff"
 )
 
 // Decision is what to do about a conflict.
@@ -75,7 +76,11 @@ func (c Conflict) Detail() string {
 		if o.Task != "" {
 			fmt.Fprintf(&b, ", task %s", o.Task)
 		}
-		b.WriteString(") is working in this workspace\n")
+		b.WriteString(") is working in this workspace")
+		if o.Suspect {
+			b.WriteString(" — its record is stale, so the process may be unrelated")
+		}
+		b.WriteString("\n")
 	case len(c.Others) > 1:
 		fmt.Fprintf(&b, "  %d other sessions are working in this workspace\n", len(c.Others))
 	default:

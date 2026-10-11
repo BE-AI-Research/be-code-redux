@@ -86,3 +86,15 @@ func TestAttendedHereCountsAServedHost(t *testing.T) {
 		t.Error("a terminal on stdin is attended")
 	}
 }
+
+// be-code init builds an agent and so opens a work record, but never calls
+// finishSession; without its own Close every init left a record behind.
+func TestInitClosesTheWorkLedger(t *testing.T) {
+	b, err := os.ReadFile("init.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "workLedger.Close()") {
+		t.Error("init does not close the work ledger, so it leaves its record behind")
+	}
+}

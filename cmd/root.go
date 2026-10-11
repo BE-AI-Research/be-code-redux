@@ -383,7 +383,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	if d, derr := time.ParseDuration(cfg.Work.KeepOverwritten); derr == nil && d > 0 {
 		keep = d
 	}
-	workLedger, _ = workledger.Open(reg.Root, workledger.Options{
+	workLedger = workledger.Open(reg.Root, workledger.Options{
 		Enabled:         cfg.Work.Enabled,
 		KeepOverwritten: keep,
 		PID:             os.Getpid(),
@@ -453,6 +453,12 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			return "", 0 // no engine, so no turn boundary; the list is capped instead
 		}
 		return ag.Engine.ActiveRootID(), ag.Engine.Turn()
+	})
+	workLedger.SetSession(func() string {
+		if ag.Session == nil {
+			return ""
+		}
+		return store.CodeFor(ag.Session.ID)
 	})
 
 	// The conflict gate needs ag for its notice sink, so it is assigned here

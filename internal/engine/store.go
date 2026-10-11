@@ -263,7 +263,6 @@ func (l Limits) withDefaults() Limits {
 	return l
 }
 
-// Key derives the store directory name for a workspace root.
 // OnDocHash is told each task document's path and the hash the engine
 // computed for it, so the work ledger can tell a later outside change from
 // the engine's own write. Nil in production until cmd/root.go assigns it.
@@ -274,6 +273,7 @@ func (l Limits) withDefaults() Limits {
 // it is the one the engine acts on.
 var OnDocHash func(path, hash string)
 
+// Key derives the store directory name for a workspace root.
 func Key(root string) string {
 	abs, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {

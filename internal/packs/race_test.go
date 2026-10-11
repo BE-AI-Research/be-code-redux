@@ -1,6 +1,7 @@
 package packs
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -68,6 +69,7 @@ func TestMutateGivesUpRatherThanSpinning(t *testing.T) {
 		t.Errorf("the error should name the file: %v", err)
 	}
 }
+
 // trustOutOfBand is another process's read-modify-write: it does not take
 // trustMu, because a second process does not share it.
 func trustOutOfBand(path, pack, hash string) error {
@@ -84,4 +86,21 @@ var hashSeq int
 func randomHash() string {
 	hashSeq++
 	return "h" + strconv.Itoa(hashSeq)
+}
+
+// What mutate wrote is what this session last saw, or the work ledger's
+// record of the trust file is stale from the moment it is written.
+func TestMutateNotesWhatItWrote(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "packs.json")
+	var last []byte
+	saved := OnStateRead
+	OnStateRead = func(_ string, b []byte) { last = append([]byte(nil), b...) }
+	t.Cleanup(func() { OnStateRead = saved })
+	if err := Trust(path, "p", "h1"); err != nil {
+		t.Fatal(err)
+	}
+	onDisk, _ := os.ReadFile(path)
+	if string(last) != string(onDisk) {
+		t.Errorf("the hook last saw %q, the file holds %q", last, onDisk)
+	}
 }

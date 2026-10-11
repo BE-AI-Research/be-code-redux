@@ -12,7 +12,7 @@ func TestChangedAfterSomebodyElseWrites(t *testing.T) {
 	if err := os.WriteFile(f, []byte("ours\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	s.Note(f, []byte("ours\n"))
 
 	changed, theirs, err := s.Changed(f)
@@ -46,7 +46,7 @@ func TestAnUnseenFileIsNotAConflict(t *testing.T) {
 	if err := os.WriteFile(f, []byte("somebody else made this\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	changed, _, err := s.Changed(f)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestAnUnseenFileIsNotAConflict(t *testing.T) {
 func TestOurOwnWriteIsNotAConflict(t *testing.T) {
 	ws := t.TempDir()
 	f := filepath.Join(ws, "a.txt")
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestADeletedFileIsAChange(t *testing.T) {
 	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	s.Note(f, []byte("v1\n"))
 	if err := os.Remove(f); err != nil {
 		t.Fatal(err)
@@ -103,34 +103,6 @@ func TestADeletedFileIsAChange(t *testing.T) {
 	}
 }
 
-// A resumed session must not treat every file as unseen: the hashes outlive
-// the process.
-func TestSeenSurvivesAFlushAndReload(t *testing.T) {
-	ws := t.TempDir()
-	f := filepath.Join(ws, "a.txt")
-	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	store := filepath.Join(t.TempDir(), "seen.json")
-	s := NewSeen(store)
-	s.Note(f, []byte("v1\n"))
-	if err := s.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	again := NewSeen(store)
-	changed, _, err := again.Changed(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !changed {
-		t.Error("a reloaded Seen did not remember what it had seen")
-	}
-}
-
 // NoteHash exists so the engine can feed the hash it already computed for a
 // task document rather than hashing the same bytes twice.
 func TestNoteHashMatchesNote(t *testing.T) {
@@ -140,7 +112,7 @@ func TestNoteHashMatchesNote(t *testing.T) {
 	if err := os.WriteFile(f, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	s.NoteHash(f, HashBytes(body))
 	changed, _, err := s.Changed(f)
 	if err != nil {
@@ -148,30 +120,5 @@ func TestNoteHashMatchesNote(t *testing.T) {
 	}
 	if changed {
 		t.Error("a hash noted directly must compare equal to the file it came from")
-	}
-}
-
-func TestFlushToAnUnwritablePlaceIsNotFatal(t *testing.T) {
-	// A real file, not a path that does not exist: a noted file which is
-	// missing is a *change* (TestADeletedFileIsAChange), so using one here
-	// would assert the opposite of this package's own semantics.
-	ws := t.TempDir()
-	f := filepath.Join(ws, "a.txt")
-	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := NewSeen(filepath.Join(t.TempDir(), "nope", "deeper", "seen.json"))
-	s.Note(f, []byte("v1\n"))
-
-	// It may error, but it must not panic, and the in-memory map still works.
-	_ = s.Flush()
-	if changed, _, _ := s.Changed(f); changed {
-		t.Error("in-memory detection stopped working after a failed flush")
-	}
-	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if changed, _, _ := s.Changed(f); !changed {
-		t.Error("in-memory detection stopped noticing changes after a failed flush")
 	}
 }

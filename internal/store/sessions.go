@@ -123,7 +123,6 @@ func TitleFrom(input string) string {
 	return t
 }
 
-// Save writes the session atomically.
 // OnSessionRead is told the session file's bytes whenever it is written or
 // read, so the work ledger can tell a later outside change from our own
 // write. Nil in production until cmd/root.go assigns it; a hook rather than
@@ -131,6 +130,7 @@ func TitleFrom(input string) string {
 // internal/gitctx and this package must not depend on either.
 var OnSessionRead func(path string, content []byte)
 
+// Save writes the session atomically.
 func (s *Session) Save() error {
 	d, err := dir()
 	if err != nil {

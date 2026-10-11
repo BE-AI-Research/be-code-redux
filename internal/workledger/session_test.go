@@ -12,10 +12,7 @@ import (
 func openFor(t *testing.T, ws string) *Ledger {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir()) // never the real ~/.be-code
-	l, err := Open(ws, Options{Enabled: true, KeepOverwritten: time.Hour, PID: 4242, Session: "ABC123", Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := Open(ws, Options{Enabled: true, KeepOverwritten: time.Hour, PID: 4242, Session: "ABC123", Model: "m"})
 	t.Cleanup(func() { l.Close() })
 	return l
 }
@@ -72,10 +69,7 @@ func TestCloseLeavesNoSeenStoreBehind(t *testing.T) {
 func TestDisabledWritesNothing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ws := t.TempDir()
-	l, err := Open(ws, Options{Enabled: false, PID: 4242})
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := Open(ws, Options{Enabled: false, PID: 4242})
 	defer l.Close()
 	if dir, derr := Dir(); derr == nil {
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -215,5 +209,65 @@ func TestTheRecordNamesTheBranch(t *testing.T) {
 	l := openFor(t, ws)
 	if l.rec.Branch == "" {
 		t.Error("the record does not name the branch, so the notice can only say a pid")
+	}
+}
+
+// The session's resume code is not known when the ledger opens — the store
+// loads after it — so it is pulled when the record is next written, like the
+// task and the turn.
+func TestTheRecordNamesTheSessionOnceKnown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	l := Open(ws, Options{Enabled: true, PID: 4242})
+	t.Cleanup(func() { l.Close() })
+	l.SetSession(func() string { return "ABC123" })
+	f := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l.OnRead(f, []byte("v1\n")) // the first read is the first heartbeat
+	dir, _ := Dir()
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("records: %v", entries)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	if !strings.Contains(string(b), `"session": "ABC123"`) {
+		t.Errorf("the record does not name the session:\n%s", b)
+	}
+}
+
+// The hooks are package vars in packs, store and engine and are never
+// unassigned, so a save after finishSession still reaches the ledger. A
+// closed ledger must do nothing — above all it must not write its record
+// back, which would leave a ghost record until the process died.
+func TestAClosedLedgerIgnoresLateHooks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	l := Open(ws, Options{Enabled: true, PID: 4242})
+	f := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(f, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l.OnRead(f, []byte("v1\n"))
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	l.lastTouch = time.Time{} // the heartbeat throttle would otherwise hide a rewrite
+	l.OnRead(f, []byte("v1\n"))
+	l.OnWrote(f)
+	l.NoteHash(f, "x")
+	if err := os.WriteFile(f, []byte("theirs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if l.Changed(f) {
+		t.Error("a closed ledger still reports changes")
+	}
+	if ok, err := l.OnConflict(context.Background(), f, []byte("mine\n"), nil, Attended, nil); !ok || err != nil {
+		t.Errorf("a closed ledger gated a write: %v %v", ok, err)
+	}
+	dir, _ := Dir()
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("a hook after Close wrote the record back: %v", entries)
 	}
 }

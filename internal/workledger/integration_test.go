@@ -26,10 +26,7 @@ func TestThroughTheRealRegistry(t *testing.T) {
 	}
 	reg.ApproveWrites = false
 
-	l, err := Open(ws, Options{Enabled: true, KeepOverwritten: 0, PID: 4242, Model: "m"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := Open(ws, Options{Enabled: true, KeepOverwritten: 0, PID: 4242, Model: "m"})
 	defer l.Close()
 
 	turn := 1

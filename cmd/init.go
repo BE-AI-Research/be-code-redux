@@ -49,8 +49,13 @@ var initCmd = &cobra.Command{
 		}
 		defer ag.Tools.Close()
 		// Same cleanup every buildAgent caller owes: the checkpoint store it
-		// created, and the editor bridge attachIDE may have connected.
+		// created, the editor bridge attachIDE may have connected, and the
+		// work record — init never reaches finishSession, which removes it
+		// for every other caller.
 		defer ag.Checkpoints.Cleanup()
+		if workLedger != nil {
+			defer workLedger.Close()
+		}
 		if ideSession != nil {
 			defer ideSession.Close()
 		}

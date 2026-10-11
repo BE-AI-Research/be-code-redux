@@ -48,7 +48,7 @@ func TestRunCountsAWriteByThisSessionToo(t *testing.T) {
 	r.Read(f, []byte("v1\n"))
 
 	// The session's own Seen would now say "unchanged"; the run must not.
-	s := NewSeen(filepath.Join(t.TempDir(), "seen.json"))
+	s := NewSeen()
 	s.Note(f, []byte("v1\n"))
 	if err := os.WriteFile(f, []byte("primary rewrote it\n"), 0o644); err != nil {
 		t.Fatal(err)
