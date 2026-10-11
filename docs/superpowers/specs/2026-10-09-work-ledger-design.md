@@ -1,7 +1,7 @@
 # Work ledger: who is working where, and what happens when two writers meet
 
 Date: 2026-10-09
-Status: design, approved in conversation; not yet implemented
+Status: implemented and merged to `main` 2026-10-09; amended 2026-10-10 after a post-merge review (§6, §7, §10)
 Sub-project **A** of three (see §3).
 
 ## 1. What this is for
@@ -191,10 +191,16 @@ func Seen(path string, content []byte)
 func Changed(path string) (changed bool, theirs []byte, err error)
 ```
 
-Hashes live in memory for the session, and on disk in the work record's own
-directory (`work/<pid>-<started>.seen.json`) so a resumed session does not
-treat every file as unseen. SHA-256 of the exact bytes; no normalisation,
-because a byte that changed is a change.
+Hashes live in memory for the life of the process. SHA-256 of the exact
+bytes; no normalisation, because a byte that changed is a change.
+
+*Amended 2026-10-10.* The design first put them on disk too, as
+`work/<pid>-<started>.seen.json`, "so a resumed session does not treat every
+file as unseen" — but a file keyed by pid and start time is one no later
+process ever has, so it could never be read back and only accumulated, one
+per session, with nothing to remove it. `Close` now removes the store and
+`Others` prunes one whose pid is gone. A resumed session starts unseen, which
+is the rule the table above already states for a first read.
 
 **Where `Seen` is called**, which is the half that makes `Changed` mean
 anything — a file never seen is never a conflict, so a missed `Seen` is a
@@ -228,6 +234,7 @@ already on disk, including two published packs' worth of `packs.json`.
 | The same, during a fired scheduled turn | **Write last, snapshot first**, and say where the old version went (§9). Never refuse: an unattended turn has nobody to ask, and the schedules design is explicit that a prompt with no deadline hangs the turn. |
 | The same, with no approver at all (headless without `-y`) | As the fired turn: snapshot, write, say so. `-y` is irrelevant here — there is no consent to give, only a record to keep. |
 | The file this session is writing is one it has never seen | Not a conflict. Write. |
+| An `edit_file` whose file changed since this session read it | Not a conflict (*amended 2026-10-10*). The replacement is applied to what is on disk now, so the other change is already in what is written and nothing is overwritten; by §2's own test — "applying ours discards theirs" — there is nothing to choose between. The tool result tells the model the file moved and to read it again before editing further. |
 
 ## 8. The `work_conflict` approval
 
@@ -319,10 +326,12 @@ Three places, and no others in A:
 
 1. **`internal/packs/trust.go:mutate`** — compare-and-retry (the race), and
    nothing else: every writer of that file applies a delta.
-2. **`internal/tools/fs.go`'s write path** — after approval and before
+2. **`internal/tools/fs.go`'s `write_file` path** — after approval and before
    `OnBeforeWrite`, so a conflict is caught before the checkpointer snapshots
    a file that is about to be overwritten anyway. This is the one that
-   protects task documents, pack directories and source.
+   protects task documents, pack directories and source. `edit_file` asks
+   `Registry.OnChanged` instead (§7): its write already carries the other
+   version, so it owes the model a note and nobody a question.
 3. **`internal/store`'s session save** — which already has half of this:
    `Session.HostPID` detects a different live host owning the file and
    disables autosave for the run. That guard stays as it is; A adds the

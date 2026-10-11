@@ -141,3 +141,67 @@ Final: minor (deferred): `Conflict.Detail` does not say a record is `Suspect`, s
 Final: minor (deferred): the spec's §5 notice ends "(be-code sessions lists them)"; `NoticeLine` drops it, and `be-code sessions` lists live records rather than work records.
 Final: Ruling: re-graded two Minors to Important and fixed them. M7: my own `internal/engine/seen_test.go` called `OpenAt(ws, dot, …)` where the signature is `OpenAt(dir, root, …)` — the arguments were reversed, so the fixture put task documents in the dotdir and state in the workspace and the test passed against a layout production never uses. M12: three factual errors in the CLAUDE.md section I wrote (it credited `procattr.Alive` for Unix pruning, omitted the store and engine read sites, and described the attendance inference C2 disproved). Both are wrong facts rather than polish, and the second is in the file I wrote a memory about this session for exactly this reason. Cost if wrong: two small corrections nobody asked for.
 Final: fix pass complete, `make -f build.mk verify` green (34 packages, exit 0), ~/.be-code/config.json mtime 1791327107 unchanged. One `verify` run mid-pass failed three `internal/tui` mailbox tests; each passed alone twice and the next full run was green, so it was CPU contention — the known pattern in this repo — not a regression. No second review dispatched: every fix has a test that failed first.
+
+---
+
+# Post-merge review, 2026-10-10
+
+A second reviewer (a different model, reading `67bd7e3..f26b798` cold) found
+no Critical and four Important, all in seams the final review had not
+reached. Fixed on `fix/review-importants`, each with a test that failed
+first; `make -f build.mk verify` green, 34 packages.
+
+Post-merge: fixed the seen store leak — `work/<pid>-<started>.seen.json` is
+keyed by a pid and start time no later process ever has, so the file `Close`
+flushed had no reader and accumulated one per session with nothing to remove
+it (I2's fix had, correctly, stopped `Others` deleting unclassified files, and
+so also stopped the only thing that had ever removed them). `Close` removes
+it; `Others` prunes one whose pid is gone. `TestCloseLeavesNoSeenStoreBehind`,
+`TestOthersPrunesASeenStoreWhoseProcessIsGone` RED→GREEN. Ruling: the spec's
+"a resumed session does not treat every file as unseen" is withdrawn rather
+than re-engineered — it needs a key that survives the process, and the rule
+for an unseen file is already "a first write is not a conflict". Cost if
+wrong: a resumed session's first write to a file it saw before the restart is
+not gated.
+
+Post-merge: fixed the README fence (`README.md:1282` had prose after the
+closing fence, so the block ran to line 1489 and the rest of the section plus
+the whole config reference rendered as code). `TestReadmeFencesCloseOnTheirOwnLine`
+RED→GREEN.
+
+Post-merge: fixed `edit_file`'s false conflict. It applies the replacement to
+the current contents, so the other writer's change is already in what it
+writes; the gate then asked a person to choose between two things not in
+conflict, and unattended it took a whole-tree snapshot and noticed "wrote X
+over a change this session did not make", which was untrue. Ruling: by §2's
+own test ("applying ours discards theirs") an edit is not a conflict; it is a
+note to the model, through the new `Registry.OnChanged`/`Ledger.Changed`, and
+the gate is `write_file`'s alone. Spec §7 and §10 amended. Cost if wrong: a
+person is not told that a file the model is editing moved under it; the model
+is, and their change is intact either way.
+`TestEditNeverPromptsButTellsTheModelTheFileMoved` RED→GREEN.
+
+Post-merge: fixed attendance-by-accident. The session host runs with
+`cmd.Stdin = nil`, which is `/dev/null`, a character device, so `stdinIsTTY`
+said "terminal" and the default interactive mode was Attended for that reason
+alone; a correct TTY check would have turned every hosted session Unattended
+with nobody told. `attendedHere()` now counts a session host (its terminals
+are attached through its socket) or a terminal on stdin.
+`TestAttendedHereCountsAServedHost` pins it. `stdinIsTTY`'s own `/dev/null`
+reading is pre-existing and untouched.
+
+Post-merge: minor (deferred): three doc comments were orphaned onto the new
+hook vars — `engine/store.go` (`Key`), `store/sessions.go` (`Save`),
+`packs/trust.go` (`readState`) — the slip the pack-loader review fixed once.
+Post-merge: minor (deferred): `Record.Session` is never populated (§4).
+Post-merge: minor (deferred): `trust.go`'s `writeState` does not note its own
+bytes, so the trust file's hash in `Seen` is stale after every write; harmless
+until dotdir detection is wired (I8).
+Post-merge: minor (deferred): README says `keep_overwritten` covers "a dotdir
+file", but no dotdir path can reach `KeepOld` (`Changed` is asked only about
+workspace paths); sidecars arise for non-repo workspaces and gitignored files.
+Post-merge: minor (deferred): `internal/packs/race_test.go` is not gofmt-clean.
+Post-merge: minor (deferred): CHANGELOG.md has no entry for the pack loader
+or the work ledger.
+Post-merge: minor (deferred): the `Seen` file form (`NewSeen` load, `Flush`)
+now has no production caller.

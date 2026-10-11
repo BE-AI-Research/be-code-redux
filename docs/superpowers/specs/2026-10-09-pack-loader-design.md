@@ -1,7 +1,7 @@
 # Pack loader: installing a skill pack into a project
 
 Date: 2026-10-09
-Status: design, approved in conversation; not yet implemented
+Status: implemented and merged to `main` 2026-10-09
 
 ## 1. What this is for
 
