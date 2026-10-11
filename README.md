@@ -1279,8 +1279,10 @@ and says so once when you open a second session in the same workspace:
 ```
 note> another session is working in this workspace:
         pid 48231 on feat/thing, task 003, writing internal/tui/chat.go
-``` The records are advisory, not locks: a
-lock that outlives a crashed process is worse than a lost update.
+```
+
+The records are advisory, not locks: a lock that outlives a crashed process is
+worse than a lost update.
 
 When a write would overwrite a change that arrived since this session read the
 file, it asks: **keep mine**, **keep theirs**, or **show me** the difference.
