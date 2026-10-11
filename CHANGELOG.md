@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.3.0 — Packs, online models, a browser, schedules (2026-10-10)
 
 - **Skill packs can be installed into a project** — `be-code packs add <name>[@ref]`, the
   **Install a skill pack** row in `/menu`, or `/packs add` with no name, which opens a picker of

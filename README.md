@@ -4,7 +4,7 @@ BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.2.5-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.3.0-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -139,7 +139,7 @@ irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.
 
 Both download the current release's `be-code-windows-amd64.exe`, check it against the release's
 `SHA256SUMS`, install it to `%LOCALAPPDATA%\Programs\be-code`, add that to your user PATH (no
-administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.2.5` pins a release
+administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.3.0` pins a release
 and `BE_CODE_NO_SETUP=1` skips the wizard. Uninstall with
 `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.ps1 | iex`.
 
@@ -1553,15 +1553,19 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.2.5** — a hotfix for Windows. v1.2.4 asked the console whether it was UTF-8 capable, which
-switched every Windows terminal to glyphs it may not draw at the measured width: rows wrapped,
-the frame outgrew the terminal, and the alt screen scrolled — the top bar went and the input and
-status rows kept stale copies. Capability comes from the locale again, as before v1.2.4. Also
-fixed: the ghost rows themselves (a client clears the console's wrap-at-end-of-line for the
-length of an attach), and the one-line install from cmd.exe, which installed nothing silently.
-**If you are on v1.2.4, update.**
+**v1.3.0 — Packs, online models, a browser, and schedules.** Skill packs install into a project
+from the app; online main models (OpenRouter and other OpenAI-compatible providers) run under
+per-project, per-site consent with an optional spend cap; scheduled events wake the model later
+under an allowance approved up front; and the browser can attach to your own Chrome. Also fixed
+the Windows UTF-8 console width regression from v1.2.4 and the one-line cmd.exe install that
+silently installed nothing. **If you are on v1.2.4, update.**
 
 Recent releases:
+
+- **v1.2.5 — A hotfix for Windows.** v1.2.4 asked the console whether it was UTF-8 capable, which
+  switched every Windows terminal to glyphs it may not draw at the measured width: rows wrapped,
+  the frame outgrew the terminal, and the alt screen scrolled. Capability comes from the locale
+  again. Also fixed the ghost rows and the one-line install from cmd.exe.
 
 - **v1.2.3 — A cut-off tool call is never the answer.** A long run can no longer end in pages of
   half-JSON: a reply the output limit cuts off in the middle of a tool call is discarded and
