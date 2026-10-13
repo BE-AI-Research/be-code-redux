@@ -1564,10 +1564,12 @@ reply now nudges the model to continue instead of ending the run after a single 
 **If you are on v1.2.4, update.**
 
 A special thanks to kmesiab https://github.com/kmesiab (Kevin Mesiab) for squahsing these bugs!
-prompt: document the <tool_result> format in compat instructions- #1
-#1
-agent: nudge empty replies instead of one nudge then fatal- #2
-#2
+
+#1 prompt: document the <tool_result> format in compat instructions.
+
+
+#2 agent: nudge empty replies instead of one nudge then fatal.
+
 
 Recent releases:
 
