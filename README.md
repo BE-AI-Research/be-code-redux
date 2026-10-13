@@ -1,15 +1,5 @@
 <img width="2334" height="1079" alt="be-code-redux-launchdate" src="https://github.com/user-attachments/assets/a04617d4-eb0f-41ed-bde4-aebe4b641fca" />
 
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-5SKFGKYLET"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-5SKFGKYLET');
-</script>
-
 BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
@@ -1646,3 +1636,13 @@ attach, undo, JSON mode, bench harness, task record) drives the real binary.
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 BE AI Research.
+
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-5SKFGKYLET"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-5SKFGKYLET');
+</script>
