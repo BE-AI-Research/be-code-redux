@@ -1636,13 +1636,3 @@ attach, undo, JSON mode, bench harness, task record) drives the real binary.
 ## License
 
 MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 BE AI Research.
-
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-5SKFGKYLET"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-5SKFGKYLET');
-</script>
