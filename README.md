@@ -1558,7 +1558,10 @@ from the app; online main models (OpenRouter and other OpenAI-compatible provide
 per-project, per-site consent with an optional spend cap; scheduled events wake the model later
 under an allowance approved up front; and the browser can attach to your own Chrome. Also fixed
 the Windows UTF-8 console width regression from v1.2.4 and the one-line cmd.exe install that
-silently installed nothing. **If you are on v1.2.4, update.**
+silently installed nothing. Two more fixes are from **kmesiab**: the compat (embedded)
+tool-call instructions now document the `<tool_result>` result format (#1), and an empty model
+reply now nudges the model to continue instead of ending the run after a single nudge (#2).
+**If you are on v1.2.4, update.**
 
 Recent releases:
 
