@@ -1563,6 +1563,12 @@ tool-call instructions now document the `<tool_result>` result format (#1), and 
 reply now nudges the model to continue instead of ending the run after a single nudge (#2).
 **If you are on v1.2.4, update.**
 
+A special thanks to kmesiab https://github.com/kmesiab (Kevin Mesiab) for squahsing these bugs!
+prompt: document the <tool_result> format in compat instructions- #1
+#1
+agent: nudge empty replies instead of one nudge then fatal- #2
+#2
+
 Recent releases:
 
 - **v1.2.5 — A hotfix for Windows.** v1.2.4 asked the console whether it was UTF-8 capable, which
