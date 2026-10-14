@@ -26,6 +26,14 @@ import (
 // maxBackendRetries bounds in-place retries of one model call.
 const maxBackendRetries = 5
 
+// maxEmptyNudges bounds how many times the loop asks a model that
+// returned an empty reply (finish_reason=stop, no content, no tool calls)
+// to continue. The model emitted EOS with nothing to say — typically a
+// small model that believes it is done, or has lost the thread — so the
+// remedy is to say so plainly, not to wait it out; a transient backend
+// flake is cured by the retry as well.
+const maxEmptyNudges = 3
+
 // chatWithRetry runs chatFiltered, retrying transient backend failures with
 // exponential backoff (retryBase, doubling, capped at 30s).
 func (a *Agent) chatWithRetry(ctx context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
