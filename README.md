@@ -1129,6 +1129,31 @@ providers have presets (`be-code setup` writes them); see [Online providers](#on
 echo "fix the failing test" | ./be-code run -y   # pipeline mode (auto-approve shell)
 ```
 
+### Repairing a broken provider config
+
+If `be-code` exits at startup with `provider "X" has unknown type "Y"`, the config's
+provider type resolver (`internal/provider/registry.go`) rejected a `"type"` value it does
+not know — it only accepts `ollama`, `openai` or empty. A bad config state can write an
+unknown type (e.g. a provider's own name) into that field, and be-code then refuses to
+start. `scripts/fix-provider-config.py` repairs the config without needing the Go toolchain,
+so it runs on boxes where be-code itself cannot build.
+
+```bash
+python3 scripts/fix-provider-config.py --dry-run   # report what would change, write nothing
+python3 scripts/fix-provider-config.py             # fix: default provider -> ollama
+python3 scripts/fix-provider-config.py --type openai  # or repair the default as openai
+```
+
+It backs up the config to `config.json.bak-<timestamp>` before writing, leaves already-legal
+entries untouched, and is idempotent (exit `2` when there is nothing to do; exit `3` on a
+dry-run; exit `1` on bad input). A safe script form:
+
+```bash
+python3 scripts/fix-provider-config.py || [ $? -eq 2 ] && be-code
+```
+
+Full reference: [`docs/fix-provider-config.md`](docs/fix-provider-config.md).
+
 ## Skill packs
 
 A pack is a folder of Markdown and JSON that teaches the model one kind of project: always-on
