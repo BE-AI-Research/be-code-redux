@@ -22,7 +22,7 @@ func loadPackWithWhen(t *testing.T, name string, changed []string) *packs.Pack {
 	}
 	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"a test pack",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work"}},
+		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work","triggers":["x"]}},
 		"verify":[{"name":"packbuild","cmd":["mybuild"],"parser":"gcc"` + when + `}]}`
 	for rel, s := range map[string]string{
 		"pack.json":        body,
@@ -63,7 +63,7 @@ func has(names []string, want string) bool {
 // (30-minute timeout) because somebody fixed a typo in a README.
 func TestPackCheckIsSkippedWhenNothingItWatchesChanged(t *testing.T) {
 	ag := packAgent(t)
-	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", []string{"src/**", "*.go"})})
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "pack", []string{"src/**", "*.go"})})
 
 	if names := checkNames(ag, []string{"README.md", "docs/x.md"}); has(names, "packbuild") {
 		t.Errorf("ran a watched check for unrelated edits: %v", names)
@@ -79,7 +79,7 @@ func TestPackCheckIsSkippedWhenNothingItWatchesChanged(t *testing.T) {
 // A check with no when.changed is unconditional, as the spec says.
 func TestPackCheckWithoutWhenAlwaysRuns(t *testing.T) {
 	ag := packAgent(t)
-	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", nil)})
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "pack", nil)})
 
 	if names := checkNames(ag, []string{"README.md"}); !has(names, "packbuild") {
 		t.Errorf("an unconditional check was skipped: %v", names)
@@ -92,7 +92,7 @@ func TestPackCheckWithoutWhenAlwaysRuns(t *testing.T) {
 // stop verifying at all, which is the one outcome worse than a slow build.
 func TestPackCheckRunsWhenTheChangedListIsUnknown(t *testing.T) {
 	ag := packAgent(t)
-	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", []string{"src/**"})})
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "pack", []string{"src/**"})})
 
 	if names := checkNames(ag, nil); !has(names, "packbuild") {
 		t.Errorf("skipped a check with no changed-file list to judge by: %v", names)
@@ -106,7 +106,7 @@ func TestProjectChecksAreNeverFilteredByPackGlobs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ag.Tools.Root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", []string{"nothing/**"})})
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "pack", []string{"nothing/**"})})
 
 	names := checkNames(ag, []string{"README.md"})
 	if len(names) == 0 {
@@ -125,7 +125,7 @@ func TestProjectChecksAreNeverFilteredByPackGlobs(t *testing.T) {
 // VerifyNow is the one path, and it is the agent's own.
 func TestVerifyNowIncludesPackChecks(t *testing.T) {
 	ag := packAgent(t)
-	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "p", nil)})
+	ag.EnablePacks([]*packs.Pack{loadPackWithWhen(t, "pack", nil)})
 
 	proj := ag.VerifyProjectNow()
 	var found bool

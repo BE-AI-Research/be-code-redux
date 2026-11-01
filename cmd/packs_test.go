@@ -20,9 +20,9 @@ func TestPacksValidateReportsProblemsAndFails(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("pack.json", 0o644, `{"schema":1,"name":"p","version":"1.0.0",
-		"core":{"file":"core.md","budget_tokens":10},
-		"chunks":{"big":{"file":"chunks/big.md","summary":"s"}},
+	write("pack.json", 0o644, `{"schema":1,"name":"pack","version":"1.0.0","description":"test",
+		"core":{"file":"core.md","budget_tokens":100},
+		"chunks":{"big":{"file":"chunks/big.md","summary":"s","triggers":["t"]}},
 		"verify":[{"name":"build","cmd":["{pack}/tools/build","--x"],"parser":"gcc"}]}`)
 	write("core.md", 0o644, strings.Repeat("core rules. ", 50)) // over a 10-token budget
 	if err := os.MkdirAll(filepath.Join(dir, "chunks"), 0o755); err != nil {
@@ -44,9 +44,9 @@ func TestPacksValidateReportsProblemsAndFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	write("chunks/big.md", 0o644, "small enough")
-	write("pack.json", 0o644, `{"schema":1,"name":"p","version":"1.0.0",
+	write("pack.json", 0o644, `{"schema":1,"name":"pack","version":"1.0.0","description":"test",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"big":{"file":"chunks/big.md","summary":"s"}},
+		"chunks":{"big":{"file":"chunks/big.md","summary":"s","triggers":["t"]}},
 		"verify":[{"name":"build","cmd":["{pack}/tools/build","--x"],"parser":"gcc"}]}`)
 	if err := packsValidateCmd.RunE(packsValidateCmd, []string{dir}); err != nil {
 		t.Fatalf("a sound pack must validate: %v", err)
@@ -59,7 +59,8 @@ func TestPacksValidateRejectsABadManifest(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(`{"schema":1,"name":"p","version":"1",
+	if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(`{"schema":1,"name":"pack","version":"1.0.0","description":"test",
+		"core":{"file":"core.md","budget_tokens":100},
 		"verify":[{"name":"b","cmd":["b"],"parser":"nope"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -80,7 +80,6 @@ type manifest struct {
 
 type detect struct {
 	Any []string `json:"any"`
-	All []string `json:"all"`
 }
 
 type core struct {
@@ -120,6 +119,9 @@ func Load(dir string) (*Pack, []string, error) {
 	var m manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, nil, fmt.Errorf("pack.json in %s is not valid JSON: %w", root, err)
+	}
+	if err := ValidateManifest(raw); err != nil {
+		return nil, nil, fmt.Errorf("pack.json in %s: %w", root, err)
 	}
 	if m.Schema != schemaVersion {
 		// The directory, not m.Name: a manifest broken enough to have the

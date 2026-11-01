@@ -12,7 +12,7 @@ func writeMinimalPack(t *testing.T, dir, name, detect string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","core":{"file":"core.md"}` + detect + `}`
+	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500}` + detect + `}`
 	if err := os.WriteFile(filepath.Join(dir, "pack.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -113,15 +113,13 @@ func TestMatchesWorkspace(t *testing.T) {
 		{"any matches nothing", `{"any":["project.godot","*.sln"]}`, false},
 		{"a nested path needs **", `{"any":["**/*.Build.cs"]}`, true},
 		{"* does not cross a separator", `{"any":["*.Build.cs"]}`, false},
-		{"all requires every glob", `{"all":["*.uproject","**/*.Build.cs"]}`, true},
-		{"all fails on one miss", `{"all":["*.uproject","project.godot"]}`, false},
 		// A pack with no detect block never activates on its own: it is a
 		// general-purpose pack somebody turns on deliberately.
 		{"no detect never matches", `{}`, false},
 	}
 	for _, tc := range cases {
 		dir := filepath.Join(t.TempDir(), "p")
-		writeMinimalPack(t, dir, "p", `,"detect":`+tc.detect)
+		writeMinimalPack(t, dir, "pack", `,"detect":`+tc.detect)
 		p, _, err := Load(dir)
 		if err != nil {
 			t.Fatal(err)

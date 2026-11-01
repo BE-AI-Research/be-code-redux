@@ -22,8 +22,8 @@ func writeProjectPack(t *testing.T, root, name string) {
 	}
 	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"a test pack",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work"}},
-		"detect":{"all":["go.mod"]}}`
+		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work","triggers":["x"]}},
+		"detect":{"any":["go.mod"]}}`
 	for rel, s := range map[string]string{
 		"pack.json":        body,
 		"core.md":          "pack rules",

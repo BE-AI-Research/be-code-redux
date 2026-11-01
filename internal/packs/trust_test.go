@@ -204,7 +204,7 @@ func TestContentHashCoversAFileACheckNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("pack.json", `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},
+	write("pack.json", `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500},
   "verify":[{"name":"run","cmd":["sh","{pack}/chunks/run.md"],"parser":"generic"}]}`)
 	write("core.md", "rules")
 	write("chunks/run.md", "echo one")

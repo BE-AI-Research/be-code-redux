@@ -91,10 +91,9 @@ const (
 //
 // Globs are workspace-relative, with "*" matching within one path element and
 // "**" across separators, so "*.uproject" is a file at the root and
-// "**/*.Build.cs" is one anywhere. "any" needs one hit, "all" needs every
-// glob. A pack with no detect block never matches: it is a general-purpose
-// pack somebody turns on deliberately rather than one that recognises a
-// project.
+// "**/*.Build.cs" is one anywhere. Any single glob hit matches. A pack with
+// no detect block never matches: it is a general-purpose pack somebody turns
+// on deliberately rather than one that recognises a project.
 func (p *Pack) Matches(workspace string) bool {
 	matched, _ := p.MatchesDetail(workspace)
 	return matched
@@ -114,36 +113,26 @@ func (p *Pack) Matches(workspace string) bool {
 // rest of the tree for nothing, which is what made the limit reachable in the
 // first place and cost up to walkTime per pack at startup.
 func (p *Pack) MatchesDetail(workspace string) (matched, truncated bool) {
-	if len(p.detect.Any) == 0 && len(p.detect.All) == 0 {
+	if len(p.detect.Any) == 0 {
 		return false, false
 	}
 	// One walk answers every glob. Compiling first means a glob that cannot
 	// be compiled simply never matches, rather than aborting detection.
 	anyM := compileGlobs(p.detect.Any)
-	allM := compileGlobs(p.detect.All)
 
 	deadline := time.Now().Add(walkTime)
 	seen := 0
 	anyHit := make([]bool, len(anyM))
-	allHit := make([]bool, len(allM))
 
-	// decided reports whether the remaining files can still change the
-	// answer: one "any" hit settles it, and so does every "all" glob hit.
+	// decided reports whether any glob has matched, which settles the answer:
+	// a single hit means the pack fits this workspace.
 	decided := func() bool {
 		for _, h := range anyHit {
 			if h {
 				return true
 			}
 		}
-		if len(allM) == 0 {
-			return false
-		}
-		for _, h := range allHit {
-			if !h {
-				return false
-			}
-		}
-		return true
+		return false
 	}
 
 	filepath.WalkDir(workspace, func(full string, d fs.DirEntry, err error) error {
@@ -168,11 +157,6 @@ func (p *Pack) MatchesDetail(workspace string) (matched, truncated bool) {
 		for i, re := range anyM {
 			if re != nil && !anyHit[i] && re.MatchString(slash) {
 				anyHit[i] = true
-			}
-		}
-		for i, re := range allM {
-			if re != nil && !allHit[i] && re.MatchString(slash) {
-				allHit[i] = true
 			}
 		}
 		if decided() {

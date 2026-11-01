@@ -42,7 +42,7 @@ func playbookAgent(t *testing.T) *Agent {
 			t.Fatal(err)
 		}
 	}
-	write("pack.json", `{"schema":1,"name":"ue5","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},"playbooks":["playbooks/errors.md"]}`)
+	write("pack.json", `{"schema":1,"name":"ue5","version":"1.0.0","description":"a test pack","core":{"file":"core.md","budget_tokens":1500},"playbooks":["playbooks/errors.md"]}`)
 	write("core.md", "rules")
 	write("playbooks/errors.md", testPlaybook)
 	p, warns, err := packs.Load(dir)

@@ -19,7 +19,7 @@ func loadTestPack(t *testing.T, name, core, detect string, source packs.Source) 
 	}
 	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"a test pack",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work"}},
+		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work","triggers":["x"]}},
 		"verify":[{"name":"packbuild","cmd":["mybuild","--project","{workspace}"],"parser":"gcc"}]` + detect + `}`
 	write := func(rel, s string) {
 		if err := os.WriteFile(filepath.Join(dir, rel), []byte(s), 0o644); err != nil {
@@ -331,8 +331,8 @@ func TestPackRowsExplainEveryPack(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, "chunks"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		body := `{"schema":1,"name":"` + p.name + `","version":"2.0.0","core":{"file":"core.md","budget_tokens":1500},
-			"chunks":{"things":{"file":"chunks/things.md","summary":"s"}}` + p.detect + `}`
+		body := `{"schema":1,"name":"` + p.name + `","version":"2.0.0","description":"a test pack","core":{"file":"core.md","budget_tokens":1500},
+			"chunks":{"things":{"file":"chunks/things.md","summary":"s","triggers":["x"]}}` + p.detect + `}`
 		for rel, s := range map[string]string{"pack.json": body, "core.md": "rules", "chunks/things.md": "c"} {
 			if err := os.WriteFile(filepath.Join(dir, rel), []byte(s), 0o644); err != nil {
 				t.Fatal(err)

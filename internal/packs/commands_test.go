@@ -15,7 +15,7 @@ func commandPack(t *testing.T, name, cmdName, body string) *Pack {
 	if err := os.MkdirAll(filepath.Join(root, "commands"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `{"schema":1,"name":"` + name + `","version":"1.0.0",
+	manifest := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"pack for tests",
 		"core":{"file":"core.md","budget_tokens":1500},
 		"commands":"commands"}`
 	files := map[string]string{
@@ -70,7 +70,7 @@ func TestPackCommandsAreOffered(t *testing.T) {
 func TestPackWithoutCommandsOffersNone(t *testing.T) {
 	root := t.TempDir()
 	for rel, s := range map[string]string{
-		"pack.json": `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500}}`,
+		"pack.json": `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500}}`,
 		"core.md":   "rules",
 	} {
 		if err := os.WriteFile(filepath.Join(root, rel), []byte(s), 0o644); err != nil {
@@ -99,7 +99,7 @@ func TestPackCommandsCannotEscapeThePack(t *testing.T) {
 		t.Fatal(err)
 	}
 	for rel, s := range map[string]string{
-		"pack.json": `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},
+		"pack.json": `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500},
 			"commands":"../../` + filepath.Base(filepath.Dir(outside)) + `/secrets"}`,
 		"core.md": "rules",
 	} {
@@ -126,7 +126,7 @@ func TestPackCommandsCannotEscapeThePack(t *testing.T) {
 // "**\*.ts", and a flag or a pattern is not a path.
 func TestCheckArgvOnlyConvertsSubstitutedPaths(t *testing.T) {
 	root := t.TempDir()
-	manifest := `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},
+	manifest := `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500},
 		"verify":[{"name":"lint","cmd":["{pack}/tools/lint","--glob","**/*.ts","--project","{workspace}"],"parser":"msvc"}]}`
 	for rel, s := range map[string]string{"pack.json": manifest, "core.md": "r"} {
 		if err := os.WriteFile(filepath.Join(root, rel), []byte(s), 0o644); err != nil {
@@ -163,7 +163,7 @@ func TestLoadRefusesAnUnrunnableCheck(t *testing.T) {
 	}
 	for what, verify := range cases {
 		root := t.TempDir()
-		manifest := `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},
+		manifest := `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500},
 			"verify":` + verify + `}`
 		for rel, s := range map[string]string{"pack.json": manifest, "core.md": "r"} {
 			if err := os.WriteFile(filepath.Join(root, rel), []byte(s), 0o644); err != nil {
@@ -205,7 +205,7 @@ func TestSchemaErrorNamesTheDirectory(t *testing.T) {
 func TestMissingFileUnderASymlinkedRootSaysItIsMissing(t *testing.T) {
 	real := t.TempDir()
 	for rel, s := range map[string]string{
-		"pack.json": `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500}}`,
+		"pack.json": `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500}}`,
 		"core.md":   "r",
 	} {
 		if err := os.WriteFile(filepath.Join(real, rel), []byte(s), 0o644); err != nil {

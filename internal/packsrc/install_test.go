@@ -220,13 +220,13 @@ func TestForceNeverLeavesHalfAPack(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory permissions this test relies on")
 	}
-	src := packsRepo(t, "p")
+	src := packsRepo(t, "pack")
 	s, _ := Resolve(src, "")
 	o, ws := opts(t, true)
-	if _, err := Install(context.Background(), s, "p", o); err != nil {
+	if _, err := Install(context.Background(), s, "pack", o); err != nil {
 		t.Fatal(err)
 	}
-	dest := filepath.Join(ws, ".becode", "packs", "p")
+	dest := filepath.Join(ws, ".becode", "packs", "pack")
 
 	// A subdirectory whose contents cannot be unlinked: RemoveAll fails here.
 	sub := filepath.Join(dest, "sub")

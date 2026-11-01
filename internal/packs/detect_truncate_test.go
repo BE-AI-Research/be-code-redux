@@ -32,14 +32,14 @@ func bigWorkspace(t *testing.T, target string) string {
 	return ws
 }
 
-func packWithDetect(t *testing.T, all string) *Pack {
+func packWithDetect(t *testing.T, glob string) *Pack {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "chunks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"schema":1,"name":"p","version":"1.0.0","core":{"file":"core.md","budget_tokens":1500},
-		"detect":{"all":["` + all + `"]}}`
+	body := `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests","core":{"file":"core.md","budget_tokens":1500},
+		"detect":{"any":["` + glob + `"]}}`
 	for rel, s := range map[string]string{"pack.json": body, "core.md": "rules"} {
 		if err := os.WriteFile(filepath.Join(root, rel), []byte(s), 0o644); err != nil {
 			t.Fatal(err)

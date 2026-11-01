@@ -16,7 +16,7 @@ const manifestJSON = `{
   "core": { "file": "core.md", "budget_tokens": 1500 },
   "chunks": {
     "cpp-reflection": { "file": "chunks/cpp-reflection.md", "summary": "UCLASS and friends", "triggers": ["UCLASS"] },
-    "build-system":   { "file": "chunks/build-system.md",   "summary": "Build.cs and modules" }
+    "build-system":   { "file": "chunks/build-system.md",   "summary": "Build.cs and modules", "triggers": ["Build.cs"] }
   },
   "verify": [
     { "name": "build", "cmd": ["{pack}/tools/ue-build", "--project", "{workspace}"], "parser": "ubt", "timeout": "30m" }
@@ -146,11 +146,11 @@ func TestChecksSubstitutePlaceholders(t *testing.T) {
 
 func TestLoadRejectsABadManifest(t *testing.T) {
 	for _, tc := range []struct{ name, body, wantIn string }{
-		{"unknown schema", `{"schema": 99, "name": "x", "version": "1"}`, "schema"},
-		{"bad name", `{"schema": 1, "name": "UE 5!", "version": "1"}`, "name"},
-		{"no name", `{"schema": 1, "version": "1"}`, "name"},
-		{"unknown parser", `{"schema":1,"name":"x","version":"1","verify":[{"name":"b","cmd":["b"],"parser":"nope"}]}`, "parser"},
-		{"shell string instead of argv", `{"schema":1,"name":"x","version":"1","verify":[{"name":"b","cmd":[]}]}`, "cmd"},
+		{"unknown schema", `{"schema": 99, "name": "x", "version": "1", "description": "d", "core": {"file": "core.md", "budget_tokens": 1500}}`, "schema"},
+		{"bad name", `{"schema": 1, "name": "UE 5!", "version": "1", "description": "d", "core": {"file": "core.md", "budget_tokens": 1500}}`, "name"},
+		{"no name", `{"schema": 1, "version": "1", "description": "d", "core": {"file": "core.md", "budget_tokens": 1500}}`, "name"},
+		{"unknown parser", `{"schema":1,"name":"pack","version":"1.0.0","description":"d","core":{"file":"core.md","budget_tokens":1500},"verify":[{"name":"b","cmd":["b"],"parser":"nope"}]}`, "parser"},
+		{"shell string instead of argv", `{"schema":1,"name":"pack","version":"1.0.0","description":"d","core":{"file":"core.md","budget_tokens":1500},"verify":[{"name":"b","cmd":[],"parser":"jsonl-diag"}]}`, "cmd"},
 		{"not json", `nonsense`, "pack.json"},
 	} {
 		dir := filepath.Join(t.TempDir(), "p")

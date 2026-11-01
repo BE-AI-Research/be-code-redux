@@ -19,7 +19,7 @@ func hashFixture(t *testing.T) string {
 		}
 	}
 	files := map[string]string{
-		"pack.json":             `{"schema":1,"name":"p","version":"1.0.0"}`,
+		"pack.json":             `{"schema":1,"name":"pack","version":"1.0.0"}`,
 		"core.md":               "the standing rules",
 		"chunks/a.md":           "a chunk",
 		"playbooks/errors.md":   "## E\nmatch: x\n",
@@ -160,7 +160,7 @@ func TestTrustDetailShowsTheRulesAndSaysTheyAreNotCovered(t *testing.T) {
 	root := hashFixture(t)
 	core := "You are working in Unreal Engine 5 C++.\nNever edit generated .generated.h files.\n"
 	rewrite(t, root, "core.md", core)
-	rewrite(t, root, "pack.json", `{"schema":1,"name":"p","version":"1.0.0","description":"a pack",
+	rewrite(t, root, "pack.json", `{"schema":1,"name":"pack","version":"1.0.0","description":"a pack",
 		"core":{"file":"core.md","budget_tokens":1500},
 		"verify":[{"name":"build","cmd":["mybuild","{workspace}"],"parser":"gcc"}]}`)
 	p, _, err := Load(root)
@@ -202,7 +202,7 @@ func TestTrustDetailBoundsTheExcerpt(t *testing.T) {
 		fmt.Fprintf(&sb, "rule line %d\n", i)
 	}
 	rewrite(t, root, "core.md", sb.String())
-	rewrite(t, root, "pack.json", `{"schema":1,"name":"p","version":"1.0.0",
+	rewrite(t, root, "pack.json", `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests",
 		"core":{"file":"core.md","budget_tokens":1500}}`)
 	p, _, err := Load(root)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestTrustDetailBoundsTheExcerpt(t *testing.T) {
 func TestTrustDetailDoesNotClaimFalseOmissions(t *testing.T) {
 	root := hashFixture(t)
 	rewrite(t, root, "core.md", "first rule\n\nsecond rule\n\n\nthird rule\n")
-	rewrite(t, root, "pack.json", `{"schema":1,"name":"p","version":"1.0.0",
+	rewrite(t, root, "pack.json", `{"schema":1,"name":"pack","version":"1.0.0","description":"pack for tests",
 		"core":{"file":"core.md","budget_tokens":1500}}`)
 	p, _, err := Load(root)
 	if err != nil {

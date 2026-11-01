@@ -18,9 +18,9 @@ func writeProjectPack(t *testing.T, root, name, core string) {
 	}
 	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"a test pack",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work"}},
+		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work","triggers":["x"]}},
 		"verify":[{"name":"packbuild","cmd":["mybuild","--project","{workspace}"],"parser":"gcc"}],
-		"detect":{"all":["go.mod"]}}`
+		"detect":{"any":["go.mod"]}}`
 	for rel, s := range map[string]string{
 		"pack.json":        body,
 		"core.md":          core,
@@ -119,8 +119,8 @@ func writeGlobalPack(t *testing.T, packsDir, name, core string) {
 	}
 	body := `{"schema":1,"name":"` + name + `","version":"1.0.0","description":"a test pack",
 		"core":{"file":"core.md","budget_tokens":1500},
-		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work"}},
-		"detect":{"all":["go.mod"]}}`
+		"chunks":{"things":{"file":"chunks/things.md","summary":"how things work","triggers":["x"]}},
+		"detect":{"any":["go.mod"]}}`
 	for rel, s := range map[string]string{
 		"pack.json":        body,
 		"core.md":          core,
