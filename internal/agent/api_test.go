@@ -12,6 +12,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/packs"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
+	"os"
 )
 
 func apiAgent(t *testing.T, replies ...string) (*Agent, *scriptedProvider) {
@@ -191,5 +192,59 @@ func TestNamedModelGoesThroughTheFactory(t *testing.T) {
 	APIModelFactory = nil
 	if _, err := b.Query(context.Background(), api.QueryRequest{Prompt: "q", Model: "big"}); err == nil {
 		t.Fatal("with no factory a named model is an error")
+	}
+}
+
+func TestAPISpendCapIs429WithoutAsking(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, _ := onlineAgent(t, &scriptedProvider{}, "openrouter", func(c *config.Config) { c.MaxSpendUSD = 1; c.RepoMap = false })
+	ag.approveOnline("openrouter")
+	ag.addStats(Stats{SpendUSD: 2})
+	var l safeLog
+	ag.Tools.Approve = l.approver(true)
+	_, err := NewAPIBackend(ag, "1").Query(context.Background(), api.QueryRequest{Prompt: "q"})
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != 429 || e.Code != "spend_cap" {
+		t.Fatalf("want 429 spend_cap, got %v", err)
+	}
+	if got := l.get(); len(got) != 0 {
+		t.Fatalf("the person must not be asked: %q", got)
+	}
+}
+
+func TestAPIUnapprovedOnlineProviderIs403(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &scriptedProvider{}
+	ag, _ := onlineAgent(t, p, "openrouter", func(c *config.Config) { c.RepoMap = false })
+	var l safeLog
+	ag.Tools.Approve = l.approver(true)
+	_, err := NewAPIBackend(ag, "1").Query(context.Background(), api.QueryRequest{Prompt: "q"})
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != 403 || e.Code != "online_not_approved" || p.i != 0 || len(l.get()) != 0 {
+		t.Fatalf("want 403 online_not_approved, nothing sent, nobody asked: %v", err)
+	}
+}
+
+func TestSessionTokenRefusedWhileATurnRuns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, _ := apiAgent(t)
+	ag.turnMu.Lock()
+	_, err := ag.SessionToken()
+	_, err2 := ag.RotateSessionToken(0)
+	ag.turnMu.Unlock()
+	if err == nil || err2 == nil || !strings.Contains(err.Error(), "middle of a turn") || ag.Session.Token != "" {
+		t.Fatalf("%v %v token=%q", err, err2, ag.Session.Token)
+	}
+}
+
+func TestSessionTokenSaveStampsHostPID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, _ := apiAgent(t)
+	if _, err := ag.SessionToken(); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Load(ag.Session.ID)
+	if err != nil || saved.HostPID != os.Getpid() {
+		t.Fatalf("%v host_pid=%d", err, saved.HostPID)
 	}
 }

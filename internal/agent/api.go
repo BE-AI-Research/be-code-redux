@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/brown-enterprises/be-code/internal/api"
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/packs"
+	"github.com/brown-enterprises/be-code/internal/profiles"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/store"
 )
 
 // APIModelFactory builds a provider for a model the serving session is not
@@ -40,29 +43,32 @@ func NewAPIBackend(a *Agent, version string) *APIBackend {
 
 func (b *APIBackend) Health() api.Health {
 	code := ""
-	if b.a.Session != nil {
-		code = b.a.Session.ResumeCode()
+	if s := b.a.CurrentSession(); s != nil {
+		code = s.ResumeCode()
 	}
-	return api.Health{Version: b.version, SessionCode: code, Model: b.a.Model, Since: b.since}
+	_, model, _ := b.a.modelSnapshot()
+	return api.Health{Version: b.version, SessionCode: code, Model: model, Since: b.since}
 }
 
 func (b *APIBackend) SessionInfo() api.SessionInfo {
 	title := ""
-	if b.a.Session != nil {
-		title = b.a.Session.Title
+	if s := b.a.CurrentSession(); s != nil {
+		title = s.Title
 	}
-	return api.SessionInfo{Title: title, Workspace: b.a.Tools.Root, Model: b.a.Model}
+	_, model, _ := b.a.modelSnapshot()
+	return api.SessionInfo{Title: title, Workspace: b.a.Tools.Root, Model: model}
 }
 
 // AcceptsSession compares under saveMu: Accepts may clear an expired grace
 // token, and autosave marshals the same struct.
 func (b *APIBackend) AcceptsSession(tok string) bool {
-	if b.a.Session == nil {
+	s := b.a.CurrentSession()
+	if s == nil {
 		return false
 	}
 	b.a.saveMu.Lock()
 	defer b.a.saveMu.Unlock()
-	return b.a.Session.Accepts(tok)
+	return s.Accepts(tok)
 }
 
 func (b *APIBackend) PackActive(name string) bool { return b.activePack(name) != nil }
@@ -143,7 +149,9 @@ func (b *APIBackend) SessionQuery(ctx context.Context, q api.QueryRequest) (api.
 	if !a.turnMu.TryLock() {
 		return api.QueryResponse{}, api.Errorf(http.StatusConflict, "session_busy", "the session is in the middle of a turn; try again shortly")
 	}
+	a.modelMu.Lock()
 	system := a.History.System.Content
+	a.modelMu.Unlock()
 	snapshot := make([]provider.Message, 0, len(a.History.Messages)+1)
 	all := a.History.Messages
 	for _, m := range all {
@@ -192,12 +200,20 @@ func (b *APIBackend) SessionQuery(ctx context.Context, q api.QueryRequest) (api.
 // §5: the API call made the cache cold).
 func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRequest, onDelta provider.StreamFunc) (*provider.ChatResponse, string, error) {
 	a := b.a
-	if err := a.checkSpendCap(ctx); err != nil {
-		return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "%v", err)
-	}
-	prov, name := a.Provider, a.Model
+	prov, name, profile := a.modelSnapshot()
 	primary := model == "" || model == "default"
-	if !primary {
+	if primary {
+		// The person's gate and cap, never a prompt: an app's request is
+		// refused outright (spec §5), not put to the terminal.
+		if err := a.checkOnlineGate(ctx, false); err != nil {
+			return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
+		}
+		if _, online := a.Online(); online {
+			if capUSD := a.SpendCap(); capUSD > 0 && a.Usage().SpendUSD >= capUSD {
+				return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "the session's spend cap of $%.2f is reached", capUSD)
+			}
+		}
+	} else {
 		p, err := b.providerFor(ctx, model)
 		if err != nil {
 			return nil, "", err
@@ -205,7 +221,7 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 		prov, name = p, model
 	}
 	req.Model = name
-	if a.Profile.StripThink && onDelta != nil {
+	if profile.StripThink && onDelta != nil {
 		f := &ThinkFilter{}
 		inner := onDelta
 		onDelta = func(d string) {
@@ -223,7 +239,7 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 	if err != nil {
 		return nil, "", err
 	}
-	if a.Profile.StripThink {
+	if profile.StripThink {
 		resp.Content = StripThink(resp.Content)
 	}
 	used := Stats{Requests: 1, PromptTokens: resp.Usage.PromptTokens, CompletionTokens: resp.Usage.CompletionTokens}
@@ -262,45 +278,70 @@ func (b *APIBackend) providerFor(ctx context.Context, model string) (provider.Pr
 	return p, nil
 }
 
+// modelSnapshot reads the primary's provider, model and profile together
+// under the lock their writers (SetModel, SetProvider) hold.
+func (a *Agent) modelSnapshot() (provider.Provider, string, profiles.Profile) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.Provider, a.Model, a.Profile
+}
+
 func usageOf(r *provider.ChatResponse) api.Usage {
 	return api.Usage{PromptTokens: r.Usage.PromptTokens, CompletionTokens: r.Usage.CompletionTokens}
 }
 
-// SessionToken is the session's token, minted and saved if it had none.
+// errTurnRunning is the answer when a token change cannot take the turn lock.
+var errTurnRunning = errors.New("the session is in the middle of a turn; try again after it finishes")
+
+// SessionToken is the session's token, minted and saved if it had none. It
+// holds the turn lock (TryLock) so the save never races a turn's appends.
 func (a *Agent) SessionToken() (string, error) {
-	if a.Session == nil {
-		return "", errors.New("no session")
-	}
-	a.saveMu.Lock()
-	tok := a.Session.AccessToken()
-	a.saveMu.Unlock()
-	return tok, a.saveSessionNow()
+	return a.withTurnLock(func(s *store.Session) (string, error) {
+		a.saveMu.Lock()
+		tok := s.AccessToken()
+		a.saveMu.Unlock()
+		return tok, nil
+	})
 }
 
 // RotateSessionToken replaces the token (spec §3.1) and saves.
 func (a *Agent) RotateSessionToken(grace time.Duration) (string, error) {
-	if a.Session == nil {
+	return a.withTurnLock(func(s *store.Session) (string, error) {
+		a.saveMu.Lock()
+		defer a.saveMu.Unlock()
+		if err := s.Rotate(grace); err != nil {
+			return "", err
+		}
+		return s.Token, nil
+	})
+}
+
+// withTurnLock runs change with the turn lock held, then saves as autosave
+// does (this pid stamped, the save guard honoured). If a turn holds the lock
+// nothing is changed.
+func (a *Agent) withTurnLock(change func(*store.Session) (string, error)) (string, error) {
+	s := a.CurrentSession()
+	if s == nil {
 		return "", errors.New("no session")
 	}
-	a.saveMu.Lock()
-	err := a.Session.Rotate(grace)
-	tok := a.Session.Token
-	a.saveMu.Unlock()
+	if !a.turnMu.TryLock() {
+		return "", errTurnRunning
+	}
+	defer a.turnMu.Unlock()
+	if blocked, owner := a.SaveGuard(); blocked {
+		return "", fmt.Errorf("session file is owned by live host %d", owner)
+	}
+	tok, err := change(s)
 	if err != nil {
 		return "", err
 	}
-	return tok, a.saveSessionNow()
-}
-
-// saveSessionNow persists the session's fields as autosave does, without a
-// user input to title it from. Refused when another host owns the file.
-func (a *Agent) saveSessionNow() error {
-	if blocked, owner := a.SaveGuard(); blocked {
-		return fmt.Errorf("session file is owned by live host %d", owner)
-	}
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
-	a.Session.Model = a.Model
-	a.Session.Messages = a.History.Messages
-	return a.Session.Save()
+	s.HostPID = os.Getpid()
+	_, s.Model, _ = a.modelSnapshot()
+	s.Messages = a.History.Messages
+	if err := s.Save(); err != nil {
+		return tok, err
+	}
+	return tok, nil
 }
