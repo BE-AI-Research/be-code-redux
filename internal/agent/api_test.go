@@ -223,6 +223,16 @@ func TestAPIUnapprovedOnlineProviderIs403(t *testing.T) {
 	if !errors.As(err, &e) || e.Status != 403 || e.Code != "online_not_approved" || p.i != 0 || len(l.get()) != 0 {
 		t.Fatalf("want 403 online_not_approved, nothing sent, nobody asked: %v", err)
 	}
+	calls := 0
+	APIModelFactory = func(ctx context.Context, cfg *config.Config, model string) (provider.Provider, error) {
+		calls++
+		return &scriptedProvider{}, nil
+	}
+	t.Cleanup(func() { APIModelFactory = nil })
+	_, err = NewAPIBackend(ag, "1").Query(context.Background(), api.QueryRequest{Prompt: "q", Model: "big"})
+	if !errors.As(err, &e) || e.Status != 403 || e.Code != "online_not_approved" || calls != 0 {
+		t.Fatalf("a named model is gated too, factory uncalled (calls=%d): %v", calls, err)
+	}
 }
 
 func TestSessionTokenRefusedWhileATurnRuns(t *testing.T) {

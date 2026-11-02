@@ -202,12 +202,13 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 	a := b.a
 	prov, name, profile := a.modelSnapshot()
 	primary := model == "" || model == "default"
+	// The person's gate and cap, never a prompt: an app's request is refused
+	// outright (spec §5), not put to the terminal. The gate covers named
+	// models too: they are built from the same default provider's config.
+	if err := a.checkOnlineGate(ctx, false); err != nil {
+		return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
+	}
 	if primary {
-		// The person's gate and cap, never a prompt: an app's request is
-		// refused outright (spec §5), not put to the terminal.
-		if err := a.checkOnlineGate(ctx, false); err != nil {
-			return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
-		}
 		if _, online := a.Online(); online {
 			if capUSD := a.SpendCap(); capUSD > 0 && a.Usage().SpendUSD >= capUSD {
 				return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "the session's spend cap of $%.2f is reached", capUSD)
