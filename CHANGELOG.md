@@ -1,5 +1,52 @@
 # BE-Code Changelog
 
+## v1.3.1 — The pack contract, closed (2026-11-02)
+
+- **A pack is checked against the BE Skill Pack Format 1.0 contract when it loads.** `pack.json`
+  is a closed document now: every key must be one the format names, `description` and
+  `core.budget_tokens` (100–2000) are required, every chunk needs `triggers`, a verify check
+  needs a `parser`, and a timeout is written `30s`, `5m` or `2h`. A violation names the field
+  (`pack.json: chunk "errors" is missing required field "triggers"`, `unknown key "extend" (use
+  "extends" instead)`) and `be-code packs validate <dir>` reports it where a pack author looks.
+  `detect.all` is gone: any glob in `detect.any` matching is enough. The nine packs in the
+  public `be-skill-packs` repository conform.
+
+  **If you installed a pack under v1.3.0**, it may not conform — it is dropped at session start
+  with `pack in … was not loaded: pack.json: …` among the startup notices, its rules leave the
+  prompt and its checks stop running. `be-code packs update <name>` fetches the current version,
+  which does. A pack you wrote yourself: run `packs validate` on it and fix what it names.
+- The loader accepts the schema's own shapes. `requires.parsers`, `hooks`, `packs` and `tools`
+  are arrays, and `mcp_servers` may be the schema's array of `{name, command}` as well as the
+  name-keyed object the first packs used; both were refused as "not valid JSON" by the typed
+  parse before the validator ran. The format's `conformance/minimal-pack` now gets as far as its
+  parser: the universal `jsonl-diag` parser and `{shell}` substitution the standard also asks for
+  are not in this release.
+- **An unapproved project pack no longer takes your own pack of the same name out of force.** A
+  pack committed to a repository under the name of one in `~/.be-code/packs` used to replace it
+  at discovery and then sit unapproved, so the repository had switched off your rules and checks
+  without a prompt being answered. The global pack stays active until the project pack is
+  approved (the standard's REQ-SPF-081); `/packs` says so.
+- A pack `packs update` moved aside and could not remove (`<name>.replacing-<stamp>`, a file held
+  open on Windows) was discovered as a pack and, loading last, took the updated pack's name. It
+  is skipped now.
+- The trust hash covers a file a check names anywhere in an argv word — `sh -c "sh
+  {pack}/chunks/run.md"` — as it already did for the whole-word form, so rewriting that chunk
+  re-asks.
+- Validator messages: an error inside the fourth check says `verify[3]`; the 200-character
+  limits on `description` and chunk summaries count characters, not bytes; which chunk is
+  reported first no longer depends on map order.
+- Two fixes from **kmesiab** ([#1](https://github.com/BE-AI-Research/be-code-redux/pull/1),
+  [#2](https://github.com/BE-AI-Research/be-code-redux/pull/2)), which v1.3.0's notes credited
+  but which had not been merged: the compat (embedded) tool-calling instructions document the
+  `<tool_result>` format a result comes back in, and an empty model reply is nudged up to three
+  times, the count resetting on any productive turn, instead of ending the run after one nudge.
+  The final error names both things it can mean — a model that believes it is done, or a backend
+  that returned nothing for a prompt larger than its window.
+- `scripts/fix-provider-config.py` repairs `~/.be-code/config.json`, the file be-code loads; it
+  no longer honours a `BE_CODE_CONFIG` variable be-code itself never read.
+- `uninstall.ps1` points the `-Purge` hint at `.\uninstall.cmd -Purge`, the launcher a default
+  Windows policy can run.
+
 ## v1.3.0 — Packs, online models, a browser, schedules (2026-10-10)
 
 - **Skill packs can be installed into a project** — `be-code packs add <name>[@ref]`, the
