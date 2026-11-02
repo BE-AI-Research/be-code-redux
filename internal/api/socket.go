@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/procattr"
@@ -25,13 +28,27 @@ type Record struct {
 
 var ErrServedElsewhere = errors.New("the API is served by another session")
 
-// ServedElsewhere is Listen's answer when a live session already serves.
+// ServedElsewhere is Listen's answer when a live session already serves, or
+// when the socket cannot be probed and so cannot be reclaimed.
 type ServedElsewhere struct{ Record Record }
 
 func (e *ServedElsewhere) Error() string {
+	if e.Record.SessionCode == "" {
+		return fmt.Sprintf("API: another session serves on %s; this session is not serving", e.Record.Socket)
+	}
 	return fmt.Sprintf("API is served by session %s (pid %d); this session is not serving", e.Record.SessionCode, e.Record.PID)
 }
 func (e *ServedElsewhere) Is(target error) bool { return target == ErrServedElsewhere }
+
+// lockStale is how old a binding lock must be before a dead holder's lock
+// is taken over. A live holder is never taken over, however old.
+const lockStale = 10 * time.Second
+
+// probeDial connects to the socket to learn whether anyone listens on it.
+// A variable so tests can exercise the probe-failure branches.
+var probeDial = func(path string) (net.Conn, error) {
+	return net.DialTimeout("unix", path, time.Second)
+}
 
 // Dir is ~/.be-code/api.
 func Dir() (string, error) {
@@ -44,6 +61,7 @@ func Dir() (string, error) {
 
 func SocketPath(dir string) string { return filepath.Join(dir, "api.sock") }
 func recordPath(dir string) string { return filepath.Join(dir, "server.json") }
+func lockPath(dir string) string   { return filepath.Join(dir, "api.lock") }
 
 // CheckDir refuses to serve from a directory other users could read: the
 // socket's mode is the whole boundary on Unix. Windows does not enforce
@@ -82,9 +100,72 @@ func Serving(dir string) (Record, bool) {
 	return r, true
 }
 
-// Listen binds the socket. On address-in-use it connects: a refusal means
-// a stale socket, removed and re-bound; a live listener means another
-// session serves and the error names it from its record.
+// acquireLock takes <dir>/api.lock with O_EXCL, so one binding at a time.
+// A lock older than lockStale whose holder is dead is taken over once; any
+// other existing lock is refused, naming its holder. The returned func
+// releases the lock.
+func acquireLock(dir string) (func(), error) {
+	path := lockPath(dir)
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			_ = f.Close()
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		st, serr := os.Stat(path)
+		if serr != nil {
+			continue // released between our attempt and the stat
+		}
+		raw, _ := os.ReadFile(path)
+		pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if attempt == 0 && time.Since(st.ModTime()) > lockStale && !procattr.Alive(pid) {
+			_ = os.Remove(path)
+			continue
+		}
+		return nil, fmt.Errorf("api: another session is binding the socket (pid %d holds %s)", pid, path)
+	}
+	return nil, fmt.Errorf("api: could not take %s", path)
+}
+
+// writeRecord replaces server.json atomically, so a concurrent Serving never
+// reads a half-written record.
+func writeRecord(dir string, rec Record) error {
+	data, _ := json.MarshalIndent(rec, "", "  ")
+	tmp := recordPath(dir) + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(tmp, 0o600); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := os.Rename(tmp, recordPath(dir)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// servedElsewhere names whoever serves, from the record when there is one.
+func servedElsewhere(dir, path string) error {
+	r, _ := Serving(dir)
+	if r.PID == 0 {
+		r = Record{Socket: path}
+	}
+	return &ServedElsewhere{Record: r}
+}
+
+// Listen binds the socket under the binding lock. When the bind fails it
+// probes the socket: a refused connect (or a missing file) means a stale
+// socket, removed and re-bound; a successful connect, a timeout or any other
+// error means someone may be serving, so nothing is removed and the error
+// is ServedElsewhere.
 func Listen(dir string, rec Record) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "apps"), 0o700); err != nil {
 		return nil, err
@@ -92,21 +173,28 @@ func Listen(dir string, rec Record) (net.Listener, error) {
 	if err := CheckDir(dir); err != nil {
 		return nil, err
 	}
+	unlock, err := acquireLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	path := SocketPath(dir)
 	l, err := net.Listen("unix", path)
 	if err != nil {
-		if c, derr := net.DialTimeout("unix", path, time.Second); derr == nil {
+		c, derr := probeDial(path)
+		switch {
+		case derr == nil:
 			c.Close()
-			r, _ := Serving(dir)
-			if r.SessionCode == "" {
-				r = Record{Socket: path}
+			return nil, servedElsewhere(dir, path)
+		case errors.Is(derr, syscall.ECONNREFUSED) || errors.Is(derr, syscall.ENOENT):
+			_ = os.Remove(path)
+			_ = os.Remove(recordPath(dir))
+			if l, err = net.Listen("unix", path); err != nil {
+				return nil, err
 			}
-			return nil, &ServedElsewhere{Record: r}
-		}
-		_ = os.Remove(path)
-		_ = os.Remove(recordPath(dir))
-		if l, err = net.Listen("unix", path); err != nil {
-			return nil, err
+		default:
+			return nil, servedElsewhere(dir, path)
 		}
 	}
 	if runtime.GOOS != "windows" {
@@ -116,18 +204,23 @@ func Listen(dir string, rec Record) (net.Listener, error) {
 	if rec.Started.IsZero() {
 		rec.Started = time.Now()
 	}
-	data, _ := json.MarshalIndent(rec, "", "  ")
-	if err := os.WriteFile(recordPath(dir), data, 0o600); err != nil {
+	if err := writeRecord(dir, rec); err != nil {
 		l.Close()
 		return nil, err
 	}
 	return l, nil
 }
 
-// Release removes this process's socket and record. Another process's
-// record is left alone.
+// Release removes this process's socket and record. It acts only when
+// server.json names this process; any other record, or none, is left alone.
+// Our own listener's Close already unlinks the socket file.
 func Release(dir string) {
-	if r, ok := Serving(dir); ok && r.PID != os.Getpid() {
+	raw, err := os.ReadFile(recordPath(dir))
+	if err != nil {
+		return
+	}
+	var r Record
+	if json.Unmarshal(raw, &r) != nil || r.PID != os.Getpid() {
 		return
 	}
 	_ = os.Remove(SocketPath(dir))

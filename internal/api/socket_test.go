@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -114,5 +117,129 @@ func TestCheckDirRefusesOpenModes(t *testing.T) {
 	_ = os.Chmod(filepath.Join(dir, "apps"), 0o700)
 	if err := CheckDir(dir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProbeTimeoutNeverRemovesTheSocket(t *testing.T) {
+	dir := shortDir(t)
+	live, err := net.Listen("unix", SocketPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	saved := probeDial
+	defer func() { probeDial = saved }()
+	probeDial = func(string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.ETIMEDOUT}
+	}
+	_, err = Listen(dir, Record{PID: os.Getpid(), SessionCode: "mine"})
+	if !errors.Is(err, ErrServedElsewhere) {
+		t.Fatalf("a probe timeout must be ServedElsewhere, got %v", err)
+	}
+	if _, err := os.Stat(SocketPath(dir)); err != nil {
+		t.Fatalf("the socket must not be removed on a probe timeout: %v", err)
+	}
+}
+
+func TestConcurrentListenOneWins(t *testing.T) {
+	dir := shortDir(t)
+	const n = 2
+	type result struct {
+		l   net.Listener
+		err error
+	}
+	results := make(chan result, n)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			start.Wait()
+			l, err := Listen(dir, Record{PID: os.Getpid(), SessionCode: "c" + strconv.Itoa(i)})
+			results <- result{l, err}
+		}(i)
+	}
+	start.Done()
+	var winners []net.Listener
+	var losers []error
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err == nil {
+			winners = append(winners, r.l)
+		} else {
+			losers = append(losers, r.err)
+		}
+	}
+	defer func() {
+		for _, w := range winners {
+			w.Close()
+		}
+	}()
+	if len(winners) != 1 || len(losers) != 1 {
+		t.Fatalf("want exactly one winner, got %d winners and %d losers", len(winners), len(losers))
+	}
+	var se *ServedElsewhere
+	if !errors.As(losers[0], &se) && !strings.Contains(losers[0].Error(), "another session is binding") {
+		t.Fatalf("the loser must name the other session or the lock: %v", losers[0])
+	}
+	c, err := net.Dial("unix", SocketPath(dir))
+	if err != nil {
+		t.Fatalf("the winner's socket must still be connectable: %v", err)
+	}
+	c.Close()
+}
+
+func TestReleaseLeavesAnotherProcessesRecord(t *testing.T) {
+	dir := shortDir(t)
+	// The parent is alive and is not us: its record must survive our Release.
+	rec := Record{PID: os.Getppid(), Socket: SocketPath(dir), SessionCode: "theirs", Started: time.Now()}
+	if err := writeRecord(dir, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SocketPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Release(dir)
+	if _, err := os.Stat(SocketPath(dir)); err != nil {
+		t.Fatalf("Release must not remove another process's socket: %v", err)
+	}
+	if got, ok := Serving(dir); !ok || got.SessionCode != "theirs" {
+		t.Fatalf("Release must not remove another process's record: %+v %v", got, ok)
+	}
+}
+
+func TestOldLockOfDeadHolderIsReplaced(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	lock := lockPath(dir)
+	if err := os.WriteFile(lock, []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-20 * time.Second)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	l, err := Listen(dir, Record{PID: os.Getpid(), SessionCode: "after"})
+	if err != nil {
+		t.Fatalf("an old lock with a dead holder must be replaced: %v", err)
+	}
+	l.Close()
+	if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the lock is released after Listen")
+	}
+}
+
+func TestFreshLockOfLiveHolderIsRefused(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	pid := os.Getpid()
+	if err := os.WriteFile(lockPath(dir), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Listen(dir, Record{PID: pid, SessionCode: "blocked"})
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(pid)) {
+		t.Fatalf("a fresh lock held by a live pid must be refused naming it, got %v", err)
+	}
+	if _, serr := os.Stat(lockPath(dir)); serr != nil {
+		t.Fatal("a refused Listen must leave the holder's lock alone")
 	}
 }
