@@ -361,7 +361,3 @@ func handleHealth(s *Server, c *call) {
 		"apps_seen":     s.Stats().Served,
 	})
 }
-
-func handleCompletions(s *Server, c *call) { // replaced in Task 5
-	writeError(c.w, Errorf(http.StatusNotImplemented, "not_supported", "completions are not wired yet"))
-}

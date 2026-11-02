@@ -16,14 +16,16 @@ import (
 
 // fakeBackend answers everything from fields; tests set what they need.
 type fakeBackend struct {
-	token          string
-	queries        []QueryRequest
-	complete       []CompletionRequest
-	answer         string
-	err            error
-	packs          map[string]bool
-	block          chan struct{} // when set, Query waits on it (or ctx)
-	sessionQueries int
+	token           string
+	queries         []QueryRequest
+	complete        []CompletionRequest
+	answer          string
+	err             error
+	packs           map[string]bool
+	block           chan struct{} // when set, Query waits on it (or ctx)
+	blockComplete   chan struct{} // when set, Complete waits on it (or ctx)
+	completeWaiting chan struct{} // when set, Complete signals here once it is waiting on blockComplete
+	sessionQueries  int
 }
 
 func (f *fakeBackend) Health() Health {
@@ -45,6 +47,16 @@ func (f *fakeBackend) Query(ctx context.Context, q QueryRequest) (QueryResponse,
 }
 func (f *fakeBackend) Complete(ctx context.Context, c CompletionRequest, on func(string)) (CompletionResponse, error) {
 	f.complete = append(f.complete, c)
+	if f.blockComplete != nil {
+		if f.completeWaiting != nil {
+			f.completeWaiting <- struct{}{}
+		}
+		select {
+		case <-f.blockComplete:
+		case <-ctx.Done():
+			return CompletionResponse{}, ctx.Err()
+		}
+	}
 	if f.err != nil {
 		return CompletionResponse{}, f.err
 	}
