@@ -44,6 +44,15 @@ type Session struct {
 	// Timers are the session's one-off scheduled events (schedules spec
 	// §1.2); recurring schedules live in the project's schedules.md.
 	Timers []schedule.Schedule `json:"timers,omitempty"`
+	// Token addresses this session over the application API. Minted lazily
+	// by AccessToken, persisted with the session, never derived from ID or
+	// Code, never shown in a listing or a log. PrevToken is the token before
+	// the last Rotate, honoured until PrevUntil; both are empty when no
+	// grace window is open.
+	Token          string    `json:"token,omitempty"`
+	PrevToken      string    `json:"prev_token,omitempty"`
+	PrevUntil      time.Time `json:"prev_until,omitempty"`
+	TokenRotatedAt time.Time `json:"token_rotated_at,omitempty"`
 }
 
 // ChatLine is one line of the room. User is an ID, "agent", or "" for a
