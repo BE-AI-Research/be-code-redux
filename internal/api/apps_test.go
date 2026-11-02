@@ -163,3 +163,38 @@ func TestABrokenFileIsAbsentAndWarnedOnce(t *testing.T) {
 		t.Fatalf("one warning naming the file: %v", warns)
 	}
 }
+
+// A rotate by another process that lands within one mtime tick of the version
+// this registry last saw, at the same file size, must still be seen: the
+// old key stops at once, with no timestamp deciding whether the file changed.
+func TestRotateInTheSameMtimeTickIsSeen(t *testing.T) {
+	r := newReg(t)
+	key, _ := r.Add("app", Profile{Tiers: []string{"query"}})
+	path := filepath.Join(r.Dir, "app.json")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Lookup(key); !ok {
+		t.Fatal("setup")
+	}
+	other := NewRegistry(r.Dir)
+	key2, err := other.Rotate("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same size (fixed-length hash), and the mtime the first registry last saw.
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(path)
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("setup: size and mtime must match the seen version")
+	}
+	if _, ok := r.Lookup(key); ok {
+		t.Fatal("the old key must stop at once, even within one mtime tick")
+	}
+	if _, ok := r.Lookup(key2); !ok {
+		t.Fatal("the new key must work")
+	}
+}

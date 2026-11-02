@@ -143,26 +143,19 @@ func HashKey(key string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Registry is the app files under Dir, re-read when they change so a
-// rotate or revoke from another process takes effect without a restart.
+// Registry is the app files under Dir. Lookup reads every file on each call,
+// so a rotate or revoke from any process takes effect at once: no cache can
+// outlive a write, and no timestamp decides whether a file changed.
 type Registry struct {
 	Dir  string
 	Warn func(string) // one line per unreadable file, once; nil is silent
 
 	mu     sync.Mutex
-	apps   map[string]cachedApp // by file name
 	warned map[string]bool
 }
 
-type cachedApp struct {
-	app   App
-	mtime time.Time
-	size  int64
-	bad   bool
-}
-
 func NewRegistry(dir string) *Registry {
-	return &Registry{Dir: dir, apps: map[string]cachedApp{}, warned: map[string]bool{}}
+	return &Registry{Dir: dir, warned: map[string]bool{}}
 }
 
 func (r *Registry) path(name string) string { return filepath.Join(r.Dir, name+".json") }
@@ -180,15 +173,7 @@ func (r *Registry) write(a App) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, p); err != nil {
-		return err
-	}
-	// A rotate keeps the file's size and may land within one mtime tick, so
-	// this registry's own writes must never leave a stale cache entry behind.
-	r.mu.Lock()
-	delete(r.apps, a.Name+".json")
-	r.mu.Unlock()
-	return nil
+	return os.Rename(tmp, p)
 }
 
 // Add registers name with p (defaults filled, validated) and returns the one
@@ -288,62 +273,53 @@ func (r *Registry) Lookup(key string) (App, bool) {
 	want := []byte(HashKey(key))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.refreshLocked()
+	entries, err := os.ReadDir(r.Dir)
+	if err != nil {
+		return App{}, false
+	}
 	var found App
 	ok := false
-	for _, c := range r.apps {
-		if c.bad {
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		a, err := r.readApp(e.Name())
+		if err != nil {
+			r.warnOnce(e.Name(), err)
 			continue
 		}
 		// Every candidate is compared so timing does not say which exists.
-		if subtle.ConstantTimeCompare([]byte(c.app.KeyHash), want) == 1 && c.app.Revoked == nil {
-			found, ok = c.app, true
+		if subtle.ConstantTimeCompare([]byte(a.KeyHash), want) == 1 && a.Revoked == nil {
+			found, ok = a, true
 		}
 	}
 	return found, ok
 }
 
-// refreshLocked re-reads any file whose mtime or size changed and forgets
-// files that are gone.
-func (r *Registry) refreshLocked() {
-	entries, err := os.ReadDir(r.Dir)
+// readApp parses one app file. A file that will not parse, or has no key
+// hash, is an error: Lookup treats it as absent (fail closed).
+func (r *Registry) readApp(file string) (App, error) {
+	raw, err := os.ReadFile(filepath.Join(r.Dir, file))
 	if err != nil {
-		r.apps = map[string]cachedApp{}
+		return App{}, err
+	}
+	var a App
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return App{}, err
+	}
+	if a.KeyHash == "" {
+		return App{}, errors.New("no key_hash")
+	}
+	return a, nil
+}
+
+// warnOnce reports an unreadable file once per registry, then stays quiet.
+func (r *Registry) warnOnce(file string, err error) {
+	if r.warned[file] {
 		return
 	}
-	seen := map[string]bool{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		seen[e.Name()] = true
-		if c, ok := r.apps[e.Name()]; ok && c.mtime.Equal(info.ModTime()) && c.size == info.Size() {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join(r.Dir, e.Name()))
-		var a App
-		if err == nil {
-			err = json.Unmarshal(raw, &a)
-		}
-		if err != nil || a.KeyHash == "" {
-			if !r.warned[e.Name()] {
-				r.warned[e.Name()] = true
-				if r.Warn != nil {
-					r.Warn(fmt.Sprintf("api: app file %s could not be read and is ignored: %v", filepath.Join(r.Dir, e.Name()), err))
-				}
-			}
-			r.apps[e.Name()] = cachedApp{mtime: info.ModTime(), size: info.Size(), bad: true}
-			continue
-		}
-		r.apps[e.Name()] = cachedApp{app: a, mtime: info.ModTime(), size: info.Size()}
-	}
-	for name := range r.apps {
-		if !seen[name] {
-			delete(r.apps, name)
-		}
+	r.warned[file] = true
+	if r.Warn != nil {
+		r.Warn(fmt.Sprintf("api: app file %s could not be read and is ignored: %v", filepath.Join(r.Dir, file), err))
 	}
 }
