@@ -25,7 +25,11 @@ func Validate(schema json.RawMessage, doc []byte) error {
 }
 
 func validate(sc map[string]any, v any, at string) error {
-	if t, ok := sc["type"].(string); ok {
+	if raw, has := sc["type"]; has {
+		t, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%s: schema type must be a string, got %T", at, raw)
+		}
 		if err := checkType(t, v, at); err != nil {
 			return err
 		}
@@ -101,6 +105,59 @@ func checkType(t string, v any, at string) error {
 	}
 	if !ok {
 		return fmt.Errorf("%s: want %s, got %T", at, t, v)
+	}
+	return nil
+}
+
+var schemaTypes = map[string]bool{"string": true, "integer": true, "number": true, "boolean": true, "object": true, "array": true, "null": true}
+
+// CompileSchema checks the schema itself, before any model call: it must be
+// a JSON object, every type a supported type name, required and enum arrays,
+// and properties, items and nested schemas the same, recursively.
+func CompileSchema(raw json.RawMessage) error {
+	var sc any
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		return fmt.Errorf("json_schema is not valid JSON: %w", err)
+	}
+	return compile(sc, "$")
+}
+
+func compile(v any, at string) error {
+	sc, ok := v.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s: a schema must be a JSON object", at)
+	}
+	if raw, has := sc["type"]; has {
+		t, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%s: type must be a string", at)
+		}
+		if !schemaTypes[t] {
+			return fmt.Errorf("%s: type %q is not understood", at, t)
+		}
+	}
+	for _, k := range []string{"required", "enum"} {
+		if raw, has := sc[k]; has {
+			if _, ok := raw.([]any); !ok {
+				return fmt.Errorf("%s: %s must be an array", at, k)
+			}
+		}
+	}
+	if raw, has := sc["properties"]; has {
+		props, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s: properties must be an object", at)
+		}
+		for name, p := range props {
+			if err := compile(p, at+"."+name); err != nil {
+				return err
+			}
+		}
+	}
+	if raw, has := sc["items"]; has {
+		if err := compile(raw, at+"[]"); err != nil {
+			return err
+		}
 	}
 	return nil
 }

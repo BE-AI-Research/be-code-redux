@@ -101,3 +101,24 @@ func TestNonCanonicalPathIsNeverRedirectedNorLogged(t *testing.T) {
 		t.Fatalf("the log must carry neither token nor path: %q", log)
 	}
 }
+
+func TestBadRequestsNeverReachTheModel(t *testing.T) {
+	h := newHarness(t)
+	key := h.app(t, "app", Profile{Tiers: []string{"query"}})
+	for name, b := range map[string]map[string]any{
+		"negative max_tokens": {"prompt": "x", "max_tokens": -1},
+		"misspelt type":       {"prompt": "x", "json_schema": map[string]any{"type": "strnig"}},
+		"schema not object":   {"prompt": "x", "json_schema": []any{}},
+		"array type":          {"prompt": "x", "json_schema": map[string]any{"type": []string{"string", "null"}}},
+		"nested bad type":     {"prompt": "x", "json_schema": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "nope"}}}},
+		"required not array":  {"prompt": "x", "json_schema": map[string]any{"required": "a"}},
+	} {
+		resp, body := h.do(t, "POST", "/v1/query", key, "", b, nil)
+		if resp.StatusCode != 400 || errCode(body) != "bad_request" {
+			t.Errorf("%s: %d %v", name, resp.StatusCode, body)
+		}
+	}
+	if len(h.back.queries) != 0 {
+		t.Fatalf("the backend ran: %v", h.back.queries)
+	}
+}

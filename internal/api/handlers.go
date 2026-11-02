@@ -33,6 +33,16 @@ func checkQuery(s *Server, c *call, q *QueryRequest) bool {
 		writeError(c.w, Errorf(http.StatusForbidden, "pack_not_allowed", "pack %q is not in app %q's profile or not active in the serving session", q.Pack, c.app.Name))
 		return false
 	}
+	if q.MaxTokens < 0 {
+		writeError(c.w, Errorf(http.StatusBadRequest, "bad_request", "max_tokens must not be negative"))
+		return false
+	}
+	if len(q.JSONSchema) > 0 {
+		if err := CompileSchema(q.JSONSchema); err != nil {
+			writeError(c.w, Errorf(http.StatusBadRequest, "bad_request", "%v", err))
+			return false
+		}
+	}
 	cap := c.app.Profile.Budget.Tokens
 	if q.MaxTokens == 0 {
 		q.MaxTokens = cap

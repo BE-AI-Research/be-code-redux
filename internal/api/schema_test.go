@@ -38,3 +38,15 @@ func TestValidateSubset(t *testing.T) {
 		t.Error("an unknown type is a schema error, not a pass")
 	}
 }
+
+func TestValidateRefusesANonStringType(t *testing.T) {
+	if err := Validate(json.RawMessage(`{"type": ["string","null"]}`), []byte(`1`)); err == nil {
+		t.Error("an array type is a schema error, not a pass")
+	}
+	if err := CompileSchema(json.RawMessage(`{"type": ["string"]}`)); err == nil {
+		t.Error("CompileSchema must refuse an array type")
+	}
+	if err := CompileSchema(json.RawMessage(`{"type":"object","properties":{"a":{"type":"array","items":{"type":"integer"}}},"required":["a"]}`)); err != nil {
+		t.Error(err)
+	}
+}
