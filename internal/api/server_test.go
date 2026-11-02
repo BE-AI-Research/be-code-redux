@@ -16,13 +16,14 @@ import (
 
 // fakeBackend answers everything from fields; tests set what they need.
 type fakeBackend struct {
-	token    string
-	queries  []QueryRequest
-	complete []CompletionRequest
-	answer   string
-	err      error
-	packs    map[string]bool
-	block    chan struct{} // when set, Query waits on it (or ctx)
+	token          string
+	queries        []QueryRequest
+	complete       []CompletionRequest
+	answer         string
+	err            error
+	packs          map[string]bool
+	block          chan struct{} // when set, Query waits on it (or ctx)
+	sessionQueries int
 }
 
 func (f *fakeBackend) Health() Health {
@@ -59,6 +60,7 @@ func (f *fakeBackend) SessionInfo() SessionInfo {
 }
 func (f *fakeBackend) AcceptsSession(tok string) bool { return tok != "" && tok == f.token }
 func (f *fakeBackend) SessionQuery(ctx context.Context, q QueryRequest) (QueryResponse, error) {
+	f.sessionQueries++
 	return f.Query(ctx, q)
 }
 func (f *fakeBackend) PackActive(name string) bool { return f.packs[name] }

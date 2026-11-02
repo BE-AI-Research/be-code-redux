@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,6 +126,13 @@ func (s *Server) Handler() http.Handler {
 			s.answerEarly(w, r, Errorf(http.StatusServiceUnavailable, "shutting_down", "the serving session is ending"))
 			return
 		}
+		// A path that is not canonical would make the mux answer with an
+		// unauthenticated redirect to the cleaned path, which can carry a
+		// session token. Never route it, never redirect it.
+		if !canonicalPath(r) {
+			s.answerEarly(w, r, Errorf(http.StatusNotFound, "not_found", "no such endpoint"))
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		if _, pattern := s.mux.Handler(r); pattern == "" {
 			// An unknown path and a wrong method are the same 404, and only
@@ -136,15 +144,21 @@ func (s *Server) Handler() http.Handler {
 	})
 }
 
+// canonicalPath: the request path is its own cleaned form, with no "//".
+func canonicalPath(r *http.Request) bool {
+	p := r.URL.Path
+	return !strings.Contains(p, "//") && (p == "" || path.Clean(p) == p)
+}
+
 // answerEarly answers a request refused before routing and logs it: no app,
 // the route template when the request matches one, else "-".
 func (s *Server) answerEarly(w http.ResponseWriter, r *http.Request, e *Error) {
 	route := "-"
-	if _, p := s.mux.Handler(r); p != "" {
-		if _, t, ok := strings.Cut(p, " "); ok {
+	if _, p := s.mux.Handler(r); p != "" && canonicalPath(r) {
+		// Only a pattern that starts with a method verb is a template; any
+		// other "pattern" is a cleaned request path and may carry a token.
+		if m, t, ok := strings.Cut(p, " "); ok && m != "" && !strings.Contains(m, "/") {
 			route = t
-		} else {
-			route = p
 		}
 	}
 	writeError(w, e)
@@ -348,57 +362,6 @@ func handleHealth(s *Server, c *call) {
 	})
 }
 
-// Placeholders until Tasks 4 and 5; handleQuery already does the model,
-// pack and max_tokens checks the Task 3 tests need.
-func handleQuery(s *Server, c *call) {
-	var q struct {
-		Prompt, System, Model, Pack string
-		JSONSchema                  json.RawMessage `json:"json_schema"`
-		MaxTokens                   int             `json:"max_tokens"`
-	}
-	if !readJSON(c, &q) {
-		return
-	}
-	req := QueryRequest{Prompt: q.Prompt, System: q.System, Model: q.Model, Pack: q.Pack, JSONSchema: q.JSONSchema, MaxTokens: q.MaxTokens}
-	if !checkQuery(s, c, &req) {
-		return
-	}
-	resp, err := s.o.Backend.Query(c.r.Context(), req)
-	if err != nil {
-		writeError(c.w, s.mapErr(err))
-		return
-	}
-	writeJSON(c, map[string]any{"text": resp.Text, "model": resp.Model, "pack": resp.Pack, "usage": resp.Usage})
-}
-
-// checkQuery applies spec §2.4 steps 7 and 8's request-level checks.
-func checkQuery(s *Server, c *call, q *QueryRequest) bool {
-	if !c.app.Profile.AllowsModel(q.Model) {
-		writeError(c.w, Errorf(http.StatusForbidden, "model_not_allowed", "app %q may not use model %q", c.app.Name, q.Model))
-		return false
-	}
-	if q.Pack != "" && (!c.app.Profile.AllowsPack(q.Pack) || !s.o.Backend.PackActive(q.Pack)) {
-		writeError(c.w, Errorf(http.StatusForbidden, "pack_not_allowed", "pack %q is not in app %q's profile or not active in the serving session", q.Pack, c.app.Name))
-		return false
-	}
-	cap := c.app.Profile.Budget.Tokens
-	if q.MaxTokens == 0 {
-		q.MaxTokens = cap
-	}
-	if cap > 0 && q.MaxTokens > cap {
-		writeError(c.w, Errorf(http.StatusBadRequest, "over_budget", "max_tokens %d is over app %q's budget of %d", q.MaxTokens, c.app.Name, cap))
-		return false
-	}
-	return true
-}
-
 func handleCompletions(s *Server, c *call) { // replaced in Task 5
 	writeError(c.w, Errorf(http.StatusNotImplemented, "not_supported", "completions are not wired yet"))
-}
-func handleSessionInfo(s *Server, c *call) { // replaced in Task 4
-	i := s.o.Backend.SessionInfo()
-	writeJSON(c, map[string]any{"title": i.Title, "workspace": i.Workspace, "model": i.Model, "live": true})
-}
-func handleSessionQuery(s *Server, c *call) { // replaced in Task 4
-	handleQuery(s, c)
 }
