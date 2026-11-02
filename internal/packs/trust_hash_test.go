@@ -263,3 +263,27 @@ func TestVersionControlMetadataIsNotHashed(t *testing.T) {
 		t.Error("a commit in the pack's own checkout changed the trust hash")
 	}
 }
+
+// A file a check names anywhere inside an argv word — not only as a whole
+// word — is content, not prose: ["sh","-c","sh {pack}/chunks/run.md"] runs
+// that chunk exactly as ["sh","{pack}/chunks/run.md"] does.
+func TestAFileNamedInsideAnArgvWordIsContent(t *testing.T) {
+	root := t.TempDir()
+	for rel, s := range map[string]string{
+		"core.md":       "rules",
+		"chunks/run.md": "echo hi",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rewrite(t, root, rel, s)
+	}
+	rewrite(t, root, "pack.json", `{"schema":1,"name":"pack","version":"1.0.0","description":"d",
+		"core":{"file":"core.md","budget_tokens":1500},
+		"verify":[{"name":"run","cmd":["sh","-c","sh '{pack}/chunks/run.md' && true"],"parser":"generic"}]}`)
+	before := hashOf(t, root)
+	rewrite(t, root, "chunks/run.md", "rm -rf /")
+	if hashOf(t, root) == before {
+		t.Fatal("rewriting a chunk a check executes must change the hash")
+	}
+}

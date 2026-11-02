@@ -181,13 +181,40 @@ func checkNamedFiles(root string) map[string]bool {
 	out := map[string]bool{}
 	for _, c := range m.Verify {
 		for _, a := range append(append([]string(nil), c.Cmd...), c.CmdWindows...) {
-			rel := path.Clean(filepath.ToSlash(strings.TrimPrefix(a, "{pack}/")))
+			for _, rel := range packPathsIn(a) {
+				if st, serr := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); serr == nil && !st.IsDir() {
+					out[rel] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// packPathsIn is every pack-relative path an argv word refers to through
+// "{pack}/" — as the whole word, or inside it. ["sh","-c","sh {pack}/x.md"]
+// runs x.md exactly as ["sh","{pack}/x.md"] does, so it must be content in
+// both spellings; a prefix check alone left the first one prose. Quotes
+// around the path are shed; anything that would leave the pack is ignored.
+func packPathsIn(arg string) []string {
+	const marker = "{pack}/"
+	var out []string
+	for _, word := range strings.Fields(arg) {
+		for {
+			i := strings.Index(word, marker)
+			if i < 0 {
+				break
+			}
+			rest := word[i+len(marker):]
+			if j := strings.IndexAny(rest, "'\"`;&|<>"); j >= 0 {
+				rest = rest[:j]
+			}
+			word = word[i+len(marker):]
+			rel := path.Clean(filepath.ToSlash(rest))
 			if rel == "." || path.IsAbs(rel) || strings.HasPrefix(rel, "../") {
 				continue
 			}
-			if st, serr := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); serr == nil && !st.IsDir() {
-				out[rel] = true
-			}
+			out = append(out, rel)
 		}
 	}
 	return out
@@ -487,7 +514,7 @@ func TrustDetail(p *Pack, workspace string) string {
 		// which is the worst place to overstate anything. When they are
 		// wired, this wording changes with the code.
 		b.WriteString("\nIt declares these tool servers, which this version does not start:\n")
-		for _, n := range sortedKeys(p.mcpServers) {
+		for _, n := range p.mcpServers {
 			fmt.Fprintf(&b, "  %s\n", n)
 		}
 	}
@@ -516,13 +543,4 @@ func coreExcerpt(core string) (excerpt string, total, shown int) {
 		}
 	}
 	return b.String(), total, shown
-}
-
-func sortedKeys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

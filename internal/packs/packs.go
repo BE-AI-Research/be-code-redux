@@ -54,13 +54,19 @@ type Pack struct {
 	Source      Source // where it came from, which decides how far it is trusted
 	Core        string // contents of core.md, already read
 	CoreBudget  int    // budget_tokens for Core, 0 when unset
+	// Shadowed is the global pack of the same name this project pack takes
+	// the place of, when there is one. Discover sets it; the agent keeps the
+	// shadowed pack in force until this one is approved, because a
+	// repository must not be able to switch off a person's own pack just by
+	// naming its own after it.
+	Shadowed *Pack
 
 	entries    []playbook.Entry
 	chunks     map[string]Chunk
 	checks     []manifestCheck
 	detect     detect
-	mcpServers map[string]any
-	commands   string // manifest.Commands: a pack-relative directory, or ""
+	mcpServers []string // declared server names, sorted; nothing starts them
+	commands   string   // manifest.Commands: a pack-relative directory, or ""
 }
 
 type manifest struct {
@@ -74,8 +80,13 @@ type manifest struct {
 	Verify      []manifestCheck       `json:"verify"`
 	Playbooks   []string              `json:"playbooks"`
 	Commands    string                `json:"commands"`
-	MCPServers  map[string]any        `json:"mcp_servers"`
-	Requires    map[string]string     `json:"requires"`
+	// mcp_servers is read in both shapes the loader has met — the schema's
+	// array of {name, command} and the name-keyed object the first packs
+	// used — and requires holds arrays as well as strings, so neither is
+	// typed here: ValidateManifest checks their shape, serverNames reads
+	// the one, and nothing in this build reads the other.
+	MCPServers json.RawMessage `json:"mcp_servers"`
+	Requires   map[string]any  `json:"requires"`
 }
 
 type detect struct {
@@ -116,12 +127,15 @@ func Load(dir string) (*Pack, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read pack.json in %s: %w", root, err)
 	}
+	// The contract first, the typed parse second: the validator reads the
+	// raw bytes and names the field that is wrong, where the typed parse
+	// would call the whole file "not valid JSON" over one mistyped value.
+	if err := ValidateManifest(raw); err != nil {
+		return nil, nil, fmt.Errorf("pack.json in %s: %w", root, err)
+	}
 	var m manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, nil, fmt.Errorf("pack.json in %s is not valid JSON: %w", root, err)
-	}
-	if err := ValidateManifest(raw); err != nil {
-		return nil, nil, fmt.Errorf("pack.json in %s: %w", root, err)
 	}
 	if m.Schema != schemaVersion {
 		// The directory, not m.Name: a manifest broken enough to have the
@@ -136,7 +150,7 @@ func Load(dir string) (*Pack, []string, error) {
 	p := &Pack{
 		Name: m.Name, Version: m.Version, Description: m.Description,
 		Root: root, CoreBudget: m.Core.BudgetTokens,
-		chunks: map[string]Chunk{}, detect: m.Detect, mcpServers: m.MCPServers,
+		chunks: map[string]Chunk{}, detect: m.Detect, mcpServers: serverNames(m.MCPServers),
 		commands: m.Commands,
 	}
 
@@ -309,7 +323,36 @@ func (p *Pack) DeclaresUnstartedServers() []string {
 	if len(p.mcpServers) == 0 {
 		return nil
 	}
-	return sortedKeys(p.mcpServers)
+	return append([]string(nil), p.mcpServers...)
+}
+
+// serverNames reads the names out of a manifest's mcp_servers in either
+// shape — the schema's array of {name, command} objects, or the name-keyed
+// object — sorted. ValidateManifest has already refused anything else, so a
+// shape that will not parse here is simply empty.
+func serverNames(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var names []string
+	var asList []struct {
+		Name string `json:"name"`
+	}
+	var asMap map[string]any
+	switch {
+	case json.Unmarshal(raw, &asList) == nil:
+		for _, s := range asList {
+			if s.Name != "" {
+				names = append(names, s.Name)
+			}
+		}
+	case json.Unmarshal(raw, &asMap) == nil:
+		for n := range asMap {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Commands are the pack's slash commands: the name a person types and the

@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file enforces the closed v1.0 manifest contract
@@ -23,6 +24,7 @@ var (
 	validateChunkRe   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	validateVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 	validateTimeRe    = regexp.MustCompile(`^[0-9]+(ms|s|m|h)$`)
+	validateFormatRe  = regexp.MustCompile(`^1\.[0-9]+$`)
 )
 
 // closed objects: the exact key set each object accepts. Anything else is an
@@ -33,15 +35,15 @@ var (
 		"homepage", "extends", "detect", "core", "chunks", "verify", "hooks",
 		"playbooks", "playbook_scope", "commands", "mcp_servers", "requires",
 	)
-	detectKeys  = keys("any", "always", "shell")
-	coreKeys    = keys("file", "budget_tokens")
-	chunkKeys   = keys("file", "summary", "triggers")
-	verifyKeys  = keys("name", "cmd", "cmd_windows", "parser", "timeout", "when")
-	whenKeys    = keys("changed")
-	hooksKeys   = keys("pre_exec")
-	preExecKeys = keys("tool", "shell", "cmd", "cmd_windows", "stdin", "parser", "timeout", "on_error", "on_gate")
+	detectKeys   = keys("any", "always", "shell")
+	coreKeys     = keys("file", "budget_tokens")
+	chunkKeys    = keys("file", "summary", "triggers")
+	verifyKeys   = keys("name", "cmd", "cmd_windows", "parser", "timeout", "when")
+	whenKeys     = keys("changed")
+	hooksKeys    = keys("pre_exec")
+	preExecKeys  = keys("tool", "shell", "cmd", "cmd_windows", "stdin", "parser", "timeout", "on_error", "on_gate")
 	requiresKeys = keys("format", "be_code", "parsers", "hooks", "packs", "tools")
-	mcpItemKeys = keys("name", "command", "optional", "env")
+	mcpItemKeys  = keys("name", "command", "optional", "env")
 )
 
 // rename hints: the old key a person most likely meant, for the known v1.0
@@ -63,9 +65,9 @@ func keys(list ...string) map[string]bool {
 }
 
 // ValidateManifest checks the raw pack.json against the closed v1.0 contract.
-// It is called by Load after the bytes are read and the schema major checked,
-// so by the time it runs m.Schema is known to be 1. err names the first
-// violation; callers wrap it with the pack's location.
+// Load calls it on the bytes before its own typed parse, so a mistyped value
+// is reported by name here rather than as "not valid JSON" there. err names
+// the first violation; callers wrap it with the pack's location.
 func ValidateManifest(raw []byte) error {
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -96,8 +98,8 @@ func ValidateManifest(raw []byte) error {
 	if d, ok := m["description"]; ok {
 		if s, is := d.(string); !is {
 			return fmt.Errorf("pack.json: field %q must be a string", "description")
-		} else if len(s) > 200 {
-			return fmt.Errorf("pack.json: description is %d characters; the limit is 200", len(s))
+		} else if n := utf8.RuneCountInString(s); n > 200 {
+			return fmt.Errorf("pack.json: description is %d characters; the limit is 200", n)
 		}
 	}
 	if e, ok := m["extends"]; ok && !validateNameRe.MatchString(str(e)) {
@@ -190,7 +192,15 @@ func validateChunks(v any) error {
 	if !ok {
 		return fmt.Errorf("pack.json: field %q must be an object", "chunks")
 	}
-	for name, cv := range o {
+	// Name order, so which chunk is reported first does not change from one
+	// run to the next.
+	names := make([]string, 0, len(o))
+	for name := range o {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cv := o[name]
 		if !validateChunkRe.MatchString(name) {
 			return fmt.Errorf("pack.json: chunk name %q must match %s", name, validateChunkRe)
 		}
@@ -211,8 +221,8 @@ func validateChunks(v any) error {
 		}
 		if s, ok := co["summary"].(string); !ok {
 			return fmt.Errorf("pack.json: chunk %q: summary must be a string", name)
-		} else if len(s) > 200 {
-			return fmt.Errorf("pack.json: chunk %q: summary is %d characters; the limit is 200", name, len(s))
+		} else if n := utf8.RuneCountInString(s); n > 200 {
+			return fmt.Errorf("pack.json: chunk %q: summary is %d characters; the limit is 200", name, n)
 		}
 		tr, ok := co["triggers"].([]any)
 		if !ok || len(tr) < 1 {
@@ -334,7 +344,7 @@ func validateRequires(v any) error {
 	if bad := unknown(o, requiresKeys); bad != "" {
 		return fmt.Errorf("pack.json: requires: %s", bad)
 	}
-	if f, ok := o["format"].(string); ok && !regexp.MustCompile(`^1\.[0-9]+$`).MatchString(f) {
+	if f, ok := o["format"].(string); ok && !validateFormatRe.MatchString(f) {
 		return fmt.Errorf("pack.json: requires.format %q must be like 1.0", f)
 	}
 	for _, k := range []string{"parsers", "hooks", "packs", "tools"} {
@@ -452,13 +462,13 @@ func stringArray(label string, idx int, key string, v any) error {
 	}
 	arr, ok := v.([]any)
 	if !ok {
-		return fmt.Errorf("pack.json: %s must be an array", qualify(label, key))
+		return fmt.Errorf("pack.json: %s must be an array", qualify(label, idx, key))
 	}
 	for i, e := range arr {
 		if s, is := e.(string); !is {
-			return fmt.Errorf("pack.json: %s[%d] must be a string", qualify(label, key), i)
+			return fmt.Errorf("pack.json: %s[%d] must be a string", qualify(label, idx, key), i)
 		} else if s == "" {
-			return fmt.Errorf("pack.json: %s[%d] must not be empty", qualify(label, key), i)
+			return fmt.Errorf("pack.json: %s[%d] must not be empty", qualify(label, idx, key), i)
 		}
 	}
 	return nil
@@ -468,27 +478,31 @@ func stringArray(label string, idx int, key string, v any) error {
 // (the schema's minItems:1).
 func nonEmptyStringArray(label string, idx int, key string, v any) error {
 	if v == nil {
-		return fmt.Errorf("pack.json: %s must be a non-empty array", qualify(label, key))
+		return fmt.Errorf("pack.json: %s must be a non-empty array", qualify(label, idx, key))
 	}
 	arr, ok := v.([]any)
 	if !ok {
-		return fmt.Errorf("pack.json: %s must be an array", qualify(label, key))
+		return fmt.Errorf("pack.json: %s must be an array", qualify(label, idx, key))
 	}
 	if len(arr) < 1 {
-		return fmt.Errorf("pack.json: %s must have at least one element", qualify(label, key))
+		return fmt.Errorf("pack.json: %s must have at least one element", qualify(label, idx, key))
 	}
 	for i, e := range arr {
 		if s, is := e.(string); !is {
-			return fmt.Errorf("pack.json: %s[%d] must be a string", qualify(label, key), i)
+			return fmt.Errorf("pack.json: %s[%d] must be a string", qualify(label, idx, key), i)
 		} else if s == "" {
-			return fmt.Errorf("pack.json: %s[%d] must not be empty", qualify(label, key), i)
+			return fmt.Errorf("pack.json: %s[%d] must not be empty", qualify(label, idx, key), i)
 		}
 	}
 	return nil
 }
 
-// qualify builds a dotted "label.key" label for an error message.
-func qualify(label, key string) string {
+// qualify builds the label for an error message: "verify[3].when.changed"
+// for an indexed field, "hooks.pre_exec.cmd" for one that is not.
+func qualify(label string, idx int, key string) string {
+	if idx >= 0 {
+		label = fmt.Sprintf("%s[%d]", label, idx)
+	}
 	if key == "" {
 		return label
 	}
