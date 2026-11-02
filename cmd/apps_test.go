@@ -134,3 +134,88 @@ func TestAppsListShowRotateRevokeRemove(t *testing.T) {
 		t.Fatal("show after remove is an error")
 	}
 }
+
+// keyFromAppsOutput returns the bek_1_ key line a command printed, or "".
+func keyFromAppsOutput(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if l := strings.TrimSpace(line); strings.HasPrefix(l, "bek_1_") {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestAppsAddStoresOnlyTheHash(t *testing.T) {
+	home := appsTestHome(t)
+	out, err := captureAppsStdout(t, func() error { return appsAddCmd.RunE(appsAddCmd, []string{"hashonly"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := keyFromAppsOutput(out)
+	if key == "" {
+		t.Fatalf("add prints a key:\n%s", out)
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".be-code", "api", "apps", "hashonly.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.TrimPrefix(key, "bek_1_")
+	if strings.Contains(string(raw), key) || strings.Contains(string(raw), payload) {
+		t.Fatalf("the app file holds the key or its payload:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "sha256:") {
+		t.Fatalf("the app file holds the key hash:\n%s", raw)
+	}
+}
+
+func TestAppsRotateReplacesTheKey(t *testing.T) {
+	home := appsTestHome(t)
+	out, err := captureAppsStdout(t, func() error { return appsAddCmd.RunE(appsAddCmd, []string{"spinner"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := keyFromAppsOutput(out)
+	out, err = captureAppsStdout(t, func() error { return appsRotateCmd.RunE(appsRotateCmd, []string{"spinner"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	newKey := keyFromAppsOutput(out)
+	if newKey == "" || newKey == oldKey {
+		t.Fatalf("rotate prints a different key: old=%q new=%q", oldKey, newKey)
+	}
+	reg := api.NewRegistry(filepath.Join(home, ".be-code", "api", "apps"))
+	if _, ok := reg.Lookup(oldKey); ok {
+		t.Fatal("the old key still works after rotate")
+	}
+	if _, ok := reg.Lookup(newKey); !ok {
+		t.Fatal("the new key does not work after rotate")
+	}
+}
+
+func TestAppsRevokeThenRotateReactivates(t *testing.T) {
+	appsTestHome(t)
+	if _, err := captureAppsStdout(t, func() error { return appsAddCmd.RunE(appsAddCmd, []string{"bounce"}) }); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureAppsStdout(t, func() error { return appsRevokeCmd.RunE(appsRevokeCmd, []string{"bounce"}) })
+	if err != nil || !strings.Contains(out, "the key no longer works") || !strings.Contains(out, "re-activates the app") {
+		t.Fatalf("revoke says what rotate does: %v\n%s", err, out)
+	}
+	out, err = captureAppsStdout(t, func() error { return appsRotateCmd.RunE(appsRotateCmd, []string{"bounce"}) })
+	if err != nil || !strings.Contains(out, "bounce is active again") || !strings.Contains(out, "bek_1_") {
+		t.Fatalf("rotate of a revoked app says it is active again: %v\n%s", err, out)
+	}
+	out, _ = captureAppsStdout(t, func() error { return appsListCmd.RunE(appsListCmd, nil) })
+	if !strings.Contains(out, "active") || strings.Contains(out, "revoked") {
+		t.Fatalf("list shows the app active after rotate:\n%s", out)
+	}
+}
+
+func TestAppsHelpDoesNotPromiseUnbounded(t *testing.T) {
+	for _, name := range []string{"per-hour", "max-tokens"} {
+		usage := appsAddCmd.Flags().Lookup(name).Usage
+		if strings.Contains(usage, "unbounded") {
+			t.Fatalf("%s help promises unbounded, which apps add cannot express: %q", name, usage)
+		}
+	}
+}

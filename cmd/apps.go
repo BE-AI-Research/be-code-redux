@@ -165,11 +165,18 @@ var appsRotateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		before, err := reg.Get(args[0])
+		if err != nil {
+			return err
+		}
 		key, err := reg.Rotate(args[0])
 		if err != nil {
 			return err
 		}
 		fmt.Printf("new key for %s (shown once):\n  %s\n", args[0], key)
+		if before.Revoked != nil {
+			fmt.Printf("%s is active again: rotate re-activates a revoked app\n", args[0])
+		}
 		return nil
 	},
 }
@@ -186,7 +193,7 @@ var appsRevokeCmd = &cobra.Command{
 		if err := reg.Revoke(args[0]); err != nil {
 			return err
 		}
-		fmt.Printf("revoked %s; `be-code apps rotate %s` issues a new key, `apps remove` deletes it\n", args[0], args[0])
+		fmt.Printf("revoked %s; the key no longer works. 'be-code apps rotate %s' issues a new key AND re-activates the app; 'be-code apps remove %s' deletes it\n", args[0], args[0], args[0])
 		return nil
 	},
 }
@@ -215,7 +222,7 @@ func init() {
 	f.String("models", "", "comma-separated model names the app may ask for (default is always allowed)")
 	f.String("packs", "", "comma-separated packs whose rules a query may include")
 	f.String("sessions", "none", "none or named")
-	f.Int("per-hour", api.DefaultPerHour, "requests allowed per sliding hour (0 = unbounded)")
-	f.Int("max-tokens", api.DefaultTokens, "most tokens one reply may be asked for (0 = unbounded)")
+	f.Int("per-hour", api.DefaultPerHour, "requests allowed per sliding hour (default 120)")
+	f.Int("max-tokens", api.DefaultTokens, "most tokens one reply may be asked for (default 4096)")
 	appsCmd.AddCommand(appsAddCmd, appsListCmd, appsShowCmd, appsRotateCmd, appsRevokeCmd, appsRemoveCmd)
 }
