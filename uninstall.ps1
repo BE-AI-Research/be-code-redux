@@ -52,7 +52,7 @@ if ($Purge) {
         Say "no $DataDir to purge"
     }
 } elseif (Test-Path $DataDir) {
-    Say "kept $DataDir (config/sessions/history) — remove with: .\uninstall.ps1 -Purge"
+    Say "kept $DataDir (config/sessions/history) — remove with: .\uninstall.cmd -Purge"
 }
 
 Say "BE-Code uninstall complete."
