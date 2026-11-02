@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -127,6 +128,11 @@ func TestProbeTimeoutNeverRemovesTheSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer live.Close()
+	// A busy server: its record names a live pid, so a timed-out probe is not stale.
+	busy := fmt.Sprintf(`{"pid": %d, "session_code": "busy"}`, os.Getpid())
+	if err := os.WriteFile(recordPath(dir), []byte(busy), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	saved := probeDial
 	defer func() { probeDial = saved }()
 	probeDial = func(string) (net.Conn, error) {
@@ -241,5 +247,109 @@ func TestFreshLockOfLiveHolderIsRefused(t *testing.T) {
 	}
 	if _, serr := os.Stat(lockPath(dir)); serr != nil {
 		t.Fatal("a refused Listen must leave the holder's lock alone")
+	}
+}
+
+// failingProbe makes every probe dial fail with an error carrying no errno,
+// the way Windows reports a refused connect.
+func failingProbe(t *testing.T) {
+	t.Helper()
+	saved := probeDial
+	t.Cleanup(func() { probeDial = saved })
+	probeDial = func(string) (net.Conn, error) { return nil, errors.New("connect failed") }
+}
+
+func TestFailedDialWithNoRecordReclaims(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	if err := os.WriteFile(SocketPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failingProbe(t)
+	l, err := Listen(dir, Record{PID: os.Getpid(), SessionCode: "fresh"})
+	if err != nil {
+		t.Fatalf("a failed dial with no record is a stale socket: %v", err)
+	}
+	l.Close()
+}
+
+func TestFailedDialWithDeadPidRecordReclaims(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	if err := os.WriteFile(SocketPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath(dir), []byte(`{"pid": 999999999, "session_code": "dead"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failingProbe(t)
+	l, err := Listen(dir, Record{PID: os.Getpid(), SessionCode: "fresh"})
+	if err != nil {
+		t.Fatalf("a failed dial with a dead-pid record is a stale socket: %v", err)
+	}
+	l.Close()
+}
+
+func TestFailedDialWithLivePidRecordIsBusy(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	if err := os.WriteFile(SocketPath(dir), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := fmt.Sprintf(`{"pid": %d, "session_code": "busy"}`, os.Getpid())
+	if err := os.WriteFile(recordPath(dir), []byte(live), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failingProbe(t)
+	_, err := Listen(dir, Record{PID: os.Getpid(), SessionCode: "fresh"})
+	if !errors.Is(err, ErrServedElsewhere) {
+		t.Fatalf("a failed dial with a live-pid record is busy, got %v", err)
+	}
+	if _, serr := os.Stat(SocketPath(dir)); serr != nil {
+		t.Fatalf("a busy session's socket must be left alone: %v", serr)
+	}
+}
+
+func TestDeadLockTakeoverRacesToOneWinner(t *testing.T) {
+	dir := shortDir(t)
+	_ = os.MkdirAll(filepath.Join(dir, "apps"), 0o700)
+	lock := lockPath(dir)
+	if err := os.WriteFile(lock, []byte("999999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-20 * time.Second)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	const n = 2
+	type result struct {
+		unlock func()
+		err    error
+	}
+	results := make(chan result, n)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := 0; i < n; i++ {
+		go func() {
+			start.Wait()
+			u, err := acquireLock(dir)
+			results <- result{u, err}
+		}()
+	}
+	start.Done()
+	var held []func()
+	for i := 0; i < n; i++ {
+		r := <-results
+		if r.err == nil {
+			held = append(held, r.unlock)
+		}
+	}
+	// Release only after both racers have reported: an early release would let
+	// a slow racer take a free lock sequentially, which is not a race.
+	for _, u := range held {
+		u()
+	}
+	if len(held) != 1 {
+		t.Fatalf("exactly one racer takes a dead holder's lock, got %d", len(held))
 	}
 }

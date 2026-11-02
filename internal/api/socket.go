@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/procattr"
@@ -100,6 +99,33 @@ func Serving(dir string) (Record, bool) {
 	return r, true
 }
 
+// lockHolder reads the pid a lock file names; 0 when it names none.
+func lockHolder(path string) int {
+	raw, _ := os.ReadFile(path)
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return pid
+}
+
+// takeOverStaleLock moves a dead holder's lock out of the way. The rename is
+// atomic, so of several racers only one moves the file. The moved file is then
+// judged again, by age and by pid: a fresh lock, or one whose pid is still
+// alive, is a live binder's (it may have just been created, still empty), so it
+// is put back with a link that fails rather than overwrites a newer lock.
+func takeOverStaleLock(path string) bool {
+	moved := fmt.Sprintf("%s.stale-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(path, moved); err != nil {
+		return false
+	}
+	if st, err := os.Stat(moved); err == nil && time.Since(st.ModTime()) > lockStale && !procattr.Alive(lockHolder(moved)) {
+		_ = os.Remove(moved)
+		return true
+	}
+	if os.Link(moved, path) == nil {
+		_ = os.Remove(moved)
+	}
+	return false
+}
+
 // acquireLock takes <dir>/api.lock with O_EXCL, so one binding at a time.
 // A lock older than lockStale whose holder is dead is taken over once; any
 // other existing lock is refused, naming its holder. The returned func
@@ -120,10 +146,8 @@ func acquireLock(dir string) (func(), error) {
 		if serr != nil {
 			continue // released between our attempt and the stat
 		}
-		raw, _ := os.ReadFile(path)
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if attempt == 0 && time.Since(st.ModTime()) > lockStale && !procattr.Alive(pid) {
-			_ = os.Remove(path)
+		pid := lockHolder(path)
+		if attempt == 0 && time.Since(st.ModTime()) > lockStale && !procattr.Alive(pid) && takeOverStaleLock(path) {
 			continue
 		}
 		return nil, fmt.Errorf("api: another session is binding the socket (pid %d holds %s)", pid, path)
@@ -152,6 +176,18 @@ func writeRecord(dir string, rec Record) error {
 	return nil
 }
 
+// busyRecord reports whether server.json names a live pid. Listen holds the
+// binding lock until its record is written, so under the lock an absent,
+// unparseable or dead-pid record means no session is serving.
+func busyRecord(dir string) bool {
+	raw, err := os.ReadFile(recordPath(dir))
+	if err != nil {
+		return false
+	}
+	var r Record
+	return json.Unmarshal(raw, &r) == nil && r.PID > 0 && procattr.Alive(r.PID)
+}
+
 // servedElsewhere names whoever serves, from the record when there is one.
 func servedElsewhere(dir, path string) error {
 	r, _ := Serving(dir)
@@ -162,10 +198,11 @@ func servedElsewhere(dir, path string) error {
 }
 
 // Listen binds the socket under the binding lock. When the bind fails it
-// probes the socket: a refused connect (or a missing file) means a stale
-// socket, removed and re-bound; a successful connect, a timeout or any other
-// error means someone may be serving, so nothing is removed and the error
-// is ServedElsewhere.
+// probes the socket. A successful connect means another session serves. A
+// failed connect means a stale socket only when the record names no live
+// pid; a live record means a busy session, and the socket is left alone.
+// Errno is never consulted, because Windows reports these failures with
+// codes Go's syscall package does not map.
 func Listen(dir string, rec Record) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "apps"), 0o700); err != nil {
 		return nil, err
@@ -182,19 +219,17 @@ func Listen(dir string, rec Record) (net.Listener, error) {
 	path := SocketPath(dir)
 	l, err := net.Listen("unix", path)
 	if err != nil {
-		c, derr := probeDial(path)
-		switch {
-		case derr == nil:
+		if c, derr := probeDial(path); derr == nil {
 			c.Close()
 			return nil, servedElsewhere(dir, path)
-		case errors.Is(derr, syscall.ECONNREFUSED) || errors.Is(derr, syscall.ENOENT):
-			_ = os.Remove(path)
-			_ = os.Remove(recordPath(dir))
-			if l, err = net.Listen("unix", path); err != nil {
-				return nil, err
-			}
-		default:
+		}
+		if busyRecord(dir) {
 			return nil, servedElsewhere(dir, path)
+		}
+		_ = os.Remove(path)
+		_ = os.Remove(recordPath(dir))
+		if l, err = net.Listen("unix", path); err != nil {
+			return nil, err
 		}
 	}
 	if runtime.GOOS != "windows" {
