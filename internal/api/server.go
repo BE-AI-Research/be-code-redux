@@ -118,16 +118,41 @@ func (s *Server) Handler() http.Handler {
 			// Close the connection: otherwise net/http reads the unread body
 			// (up to 256 KB) before answering, which is the very thing refused.
 			w.Header().Set("Connection", "close")
-			writeError(w, Errorf(http.StatusForbidden, "browser_refused", "this API is for programs, not pages"))
+			s.answerEarly(w, r, Errorf(http.StatusForbidden, "browser_refused", "this API is for programs, not pages"))
 			return
 		}
 		if s.closing.Load() {
-			writeError(w, Errorf(http.StatusServiceUnavailable, "shutting_down", "the serving session is ending"))
+			s.answerEarly(w, r, Errorf(http.StatusServiceUnavailable, "shutting_down", "the serving session is ending"))
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		if _, pattern := s.mux.Handler(r); pattern == "" {
+			// An unknown path and a wrong method are the same 404, and only
+			// after authentication, so a caller learns nothing about routes.
+			s.serve(w, r, "-", "", false, handleNotFound)
+			return
+		}
 		s.mux.ServeHTTP(w, r)
 	})
+}
+
+// answerEarly answers a request refused before routing and logs it: no app,
+// the route template when the request matches one, else "-".
+func (s *Server) answerEarly(w http.ResponseWriter, r *http.Request, e *Error) {
+	route := "-"
+	if _, p := s.mux.Handler(r); p != "" {
+		if _, t, ok := strings.Cut(p, " "); ok {
+			route = t
+		} else {
+			route = p
+		}
+	}
+	writeError(w, e)
+	s.logLine(&call{route: route}, e.Status, 0)
+}
+
+func handleNotFound(s *Server, c *call) {
+	writeError(c.w, Errorf(http.StatusNotFound, "not_found", "no such endpoint"))
 }
 
 func (s *Server) Serve(l net.Listener) error { return s.http.Serve(l) }
@@ -201,11 +226,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, template, tier st
 		c.sessionToken = pathTok
 		c.sessionCode = s.o.Backend.Health().SessionCode
 	}
-	if retry, ok := s.budgets.take(app.Name, app.Profile.Budget.PerHour); !ok {
-		c.w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
-		writeError(c.w, Errorf(http.StatusTooManyRequests, "rate_limited", "app %q is over its %d requests per hour", app.Name, app.Profile.Budget.PerHour))
-		return
-	}
+	// The in-flight slot first: a request refused for it must not spend the
+	// hour, or a client obeying Retry-After would burn its budget on refusals.
 	release, ok := s.budgets.begin(app.Name)
 	if !ok {
 		c.w.Header().Set("Retry-After", "1")
@@ -213,6 +235,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, template, tier st
 		return
 	}
 	defer release()
+	if retry, ok := s.budgets.take(app.Name, app.Profile.Budget.PerHour); !ok {
+		c.w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		writeError(c.w, Errorf(http.StatusTooManyRequests, "rate_limited", "app %q is over its %d requests per hour", app.Name, app.Profile.Budget.PerHour))
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.o.Timeout)
 	stop := context.AfterFunc(s.closeCtx, cancel)
 	defer stop()

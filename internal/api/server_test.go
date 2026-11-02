@@ -279,3 +279,58 @@ func TestCloseAnswersInFlightWith503(t *testing.T) {
 		t.Fatalf("in-flight requests are told the server is closing: %v", body)
 	}
 }
+
+func TestRefusedInFlightIsNotCharged(t *testing.T) {
+	h := newHarness(t)
+	key := h.app(t, "app", Profile{Tiers: []string{"query"}, Budget: Budget{PerHour: 2, Tokens: 100}})
+	h.back.block = make(chan struct{})
+	first := make(chan int, 1)
+	go func() {
+		r, _ := h.do(t, "POST", "/v1/query", key, "", map[string]any{"prompt": "slow"}, nil)
+		first <- r.StatusCode
+	}()
+	time.Sleep(100 * time.Millisecond)
+	resp, body := h.do(t, "POST", "/v1/query", key, "", map[string]any{"prompt": "x"}, nil)
+	if resp.StatusCode != 429 || errCode(body) != "rate_limited" {
+		t.Fatalf("second in-flight request: %d %v", resp.StatusCode, body)
+	}
+	close(h.back.block)
+	if <-first != 200 {
+		t.Fatal("the first finishes normally")
+	}
+	for i := 0; i < 1; i++ { // the slow one was charged once; one more fits, the refusal was free
+		if resp, _ := h.do(t, "POST", "/v1/query", key, "", map[string]any{"prompt": "x"}, nil); resp.StatusCode != 200 {
+			t.Fatalf("request %d after the refusal: %d", i, resp.StatusCode)
+		}
+	}
+	if resp, _ := h.do(t, "POST", "/v1/query", key, "", map[string]any{"prompt": "x"}, nil); resp.StatusCode != 429 {
+		t.Fatalf("the hour holds exactly two charged requests: %d", resp.StatusCode)
+	}
+}
+
+func TestUnmatchedRoutesAreJSON404AfterAuth(t *testing.T) {
+	h := newHarness(t)
+	key := h.app(t, "app", Profile{Tiers: []string{"query"}})
+	for _, tc := range []struct{ method, path string }{{"GET", "/v1/nope"}, {"PUT", "/v1/query"}} {
+		resp, body := h.do(t, tc.method, tc.path, key, "", nil, nil)
+		if resp.StatusCode != 404 || errCode(body) != "not_found" {
+			t.Errorf("%s %s: %d %v", tc.method, tc.path, resp.StatusCode, body)
+		}
+	}
+	for _, tc := range []struct{ method, path string }{{"GET", "/v1/nope"}, {"PUT", "/v1/query"}} {
+		if resp, body := h.do(t, tc.method, tc.path, "", "", nil, nil); resp.StatusCode != 401 || errCode(body) != "unauthorized" {
+			t.Errorf("unauthenticated %s %s: %d %v", tc.method, tc.path, resp.StatusCode, body)
+		}
+	}
+	if !strings.Contains(h.log.String(), "route=-") {
+		t.Fatalf("unmatched requests are logged:\n%s", h.log.String())
+	}
+}
+
+func TestBrowserRefusalIsLogged(t *testing.T) {
+	h := newHarness(t)
+	h.do(t, "POST", "/v1/query", "", "", map[string]any{"prompt": "x"}, map[string]string{"Origin": "http://x"})
+	if l := h.log.String(); !strings.Contains(l, "app=- ") || !strings.Contains(l, "route=/v1/query") || !strings.Contains(l, "status=403") {
+		t.Fatalf("a browser-refused request is logged:\n%s", l)
+	}
+}
