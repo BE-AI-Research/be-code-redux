@@ -197,9 +197,9 @@ cost and the README states it.
 
 ### 3.5 Showing it
 
-- `/session token` and `/session rotate [grace]` in the TUI show the token in a modal that is
-  never written to the transcript or the chat; in the REPL they print it, refusing when stdout
-  is not a terminal unless `--stdout` is given.
+- `/session token` and `/session rotate [grace]` in the TUI render the token on the terminal
+  that asked only — a local line, never a transcript entry, never saved, never shown to another
+  attached terminal; in the REPL they print it, refusing when stdout is not a terminal.
 - `be-code session token <code>` and `be-code session rotate <code> [--grace 10m]` act on a
   session file that is not live, saving it. For a live session they refuse with `CODE is live;
   join it and use /session token`, because the host owns the file (the save guard in
@@ -252,8 +252,10 @@ The reference `openai` Python client completes a streamed chat against it with o
 
 ### 4.3 `/v1/sessions/{token}/query`
 
-The context is a **snapshot** of the serving session's system prompt and messages, taken under
-the turn lock so it is never mid-rewrite, with harness state stripped (`StripHarnessState`) and
+The context is a **snapshot** of the serving session's system prompt and messages, taken only
+when no turn is running (the turn lock is tried, never waited for: a turn can hold it for
+minutes, so a request that finds it held is answered 409 `session_busy` at once and the caller
+retries) and so never mid-rewrite, with harness state stripped (`StripHarnessState`) and
 browser, `web_fetch` and `web_search` results withheld as `(not shown)`, the way the model-written
 handoff withholds them. The caller's `system` is appended after the session's system prompt;
 the caller's `prompt` is the final user message. Nothing is appended to the session: the
@@ -287,8 +289,9 @@ same machine and may well be the program that opened it.
   already have been answered by the person for the session to be serving at all; an app can
   never answer it. `ShareGate` does not apply: nothing an app sends is page text, and page text
   in a session snapshot is withheld (§4.3).
-- Events: `Events.OnModelStart` fires for an API call as for any other, so the TUI's thinking
-  status counts it; the bottom line reads `api: <app>` while one runs (§6.3).
+- Events: an API call does not go through the session's own streaming path — that path writes
+  into the person's transcript — so no transcript or thinking status reflects it; the bottom
+  line reads `api: <app>` while one runs (§6.3), and `/stats` counts the request.
 
 ## §6 Config, commands, UI
 
