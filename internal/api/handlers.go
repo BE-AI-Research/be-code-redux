@@ -37,6 +37,9 @@ func checkQuery(s *Server, c *call, q *QueryRequest) bool {
 		writeError(c.w, Errorf(http.StatusBadRequest, "bad_request", "max_tokens must not be negative"))
 		return false
 	}
+	if isNullSchema(q.JSONSchema) {
+		q.JSONSchema = nil // JSON null is "no schema"
+	}
 	if len(q.JSONSchema) > 0 {
 		if err := CompileSchema(q.JSONSchema); err != nil {
 			writeError(c.w, Errorf(http.StatusBadRequest, "bad_request", "%v", err))

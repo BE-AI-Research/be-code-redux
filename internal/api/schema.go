@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -9,10 +10,14 @@ import (
 
 // Validate checks doc against the JSON-schema subset this build understands:
 // type, properties, required, items, enum and additionalProperties:false.
-// Other keywords are ignored, so a schema using them is checked loosely,
-// never refused. The point is to tell a caller "the model did not produce
+// The schema must be well-formed in that subset (see CompileSchema); unknown
+// keywords inside a well-formed schema are ignored, so it is checked loosely.
+// A JSON null schema means no schema. The point is to tell a caller "the model did not produce
 // what you asked for" rather than to be a full validator.
 func Validate(schema json.RawMessage, doc []byte) error {
+	if isNullSchema(schema) {
+		return nil
+	}
 	var sc map[string]any
 	if err := json.Unmarshal(schema, &sc); err != nil {
 		return fmt.Errorf("json_schema is not a JSON object: %w", err)
@@ -22,6 +27,12 @@ func Validate(schema json.RawMessage, doc []byte) error {
 		return fmt.Errorf("the reply is not JSON: %w", err)
 	}
 	return validate(sc, v, "$")
+}
+
+// isNullSchema: absent, or the JSON null an SDK sends for "no schema".
+func isNullSchema(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) == 0 || string(t) == "null"
 }
 
 func validate(sc map[string]any, v any, at string) error {
@@ -58,6 +69,9 @@ func validate(sc map[string]any, v any, at string) error {
 		}
 		props, _ := sc["properties"].(map[string]any)
 		for name, val := range obj {
+			if b, isBool := props[name].(bool); isBool && b {
+				continue // a true subschema is unconstrained
+			}
 			ps, has := props[name].(map[string]any)
 			if !has {
 				if ap, ok := sc["additionalProperties"].(bool); ok && !ap {
@@ -115,17 +129,26 @@ var schemaTypes = map[string]bool{"string": true, "integer": true, "number": tru
 // a JSON object, every type a supported type name, required and enum arrays,
 // and properties, items and nested schemas the same, recursively.
 func CompileSchema(raw json.RawMessage) error {
+	if isNullSchema(raw) {
+		return nil
+	}
 	var sc any
 	if err := json.Unmarshal(raw, &sc); err != nil {
 		return fmt.Errorf("json_schema is not valid JSON: %w", err)
 	}
-	return compile(sc, "$")
+	return compile(sc, "$", "json_schema")
 }
 
-func compile(v any, at string) error {
+func compile(v any, at, kw string) error {
+	if b, ok := v.(bool); ok {
+		if b {
+			return nil // true: unconstrained
+		}
+		return fmt.Errorf("%s: %s: a false schema is not supported", at, kw)
+	}
 	sc, ok := v.(map[string]any)
 	if !ok {
-		return fmt.Errorf("%s: a schema must be a JSON object", at)
+		return fmt.Errorf("%s: %s must be a JSON object", at, kw)
 	}
 	if raw, has := sc["type"]; has {
 		t, ok := raw.(string)
@@ -149,13 +172,16 @@ func compile(v any, at string) error {
 			return fmt.Errorf("%s: properties must be an object", at)
 		}
 		for name, p := range props {
-			if err := compile(p, at+"."+name); err != nil {
+			if err := compile(p, at+"."+name, "properties"); err != nil {
 				return err
 			}
 		}
 	}
 	if raw, has := sc["items"]; has {
-		if err := compile(raw, at+"[]"); err != nil {
+		if _, tuple := raw.([]any); tuple {
+			return fmt.Errorf("%s: items: the tuple form (an array) is not supported", at)
+		}
+		if err := compile(raw, at+"[]", "items"); err != nil {
 			return err
 		}
 	}

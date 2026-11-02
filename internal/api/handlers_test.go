@@ -122,3 +122,16 @@ func TestBadRequestsNeverReachTheModel(t *testing.T) {
 		t.Fatalf("the backend ran: %v", h.back.queries)
 	}
 }
+
+func TestNullJSONSchemaIsNoSchema(t *testing.T) {
+	h := newHarness(t)
+	key := h.app(t, "app", Profile{Tiers: []string{"query"}})
+	h.back.answer = "not json at all"
+	resp, body := h.do(t, "POST", "/v1/query", key, "", map[string]any{"prompt": "x", "json_schema": nil}, nil)
+	if resp.StatusCode != 200 || body["text"] != "not json at all" {
+		t.Fatalf("null schema is unchecked: %d %v", resp.StatusCode, body)
+	}
+	if len(h.back.queries) != 1 {
+		t.Fatalf("positive control: backend called %d times", len(h.back.queries))
+	}
+}

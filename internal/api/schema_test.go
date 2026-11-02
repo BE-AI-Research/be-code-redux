@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +49,29 @@ func TestValidateRefusesANonStringType(t *testing.T) {
 	}
 	if err := CompileSchema(json.RawMessage(`{"type":"object","properties":{"a":{"type":"array","items":{"type":"integer"}}},"required":["a"]}`)); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestSchemaBooleanSubschemasAndTupleItems(t *testing.T) {
+	ok := json.RawMessage(`{"type":"array","items":true}`)
+	if err := CompileSchema(ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(ok, []byte(`[1,"a",null]`)); err != nil {
+		t.Errorf("items:true is unconstrained: %v", err)
+	}
+	props := json.RawMessage(`{"type":"object","properties":{"a":true},"additionalProperties":false}`)
+	if err := Validate(props, []byte(`{"a":[1]}`)); err != nil {
+		t.Errorf("a true property schema is unconstrained: %v", err)
+	}
+	err := CompileSchema(json.RawMessage(`{"type":"array","items":[{"type":"string"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "items") {
+		t.Errorf("tuple items is a compile error naming items: %v", err)
+	}
+	if err := CompileSchema(json.RawMessage(`{"properties":{"a":false}}`)); err == nil || !strings.Contains(err.Error(), "properties") {
+		t.Errorf("a false subschema is refused naming the keyword: %v", err)
+	}
+	if CompileSchema(json.RawMessage(` null `)) != nil || Validate(json.RawMessage(`null`), []byte(`x`)) != nil {
+		t.Error("null is no schema")
 	}
 }
