@@ -42,6 +42,10 @@
   times, the count resetting on any productive turn, instead of ending the run after one nudge.
   The final error names both things it can mean — a model that believes it is done, or a backend
   that returned nothing for a prompt larger than its window.
+- **The Linux and macOS installer verifies what it downloads.** `install.sh` checks the release
+  binary against the release's `SHA256SUMS` the way `install.ps1` and the in-app updater already
+  did, with `sha256sum`, `shasum` or `openssl`, whichever the system has; a download that cannot
+  be verified — no listing, no line for the asset, a mismatch — is never installed.
 - `scripts/fix-provider-config.py` repairs `~/.be-code/config.json`, the file be-code loads; it
   no longer honours a `BE_CODE_CONFIG` variable be-code itself never read.
 - `uninstall.ps1` points the `-Purge` hint at `.\uninstall.cmd -Purge`, the launcher a default

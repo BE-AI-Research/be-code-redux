@@ -9,6 +9,7 @@ build:
 
 test:
 	go test ./...
+	sh test/install/verify_download_test.sh
 
 vet:
 	go vet ./...

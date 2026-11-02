@@ -42,8 +42,9 @@ Windows, in **PowerShell**:
 irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.ps1 | iex
 ```
 
-Each downloads the current release for your platform and offers the setup wizard; the Windows
-installers also check the download against the release's `SHA256SUMS`. More options, uninstalling and installing from a checkout are under
+Each downloads the current release for your platform, checks it against the release's
+`SHA256SUMS` (a binary that cannot be verified is never installed) and offers the setup wizard.
+More options, uninstalling and installing from a checkout are under
 [Install](#install--uninstall).
 
 ## Contents

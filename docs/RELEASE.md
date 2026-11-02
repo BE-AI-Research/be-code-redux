@@ -74,7 +74,7 @@ cat dist/SHA256SUMS
 2. **One line per binary**, in the same set you upload.
 
 **HARD — the asset name** is **`SHA256SUMS`** — no `.txt`, no extension. The
-updater (`update.go:205`) and `install.ps1:54` look up the asset by that
+updater (`update.go:205`), `install.sh` (`verify_download`) and `install.ps1:54` look up the asset by that
 exact string. Uploading it as `SHA256SUMS.txt` is what made v1.3.0 fail with
 `could not be verified; not installed` even though the hashes were correct.
 

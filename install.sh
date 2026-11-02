@@ -17,10 +17,12 @@
 # from an older checkout is never installed under a newer version's name.
 #
 # Run on its own it reads the version from the repository's build.mk,
-# downloads that release's binary for this platform, and falls back to fetching
-# the source and building it when the release has no such asset. BE_CODE_REPO,
-# BE_CODE_REF and BE_CODE_VERSION override where it fetches from and what it
-# installs. Safe to re-run: upgrades in place. Undo with ./uninstall.sh.
+# downloads that release's binary for this platform, checks it against the
+# release's SHA256SUMS — a binary that cannot be verified is never installed —
+# and falls back to fetching the source and building it when the release has
+# no such asset. BE_CODE_REPO, BE_CODE_REF and BE_CODE_VERSION override where
+# it fetches from and what it installs. Safe to re-run: upgrades in place.
+# Undo with ./uninstall.sh.
 set -eu
 
 # Where a checkout-less install fetches from.
@@ -104,6 +106,33 @@ goversion_ok() {
     [ "${major:-0}" -eq 1 ] && [ "${minor:-0}" -ge 25 ] 2>/dev/null
 }
 
+# sha256_of prints the lower-case SHA-256 of a file with whatever this system
+# has: coreutils on Linux, shasum on macOS, openssl nearly everywhere. Nothing
+# printed means none of them is here.
+sha256_of() {
+    if have sha256sum; then sha256sum "$1" | awk '{print tolower($1)}'
+    elif have shasum; then shasum -a 256 "$1" | awk '{print tolower($1)}'
+    elif have openssl; then openssl dgst -sha256 "$1" | awk '{print tolower($NF)}'
+    fi
+}
+
+# verify_download FILE NAME SUMS_URL checks FILE against the line for NAME in
+# the release's SHA256SUMS ("<hex>  name" or "<hex> *name", bare filenames —
+# the same contract internal/update and install.ps1 read), and fails the
+# install when the listing is missing, has no line for NAME, or does not
+# match. A failure here is never an unverified install: the staged file goes
+# with the work directory and nothing has been copied into place yet.
+verify_download() {
+    sums="$WORK/SHA256SUMS"
+    fetch "$3" "$sums" || fail "$3 could not be fetched, so $2 cannot be verified; not installed. Every release carries a SHA256SUMS asset; if this one is missing it, report it at https://github.com/$REPO/issues"
+    want=$(awk -v name="$2" '{ n = $2; sub(/^\*/, "", n); if (NF == 2 && n == name) { print tolower($1); exit } }' "$sums")
+    [ -n "$want" ] || fail "the release's SHA256SUMS has no line for $2; not installed"
+    got=$(sha256_of "$1")
+    [ -n "$got" ] || fail "cannot compute a SHA-256 here (no sha256sum, shasum or openssl), so $2 cannot be verified; not installed"
+    [ "$got" = "$want" ] || fail "the downloaded $2 does not match the release's SHA256SUMS (want $want, got $got); not installed"
+    say "verified $2 against SHA256SUMS"
+}
+
 # binary_version prints the version a binary reports ("0.8.0"), or nothing
 # if it cannot run here (wrong platform, not executable).
 binary_version() {
@@ -147,6 +176,7 @@ remote_install() {
     asset="$REL_URL/v$ver/$BINARY-$os-$arch"
     say "fetching $BINARY $ver for $os/$arch from $REPO..."
     if fetch "$asset" "$TMP_BIN"; then
+        verify_download "$TMP_BIN" "$BINARY-$os-$arch" "$REL_URL/v$ver/SHA256SUMS"
         chmod +x "$TMP_BIN"
         got=$(binary_version "$TMP_BIN")
         [ -n "$got" ] || fail "the downloaded binary does not run on this machine ($os/$arch): $asset"
