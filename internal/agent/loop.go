@@ -1426,7 +1426,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 					continue
 				}
 				a.autosave(userInput)
-				return "", fmt.Errorf("model returned an empty reply %d times in a row (no content and no tool calls); it may believe the task is complete", emptyRetries)
+				return "", fmt.Errorf("model returned an empty reply %d times in a row (no content and no tool calls): it may believe the task is complete, or the backend may be truncating the prompt (check its context window against context_tokens)", emptyRetries)
 			}
 			if resp.FinishReason == "length" {
 				// A reply cut off inside an embedded tool call is not an

@@ -67,8 +67,6 @@ func newTestAgentAt(t *testing.T, dir string, p provider.Provider, mut func(*con
 	return New(cfg, p, "test-model", reg, ""), dir
 }
 
-// An empty reply with no tool calls is a backend flake, not a confused
-// model: the turn is retried in place with backoff, without polluting
 // An empty reply means the model emitted EOS with nothing to say — it
 // believes it is done, or has lost the thread. The loop says so plainly
 // and asks it to continue; the real reply is then used.
@@ -113,15 +111,17 @@ func TestRunFailsAfterPersistentEmptyReplies(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("expected empty-reply error, got %v", err)
 	}
-	if strings.Contains(err.Error(), "truncating") {
-		t.Fatalf("error misdiagnoses truncation: %v", err)
+	// Neither cause is asserted as the diagnosis: a model that thinks it is
+	// done and a backend that returned nothing both look like this from
+	// here, and the second has happened on a real server.
+	if !strings.Contains(err.Error(), "complete") || !strings.Contains(err.Error(), "truncating") {
+		t.Fatalf("error must name both possible causes: %v", err)
 	}
 	// maxEmptyNudges nudges, then the final attempt that fails.
 	if p.i != maxEmptyNudges+1 {
 		t.Fatalf("expected %d model calls, got %d", maxEmptyNudges+1, p.i)
 	}
 }
-
 
 // Sporadic empty replies separated by productive turns must not
 // accumulate into a fatal error: the streak resets on any turn with
