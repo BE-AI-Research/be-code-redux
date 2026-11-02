@@ -150,7 +150,7 @@ func init() {
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd, appsCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd, appsCmd, sessionCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	packsCmd.AddCommand(packsValidateCmd, packsInfoCmd, packsAddCmd, packsUpdateCmd, packsRemoveCmd)
 	packsAddCmd.Flags().StringVar(&flagPackSource, "source", "", "a directory or git URL to fetch from (default: packs.source)")
