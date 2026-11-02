@@ -46,11 +46,12 @@ var appsAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		a, err := reg.Get(args[0])
-		if err != nil {
-			return err
+		// The key exists only here: print it even if reading the file back fails.
+		shown := p
+		if a, err := reg.Get(args[0]); err == nil {
+			shown = a.Profile
 		}
-		fmt.Printf("registered app %s\n%s\nkey (shown once; store it with the app):\n  %s\n", a.Name, describeProfile(a.Profile), key)
+		fmt.Printf("registered app %s\n%s\nkey (shown once; store it with the app):\n  %s\n", args[0], describeProfile(shown), key)
 		return nil
 	},
 }
