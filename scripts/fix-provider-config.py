@@ -14,7 +14,7 @@ one of the three legal values.
 
 What it does
 ------------
-1. Locates the config: --config FILE, else $BE_CODE_CONFIG, else
+1. Locates the config: --config FILE, else
    ~/.be-code/config.json (matches internal/config/config.go Load).
 2. For each provider entry with an illegal type:
      - the entry named by "default_provider": its type is replaced with the
@@ -56,9 +56,9 @@ LEGAL_TYPES = ("ollama", "openai", "")
 
 
 def default_config_path():
-    env = os.environ.get("BE_CODE_CONFIG")
-    if env:
-        return os.path.expanduser(env)
+    # The same file be-code itself loads (internal/config: the user's home
+    # directory, no environment override), so the file repaired here is the
+    # one the next launch reads.
     return os.path.expanduser(os.path.join("~", ".be-code", "config.json"))
 
 
@@ -140,7 +140,7 @@ def plan(cfg, repair_type):
 def main():
     ap = argparse.ArgumentParser(description="Fix ~/.be-code/config.json so be-code can launch.")
     ap.add_argument("--config", metavar="FILE",
-                    help="path to config.json (default: $BE_CODE_CONFIG or ~/.be-code/config.json)")
+                    help="path to config.json (default: ~/.be-code/config.json, the file be-code loads)")
     ap.add_argument("--type", dest="repair_type", default="ollama",
                     help="legal type to repair the default provider to (default: ollama; 'openai' also works)")
     ap.add_argument("--dry-run", action="store_true",

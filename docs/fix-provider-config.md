@@ -17,9 +17,9 @@ provider entry whose type is not one of the three legal values.
 
 ## What it does
 
-1. Locates the config: `--config FILE`, else `$BE_CODE_CONFIG`, else
-   `~/.be-code/config.json` (same resolution as `internal/config/config.go`
-   `Load`).
+1. Locates the config: `--config FILE`, else `~/.be-code/config.json` — the
+   file `internal/config/config.go` `Load` reads; be-code honours no
+   environment override, so neither does the script.
 2. For each provider entry with an illegal type:
    - the entry named by `"default_provider"`: its `type` is replaced with the
      legal type given by `--type` (default `ollama`); it is repaired in place,
@@ -47,8 +47,8 @@ legal, are left untouched — the script never guesses at malformed entries.
 
 Flags:
 
-- `--config FILE` — path to the config (default `$BE_CODE_CONFIG` or
-  `~/.be-code/config.json`; `~` is expanded).
+- `--config FILE` — path to the config (default `~/.be-code/config.json`;
+  `~` is expanded).
 - `--type T` — legal type to repair the default provider to; `ollama`
   (default), `openai` or empty string. Anything else is rejected, exit 1.
 - `--dry-run` — report the planned changes without writing; exit 3.
