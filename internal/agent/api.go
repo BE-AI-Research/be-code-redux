@@ -346,3 +346,24 @@ func (a *Agent) withTurnLock(change func(*store.Session) (string, error)) (strin
 	}
 	return tok, nil
 }
+
+// APIStatus is what /api and the header show.
+type APIStatus struct {
+	Serving     bool
+	Socket      string
+	ServedBy    string // another session's code when it serves instead
+	ServedByPID int
+	Served      int
+	LastApp     string
+	LastAt      time.Time
+	InFlight    string // the app whose request is being answered now
+	Err         string // why this session is not serving, when it tried
+}
+
+// APIControl is the serving side the UIs drive (/api on|off, the header).
+// cmd/api.go implements it; nil means this session can never serve.
+type APIControl interface {
+	Start() error
+	Stop()
+	Status() APIStatus
+}

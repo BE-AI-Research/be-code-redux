@@ -574,3 +574,10 @@ func TestScheduleSettingsDefaultOff(t *testing.T) {
 		t.Fatalf("set keys decode: %+v", c.Schedules)
 	}
 }
+
+func TestAPIConfigDefaultsOff(t *testing.T) {
+	d := Default()
+	if d.API.Enabled || d.API.Timeout != "120s" {
+		t.Fatalf("api defaults: %+v", d.API)
+	}
+}

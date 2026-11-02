@@ -158,6 +158,9 @@ func runSessionHost(code string) error {
 		ag.StartSchedulesAsync()
 		// And the pack trust question, for the same reason.
 		ag.StartPacksAsync()
+		if s, ok := ag.API.(*apiService); ok {
+			s.StartIfEnabled()
+		}
 	})
 
 	// The hosted case is the one that most needed this. Here stdio is the

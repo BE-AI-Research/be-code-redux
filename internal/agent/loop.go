@@ -126,6 +126,9 @@ type Agent struct {
 	Session *store.Session
 	// Checkpoints, when set, snapshots files before each turn's edits.
 	Checkpoints *checkpoint.Checkpointer
+	// API is the application API's serving side (cmd/api.go); nil when this
+	// session can never serve (headless).
+	API APIControl
 	// Profile is the active model-family tuning.
 	Profile profiles.Profile
 	// Stats is cumulative session usage. The agent goroutine writes it

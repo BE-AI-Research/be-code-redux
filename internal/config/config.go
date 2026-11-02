@@ -375,6 +375,10 @@ type Config struct {
 	Schedules SchedulesConfig `json:"schedules"`
 	Packs     PacksConfig     `json:"packs"`
 	Work      WorkConfig      `json:"work"`
+	// API serves the application API from an interactive session (spec
+	// 2026-11-02-app-api-design.md): other programs on this machine ask
+	// over ~/.be-code/api/api.sock. Timeout bounds one request.
+	API APIConfig `json:"api"`
 
 	// KeepAlive is how long the backend should keep the model resident after
 	// each request (Ollama keep_alive; Go duration, "0" disables). Refreshed
@@ -488,6 +492,7 @@ func Default() *Config {
 		Work:             WorkConfig{Enabled: true, KeepOverwritten: "168h"},
 		Packs:            PacksConfig{Source: "https://github.com/BE-AI-Research/be-skill-packs"},
 		Schedules:        SchedulesConfig{Enabled: true, MinInterval: "5m", MaxActive: 20, AskTimeout: "10m", MaxRuntime: "30m", PauseAfterFailures: 3, ConfirmOnStart: true, Allow: []string{}},
+		API:              APIConfig{Enabled: false, Timeout: "120s"},
 		KeepAlive:        "30m",
 		ReloadOnMismatch: "ask",
 		CompactWithModel: true,
@@ -836,3 +841,10 @@ func LocalEndpoint(baseURL string) bool {
 // cgnat is RFC 6598's shared address space, which Tailscale hands out to a
 // tailnet's own machines.
 var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+// APIConfig is the application API's switch and request timeout; everything
+// per-app lives in ~/.be-code/api/apps/<name>.json.
+type APIConfig struct {
+	Enabled bool   `json:"enabled"`
+	Timeout string `json:"timeout"`
+}

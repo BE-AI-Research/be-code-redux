@@ -413,6 +413,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	// here rather than with the registry.
 	attachEngine(cfg, reg, ag, flagResume != "")
 	attachPacks(ag)
+	if !headless {
+		buildAPI(cfg, ag)
+		agent.APIModelFactory = apiModelFactory(ag)
+	}
 	if !headless && cfg.Schedules.Enabled {
 		// Scheduled events: interactive sessions only — a one-shot run has
 		// no "later" (schedules spec §1.3). The scheduler is created here but
@@ -707,6 +711,9 @@ func applyModelParams(cfg *config.Config, p provider.Provider, reg *tools.Regist
 // next session can pick up without loss of fidelity, saves, and prints the
 // resume code. withModel=false keeps headless runs fast.
 func finishSession(ag *agent.Agent, withModel bool, out io.Writer) {
+	if ag.API != nil {
+		ag.API.Stop()
+	}
 	ag.StopAllSubAgents("session ended")
 	ag.StopSchedules()
 	if workLedger != nil {
@@ -922,6 +929,9 @@ func runInteractive(cmd *cobra.Command) error {
 			repl.ResolveModelParams(ctx)
 			ag.StartSubAgents()
 			ag.StartSchedules()
+			if s, ok := ag.API.(*apiService); ok {
+				s.StartIfEnabled()
+			}
 		}
 		return repl.Run(ctx)
 	}
@@ -978,6 +988,9 @@ func runInteractive(cmd *cobra.Command) error {
 		// And the trust question for a pack that came with this repository,
 		// which LoadPacks could not ask during buildAgent.
 		ag.StartPacksAsync()
+		if s, ok := ag.API.(*apiService); ok {
+			s.StartIfEnabled()
+		}
 	})
 	// Now that NewSession has wired Registry.Approve, the question startup
 	// could not put to anybody can be asked: it goes through the shared
