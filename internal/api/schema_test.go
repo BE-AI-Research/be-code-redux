@@ -75,3 +75,12 @@ func TestSchemaBooleanSubschemasAndTupleItems(t *testing.T) {
 		t.Error("null is no schema")
 	}
 }
+
+func TestCompileSchemaTopLevelMustBeAnObject(t *testing.T) {
+	for _, raw := range []string{`true`, `false`, `[]`, `"x"`} {
+		err := CompileSchema(json.RawMessage(raw))
+		if err == nil || !strings.Contains(err.Error(), "json_schema must be a JSON object") {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+}

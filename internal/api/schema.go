@@ -12,8 +12,9 @@ import (
 // type, properties, required, items, enum and additionalProperties:false.
 // The schema must be well-formed in that subset (see CompileSchema); unknown
 // keywords inside a well-formed schema are ignored, so it is checked loosely.
-// A JSON null schema means no schema. The point is to tell a caller "the model did not produce
-// what you asked for" rather than to be a full validator.
+// A JSON null schema means no schema. The point is to tell a caller "the
+// model did not produce what you asked for" rather than to be a full
+// validator.
 func Validate(schema json.RawMessage, doc []byte) error {
 	if isNullSchema(schema) {
 		return nil
@@ -135,6 +136,9 @@ func CompileSchema(raw json.RawMessage) error {
 	var sc any
 	if err := json.Unmarshal(raw, &sc); err != nil {
 		return fmt.Errorf("json_schema is not valid JSON: %w", err)
+	}
+	if _, ok := sc.(map[string]any); !ok {
+		return fmt.Errorf("json_schema must be a JSON object (send null or omit it for no schema)")
 	}
 	return compile(sc, "$", "json_schema")
 }

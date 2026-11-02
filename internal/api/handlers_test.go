@@ -109,6 +109,7 @@ func TestBadRequestsNeverReachTheModel(t *testing.T) {
 		"negative max_tokens": {"prompt": "x", "max_tokens": -1},
 		"misspelt type":       {"prompt": "x", "json_schema": map[string]any{"type": "strnig"}},
 		"schema not object":   {"prompt": "x", "json_schema": []any{}},
+		"top-level true":      {"prompt": "x", "json_schema": true},
 		"array type":          {"prompt": "x", "json_schema": map[string]any{"type": []string{"string", "null"}}},
 		"nested bad type":     {"prompt": "x", "json_schema": map[string]any{"type": "object", "properties": map[string]any{"a": map[string]any{"type": "nope"}}}},
 		"required not array":  {"prompt": "x", "json_schema": map[string]any{"required": "a"}},
