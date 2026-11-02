@@ -276,8 +276,16 @@ func (a *Agent) EnablePacks(ps []*packs.Pack) map[string]string {
 	)
 	for _, p := range ps {
 		if p.Source == packs.SourceProject && !a.trustProjectPack(p, refuse) {
-			skipped[p.Name] = "needs approval"
-			continue
+			if p.Shadowed == nil {
+				skipped[p.Name] = "needs approval"
+				continue
+			}
+			// The standard shadows only after approval (REQ-SPF-081): until
+			// then the person's own global pack of that name stays in
+			// force, or a repository could switch off somebody's rules and
+			// checks just by committing a pack named after them.
+			skipped[p.Name] = "needs approval; your global pack of that name is active instead"
+			p = p.Shadowed
 		}
 		if over, est, budget := packs.CoreOverBudget(p); over {
 			refuse("pack %q is not active: its core is about %d tokens against a budget of %d. Shorten core.md or raise core.budget_tokens.", p.Name, est, budget)

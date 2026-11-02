@@ -25,6 +25,11 @@ const (
 	SourceProject Source = "project"
 )
 
+// ReplacingMark is in the name Install gives the pack it moves aside
+// (<name>.replacing-<stamp>); Discover skips such a directory, so a leftover
+// one — the removal failed, a file was held open — is never loaded as a pack.
+const ReplacingMark = ".replacing-"
+
 // Discover loads every pack on the search path: global first, then the
 // project's own, so a project pack shadows a global one of the same name —
 // and says so, since the two may give very different advice and which is in
@@ -51,6 +56,12 @@ func Discover(globalDir, workspace string) ([]*Pack, []string) {
 			if !e.IsDir() {
 				continue
 			}
+			if strings.Contains(e.Name(), ReplacingMark) {
+				// What Install moved aside and could not remove — a
+				// sibling with a pack.json of its own, which loaded last
+				// would take the installed pack's name.
+				continue
+			}
 			dir := filepath.Join(src.dir, e.Name())
 			if _, err := os.Stat(filepath.Join(dir, "pack.json")); err != nil {
 				continue // a directory without a manifest is not a pack
@@ -63,7 +74,12 @@ func Discover(globalDir, workspace string) ([]*Pack, []string) {
 			}
 			p.Source = src.source
 			if prev, ok := byName[p.Name]; ok {
-				warns = append(warns, fmt.Sprintf("pack %q in this project shadows the %s one (%s)", p.Name, prev.Source, prev.Root))
+				if prev.Source != p.Source {
+					warns = append(warns, fmt.Sprintf("pack %q in this project shadows the %s one (%s)", p.Name, prev.Source, prev.Root))
+					p.Shadowed = prev
+				} else {
+					warns = append(warns, fmt.Sprintf("two %s packs are named %q; %s is in force, %s is not", p.Source, p.Name, p.Root, prev.Root))
+				}
 			}
 			byName[p.Name] = p
 		}

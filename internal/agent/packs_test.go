@@ -401,3 +401,27 @@ func TestPackRowsExplainEveryPack(t *testing.T) {
 		t.Error("forcing an unknown pack must say so")
 	}
 }
+
+// An unapproved project pack must not take the person's own global pack of
+// the same name out of force: the standard (REQ-SPF-081) shadows only after
+// approval, and a repository could otherwise switch off somebody's rules and
+// checks just by committing a same-named pack.
+func TestUnapprovedProjectPackLeavesTheGlobalOneInForce(t *testing.T) {
+	ag := packAgent(t)
+	ag.Tools.Approve = func(string, string) bool { return false }
+	global := loadTestPack(t, "shared", "the global rules", "", packs.SourceGlobal)
+	project := loadTestPack(t, "shared", "the repository's rules", "", packs.SourceProject)
+	project.Shadowed = global
+
+	skipped := ag.EnablePacks([]*packs.Pack{project})
+	sys := ag.composeSystem("")
+	if strings.Contains(sys, "the repository's rules") {
+		t.Error("a refused project pack reached the system prompt")
+	}
+	if !strings.Contains(sys, "the global rules") {
+		t.Error("the global pack it shadows must stay in force")
+	}
+	if why := skipped["shared"]; !strings.Contains(why, "global") {
+		t.Errorf("the reason must say the global pack is active instead, got %q", why)
+	}
+}

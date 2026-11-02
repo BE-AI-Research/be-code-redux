@@ -137,3 +137,38 @@ func names(ps []*Pack) []string {
 	}
 	return out
 }
+
+// Install moves the pack it replaces aside as <name>.replacing-<stamp>, a
+// sibling in the packs directory with its own pack.json. When that cleanup
+// fails the leftover must not be discovered as a pack — loading last, it
+// would take the freshly installed pack's name.
+func TestAReplacingLeftoverIsNotAPack(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	writeMinimalPack(t, filepath.Join(home, "packs", "foo"), "foo", "")
+	writeMinimalPack(t, filepath.Join(home, "packs", "foo.replacing-20260101-120000"), "foo", "")
+
+	found, warns := Discover(filepath.Join(home, "packs"), ws)
+	if len(found) != 1 || filepath.Base(found[0].Root) != "foo" {
+		t.Fatalf("want only foo/, got %v (warns %v)", names(found), warns)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("a leftover is not a shadowing pack: %v", warns)
+	}
+}
+
+// A project pack remembers the global pack it shadows, so the agent can keep
+// the person's own pack in force until the project one is approved.
+func TestAShadowingPackNamesWhatItShadows(t *testing.T) {
+	home, ws := t.TempDir(), t.TempDir()
+	writeMinimalPack(t, filepath.Join(home, "packs", "ue5"), "ue5", "")
+	writeMinimalPack(t, filepath.Join(ws, ".becode", "packs", "ue5"), "ue5", "")
+
+	found, _ := Discover(filepath.Join(home, "packs"), ws)
+	if len(found) != 1 || found[0].Shadowed == nil || found[0].Shadowed.Source != SourceGlobal {
+		t.Fatalf("the project pack must carry the global one it shadows: %+v", found)
+	}
+	solo, _ := Discover(filepath.Join(home, "packs"), t.TempDir())
+	if len(solo) != 1 || solo[0].Shadowed != nil {
+		t.Fatalf("a pack shadowing nothing carries nothing: %+v", solo)
+	}
+}

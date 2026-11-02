@@ -89,7 +89,7 @@ func Install(ctx context.Context, s Source, pack string, o Options) (Result, err
 		// part-way — an undeletable file, or on Windows one an editor or a
 		// scanner is holding open. Update sets Force, so this is the ordinary
 		// `packs update` path and §12's "never half a pack" has to hold here.
-		aside = dest + ".replacing-" + packs.Now().Format("20060102-150405")
+		aside = dest + packs.ReplacingMark + packs.Now().Format("20060102-150405")
 		if err := os.Rename(dest, aside); err != nil {
 			return Result{}, fmt.Errorf("could not move the installed %s aside to replace it: %w", got.Pack, err)
 		}
