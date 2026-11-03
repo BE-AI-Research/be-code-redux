@@ -34,12 +34,55 @@ func CleanScope(paths []string) ([]string, error) {
 	return out, nil
 }
 
+// CleanJobScope is CleanScope for a dispatched job (dispatch-jobs spec §3),
+// which differs in one way: "." is the whole workspace, accepted on its own
+// and absorbing every other entry. Blank entries are skipped; nothing left
+// is "a job needs a scope". Its refusals are the dispatch tool's sentences.
+func CleanJobScope(paths []string) ([]string, error) {
+	var out []string
+	whole := false
+	for _, p := range paths {
+		s := strings.TrimSpace(p)
+		if s == "" {
+			continue
+		}
+		if filepath.IsAbs(s) || strings.HasPrefix(s, "/") {
+			return nil, fmt.Errorf("scope %s escapes the workspace", s)
+		}
+		c := path.Clean(filepath.ToSlash(s))
+		if c == ".." || strings.HasPrefix(c, "../") {
+			return nil, fmt.Errorf("scope %s escapes the workspace", s)
+		}
+		if c == "." {
+			whole = true
+			continue
+		}
+		clean, err := CleanScope([]string{s})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, clean...)
+	}
+	if whole {
+		return []string{WholeWorkspace}, nil
+	}
+	if len(out) == 0 {
+		return nil, errors.New("a job needs a scope")
+	}
+	return out, nil
+}
+
+// WholeWorkspace is the scope entry that covers every path. Only a job's
+// scope can hold it (CleanScope refuses it for a scheduler step).
+const WholeWorkspace = "."
+
 // InScope reports whether rel (slash-separated, workspace-relative) is one
-// of the scope entries or under one of them.
+// of the scope entries or under one of them. The entry "." covers
+// everything.
 func InScope(scope []string, rel string) bool {
 	rel = path.Clean(filepath.ToSlash(rel))
 	for _, s := range scope {
-		if rel == s || strings.HasPrefix(rel, s+"/") {
+		if s == WholeWorkspace || rel == s || strings.HasPrefix(rel, s+"/") {
 			return true
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 func TestJobMarkRoundTrips(t *testing.T) {
@@ -119,4 +121,39 @@ func TestTextEndingJobIsSingleSpacedOnWrite(t *testing.T) {
 		t.Fatal("reloaded as job")
 	}
 	_ = id
+}
+
+// Ruling R4: a job may go to any co-worker, not only a sub-agent; the
+// co-worker's max_scope still binds it.
+func TestAddJobWorksForANonSubAgentCard(t *testing.T) {
+	s, root := openTest(t, "sess", false)
+	cards := cardsForTest()
+	cards["small"] = subagent.Card{Name: "small", MaxScope: []string{"docs"}}
+	s.SetCards(cards)
+	task := s.Plan("port", []string{"look"})
+	id, err := s.AddJob(task, "write the docs", "", "small", []string{"docs/api"})
+	if err != nil {
+		t.Fatalf("a non-sub-agent co-worker was refused a job: %v", err)
+	}
+	if n := s.tree.Find(id); n == nil || n.Owner != "small" || !n.Job {
+		t.Fatalf("node: %+v", n)
+	}
+	if _, err := s.AddJob(task, "outside", "", "small", []string{"cmd"}); err == nil {
+		t.Fatal("a scope outside max_scope was accepted")
+	}
+	// "." is the whole workspace for a job, and survives a reload.
+	whole, err := s.AddJob(task, "everything", "", "big", []string{"."})
+	if err != nil {
+		t.Fatalf("whole-workspace job refused: %v", err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := OpenAt(filepath.Join(t.TempDir(), "e"), root, "sess", false, testLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := s2.tree.Find(whole); n == nil || len(n.Scope) != 1 || n.Scope[0] != "." {
+		t.Fatalf("reloaded whole-workspace job: %+v", n)
+	}
 }

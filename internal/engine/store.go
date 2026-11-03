@@ -1440,7 +1440,9 @@ func (s *Store) warnOwners() {
 		}
 		card, ok := s.cards[n.Owner]
 		switch {
-		case !ok || !card.SubAgent:
+		case n.Job && !ok:
+			s.warnf("task %s: %s is not in coworkers", n.ID, n.Owner)
+		case !n.Job && (!ok || !card.SubAgent):
 			s.warnf("task %s: %s is not a sub-agent; add \"sub_agent\": true to its coworkers entry", n.ID, n.Owner)
 		case !subagent.Within(n.Scope, card.MaxScope):
 			s.warnf("task %s: %s may only own paths under %s", n.ID, n.Owner, strings.Join(card.MaxScope, ", "))
@@ -1458,6 +1460,14 @@ func (s *Store) SetOwner(id, owner string, pinned bool) error {
 	if n == nil {
 		return fmt.Errorf("no node %s", id)
 	}
+	return s.setOwnerLocked(n, owner, pinned, true)
+}
+
+// setOwnerLocked is SetOwner's body. requireSub is false only for a job
+// (AddJob, ruling R4): a job may go to any co-worker, so the owner need only
+// be one the store holds a card for; every other rule still applies.
+func (s *Store) setOwnerLocked(n *Node, owner string, pinned, requireSub bool) error {
+	id := n.ID
 	if n.OwnerPinned && !pinned {
 		return fmt.Errorf("%s was assigned by the operator; ask them to change it", id)
 	}
@@ -1465,7 +1475,11 @@ func (s *Store) SetOwner(id, owner string, pinned bool) error {
 		return fmt.Errorf("%s is being worked by %s; stop it first", id, n.Owner)
 	}
 	if owner != "" {
-		if card, ok := s.cards[owner]; !ok || !card.SubAgent {
+		card, ok := s.cards[owner]
+		if !ok && !requireSub {
+			return fmt.Errorf("%s is not a co-worker", owner)
+		}
+		if requireSub && (!ok || !card.SubAgent) {
 			return fmt.Errorf("%s is not a sub-agent; add \"sub_agent\": true to its coworkers entry", owner)
 		}
 		if above := s.tree.OwnerOf(parentID(id)); above != "" {
@@ -1496,6 +1510,13 @@ func (s *Store) SetScope(id string, scope []string) error {
 	if n == nil {
 		return fmt.Errorf("no node %s", id)
 	}
+	return s.setScopeLocked(n, clean)
+}
+
+// setScopeLocked is SetScope's body after cleaning; AddJob reaches it with
+// a scope CleanJobScope cleaned, which may be the whole workspace.
+func (s *Store) setScopeLocked(n *Node, clean []string) error {
+	id := n.ID
 	if n.Owner != "" {
 		if card, ok := s.cards[n.Owner]; ok && !subagent.Within(clean, card.MaxScope) {
 			return fmt.Errorf("%s may only own paths under %s", n.Owner, strings.Join(card.MaxScope, ", "))
@@ -1525,6 +1546,10 @@ func (s *Store) SetScope(id string, scope []string) error {
 // (sub-agent owner, max_scope, one pen per path) applies; they only mark the
 // tree dirty, so the document is written once, at the next flush.
 func (s *Store) AddJob(parent, text, note, owner string, scope []string) (string, error) {
+	clean, err := subagent.CleanJobScope(scope)
+	if err != nil {
+		return "", err
+	}
 	id, err := s.Add(parent, text)
 	if err != nil {
 		return "", err
@@ -1538,21 +1563,26 @@ func (s *Store) AddJob(parent, text, note, owner string, scope []string) (string
 		s.mu.Unlock()
 		return "", err
 	}
-	if err := s.SetOwner(id, owner, false); err != nil {
-		return fail(err)
-	}
-	if err := s.SetScope(id, scope); err != nil {
-		return fail(err)
-	}
 	s.mu.Lock()
 	n := s.tree.Find(id)
 	if n == nil {
 		s.mu.Unlock()
 		return "", fmt.Errorf("no node %s", id)
 	}
-	n.Job = true
-	s.markDirtyLocked()
+	// Owner without the sub-agent requirement (ruling R4), then the scope
+	// through the same max_scope and one-pen-per-path checks SetScope makes.
+	err = s.setOwnerLocked(n, owner, false, false)
+	if err == nil {
+		err = s.setScopeLocked(n, clean)
+	}
+	if err == nil {
+		n.Job = true
+		s.markDirtyLocked()
+	}
 	s.mu.Unlock()
+	if err != nil {
+		return fail(err)
+	}
 	if strings.TrimSpace(note) != "" {
 		if err := s.Note(id, note, "", false, false); err != nil {
 			return fail(err)
@@ -1854,6 +1884,23 @@ func (s *Store) EnsureRoot(text string) string {
 // not wholly finished — or "" when none is open. It exists for the task
 // tool's optional taskRoots capability: resolving a 0.10.0 step number
 // against the right task rather than against a root of the same number.
+// JobParent is where a dispatched job's step goes (dispatch-jobs spec §3,
+// step 2): the node doing under the active root when there is one and it
+// sits in nobody's subtree, else the active root itself; "" when there is
+// no active root, so the job becomes a task of its own.
+func (s *Store) JobParent() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.activeRootLocked()
+	if r == nil {
+		return ""
+	}
+	if d := s.tree.DoingUnder(r.ID); d != nil && d.ID != r.ID && s.tree.OwnerOf(d.ID) == "" {
+		return d.ID
+	}
+	return r.ID
+}
+
 func (s *Store) ActiveRootID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

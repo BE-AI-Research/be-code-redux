@@ -109,9 +109,16 @@ func splitFields(text string) (string, nodeFields) {
 // cannot refuse every write while quoting the operator's own text back.
 // Entry by entry, so one bad path does not take the rest of the scope with
 // it, and a drop is noted the way an id repair is.
-func cleanScopeField(paths []string) (out, dropped []string) {
+//
+// A job's scope may be the whole workspace ("."), which CleanJobScope keeps
+// and CleanScope refuses.
+func cleanScopeField(paths []string, job bool) (out, dropped []string) {
+	clean := subagent.CleanScope
+	if job {
+		clean = subagent.CleanJobScope
+	}
 	for _, p := range paths {
-		c, err := subagent.CleanScope([]string{p})
+		c, err := clean([]string{p})
 		if err != nil || len(c) == 0 {
 			dropped = append(dropped, strings.TrimSpace(p))
 			continue
@@ -443,7 +450,7 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			n := &Node{Text: text, Status: st, Reason: reason, Opened: now}
 			n.Owner, n.OwnerPinned, n.Scope, n.After, n.Job = fields.owner, fields.pinned, fields.scope, fields.after, fields.job
 			if len(n.Scope) > 0 {
-				clean, dropped := cleanScopeField(n.Scope)
+				clean, dropped := cleanScopeField(n.Scope, n.Job)
 				n.Scope = clean
 				for _, d := range dropped {
 					n.Evidence.Notes = append(n.Evidence.Notes,

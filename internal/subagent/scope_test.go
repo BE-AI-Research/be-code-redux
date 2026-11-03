@@ -47,3 +47,27 @@ func TestLaneKey(t *testing.T) {
 		t.Fatal("unparseable keeps the string")
 	}
 }
+
+func TestCleanJobScope(t *testing.T) {
+	got, err := CleanJobScope([]string{" ./internal/x/ ", "", "cmd/y.go"})
+	if err != nil || len(got) != 2 || got[0] != "internal/x" || got[1] != "cmd/y.go" {
+		t.Fatalf("got %q %v", got, err)
+	}
+	if got, err := CleanJobScope([]string{"internal", "./"}); err != nil || len(got) != 1 || got[0] != "." {
+		t.Fatalf("whole workspace: %q %v", got, err)
+	}
+	if _, err := CleanJobScope([]string{" "}); err == nil || err.Error() != "a job needs a scope" {
+		t.Fatalf("empty: %v", err)
+	}
+	for _, bad := range []string{"../x", "/etc", "a/../../b"} {
+		if _, err := CleanJobScope([]string{bad}); err == nil || err.Error() != "scope "+bad+" escapes the workspace" {
+			t.Fatalf("%q: %v", bad, err)
+		}
+	}
+	if !Overlap([]string{"."}, []string{"internal/x"}) || !InScope([]string{"."}, "a/b.go") {
+		t.Fatal(`"." must cover everything`)
+	}
+	if Within([]string{"."}, []string{"docs"}) {
+		t.Fatal(`"." is not within a narrower max_scope`)
+	}
+}
