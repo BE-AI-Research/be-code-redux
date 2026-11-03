@@ -12,6 +12,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/subagent"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // parkJobs makes every co-worker's provider park until its run is cancelled.
@@ -340,4 +341,273 @@ func TestResumeClosesAnOrphanJob(t *testing.T) {
 	if hb := wait(t, f.ends, "hand-back"); hb.Node != id {
 		t.Fatalf("hand-back: %+v", hb)
 	}
+}
+
+// dispatchJob files and dispatches one job for big, failing the test on a
+// refusal.
+func dispatchJob(t *testing.T, f *subFixture, text, scope string) string {
+	t.Helper()
+	id, err := f.ag.DispatchJob(context.Background(), "big", text, scope, "", []string{scope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func queued(f *subFixture) string { return strings.Join(f.ag.Peek(), "\n---\n") }
+
+func TestJobWaitReturnsTheHandBackAndConsumesIt(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "ported"}}}, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	line, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "job "+id+" ") || !strings.Contains(line, "done") || !strings.Contains(line, "ported") {
+		t.Fatalf("JobWait returned %q", line)
+	}
+	f.ag.WaitSubAgents(context.Background())
+	if q := queued(f); strings.Contains(q, id) {
+		t.Fatalf("the hand-back JobWait returned is still queued: %q", q)
+	}
+	// A late wait on a finished job answers at once with its hand-back.
+	start := time.Now()
+	again, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	if err != nil || again != line || time.Since(start) > 2*time.Second {
+		t.Fatalf("late JobWait: %q %v after %s", again, err, time.Since(start))
+	}
+	if _, err := f.ag.JobWait(context.Background(), "9.9", time.Second); err == nil || err.Error() != "no job 9.9" {
+		t.Fatalf("unknown id: %v", err)
+	}
+}
+
+func TestJobWaitReturnsOnAnAsk(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"which tokenizer?"}`),
+		{Content: "used the old one"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	ctx := context.Background()
+	line, err := f.ag.JobWait(ctx, id, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if line != "job "+id+" asks: which tokenizer?" {
+		t.Fatalf("JobWait on an ask: %q", line)
+	}
+	if q := queued(f); strings.Contains(q, "which tokenizer?") {
+		t.Fatalf("the ask JobWait returned is still queued: %q", q)
+	}
+	if err := f.ag.JobReply(id, "yes"); err != nil {
+		t.Fatal(err)
+	}
+	line, err = f.ag.JobWait(ctx, id, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(line, "job "+id+" ") || !strings.Contains(line, "done") {
+		t.Fatalf("second JobWait: %q", line)
+	}
+	var sawReply bool
+	for _, m := range sub.lastReq.Messages {
+		sawReply = sawReply || strings.Contains(m.Content, "yes")
+	}
+	if !sawReply {
+		t.Fatal("the reply never reached the job")
+	}
+}
+
+func TestJobWaitOnOneJobKeepsAnothersHandBack(t *testing.T) {
+	// Two co-workers on two servers: one server's lane carries one request
+	// at a time, and the slow job holds big's.
+	f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) {
+		c.Providers["other"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://other:11434"}
+		c.Coworkers = append(c.Coworkers, config.CoworkerConfig{Name: "quick", Provider: "other", Model: "m", SubAgent: true})
+	})
+	fast := &scriptedProvider{responses: []provider.ChatResponse{{Content: "fast work"}}}
+	slow := &parkingProvider{entered: make(chan struct{}, 4)}
+	CoworkerFactory = func(_ context.Context, _ *config.Config, cw config.CoworkerConfig) (provider.Provider, int, error) {
+		if cw.Name == "quick" {
+			return fast, 0, nil
+		}
+		return slow, 0, nil
+	}
+	f.st.Plan("work", nil)
+	slowID := dispatchJob(t, f, "slow job", "internal/scan")
+	wait(t, f.start, "slow start")
+	wait(t, slow.entered, "slow request")
+	fastID, err := f.ag.DispatchJob(context.Background(), "quick", "fast job", "docs", "", []string{"docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hb := wait(t, f.ends, "fast hand-back"); hb.Node != fastID {
+		t.Fatalf("first hand-back: %+v", hb)
+	}
+	got := make(chan string, 1)
+	go func() {
+		line, _ := f.ag.JobWait(context.Background(), slowID, time.Minute)
+		got <- line
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := f.ag.JobStop(slowID, "taking too long"); err != nil {
+		t.Fatal(err)
+	}
+	line := wait(t, got, "JobWait on the slow job")
+	if !strings.HasPrefix(line, "job "+slowID+" ") || !strings.Contains(line, "taking too long") {
+		t.Fatalf("JobWait on the slow job: %q", line)
+	}
+	if q := queued(f); !strings.Contains(q, "job "+fastID+" ") || strings.Contains(q, "job "+slowID+" ") {
+		t.Fatalf("queue after waiting on the slow job: %q", q)
+	}
+}
+
+func TestJobWaitWithNothingRunningReturnsAtOnce(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	start := time.Now()
+	line, err := f.ag.JobWait(context.Background(), "", time.Minute)
+	if line != "" || err != nil || time.Since(start) > time.Second {
+		t.Fatalf("JobWait with nothing running: %q %v after %s", line, err, time.Since(start))
+	}
+	// With a job running, an id-less wait returns its first event.
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	line, err = f.ag.JobWait(context.Background(), "", time.Minute)
+	if err != nil || !strings.HasPrefix(line, "job "+id+" ") {
+		t.Fatalf("id-less JobWait: %q %v", line, err)
+	}
+	// A wait that times out returns nothing and consumes nothing.
+	bp := parkJobs(t)
+	other := dispatchJob(t, f, "park", "docs")
+	wait(t, bp.entered, "parked request")
+	line, err = f.ag.JobWait(context.Background(), other, 30*time.Millisecond)
+	if line != "" || err != nil {
+		t.Fatalf("timed-out JobWait: %q %v", line, err)
+	}
+}
+
+func TestJobStopClosesBlockedWithReason(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	if err := f.ag.JobStop(id, "wrong approach"); err != nil {
+		t.Fatal(err)
+	}
+	hb := wait(t, f.ends, "hand-back")
+	if hb.Status != "blocked" || hb.Reason != "wrong approach" {
+		t.Fatalf("hand-back: %+v", hb)
+	}
+	f.ag.WaitSubAgents(context.Background())
+	if n := nodeOf(t, f.st, id); n.Status != engine.StatusBlocked || n.Reason != "wrong approach" {
+		t.Fatalf("step: %s %q", n.Status, n.Reason)
+	}
+	if q := queued(f); !strings.Contains(q, "job "+id+" ") || !strings.Contains(q, "wrong approach") {
+		t.Fatalf("the stop's hand-back was not queued: %q", q)
+	}
+	if err := f.ag.JobStop(id, ""); err == nil {
+		t.Fatal("stopping a finished job must fail")
+	}
+	if err := f.ag.JobStop("9.9", ""); err == nil || err.Error() != "no job 9.9" {
+		t.Fatalf("unknown id: %v", err)
+	}
+}
+
+func TestJobReplyWithoutAnAskLandsInTheJobsInbox(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	if err := f.ag.JobReply(id, "use the new tokenizer"); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.subs.mu.Lock()
+	scratch := f.ag.subs.runs[id].scratch
+	f.ag.subs.mu.Unlock()
+	if scratch.Pending() != 1 || !strings.Contains(scratch.Peek()[0], "use the new tokenizer") {
+		t.Fatalf("the job's inbox: %q", scratch.Peek())
+	}
+	if f.ag.Pending() != 0 {
+		t.Fatalf("the reply reached the main inbox: %q", f.ag.Peek())
+	}
+	if err := f.ag.JobReply("9.9", "x"); err == nil || err.Error() != "no job 9.9" {
+		t.Fatalf("unknown id: %v", err)
+	}
+}
+
+func TestJobExtendClearsStalled(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	f.ag.subs.mu.Lock()
+	run := f.ag.subs.runs[id]
+	run.stalled = true
+	f.ag.subs.mu.Unlock()
+	before := time.Now()
+	if err := f.ag.JobExtend(id); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.subs.mu.Lock()
+	stalled, act, iv := run.stalled, run.lastActivity, run.lastIntervention
+	f.ag.subs.mu.Unlock()
+	if stalled || act.Before(before) || iv.Before(before) {
+		t.Fatalf("after extend: stalled %v activity %s intervention %s", stalled, act, iv)
+	}
+	if err := f.ag.JobExtend("9.9"); err == nil || err.Error() != "no job 9.9" {
+		t.Fatalf("unknown id: %v", err)
+	}
+}
+
+func TestJobStatesShapes(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) { c.SubAgents.MaxConcurrent = 3 })
+	f.st.Plan("work", nil)
+	ctx := context.Background()
+
+	done := &scriptedProvider{responses: []provider.ChatResponse{{Content: "all ported"}}}
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return done, 0, nil
+	}
+	doneID := dispatchJob(t, f, "finish me", "docs")
+	wait(t, f.ends, "done hand-back")
+	f.ag.WaitSubAgents(ctx)
+
+	asking := &scriptedProvider{responses: []provider.ChatResponse{toolCall("ask_main", `{"question":"which one?"}`)}}
+	CoworkerFactory = func(context.Context, *config.Config, config.CoworkerConfig) (provider.Provider, int, error) {
+		return asking, 0, nil
+	}
+	askID := dispatchJob(t, f, "ask me", "internal/scan")
+	wait(t, f.asks, "ask")
+
+	bp := parkJobs(t)
+	runID := dispatchJob(t, f, "run me", "cmd")
+	wait(t, bp.entered, "running request")
+
+	rows := f.ag.JobStates()
+	if len(rows) != 3 {
+		t.Fatalf("rows: %+v", rows)
+	}
+	by := map[string]tools.JobState{}
+	for _, r := range rows {
+		by[r.ID] = r
+	}
+	if r := by[runID]; r.Owner != "big" || r.State != "running" || r.Elapsed <= 0 || r.At == "" {
+		t.Fatalf("running row: %+v", r)
+	}
+	if r := by[askID]; r.State != "asking" || r.Owner != "big" || r.At == "" {
+		t.Fatalf("asking row: %+v", r)
+	}
+	if r := by[doneID]; r.State != "done" || r.Summary != "all ported" || r.Elapsed <= 0 {
+		t.Fatalf("done row: %+v", r)
+	}
+	// Running rows first, then finished, each by id.
+	if rows[2].ID != doneID {
+		t.Fatalf("order: %+v", rows)
+	}
+	f.ag.StopAllSubAgents("test over")
 }

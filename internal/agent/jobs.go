@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/subagent"
+	"github.com/brown-enterprises/be-code/internal/tools"
 )
 
 // jobSessionEnded is the reason a job's step closes with when the session
@@ -219,4 +222,313 @@ func jobScopeTakenLocked(s *subAgents, scope []string) string {
 		}
 	}
 	return ""
+}
+
+// jobStoppedByMain is the reason a job stopped through the jobs tool closes
+// with when the main model gave none.
+const jobStoppedByMain = "stopped by the main model"
+
+// jobTag is the prefix of every line a job queues for the main model — its
+// hand-back, its ask, and (Task 5) its stall — so a person reading the
+// queue, and JobWait, can tell which job a line is about.
+func jobTag(id string) string { return "job " + id + " " }
+
+// jobEvent is one thing a job did that JobWait returns: Kind is "done",
+// "ask" or "stall", Line exactly the line that was queued for it.
+type jobEvent struct {
+	Kind string
+	Line string
+}
+
+// sendEvent hands ev to a waiting JobWait without ever blocking the run: the
+// line is already queued, so a full buffer loses nothing the main model
+// would not otherwise see.
+func (r *subRun) sendEvent(ev jobEvent) {
+	if r == nil || r.events == nil {
+		return
+	}
+	select {
+	case r.events <- ev:
+	default:
+	}
+}
+
+// jobRun is the running job id names, else its finished run; ok is false
+// for an id that is no job of this session. The caller holds s.mu.
+func jobRunLocked(s *subAgents, id string) (run *subRun, finished, ok bool) {
+	if r := s.runs[id]; r != nil && r.job {
+		return r, false, true
+	}
+	if r := s.jobsDone[id]; r != nil {
+		return r, true, true
+	}
+	return nil, false, false
+}
+
+// runningJob is the running job id names, or the error the jobs tool
+// reports: "no job <id>", or "job <id> has already finished".
+func (a *Agent) runningJob(id string) (*subRun, error) {
+	s := a.subs
+	if s == nil {
+		return nil, fmt.Errorf("no job %s", id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run, finished, ok := jobRunLocked(s, id)
+	switch {
+	case !ok:
+		return nil, fmt.Errorf("no job %s", id)
+	case finished:
+		return nil, fmt.Errorf("job %s has already finished", id)
+	}
+	return run, nil
+}
+
+// JobStates is the jobs tool's status: every running job, then every
+// finished one, each sorted by id.
+func (a *Agent) JobStates() []tools.JobState {
+	s := a.subs
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	var running, finished []*subRun
+	for _, r := range s.runs {
+		if r.job {
+			running = append(running, r)
+		}
+	}
+	for _, r := range s.jobsDone {
+		finished = append(finished, r)
+	}
+	type row struct {
+		st      tools.JobState
+		scratch *Agent
+	}
+	byID := func(rs []*subRun) {
+		sort.Slice(rs, func(i, j int) bool { return rs[i].d.Node < rs[j].d.Node })
+	}
+	byID(running)
+	byID(finished)
+	rows := make([]row, 0, len(running)+len(finished))
+	for _, r := range running {
+		st := tools.JobState{ID: r.d.Node, Owner: r.d.Owner, Elapsed: time.Since(r.started),
+			At: r.d.Node, LastTool: r.lastTool, LastActivity: r.lastActivity}
+		if r.at != "" {
+			st.At = r.at
+		}
+		switch {
+		case r.question != "":
+			st.State = "asking"
+		case r.waiting != "":
+			st.State = "waiting (" + r.waiting + ")"
+		case r.stalled:
+			st.State = "stalled"
+		default:
+			st.State = "running"
+		}
+		rows = append(rows, row{st: st, scratch: r.scratch})
+	}
+	for _, r := range finished {
+		hb := r.endHB
+		st := tools.JobState{ID: r.d.Node, Owner: r.d.Owner, Elapsed: hb.Elapsed, Calls: hb.Calls,
+			At: r.d.Node, LastTool: r.lastTool, LastActivity: r.lastActivity, Summary: hb.Summary}
+		switch {
+		case r.stopReason != "":
+			st.State = "stopped"
+		case hb.Status == "done":
+			st.State = "done"
+		default:
+			st.State = "blocked" // blocked, or interrupted at session end
+		}
+		if st.Summary == "" {
+			st.Summary = hb.Reason
+		}
+		rows = append(rows, row{st: st})
+	}
+	s.mu.Unlock()
+	// Usage takes the scratch agent's own lock, so it is read outside s.mu.
+	out := make([]tools.JobState, len(rows))
+	for i, r := range rows {
+		if r.scratch != nil {
+			r.st.Calls = r.scratch.Usage().ToolCalls
+		}
+		out[i] = r.st
+	}
+	return out
+}
+
+// JobWait blocks until the job id (any running job when id is "") ends,
+// asks, or stalls, or until d elapses or ctx ends. It returns the line
+// queued for that event and takes exactly that line out of the queue; a
+// wait that runs out returns "" and consumes nothing, so the line is still
+// delivered the ordinary way. With id "" and nothing running it returns ""
+// at once; a finished id answers at once with its hand-back; an unknown id
+// is "no job <id>".
+func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string, error) {
+	s := a.subs
+	if s == nil {
+		if id == "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("no job %s", id)
+	}
+	var runs []*subRun
+	s.mu.Lock()
+	if id == "" {
+		for _, r := range s.runs {
+			if r.job {
+				runs = append(runs, r)
+			}
+		}
+	} else {
+		run, finished, ok := jobRunLocked(s, id)
+		if !ok {
+			s.mu.Unlock()
+			return "", fmt.Errorf("no job %s", id)
+		}
+		if finished {
+			line := run.endLine
+			s.mu.Unlock()
+			a.consumeJobLine(line)
+			return line, nil
+		}
+		runs = []*subRun{run}
+	}
+	s.mu.Unlock()
+	if len(runs) == 0 {
+		return "", nil
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].d.Node < runs[j].d.Node })
+
+	// One select over every run's events and done, the deadline and ctx:
+	// reflect.Select takes an event only when it is returned, so a wait
+	// that ends otherwise leaves every channel as it found it.
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	cases := make([]reflect.SelectCase, 0, 2*len(runs)+2)
+	for _, r := range runs {
+		cases = append(cases,
+			reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.events)},
+			reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(r.done)})
+	}
+	timerCase := len(cases)
+	cases = append(cases,
+		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timer.C)},
+		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())})
+	for {
+		chosen, v, _ := reflect.Select(cases)
+		if chosen >= timerCase {
+			return "", nil // the deadline or ctx: nothing consumed
+		}
+		run := runs[chosen/2]
+		line := ""
+		if chosen%2 == 1 {
+			// Finished: its hand-back, whatever is still in its events.
+			s.mu.Lock()
+			line = run.endLine
+			s.mu.Unlock()
+		} else {
+			ev := v.Interface().(jobEvent)
+			if !a.jobEventLive(run, ev) {
+				continue // an ask already answered, a stall already extended
+			}
+			line = ev.Line
+		}
+		a.consumeJobLine(line)
+		return line, nil
+	}
+}
+
+// jobEventLive reports whether ev still describes run: a hand-back always
+// does; an ask only while the run is still asking, a stall only while it
+// is still stalled — an event JobReply or JobExtend has since dealt with
+// is not returned as though it were news.
+func (a *Agent) jobEventLive(run *subRun, ev jobEvent) bool {
+	s := a.subs
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runs[run.d.Node] != run {
+		// Finished since: the done case reports it with its hand-back.
+		return ev.Kind == "done"
+	}
+	switch ev.Kind {
+	case "ask":
+		return run.question != ""
+	case "stall":
+		return run.stalled
+	}
+	return true
+}
+
+// consumeJobLine takes one returned line out of the main model's queue: it
+// has been handed over as the jobs tool's result, and delivering it again
+// as a queued line would tell the model twice.
+func (a *Agent) consumeJobLine(line string) {
+	if line == "" {
+		return
+	}
+	a.RemoveWhere(func(it InboxItem) bool { return it.Harness && it.Text == line })
+}
+
+// JobStop stops a running job; its step closes blocked with reason (default
+// "stopped by the main model") and its hand-back is queued as usual.
+func (a *Agent) JobStop(id, reason string) error {
+	run, err := a.runningJob(id)
+	if err != nil {
+		return err
+	}
+	if reason = strings.TrimSpace(reason); reason == "" {
+		reason = jobStoppedByMain
+	}
+	s := a.subs
+	s.mu.Lock()
+	run.stopReason = reason
+	cancel := run.cancel
+	s.mu.Unlock()
+	cancel()
+	return nil
+}
+
+// JobReply answers a running job's open ask; with no ask open, the text is
+// queued on the job's own inbox and reaches it before its next request.
+func (a *Agent) JobReply(id, text string) error {
+	run, err := a.runningJob(id)
+	if err != nil {
+		return err
+	}
+	s := a.subs
+	s.mu.Lock()
+	asking, scratch := run.question != "", run.scratch
+	s.mu.Unlock()
+	if asking {
+		if err := a.ReplyAsk(id, text); err == nil {
+			return nil
+		}
+		// The ask closed in between (answered, timed out): fall through to
+		// the job's inbox, which is still the right place for the text.
+	}
+	if scratch == nil {
+		return fmt.Errorf("job %s has not started yet", id)
+	}
+	scratch.EnqueueHarness(text)
+	return nil
+}
+
+// JobExtend gives a running job more time: it is no longer stalled, its
+// clock restarts from now, and the intervention is stamped so the stall
+// supervisor does not report it again at once.
+func (a *Agent) JobExtend(id string) error {
+	run, err := a.runningJob(id)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	s := a.subs
+	s.mu.Lock()
+	run.stalled = false
+	run.lastActivity = now
+	run.lastIntervention = now
+	s.mu.Unlock()
+	return nil
 }

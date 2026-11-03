@@ -115,6 +115,11 @@ type subAgents struct {
 	// Appended in runSub in the same critical section that deletes the run
 	// from runs, so a reader never sees a run counted as both.
 	finished []subagent.HandBack
+	// jobsDone is every job run that has finished this session, by id, kept
+	// so JobStates can report its outcome and a late JobWait can answer at
+	// once with its hand-back. Written in the same critical section that
+	// deletes the run from runs.
+	jobsDone map[string]*subRun
 }
 
 type subRun struct {
@@ -164,6 +169,16 @@ type subRun struct {
 	stalls           int           // times the run has been reported stalled
 	stalled          bool          // currently past stall_after without activity
 	lastIntervention time.Time     // last time the main model intervened
+
+	// events carries a job's hand-back, ask and stall lines to JobWait, each
+	// sent after the same line is queued (so the queue stays the truth and a
+	// wait only consumes what it returns). Buffered, written without
+	// blocking; made at install for every run.
+	events chan jobEvent
+	// endLine and endHB are the run's queued hand-back line and its
+	// hand-back, set under subAgents.mu when it finishes.
+	endLine string
+	endHB   subagent.HandBack
 }
 
 // SubAgentState is one row of /agents.
@@ -895,8 +910,10 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	// a context calls into neither the store nor a notice.
 	ctx, cancel := context.WithCancel(s.root)
 	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(), job: job,
-		reply: make(chan string, 1), done: make(chan struct{}), drift: workledger.NewRun(a.Tools.Root)}
+		reply: make(chan string, 1), done: make(chan struct{}), drift: workledger.NewRun(a.Tools.Root),
+		events: make(chan jobEvent, 8)}
 	s.runs[c.ID] = run
+	delete(s.jobsDone, c.ID)
 	s.wg.Add(1)
 	s.mu.Unlock()
 	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
@@ -962,16 +979,27 @@ func (a *Agent) runSub(run *subRun) {
 		return
 	}
 	hb = a.settleSub(run, answer, err)
+	line := handBackLine(hb)
 	s.mu.Lock()
+	if run.job {
+		line = jobTag(run.d.Node) + line
+		run.endLine, run.endHB = strings.TrimSpace(line), hb
+		if s.jobsDone == nil {
+			s.jobsDone = map[string]*subRun{}
+		}
+		s.jobsDone[run.d.Node] = run
+	}
 	delete(s.runs, run.d.Node)
 	s.finished = append(s.finished, hb)
 	s.mu.Unlock()
 	// The queue first, the event second: a UI answers OnSubAgentEnd by
 	// starting a turn for whatever is queued when the main model is idle
 	// (spec §2.6), and it can only do that once the hand-back is in the
-	// queue to be found. OnSubAgentAsk is already ordered this way.
+	// queue to be found. OnSubAgentAsk is already ordered this way, and so
+	// is JobWait's event.
 	if hb.Status != "interrupted" {
-		a.EnqueueHarness(handBackLine(hb))
+		a.EnqueueHarness(line)
+		run.sendEvent(jobEvent{Kind: "done", Line: strings.TrimSpace(line)})
 	}
 	if a.Events.OnSubAgentEnd != nil {
 		a.Events.OnSubAgentEnd(hb)
@@ -1252,9 +1280,16 @@ func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, err
 		return "", errors.New("a question is already waiting for an answer")
 	}
 	run.question = q
+	job := run.job
 	s.mu.Unlock()
 	a.engineDo("sub-agent ask", func(st *engine.Store) { _ = st.Note(run.d.Node, "asked: "+q, "", false, false) })
-	a.EnqueueHarness(fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q))
+	line := fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q)
+	if job {
+		line = jobTag(run.d.Node) + "asks: " + q
+	}
+	line = strings.TrimSpace(line)
+	a.EnqueueHarness(line)
+	run.sendEvent(jobEvent{Kind: "ask", Line: line})
 	if a.Events.OnSubAgentAsk != nil {
 		a.Events.OnSubAgentAsk(subagent.Ask{Node: run.d.Node, Owner: run.d.Owner, Question: q})
 	}
