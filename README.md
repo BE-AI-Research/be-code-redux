@@ -435,8 +435,7 @@ write approval or editor review, or a tool call in flight. After `sub_agents.sta
 seconds with no progress the job is marked `stalled` and the main model is told:
 
 ```
-job 2.3 (big) has been quiet for 3m: ... Options: jobs extend 2.3, jobs stop 2.3,
-jobs reply 2.3 <text>, or jobs status 2.3.
+job 2.3 (big) has been quiet for 3m: 4 tool calls, last read_file 3m ago. jobs extend 2.3 to give it more time, jobs stop 2.3 to end it, jobs reply 2.3 <text> to steer it, or jobs status 2.3 to look.
 ```
 
 The main model decides whether to `jobs extend`, `jobs reply` or `jobs stop`. The
