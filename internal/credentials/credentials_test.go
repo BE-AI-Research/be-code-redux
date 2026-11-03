@@ -58,6 +58,9 @@ func TestPutCreatesDotdir(t *testing.T) {
 }
 
 func TestLooseModeRefusedBothWays(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("modes are not enforced on Windows")
+	}
 	dir := t.TempDir()
 	p := filepath.Join(dir, "credentials.json")
 	if err := os.WriteFile(p, []byte(`{"version":1,"providers":{}}`), 0o644); err != nil {
