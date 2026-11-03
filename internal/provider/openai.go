@@ -317,7 +317,8 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: HTTP %d listing models", p.ProviderName, resp.StatusCode)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, &HTTPError{Provider: p.ProviderName, Code: resp.StatusCode, Body: "listing models: " + strings.TrimSpace(string(b)), RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	// OpenRouter adds a window and per-token prices to the OpenAI shape;
 	// its prices are strings. Every other server leaves them out, and an
