@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/credentials"
 )
 
 // MCPServer configures one stdio MCP tool server.
@@ -786,6 +788,44 @@ func (pc ProviderConfig) APIKey() string {
 		return ""
 	}
 	return os.Getenv(pc.APIKeyEnv)
+}
+
+// ProviderKey resolves the key for the provider named name: the env var
+// named by its api_key_env when set and non-empty, else the credential
+// stored for name in ~/.be-code/credentials.json, else "". A credential
+// file that cannot be read (loose mode, unreadable) counts as absent:
+// the key is simply missing, and doctor says why.
+func (c *Config) ProviderKey(name string) string {
+	_, stored := c.KeySource(name)
+	if pc, ok := c.Providers[name]; ok && pc.APIKeyEnv != "" {
+		if v := os.Getenv(pc.APIKeyEnv); v != "" {
+			return v
+		}
+	}
+	return stored.Key
+}
+
+// KeySource says where ProviderKey's answer comes from — "env", "stored"
+// or "" — and returns the stored credential's metadata for display. It
+// never returns the env var's value.
+func (c *Config) KeySource(name string) (string, credentials.Credential) {
+	pc, ok := c.Providers[name]
+	if !ok {
+		return "", credentials.Credential{}
+	}
+	var stored credentials.Credential
+	if dir, err := Dir(); err == nil {
+		if s, err := credentials.Open(dir); err == nil {
+			stored, _ = s.Key(name)
+		}
+	}
+	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) != "" {
+		return "env", stored
+	}
+	if stored.Key != "" {
+		return "stored", stored
+	}
+	return "", stored
 }
 
 // ProviderIsOnline reports whether a provider sends the project off this

@@ -17,9 +17,9 @@ func FromConfig(cfg *config.Config, name string) (Provider, error) {
 	}
 	switch pc.Type {
 	case "ollama":
-		return NewOllama(name, pc.BaseURL, pc.APIKey()), nil
+		return NewOllama(name, pc.BaseURL, cfg.ProviderKey(name)), nil
 	case "openai", "":
-		return NewOpenAICompat(name, pc.BaseURL, pc.APIKey()), nil
+		return NewOpenAICompat(name, pc.BaseURL, cfg.ProviderKey(name)), nil
 	default:
 		return nil, fmt.Errorf("provider %q has unknown type %q", name, pc.Type)
 	}
