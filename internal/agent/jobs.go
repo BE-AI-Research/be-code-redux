@@ -17,6 +17,10 @@ import (
 // ends under it (dispatch-jobs spec §6).
 const jobSessionEnded = "session ended"
 
+// jobInterrupted is the reason an orphaned job's step closes with when a
+// later session's resume pass finds it open with no run (ruling R8).
+const jobInterrupted = "interrupted"
+
 // jobSlot names the placeholder a DispatchJob holds in subAgents.pending
 // while it files the step: the slot counts against max_concurrent before
 // the step's id exists. The prefix cannot be a node id.
@@ -89,10 +93,15 @@ func (a *Agent) DispatchJob(ctx context.Context, who, job, scope, extra string, 
 		return "", errors.New("the session is ending; nothing new is dispatched")
 	}
 	s.pending[slot] = true
+	if s.jobScopes == nil {
+		s.jobScopes = map[string][]string{}
+	}
+	s.jobScopes[slot] = clean
 	s.mu.Unlock()
 	release := func() {
 		s.mu.Lock()
 		delete(s.pending, slot)
+		delete(s.jobScopes, slot)
 		s.mu.Unlock()
 	}
 
@@ -121,7 +130,9 @@ func (a *Agent) DispatchJob(ctx context.Context, who, job, scope, extra string, 
 	// releases whatever happens.
 	s.mu.Lock()
 	delete(s.pending, slot)
+	delete(s.jobScopes, slot)
 	s.pending[id] = true
+	s.jobScopes[id] = clean
 	s.mu.Unlock()
 	steps = a.subSteps("dispatch")
 	if a.dispatchPicked(steps, subagent.Candidate{ID: id, Owner: who}, cw, true) {
@@ -158,6 +169,9 @@ func (a *Agent) coworkerFor(who string) (cw config.CoworkerConfig, ok bool) {
 // live scope (a widened one included); steps cover the reservations and
 // the scheduler's own assigned work. The caller holds s.mu.
 func jobOverlapLocked(s *subAgents, steps []subagent.Step, clean []string) string {
+	if id := jobScopeTakenLocked(s, clean); id != "" {
+		return id
+	}
 	ids := make([]string, 0, len(s.runs))
 	for id := range s.runs {
 		ids = append(ids, id)
@@ -185,4 +199,24 @@ func jobOverlapLocked(s *subAgents, steps []subagent.Step, clean []string) strin
 	}
 	walk(steps)
 	return found
+}
+
+// jobScopeTakenLocked names a job reservation not yet installed whose scope
+// overlaps scope; "" when none does. A slot placeholder is named "a job
+// being dispatched", since it has no id yet. The caller holds s.mu.
+func jobScopeTakenLocked(s *subAgents, scope []string) string {
+	keys := make([]string, 0, len(s.jobScopes))
+	for k := range s.jobScopes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if subagent.Overlap(scope, s.jobScopes[k]) {
+			if strings.HasPrefix(k, "job-slot-") {
+				return "a job being dispatched"
+			}
+			return k
+		}
+	}
+	return ""
 }

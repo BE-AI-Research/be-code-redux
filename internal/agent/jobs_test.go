@@ -235,3 +235,109 @@ func TestJobStepClosesAtSessionEnd(t *testing.T) {
 		t.Fatalf("reopened job step: %+v", n)
 	}
 }
+
+// Ruling R9 (and the bug behind it): AssignOwner on a job parked on an ask
+// used to interrupt it, which closed it "session ended" with nothing queued.
+func TestAssignOwnerRefusesAnAskingJob(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"which tokenizer?"}`),
+		{Content: "ported"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	f.st.Plan("work", nil)
+	id, err := f.ag.DispatchJob(context.Background(), "big", "port it", "internal/scan", "", []string{"internal/scan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.asks, "ask")
+	if err := f.ag.AssignOwner(id, "big", false); err == nil || err.Error() != id+" is a job; use jobs stop" {
+		t.Fatalf("AssignOwner on a job: %v", err)
+	}
+	rows := f.ag.RunningSubAgents()
+	if len(rows) != 1 || rows[0].Node != id {
+		t.Fatalf("the job is no longer running: %+v", rows)
+	}
+	if n := nodeOf(t, f.st, id); n.Status != engine.StatusTodo && n.Status != engine.StatusDoing {
+		t.Fatalf("the job's step was closed: %s %q", n.Status, n.Reason)
+	}
+	if err := f.ag.ReplyAsk(id, "the old one"); err != nil {
+		t.Fatal(err)
+	}
+	if hb := wait(t, f.ends, "hand-back"); hb.Status != "done" {
+		t.Fatalf("hand-back: %+v", hb)
+	}
+}
+
+func TestDispatchJobConcurrentOverlapOneWins(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		f := newSubFixture(t, &scriptedProvider{}, nil)
+		bp := parkJobs(t)
+		f.st.Plan("work", nil)
+		errs := make(chan error, 2)
+		start := make(chan struct{})
+		for _, sc := range []string{"internal/x", "internal/x/y.go"} {
+			go func(sc string) {
+				<-start
+				_, err := f.ag.DispatchJob(context.Background(), "big", "job "+sc, sc, "", []string{sc})
+				errs <- err
+			}(sc)
+		}
+		close(start)
+		var ok, overlap int
+		for i := 0; i < 2; i++ {
+			err := <-errs
+			switch {
+			case err == nil:
+				ok++
+			case strings.HasPrefix(err.Error(), "scope overlaps "):
+				overlap++
+			default:
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+		if ok != 1 || overlap != 1 {
+			t.Fatalf("round %d: %d dispatched, %d refused for overlap", round, ok, overlap)
+		}
+		wait(t, bp.entered, "the job's request")
+		f.ag.StopAllSubAgents("test over")
+	}
+}
+
+// Ruling R8: a job step a crashed session left open is closed by the next
+// session's resume pass, so it never refuses a later dispatch by overlap.
+func TestResumeClosesAnOrphanJob(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	root := f.st.Plan("work", nil)
+	// Filed as a job with no run for it: what a crash leaves behind.
+	orphan, err := f.st.AddJob(root, "port it", "", "big", []string{"internal/scan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh session on the same workspace.
+	st2, err := engine.OpenAt(filepath.Join(t.TempDir(), "eng2"), f.ag.Tools.Root, "s2", false,
+		engine.Limits{NotesCap: 4096, ItemCap: 4096, NodeCap: 32768})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ag.SetEngine(st2)
+	f.st = st2
+	cws, _ := f.ag.Cfg.ValidCoworkers()
+	f.ag.EnableSubAgents(cws, "http://primary:11434")
+	if _, err := f.ag.DispatchJob(context.Background(), "big", "again", "internal/scan", "", []string{"internal/scan"}); err == nil {
+		t.Fatal("the orphan did not hold its scope before the resume pass (test premise)")
+	}
+	f.ag.StartSubAgents()
+	if n := nodeOf(t, st2, orphan); n.Status != engine.StatusBlocked || n.Reason != "interrupted" {
+		t.Fatalf("orphan after resume: %s %q", n.Status, n.Reason)
+	}
+	id, err := f.ag.DispatchJob(context.Background(), "big", "again", "internal/scan", "", []string{"internal/scan"})
+	if err != nil {
+		t.Fatalf("dispatch over the closed orphan refused: %v", err)
+	}
+	if hb := wait(t, f.ends, "hand-back"); hb.Node != id {
+		t.Fatalf("hand-back: %+v", hb)
+	}
+}

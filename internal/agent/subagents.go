@@ -49,7 +49,14 @@ type subAgents struct {
 	// can neither double-dispatch one nor start an overlapping step beside
 	// it. A candidate that is abandoned is always released from here.
 	pending map[string]bool
-	refused map[string]bool // online consent refused this session, by name
+	// jobScopes holds the cleaned scope of every reservation DispatchJob
+	// has made but not yet installed as a run — first under its slot
+	// placeholder, then under the step's id until dispatchPicked releases
+	// it — because nothing else can see that scope yet: the step is not in
+	// the tree a concurrent reader took, or not yet a run. Both DispatchJob
+	// and the scheduler treat it as taken.
+	jobScopes map[string][]string
+	refused   map[string]bool // online consent refused this session, by name
 	// stopping is set by StopAllSubAgents: an interrupted node goes back to
 	// todo, and without this the schedule a finishing run makes on its way
 	// out would dispatch it again after the session had asked everything to
@@ -132,6 +139,10 @@ type subRun struct {
 	question   string // the open ask, "" when none
 	stopReason string // set by an operator stop
 	interrupt  bool   // reset the node instead of closing it
+	// sessionEnd is set only by StopAllSubAgents: the session itself is
+	// ending. A job closes then (blocked: session ended); every other
+	// interrupt keeps its own meaning.
+	sessionEnd bool
 	timedOut   bool
 	// drift is this run's own record of what it read, so the hand-back can
 	// name the files that changed under it. Its own, not the session's: the
@@ -625,7 +636,16 @@ func (a *Agent) resumeSubAgents() {
 	s.mu.Lock()
 	cards := s.cards
 	running := s.runningLocked()
+	// A DispatchJob between filing its step and reserving its id holds only
+	// a slot, so its step would look orphaned; leave orphans for next time.
+	filing := false
+	for k := range s.jobScopes {
+		filing = filing || strings.HasPrefix(k, "job-slot-")
+	}
 	s.mu.Unlock()
+	if !filing {
+		a.closeOrphanJobs(steps, running)
+	}
 	_, waiting := subagent.Ready(steps, cards, running)
 	for _, w := range waiting {
 		step := findStep(steps, w.ID)
@@ -640,6 +660,26 @@ func (a *Agent) resumeSubAgents() {
 			a.Events.OnSubAgentEnd(hb)
 		}
 	}
+}
+
+// closeOrphanJobs closes every job step still open with no run for it —
+// a session that crashed under a job wrote no "session ended" (ruling R8).
+// The ready rule never offers a job, so an orphan would otherwise stay open
+// forever and refuse every later dispatch whose scope overlaps it.
+func (a *Agent) closeOrphanJobs(steps []subagent.Step, running map[string]bool) {
+	var walk func(st []subagent.Step)
+	walk = func(st []subagent.Step) {
+		for _, x := range st {
+			if x.Job && (x.Status == "todo" || x.Status == "doing") && !running[x.ID] {
+				id, owner := x.ID, x.Owner
+				a.engineDo("job resume", func(st *engine.Store) { _ = st.CloseAs(id, owner, "blocked", jobInterrupted) })
+				a.notice("job %s (%s) was left open by an earlier session; closed blocked: %s", id, owner, jobInterrupted)
+				continue
+			}
+			walk(x.Children)
+		}
+	}
+	walk(steps)
 }
 
 func findStep(steps []subagent.Step, id string) *subagent.Step {
@@ -736,6 +776,9 @@ func (a *Agent) scheduleSubAgentsDispatched() []string {
 			if s.hold[c.ID] {
 				continue
 			}
+			if st := findStep(steps, c.ID); st != nil && jobScopeTakenLocked(s, st.Scope) != "" {
+				continue // a job being dispatched holds an overlapping scope
+			}
 			if s.resumeDeclined {
 				if !s.resumeAllowed[c.ID] {
 					continue
@@ -775,6 +818,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	unreserve := func() {
 		s.mu.Lock()
 		delete(s.pending, c.ID)
+		delete(s.jobScopes, c.ID)
 		s.mu.Unlock()
 	}
 	// Everything up to the install runs on the *agent* goroutine (a schedule
@@ -836,6 +880,9 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	}
 	s.mu.Lock()
 	delete(s.pending, c.ID)
+	// Installed or not, the reservation's scope is now either the run's own
+	// (s.runs) or the step's in the tree.
+	delete(s.jobScopes, c.ID)
 	if s.stopping || s.hold[c.ID] || a.firedTurn() {
 		// The session stopped, an operator claimed the node, or a scheduled
 		// event's turn began while this dispatch was being built. Nothing was
@@ -993,7 +1040,7 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	// One read of the run's mutable state, under the lock that guards it.
 	s.mu.Lock()
 	scratch, question, stopReason := run.scratch, run.question, run.stopReason
-	interrupt, timedOut, job := run.interrupt, run.timedOut, run.job
+	interrupt, timedOut, job, sessionEnd := run.interrupt, run.timedOut, run.job, run.sessionEnd
 	hb.Base = run.d.Base
 	s.mu.Unlock()
 	if scratch != nil {
@@ -1004,7 +1051,7 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	// the summary is most likely to be stale. Its own mutex, not s.mu.
 	hb.Drifted = run.drift.Drifted()
 	switch {
-	case interrupt && job:
+	case interrupt && job && sessionEnd:
 		// A job is the main model's, dispatched in a session that is now
 		// ending; nobody will be there to receive it on resume, and the
 		// ready rule never offers a job, so it closes here instead of going
@@ -1251,9 +1298,25 @@ func (a *Agent) ReplyAsk(id, text string) error {
 // stopped and its node returned to todo before the owner changes; a run
 // that is working is refused (spec §3.5).
 func (a *Agent) AssignOwner(id, owner string, pinned bool) error {
+	// Ruling R9: a job belongs to the dispatch that made it. Read from the
+	// store before mu (the invariant), and from the run under it.
+	isJob := false
+	a.engineDo("task owner", func(st *engine.Store) {
+		tr := st.Tree()
+		if n := tr.Find(id); n != nil {
+			isJob = n.Job
+		}
+	})
+	if isJob {
+		return fmt.Errorf("%s is a job; use jobs stop", id)
+	}
 	s := a.subs
 	if s != nil {
 		s.mu.Lock()
+		if run, ok := s.runs[id]; ok && run.job {
+			s.mu.Unlock()
+			return fmt.Errorf("%s is a job; use jobs stop", id)
+		}
 		if s.pending[id] {
 			// Reserved by a schedule that is building its dispatch right
 			// now: there is no run to stop yet and no done channel to wait
@@ -1455,6 +1518,7 @@ func (a *Agent) StopAllSubAgents(reason string) {
 	s.stopping = true
 	for _, r := range s.runs {
 		r.interrupt = true
+		r.sessionEnd = true
 		r.cancel()
 	}
 	rootCancel := s.cancel // reassigned on resume; read it here, use it below

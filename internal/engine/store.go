@@ -1880,10 +1880,6 @@ func (s *Store) EnsureRoot(text string) string {
 	return n.ID
 }
 
-// ActiveRootID is the id of the task in flight — the newest root that is
-// not wholly finished — or "" when none is open. It exists for the task
-// tool's optional taskRoots capability: resolving a 0.10.0 step number
-// against the right task rather than against a root of the same number.
 // JobParent is where a dispatched job's step goes (dispatch-jobs spec §3,
 // step 2): the node doing under the active root when there is one and it
 // sits in nobody's subtree, else the active root itself; "" when there is
@@ -1901,6 +1897,10 @@ func (s *Store) JobParent() string {
 	return r.ID
 }
 
+// ActiveRootID is the id of the task in flight — the newest root that is
+// not wholly finished — or "" when none is open. It exists for the task
+// tool's optional taskRoots capability: resolving a 0.10.0 step number
+// against the right task rather than against a root of the same number.
 func (s *Store) ActiveRootID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
