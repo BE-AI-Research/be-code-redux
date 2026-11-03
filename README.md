@@ -4,7 +4,7 @@ BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.4.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.4.1-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -140,7 +140,7 @@ irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.
 
 Both download the current release's `be-code-windows-amd64.exe`, check it against the release's
 `SHA256SUMS`, install it to `%LOCALAPPDATA%\Programs\be-code`, add that to your user PATH (no
-administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.4.0` pins a release
+administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.4.1` pins a release
 and `BE_CODE_NO_SETUP=1` skips the wizard. Uninstall with
 `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.ps1 | iex`.
 
@@ -1699,6 +1699,23 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 | [`docs/live-checklist.md`](docs/live-checklist.md), [`docs/vscode-live-checklist.md`](docs/vscode-live-checklist.md) | manual end-to-end checklists against a real backend |
 
 ## Status
+
+**v1.4.1 — Jobs for any co-worker.** The main model dispatches lighter models on scoped jobs
+and stays in charge of them.
+
+- **`dispatch` and `jobs`.** One tool call hands a scoped job (`who`, `job`, `scope`, optional
+  `context` and `wait`) to any configured co-worker, no `sub_agent: true` needed; the job runs
+  under the same consent, scoped registry and `ask_main` a sub-agent gets, filed as a `job` step
+  under the active task. `jobs status|wait|reply|extend|stop` steers it, and its question,
+  hand-back and stall line come back to the main model as `job <id> …` lines through the
+  mid-task queue; a headless `run` keeps taking turns on them. See [Jobs](#jobs).
+- **Stalls go to the main model first.** After `sub_agents.stall_after` seconds without
+  progress (the clock pauses while the job waits on anyone else) the main model is told and
+  decides to extend, steer or stop; a third stall stops the job and the operator is told, and
+  `sub_agents.max_runtime` caps running time.
+- **Anthropic and Gemini as online main models.** No `temperature` goes to Anthropic, Gemini's
+  thought signatures ride every replayed tool call, and a request error after native tool calls
+  have worked no longer downgrades the session to embedded calls.
 
 **v1.4.0 — Packs closed, apps served, keys stored.** The biggest release since 1.2: four new
 subsystems and a closed pack contract.

@@ -1,8 +1,38 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.4.1 — Jobs for any co-worker (2026-11-03)
 
-- **Jobs.** The main model dispatches a scoped job to any co-worker with one tool call, waits for it or is told when it ends, asks or stalls, and extends, steers or stops it; a job that stalls three times is stopped and the operator told. The stall clock pauses while a job waits on someone else. `/agents` shows every job, `sub_agents.stall_after` and `sub_agents.max_runtime` tune it.
+- **Jobs.** The main model hands a scoped job to any configured co-worker with one tool call,
+  `dispatch` (`who`, `job`, `scope`, optional `context` and `wait`); no `sub_agent: true` is
+  needed. The job runs the same scratch agent, consent, scoped registry and `ask_main` a
+  sub-agent gets, and its step is filed under the active task, rendered as `job` by `/task`.
+  `scope` is required: an array, a bare path or a comma list; `"."` is the whole workspace,
+  accepted only while nothing else runs. A scope that overlaps a running job or an assigned
+  step, or falls outside the co-worker's `max_scope`, is refused; one co-worker may run several
+  jobs, all counted against `sub_agents.max_concurrent`. The hand-back arrives as a later
+  message or, with `wait: true`, as the tool's own result.
+- **The main model steers its jobs.** `jobs status|wait|reply|extend|stop`: wait for one job
+  or for any, answer a pending question, clear a stall, end it. A job's question, hand-back and
+  stall line reach the main model as `job <id> …` lines through the same queue a mid-task
+  message uses, so it reacts on its next turn; a headless `be-code run` keeps taking turns on
+  them (up to ten) instead of ending with a job still out.
+- **A stalled job wakes the main model, not the operator.** A supervisor watches every job:
+  after `sub_agents.stall_after` seconds (180) with no tool call or output the job is marked
+  `stalled` and the main model is told — `job 2.3 (big) has been quiet for 3m: 4 tool calls,
+  last read_file 3m ago. jobs extend 2.3 to give it more time, jobs stop 2.3 to end it, jobs
+  reply 2.3 <text> to steer it, or jobs status 2.3 to look.` — and decides. The clock pauses
+  while the job waits on a question, the shared server lane, a consent prompt, a write approval
+  or editor review, or a tool call in flight. A third stall stops the job (`blocked: stalled`)
+  and the operator is told in the transcript; a headless run stops at the second.
+  `sub_agents.max_runtime` (1800) caps running time, waits excluded (`blocked: ran out of
+  time`); 0 disables either.
+- `/agents` lists every job with its state (`running`, `waiting (tool: shell)`, `asking`,
+  `stalled`, `done`, `blocked`, `stopped`). A job's step closes `blocked: session ended` at exit
+  and `blocked: interrupted` at the next start after a crash; `/task assign` refuses a job id;
+  a scheduled event's turn refuses `dispatch` and the mutating `jobs` actions.
+- The e2e suite gains a `dispatch` scenario: a job handed to a scripted co-worker, its
+  hand-back, and a stall the main model clears with `jobs extend`.
+- **Anthropic and Gemini work as online main models.** Anthropic's current models refuse any `temperature`, so none is sent to `api.anthropic.com`; Gemini 3 returns a thought signature on every tool call (`extra_content`) and demands it back on later requests, which the client now carries, stores with the session and echoes; and a request error after a native tool call has already worked no longer downgrades the session to embedded tool calls. The Gemini preset carries its 1,048,576-token window.
 
 ## v1.4.0 — Packs closed, apps served, keys stored (2026-11-02)
 
@@ -59,7 +89,6 @@
   packs and budgets); browsers are refused; one session serves per machine; headless runs never
   serve. `/api`, `/apps` and `/session token|rotate` in both UIs; `api.enabled` in config.
 - **Add an online provider from inside the harness.** `/online add` (and `be-code online add`, and `be-code setup`) takes a pasted key or, for OpenRouter, a browser sign-in, validates it against the provider's listing, and stores it in `~/.be-code/credentials.json` (0600). The list opens with a quick sign-in: OpenRouter signs in through the browser, and OpenAI, Anthropic and Gemini open their own API-keys page in the browser before the masked field (no provider issues a key to a third-party app through a login, so the page is the honest shortcut). An environment variable still wins. `/online revoke`, `doctor` lines, and a `/online add` hint on a rejected key. Anthropic keys that are not scoped to a workspace are asked for their workspace ID once (`providers.<name>.headers`), and a rejected key shows the provider's own message.
-- **Anthropic and Gemini work as online main models.** Anthropic's current models refuse any `temperature`, so none is sent to `api.anthropic.com`; Gemini 3 returns a thought signature on every tool call (`extra_content`) and demands it back on later requests, which the client now carries, stores with the session and echoes; and a request error after a native tool call has already worked no longer downgrades the session to embedded tool calls. The Gemini preset carries its 1,048,576-token window.
 - **Co-workers from inside a session.** `/coworkers add` (and **Add a co-worker** in `/menu`) picks a configured provider, a model from its live listing and a name, saves the entry and registers `consult` at once; `/coworkers remove <name>` is the inverse. The sub-agent role still takes effect at the next launch.
 - `scripts/fix-provider-config.py` repairs `~/.be-code/config.json`, the file be-code loads; it
   no longer honours a `BE_CODE_CONFIG` variable be-code itself never read.
