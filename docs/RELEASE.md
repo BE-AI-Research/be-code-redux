@@ -35,7 +35,8 @@ not a bug.
 make release
 ```
 
-`build.mk` produces the **four** platform binaries in `dist/`:
+`build.mk` produces the **four** platform binaries in `dist/`, plus the packaged
+VS Code extension:
 
 | File                          | Target            |
 |-------------------------------|-------------------|
@@ -43,8 +44,9 @@ make release
 | `dist/be-code-linux-arm64`    | linux / arm64     |
 | `dist/be-code-darwin-arm64`   | darwin / arm64    |
 | `dist/be-code-windows-amd64.exe` | windows / amd64 |
+| `dist/be-code-vscode-<ver>.vsix` | the VS Code extension (its own version, from `vscode/package.json`) |
 
-Confirm all four exist and are non-trivial in size:
+Confirm all five exist and are non-trivial in size:
 
 ```sh
 ls -la dist/
@@ -95,7 +97,9 @@ the changelog update (i.e. `main`, after steps 2–4 are committed).
 
 ## 6. Create the GitHub release + upload assets
 
-Upload the **four** binaries and the **checksums file named `SHA256SUMS`**:
+Upload the **four** binaries, the **checksums file named `SHA256SUMS`**, and the
+**VS Code extension** (the `.vsix` is how people install it — v1.3.0, v1.4.0 and
+v1.4.1 were first published without it and had to be patched):
 
 ```sh
 gh release create v$V \
@@ -104,6 +108,7 @@ gh release create v$V \
   dist/be-code-darwin-arm64 \
   dist/be-code-windows-amd64.exe \
   dist/SHA256SUMS \
+  dist/be-code-vscode-*.vsix \
   --title "v$V" \
   --notes "$(sed -n "/## v$V/,/^## /p" CHANGELOG.md)"
 ```
@@ -117,8 +122,9 @@ This is the check that would have caught v1.3.0. Confirm the remote release
 exposes the assets the updater needs, and that one of them actually matches:
 
 ```sh
-# 7a. Asset list — must include SHA256SUMS (exactly) plus the 4 binaries.
-#     Exactly five assets total, nothing else.
+# 7a. Asset list — must include SHA256SUMS (exactly), the 4 binaries and the
+#     .vsix. Exactly six assets total, nothing else. (The .vsix is not in
+#     SHA256SUMS: the updater and installers look up the binaries only.)
 gh release view v$V --json assets -q '.assets[].name'
 
 # 7b. Fetch the live checksums and one live binary; confirm the hash matches.

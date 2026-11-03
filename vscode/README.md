@@ -9,9 +9,11 @@ you're looking at, folded into each prompt automatically.
 
 ## Install
 
-- From a packaged release: open the Extensions view, `...` menu → **Install from VSIX...**,
-  and pick `dist/be-code-vscode-<version>.vsix` (built by `make -f build.mk vscode` or
-  `make -f build.mk release` in the `be-code` repo).
+- From a packaged release: download `be-code-vscode-<version>.vsix` from the
+  [GitHub release](https://github.com/BE-AI-Research/be-code-redux/releases/latest) (or build
+  it as `dist/be-code-vscode-<version>.vsix` with `make -f build.mk vscode` or `make -f build.mk
+  release` in the `be-code` repo), open the Extensions view, `...` menu → **Install from
+  VSIX...**, and pick it.
 - From source: `npm install && npm run build` in this directory, then use VS Code's
   "Run Extension" launch configuration to try it in an Extension Development Host.
 
