@@ -30,6 +30,12 @@ type Ledger struct {
 	// goroutine and from tool dispatch.
 	mu        sync.Mutex
 	lastTouch time.Time
+	// wmu orders writes: a record is built under mu and saved after it,
+	// and with Refresh forced from several goroutines two saves could
+	// land in the wrong order — the record without a job last, so that a
+	// session starting then would close a live one. Held from build
+	// through Save, never inside mu.
+	wmu sync.Mutex
 
 	// state is pulled when the record is written rather than pushed at a turn
 	// boundary: Events is owned by the UIs, so anything buildAgent assigned
@@ -204,6 +210,8 @@ func (l *Ledger) write(force bool) {
 	if l.dir == "" {
 		return
 	}
+	l.wmu.Lock()
+	defer l.wmu.Unlock()
 	l.mu.Lock()
 	if l.closed || (!force && time.Since(l.lastTouch) < heartbeat) {
 		l.mu.Unlock()
@@ -212,8 +220,12 @@ func (l *Ledger) write(force bool) {
 	l.lastTouch = time.Now()
 	// Branch is refreshed, not just read at Open: `git checkout` happens
 	// mid-session, and a notice naming the branch somebody left an hour ago
-	// is worse than naming none.
-	l.rec.Branch = currentBranch(l.ws)
+	// is worse than naming none. A forced write (a job began or ended, or
+	// a supervisor tick) carries the branch as last read: it is on a job's
+	// own path and not worth a subprocess there.
+	if !force {
+		l.rec.Branch = currentBranch(l.ws)
+	}
 	if l.state != nil {
 		task, _ := l.state()
 		l.rec.Task = task

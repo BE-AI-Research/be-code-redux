@@ -451,7 +451,11 @@ func TestCompactionIsAWaitNotAStall(t *testing.T) {
 	if runFor < 181*time.Second {
 		t.Fatalf("the meter paused for a compaction: ran %s", runFor)
 	}
+	// Queued behind the primary for five minutes on the chore's way to the
+	// server: a wait on someone else, counted against neither the chore's
+	// bound nor the stall clock.
 	s.f.ag.setWaiting(s.run, "lane")
+	s.clk.Advance(300 * time.Second)
 	s.f.ag.setWaiting(s.run, "")
 	s.f.ag.subs.mu.Lock()
 	waiting = s.run.waiting
@@ -459,7 +463,12 @@ func TestCompactionIsAWaitNotAStall(t *testing.T) {
 	if waiting != compactionWait {
 		t.Fatalf("the lane wait ending left %q, want the compaction wait back", waiting)
 	}
-	// Twice stall_after inside the chore: quiet after all.
+	s.clk.Advance(181 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 0 {
+		t.Fatalf("the lane wait was counted against the chore: %q", s.f.ag.Peek())
+	}
+	// Twice stall_after since the summary call went out: quiet after all.
 	s.clk.Advance(180 * time.Second)
 	s.f.ag.subs.sup.sweep()
 	if q := s.f.ag.Peek(); len(q) != 1 || !strings.Contains(q[0], "has been quiet for") {
@@ -546,6 +555,25 @@ func TestOrphanJobIsKeptWhileAnotherSessionRunsIt(t *testing.T) {
 	f.ag.closeOrphanJobs(f.ag.subSteps("test"), map[string]bool{})
 	if n := nodeOf(t, f.st, orphan); n.Status != engine.StatusBlocked || n.Reason != jobInterrupted {
 		t.Fatalf("a job no live session reports must close: %s %q", n.Status, n.Reason)
+	}
+}
+
+// Every supervisor sweep with a job running tells the ledger again, so the
+// record never goes stale (Suspect) under a job parked for an hour.
+func TestSweepRefreshesTheRecordWhileAJobRuns(t *testing.T) {
+	s := stallJob(t, nil)
+	n := 0
+	s.f.ag.JobsChanged = func() { n++ }
+	s.f.ag.subs.sup.sweep()
+	s.f.ag.subs.sup.sweep()
+	if n != 2 {
+		t.Fatalf("refreshed %d times over two sweeps", n)
+	}
+	s.f.ag.StopAllSubAgents("test over")
+	n = 0
+	s.f.ag.subs.sup.sweep()
+	if n != 0 {
+		t.Fatalf("refreshed with no job running")
 	}
 }
 

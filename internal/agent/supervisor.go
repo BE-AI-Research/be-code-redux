@@ -222,6 +222,15 @@ func (a *Agent) sweepJobs() {
 	}
 	s.mu.Unlock()
 
+	// A record untouched for StaleAfter stops vouching for its jobs
+	// (Suspect), and a job parked for an hour in a question or a lane
+	// would then be closed by a session starting next door. Each sweep
+	// with a job running refreshes it; the ledger skips its git lookup
+	// for a forced write, so this is one small file every tick.
+	if len(runs) > 0 {
+		a.jobsChanged()
+	}
+
 	for _, act := range acts {
 		if act.line != "" {
 			// Re-checked under mu: progress in the gap since the decision
@@ -325,9 +334,15 @@ func (a *Agent) setWaiting(run *subRun, reason string) {
 	case reason == "" && run.inTool != "":
 		reason = toolWait(run.inTool)
 	case reason == "" && run.inChore:
-		// The lane wait a chore takes on its way to the server ends
-		// inside the chore: back to the chore's own wait, not to quiet.
-		reason = compactionWait
+		// The lane wait a chore takes on its way to the server (or a
+		// spend-cap prompt inside it) ends inside the chore: back to the
+		// chore's own wait, not to quiet — and the chore's bound and the
+		// stall clock both start over here, so time spent queued behind
+		// the primary (minutes, when it is busy) is never counted against
+		// the summary call that has only now gone out.
+		changeWaitLocked(run, compactionWait, now)
+		run.waitSince, run.clockFrom = now, now
+		return
 	}
 	changeWaitLocked(run, reason, now)
 }

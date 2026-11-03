@@ -9,7 +9,8 @@
 - A second session on the same workspace no longer closes at startup a job the first session
   is still running: each session's work record (`work.enabled`) now lists its running jobs,
   and an open job another live session reports is left as it is with a notice naming that
-  session. A job nobody reports is closed `blocked: interrupted` as before.
+  session. A job nobody reports is closed `blocked: interrupted` as before — which includes a
+  job run by a session still on v1.4.1 or earlier, whose record carries no job list.
 - When the main model's next request waits behind a co-worker's request on the shared server,
   the status line says so after two seconds (`waiting for the shared server: big's request is
   in flight; the request goes out when it ends`) until the lane is free, instead of pausing in
