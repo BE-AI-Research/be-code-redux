@@ -467,6 +467,13 @@ func (r *REPL) startReader() {
 			private := r.private.Swap(false)
 			if err == nil && !private {
 				_ = r.rl.SaveHistory(line)
+			} else if private {
+				// Readline keeps the last typed line as its in-memory
+				// history placeholder even when nothing is saved, so Up then
+				// Down at the next prompt would redisplay the secret in
+				// clear. Saving an empty line clears that placeholder and
+				// writes nothing to the file.
+				_ = r.rl.SaveHistory("")
 			}
 			r.lines <- lineEvent{line: line, err: err}
 			if err != nil && err != readline.ErrInterrupt {
