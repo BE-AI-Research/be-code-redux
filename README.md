@@ -526,6 +526,50 @@ attached:
 file exists and which port it names, without connecting (a connection would raise Chrome's
 prompt).
 
+## Application API
+
+Other programs on this machine can ask a running session for an answer. An interactive
+session with `api.enabled: true` (or `/api on`) serves `~/.be-code/api/api.sock`; one session
+serves per machine, and a second one says which. Headless runs never serve.
+
+Register the caller once and keep the key it prints — it is shown once and only its hash is
+stored:
+
+```bash
+be-code apps add ue5-helper --tiers query,completions --packs ue5 --sessions named
+```
+
+Three things a caller can ask for, each with `Authorization: Bearer <key>`:
+
+- `POST /v1/query` `{prompt, system?, model?, pack?, json_schema?, max_tokens?}` → one answer
+  with no tools and no history; `pack` puts an active pack's rules in front of `system`;
+  `json_schema` has the reply checked on the way out (422 `schema_mismatch` with the text).
+- `POST /v1/chat/completions` — the OpenAI shape, streaming with `stream: true`. Point an
+  existing OpenAI client at the socket with `base_url` and the key as `api_key`; `model:
+  "default"` is the session's model. Requests with `tools` or `n > 1` are refused with
+  `not_supported`, since this tier serves inference only.
+- `POST /v1/sessions/<token>/query` — the same question answered with the serving session's
+  conversation as context, never appended to it. The token is `/session token` in the session
+  (or `be-code session token <code>` for one that is not running), sent as `X-BE-Session`;
+  `/session rotate [grace]` replaces it. Browser and web page text in the conversation is
+  withheld from the caller.
+
+An app's profile bounds it: tiers, models (`default` is always allowed), packs, whether it may
+name a session, and a budget (`tokens` per reply, `per_hour` requests; 429 with `Retry-After`
+past it). A budget is always set: an app added without one gets the defaults, and unbounded is
+not expressible. `be-code apps list|show|rotate|revoke|remove` manage apps; `revoke` takes effect
+without restarting the serving session, and `apps rotate` on a revoked app re-activates it with
+a new key. Requests carrying `Origin` or `Sec-Fetch-Mode` are
+refused: the API is for programs, not pages. `~/.be-code/api` must be mode 0700 on Unix, and
+on Windows the directory's ACL is the boundary. The access log at `~/.be-code/api/access.log`
+names apps and session codes, never keys or tokens.
+
+A request on the session's own model makes the server's prompt cache cold for the person's next
+turn; the session re-reads its prompt in the background afterwards, so the cost that remains
+is the request's own. A streamed completion's chunks carry the requested model name; the final
+response carries the resolved one. An older build that resaves a session drops its token, and
+the app must fetch a new one.
+
 ## Scheduled events
 
 A running session can wake the model later to do a pre-decided piece of work — a follow-up
@@ -1528,6 +1572,8 @@ hand; `/config` prints what the running session actually resolved.
   `schedules.allow` (a request with no grants counts), never while
   `schedules.inherit_session_approvals` is on; see
   "Scheduled events"
+- `api.enabled` (false) — serve the application API from interactive sessions; `api.timeout`
+  (`120s`) bounds one request. Everything per-app is in `~/.be-code/api/apps/<name>.json`.
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an

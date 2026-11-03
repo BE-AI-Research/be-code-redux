@@ -231,6 +231,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # it fall through to another scenario's script, so a broken
             # native path fails its assertion loudly.
             chunks = [text_chunk("NUMCTX:openai-fallback")]
+        elif last.startswith("api scenario:"):
+            # The application API's completions tier, proxied through a
+            # plain session. One streamed sentence, no tool call.
+            chunks = [text_chunk("the api says hello")]
         elif model == "coworker-model":
             # The co-worker's scratch agent gets one scripted reply: plain
             # text (no tool call), so its own run ends after one turn and

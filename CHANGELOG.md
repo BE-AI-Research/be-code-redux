@@ -46,6 +46,14 @@
   binary against the release's `SHA256SUMS` the way `install.ps1` and the in-app updater already
   did, with `sha256sum`, `shasum` or `openssl`, whichever the system has; a download that cannot
   be verified — no listing, no line for the asset, a mismatch — is never installed.
+- **An application API.** Other programs on the machine can ask a running session for an
+  answer over `~/.be-code/api/api.sock`: a plain `query` (no tools, no history, optionally with
+  an active pack's rules and a `json_schema` the reply is checked against), OpenAI-compatible
+  `chat/completions` that existing clients reach with a URL change, and a query answered with
+  a session's conversation as context, addressed by a token the session mints and can rotate.
+  Callers are registered apps (`be-code apps add`, a key shown once, a profile of tiers, models,
+  packs and budgets); browsers are refused; one session serves per machine; headless runs never
+  serve. `/api`, `/apps` and `/session token|rotate` in both UIs; `api.enabled` in config.
 - `scripts/fix-provider-config.py` repairs `~/.be-code/config.json`, the file be-code loads; it
   no longer honours a `BE_CODE_CONFIG` variable be-code itself never read.
 - `uninstall.ps1` points the `-Purge` hint at `.\uninstall.cmd -Purge`, the launcher a default

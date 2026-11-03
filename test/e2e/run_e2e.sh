@@ -139,4 +139,5 @@ grep -q "@sub  scope: internal/scan" "$SUBWS"/.be-code/tasks/*.md
 grep -q "^  - \[x\] .*port internal/scan" "$SUBWS"/.be-code/tasks/*.md
 echo "[PASS] sub-agent"
 
+sh "$(dirname "$0")/api_e2e.sh"
 echo "E2E PASS"

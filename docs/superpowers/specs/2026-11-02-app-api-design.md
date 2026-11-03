@@ -62,7 +62,9 @@ for that session only; neither writes config.
 
 ### 1.3 One server per machine
 
-Bind. On address-in-use, connect: a refusal means a stale socket left by a crash, which is
+The reclaim decision is made under `api.lock` from `server.json`'s pid, not from errno: a failed
+probe plus an absent or dead-pid record is stale, a live-pid record is busy — so Windows
+reclaims a crashed socket too. Bind. On address-in-use, connect: a refusal means a stale socket left by a crash, which is
 removed and re-bound; a successful connect means another session serves, and this one notices
 once — `API is served by session CODE (pid N); this session is not serving` — and does not
 bind. `~/.be-code/api/server.json` (0600: pid, socket, session code, started) is what that
@@ -108,15 +110,17 @@ live record. A session that stops serving removes its record and its socket.
   also be active in the serving session; the profile narrows, never widens.
 - `sessions`: `none` (stateless endpoints only) or `named` (may present a session token).
 - `budget.tokens` caps one reply's `max_tokens` and is the most a request may ask for;
-  `budget.per_hour` is the number of requests allowed in any sliding hour. Zero means
-  unbounded for that limit. Defaults when `apps add` is not told otherwise: 4096 and 120.
+  `budget.per_hour` is the number of requests allowed in any sliding hour. Absent or zero
+  takes the default; a budget is always set — unbounded is deliberately not expressible through
+  `apps add`. Defaults when `apps add` is not told otherwise: 4096 and 120.
 
 ### 2.2 Keys
 
 `bek_1_` plus 24 bytes from `crypto/rand`, base64url unpadded. `apps add` prints it once and
 stores only the hash. `apps rotate <name>` mints a new key and the old one stops at once — an app
 is a program and restarts with the new key. `apps revoke <name>` stamps `revoked`, after which
-the key is 401; `apps remove <name>` deletes the file. The `1` is a format tag, so a second
+the key is 401 (`apps rotate` on a revoked app re-activates it, and `apps revoke` says so);
+`apps remove <name>` deletes the file. The `1` is a format tag, so a second
 credential kind (or a second key format) can be told apart by prefix without a redesign.
 
 ### 2.3 Lookup
@@ -136,6 +140,8 @@ Each step fails closed; the first failure answers.
    `unauthorized`.
 3. Endpoint's tier not in the profile → 403 `tier_not_allowed`.
 4. `X-BE-Session` present but the profile's `sessions` is `none` → 403 `sessions_not_allowed`.
+4b. Path token and `X-BE-Session` differ → 400 `session_mismatch` (a malformed request, judged
+   without consulting any token).
 5. `X-BE-Session` present but `Accepts` is false → 404 `session_not_found`. Not 403: existence
    is not confirmed to a caller holding the wrong token.
 6. Session named but it is not the serving session → 409 `session_not_running`.
@@ -143,7 +149,13 @@ Each step fails closed; the first failure answers.
    → 403 `pack_not_allowed`.
 8. Over `budget.per_hour`, or a second request from the same app while one is in flight →
    429 `rate_limited` with `Retry-After`. `max_tokens` above `budget.tokens` → 400
-   `over_budget` naming the cap.
+   `over_budget` naming the cap. An in-flight refusal is not charged against `per_hour`;
+   handler-level refusals (model, pack, `over_budget`, `bad_request`) are.
+
+Unmatched paths and wrong methods answer JSON 404 `not_found` after authentication (405 is
+collapsed into 404 so route existence is not confirmed); a non-canonical path (`//`, `.`, `..`
+segments) is JSON 404 before routing, never a redirect. `browser_refused` and `shutting_down`
+answers also produce an access-log line, with app `-`.
 
 ### 2.5 Abuse and logging
 
@@ -197,6 +209,8 @@ cost and the README states it.
 
 ### 3.5 Showing it
 
+- `/session token` and `/session rotate` are refused while a turn is running ("try again after
+  it") rather than waiting.
 - `/session token` and `/session rotate [grace]` in the TUI render the token on the terminal
   that asked only — a local line, never a transcript entry, never saved, never shown to another
   attached terminal; in the REPL they print it, refusing when stdout is not a terminal.
@@ -235,7 +249,11 @@ agree (400 `session_mismatch`). The access log records the session code in its p
 - `json_schema`: passed as the provider's structured-output format where the backend has one
   (native Ollama `format`, OpenAI `response_format`). The reply is checked against the schema;
   a miss is 422 `schema_mismatch` with the raw text in `error.text`.
-- `max_tokens` defaults to `budget.tokens` and may not exceed it.
+- `max_tokens` defaults to `budget.tokens` and may not exceed it; negative is 400 `bad_request`.
+- A `json_schema` outside the supported subset (non-object top level, unknown or non-string
+  `type`, non-array `required`/`enum`, `false` or tuple-form subschemas) is 400 `bad_request`
+  before any model call; `"json_schema": null` means no schema; a boolean `true` subschema is
+  unconstrained.
 
 ### 4.2 `/v1/chat/completions`
 
@@ -243,7 +261,7 @@ Request fields honoured: `messages` (system, user, assistant), `model`, `stream`
 `temperature`, `max_tokens`, `response_format` (`json_object` and `json_schema`). `stream:
 true` answers as SSE in the OpenAI delta shape, ending with `data: [DONE]`. The response carries
 `id` (`chatcmpl-` plus 16 random bytes in hex), `object`, `created`, `model` (the resolved
-name), `choices` and `usage`. A request carrying `tools`, `functions`, `tool_choice`, or `n`
+name; streamed chunks carry the requested name instead), `choices` and `usage`. A request carrying `tools`, `functions`, `tool_choice`, or `n`
 above 1 is 400 `not_supported` naming the field, so a client learns at once rather than
 getting a silent non-answer. Unknown fields are ignored, as the OpenAI API ignores them.
 
@@ -279,6 +297,9 @@ same machine and may well be the program that opened it.
   When an API call ends and the primary is idle, the host calls `Agent.StartPrefill`, which
   re-reads the person's prompt in the background before they type. The cost that remains is the
   API call's own read, which the app's budget bounds.
+- The adapter also consults the online-project gate without asking: an unapproved online
+  provider is 403 `online_not_approved` for every model, named ones included, because named
+  models are built from the default provider.
 - `api.timeout` (120 s) bounds a request end to end; a client that disconnects cancels the
   model call through the request context, and the lane is released.
 - `budget.per_hour` is a sliding window in the serving process's memory, per app, reset by a
@@ -328,7 +349,8 @@ Added to `ui.SlashCommandTable` so the palette, the menu and both UIs agree:
 - `/session token`, `/session rotate [grace]` (§3.5).
 
 Header: an `api` marker beside the attached-terminals count while this session serves,
-ASCII-safe like the rest of the header on Windows. Bottom line: `api: <app>` while a request is
+ASCII-safe like the rest of the header on Windows. The compact bottom line (under 70x20)
+carries no `api:` marker. Bottom line: `api: <app>` while a request is
 in flight. No transcript entries, so the person's conversation is never interleaved with
 machine traffic; a session-context query leaves no trace in the session at all.
 
@@ -389,3 +411,14 @@ the priority queue and `max_concurrent`; callbacks; the scheduler as a caller; a
 the token index that lets a non-serving session be named; a human credential kind. None of
 them changes a file format or an endpoint defined here: the `bek_1_` and `sess_1_` prefixes,
 the app file's `profile` object and the error shape are the extension points.
+
+## Amendments from implementation (2026-11-02)
+
+Rulings made while building, applied in place above: check step 4b (`session_mismatch`);
+JSON 404 `not_found` for unmatched routes and non-canonical paths; refusals not charged to
+`per_hour` when in flight; budgets always set; `apps rotate` re-activates a revoked app;
+`max_tokens` and `json_schema` validation; the online-project gate (`online_not_approved`);
+lock-based reclaim; token commands refused mid-turn; no `api:` marker on the compact bottom line;
+streamed chunks name the requested model. Error codes added to the list the spec implies:
+`bad_request`, `timeout`, `not_found`, `online_not_approved`. `session_busy` (409) stands as
+planned.
