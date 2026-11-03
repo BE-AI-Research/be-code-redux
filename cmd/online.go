@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/setup"
 	"github.com/brown-enterprises/be-code/internal/ui"
 )
 
@@ -126,7 +127,7 @@ func (p *stdioPrompter) AskSecret(ctx context.Context, q string) (string, bool) 
 	}
 	fmt.Fprintln(p.out, "(the key is not echoed on a terminal)")
 	fmt.Fprint(p.out, q)
-	b, err := term.ReadPassword(p.in.Fd())
+	b, err := setup.ReadSecret(p.in.Fd())
 	fmt.Fprintln(p.out)
 	if err != nil {
 		return "", false

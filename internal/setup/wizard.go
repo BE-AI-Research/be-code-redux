@@ -352,7 +352,7 @@ func wizardBrowser(ctx context.Context, in *bufio.Reader, out io.Writer) (string
 func readKey(in *bufio.Reader, out io.Writer, prompt string) (string, bool) {
 	fmt.Fprint(out, prompt)
 	if term.IsTerminal(os.Stdin.Fd()) {
-		b, err := term.ReadPassword(os.Stdin.Fd())
+		b, err := ReadSecret(os.Stdin.Fd())
 		fmt.Fprintln(out)
 		if err != nil {
 			return "", false
