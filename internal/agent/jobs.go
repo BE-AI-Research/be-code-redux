@@ -319,6 +319,7 @@ func (a *Agent) JobStates() []tools.JobState {
 	if s == nil {
 		return nil
 	}
+	maxRun := time.Duration(a.Cfg.SubAgents.MaxRuntime) * time.Second
 	s.mu.Lock()
 	var running, finished []*subRun
 	for _, r := range s.runs {
@@ -341,7 +342,11 @@ func (a *Agent) JobStates() []tools.JobState {
 	rows := make([]row, 0, len(running)+len(finished))
 	for _, r := range running {
 		st := tools.JobState{ID: r.d.Node, Owner: r.d.Owner, Elapsed: time.Since(r.started),
-			At: r.d.Node, LastTool: r.lastTool, LastActivity: r.lastActivity}
+			At: r.d.Node, LastTool: r.lastTool, LastActivity: r.lastActivity,
+			Runtime: r.runFor, MaxRuntime: maxRun}
+		if !meterPaused(r.waiting) && !r.meterAt.IsZero() {
+			st.Runtime += a.subNow().Sub(r.meterAt)
+		}
 		if r.at != "" {
 			st.At = r.at
 		}

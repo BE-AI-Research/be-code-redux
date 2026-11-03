@@ -139,3 +139,44 @@ func TestJobsFiredMatrix(t *testing.T) {
 		t.Fatal(f.calls)
 	}
 }
+
+func TestDispatchScopeForms(t *testing.T) {
+	for name, tc := range map[string]struct {
+		scope any
+		want  []string
+		echo  string
+	}{
+		"string":   {"pkg/", []string{"pkg/"}, "(scope: pkg)"},
+		"comma":    {"a, b", []string{"a", "b"}, "(scope: a, b)"},
+		"dot":      {".", []string{"."}, "(scope: .)"},
+		"array":    {[]any{"a/", "b.go"}, []string{"a/", "b.go"}, "(scope: a, b.go)"},
+		"onecomma": {[]any{"a/, b.go"}, []string{"a/", "b.go"}, "(scope: a, b.go)"},
+	} {
+		f := &fakeJobs{}
+		r := NewDispatch(f, nil, 0).Run(context.Background(), map[string]any{"who": "big", "job": "do", "scope": tc.scope})
+		if r.IsError || len(f.paths) != len(tc.want) || !strings.Contains(r.Content, tc.echo) {
+			t.Fatalf("%s: %+v %+v", name, r, f.paths)
+		}
+		for i := range tc.want {
+			if f.paths[i] != tc.want[i] {
+				t.Fatalf("%s: %v", name, f.paths)
+			}
+		}
+	}
+}
+
+func TestJobsStatusRuntimeAndExtendWording(t *testing.T) {
+	f := &fakeJobs{states: []JobState{
+		{ID: "1", Owner: "big", State: "running", Runtime: 12 * time.Minute, MaxRuntime: 30 * time.Minute, At: "1"},
+		{ID: "2", Owner: "big", State: "running", At: "2"},
+		{ID: "3", Owner: "big", State: "done", Runtime: time.Minute, MaxRuntime: 30 * time.Minute, At: "3"},
+	}}
+	j := NewJobs(f, nil, 0)
+	lines := strings.Split(j.Run(context.Background(), map[string]any{"action": "status"}).Content, "\n")
+	if !strings.Contains(lines[0], "runtime 12m of 30m") || strings.Contains(lines[1], "runtime") || strings.Contains(lines[2], "runtime") {
+		t.Fatalf("%q", lines)
+	}
+	if strings.Contains(j.Description(), "capped") {
+		t.Fatal(j.Description())
+	}
+}

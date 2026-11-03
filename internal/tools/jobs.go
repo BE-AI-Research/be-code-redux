@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 // JobState is one job as the jobs tool reports it (dispatch-jobs spec §4):
@@ -18,7 +20,10 @@ type JobState struct {
 	// stopped.
 	ID, Owner, State string
 	Elapsed          time.Duration
-	Calls            int
+	// Runtime is the metered running time (waits excluded) of a running job
+	// and MaxRuntime the hard cap; MaxRuntime 0 means no cap.
+	Runtime, MaxRuntime time.Duration
+	Calls               int
 	// At is the doing node inside the job's subtree (the job's own id when
 	// nothing narrower is known); LastTool and LastActivity are its last
 	// sign of life.
@@ -86,18 +91,32 @@ func (t *dispatchTool) Run(ctx context.Context, args map[string]any) Result {
 		return Result{IsError: true, Content: "dispatch needs who and job"}
 	}
 	scope := argStrings(args, "scope")
+	switch {
+	case len(scope) == 0:
+		// argStrings reads only a JSON array; Qwen's XML form and a compat
+		// call hand a plain string ("pkg/", "a, b", ".") instead.
+		if s := argString(args, "scope"); s != "" {
+			scope = splitCommaList(s)
+		}
+	case len(scope) == 1 && strings.Contains(scope[0], ","):
+		scope = splitCommaList(scope[0])
+	}
 	id, err := t.r.DispatchJob(ctx, who, job, strings.Join(scope, ", "), argString(args, "context"), scope)
 	if err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
+	echo := ""
+	if clean, cerr := subagent.CleanJobScope(scope); cerr == nil {
+		echo = " (scope: " + strings.Join(clean, ", ") + ")"
+	}
 	if !argBool(args, false, "wait") {
-		return Result{Content: "dispatched job " + id + " to " + who}
+		return Result{Content: "dispatched job " + id + " to " + who + echo}
 	}
 	out, err := t.r.JobWait(ctx, id, t.waitFor)
 	if err != nil {
 		return Result{IsError: true, Content: err.Error()}
 	}
-	return Result{Content: "dispatched job " + id + " to " + who + "\n" + out}
+	return Result{Content: "dispatched job " + id + " to " + who + echo + "\n" + out}
 }
 
 type jobsTool struct {
@@ -117,7 +136,7 @@ func NewJobs(r JobRunner, fired func() bool, waitFor time.Duration) Tool {
 func (t *jobsTool) Name() string { return "jobs" }
 
 func (t *jobsTool) Description() string {
-	return "Look at and steer jobs handed to co-workers. status lists them; wait blocks until one reports (id optional, for = seconds); stop ends one (reason); reply answers its question (text); extend gives a quiet or capped job more time."
+	return "Look at and steer jobs handed to co-workers. status lists them; wait blocks until one reports (id optional, for = seconds); stop ends one (reason); reply answers its question (text); extend gives a quiet job more time."
 }
 
 func (t *jobsTool) Schema() json.RawMessage {
@@ -155,6 +174,9 @@ func (t *jobsTool) Run(ctx context.Context, args map[string]any) Result {
 				b.WriteByte('\n')
 			}
 			fmt.Fprintf(&b, "%s  %s  %s  %s  %d calls", s.ID, s.Owner, s.State, s.Elapsed.Round(time.Second), s.Calls)
+			if s.MaxRuntime > 0 && (s.State == "running" || s.State == "asking" || s.State == "stalled" || strings.HasPrefix(s.State, "waiting")) {
+				fmt.Fprintf(&b, "  runtime %s of %s", shortDur(s.Runtime), shortDur(s.MaxRuntime))
+			}
 			if s.At != "" {
 				b.WriteString("  at " + s.At)
 			}
@@ -209,4 +231,17 @@ func (t *jobsTool) Run(ctx context.Context, args map[string]any) Result {
 		}
 		return Result{Content: "extended " + id}
 	}
+}
+
+// shortDur renders a duration whole-second and without trailing zero units
+// (12m, 1m30s, 45s).
+func shortDur(d time.Duration) string {
+	out := d.Round(time.Second).String()
+	if strings.HasSuffix(out, "m0s") {
+		out = strings.TrimSuffix(out, "0s")
+	}
+	if strings.HasSuffix(out, "h0m") {
+		out = strings.TrimSuffix(out, "0m")
+	}
+	return out
 }
