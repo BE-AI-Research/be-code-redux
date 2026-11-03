@@ -77,6 +77,10 @@ type Session struct {
 
 	running    bool // a run is in progress (a view's mode may be a popup)
 	statusNote string
+	// onlineAdding is one terminal at a time in /online add; onlineAdder
+	// is the view id that holds it (a detached holder no longer counts).
+	onlineAdding bool
+	onlineAdder  int
 	// reasoningChars is the reasoning received for the reply in progress
 	// (reset at OnModelStart); reasoningShown is the count last put on the
 	// status line. statusHook sees every status for tests.

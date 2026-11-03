@@ -289,6 +289,10 @@ func (m *View) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.picker = nil
 		m.mode = m.returnMode()
 		m.input.Focus()
+		// Esc on one of /online add's own lists ends the whole flow.
+		if f := m.onlineAdd; f != nil && f.onlinePickerStep() {
+			m.cancelOnlineAdd()
+		}
 		return m, nil
 	case tea.KeyEnter:
 		items := p.filtered()

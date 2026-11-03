@@ -263,6 +263,13 @@ type View struct {
 	// ("view error") and leave the session and every other terminal
 	// running. Never set in production.
 	panicOnNextUpdate bool
+
+	// onlineAdd is this terminal's /online add in progress (onlineadd.go),
+	// nil when none; the Enter and Esc handlers and inputView consult it.
+	onlineAdd *onlineAddFlow
+	// lastCmd is the Cmd the last Update returned, so a test can drive a
+	// Cmd the flow handed back without a running program.
+	lastCmd tea.Cmd
 }
 
 // mailboxForTest exposes this view's mailbox so a test can deliver what the
@@ -374,6 +381,7 @@ func (m *View) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if drained := m.mb.drainInto(m); drained != nil {
 		cmd = tea.Batch(cmd, drained)
 	}
+	m.lastCmd = cmd
 	return model, cmd
 }
 
@@ -385,6 +393,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.panicOnNextUpdate {
 		m.panicOnNextUpdate = false
 		panic(testPanicValue)
+	}
+	if mm, cmd, ok := m.onlineMsg(msg); ok {
+		return mm, cmd
 	}
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
@@ -657,6 +668,12 @@ func (m *View) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeName:
 		return m.handleNameKey(k)
 	case modeBusy:
+		// A run another terminal started does not take the input line
+		// from an /online add in progress: the flow's keys (the masked key
+		// above all) must never be queued to the agent.
+		if m.onlineAdd != nil {
+			return m.handleInputKey(k)
+		}
 		return m.handleBusyKey(k)
 	}
 	return m.handleInputKey(k)
@@ -676,6 +693,21 @@ func (m *View) setIdleMode(to mode) {
 // terminal's own draft.
 func (m *View) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	in := &m.input
+	if f := m.onlineAdd; f != nil {
+		if k.Type == tea.KeyEsc {
+			m.cancelOnlineAdd()
+			return m, nil
+		}
+		// The masked field, not the textarea, holds the key.
+		if f.step == stepKey {
+			if k.Type == tea.KeyEnter {
+				return m, m.onlineKeyEntered()
+			}
+			var cmd tea.Cmd
+			f.secret, cmd = f.secret.Update(k)
+			return m, cmd
+		}
+	}
 	switch k.Type {
 	case tea.KeyCtrlC:
 		if m.sel != nil {
@@ -703,8 +735,12 @@ func (m *View) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.quitHint = false
-		m.histFile.add(text, m.id)
 		in.Reset()
+		// Before the history file: nothing typed into the flow is history.
+		if ok, cmd := m.onlineLine(text); ok {
+			return m, cmd
+		}
+		m.histFile.add(text, m.id)
 		if strings.HasPrefix(text, "/") {
 			return m.slashCommand(text)
 		}
@@ -1593,6 +1629,9 @@ func (m *View) inputWidth() int {
 // transcript layout's own input row, and what viewChat (chat.go) reuses so
 // the room's own input line matches it exactly.
 func (m *View) inputView() string {
+	if f := m.onlineAdd; f != nil && f.step == stepKey {
+		return lipgloss.JoinHorizontal(lipgloss.Top, f.secret.View(), " "+m.wheelView())
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, m.input.View(), " "+m.wheelView())
 }
 
@@ -1801,6 +1840,9 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.finishTurn(nil, nil)
 		}()
 	case "/online":
+		if len(fields) > 1 && fields[1] == "add" {
+			return m.startOnlineAdd(strings.Join(fields[2:], " "))
+		}
 		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, m.cfg, fields[1:])})
 	case "/update":
 		if len(fields) > 1 && fields[1] == "check" {
