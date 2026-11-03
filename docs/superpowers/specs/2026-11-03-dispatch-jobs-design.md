@@ -60,7 +60,7 @@ dispatch {
 ```
 
 **What it does, in order.**
-1. Refuses during a fired turn (`errDuringFired`, as `task owner` does), when `who` is not a
+1. Refuses during a fired turn (`errFiredSubAgents`, the error `task owner` returns), when `who` is not a
    co-worker, when `job` or `scope` is empty, when a scope path escapes the workspace, when the
    scope is outside `who`'s `max_scope` (a co-worker whose `max_scope` was entirely invalid at
    validation cannot be dispatched at all: the stated confinement never widens to the workspace),
@@ -73,7 +73,8 @@ dispatch {
    doing under that root), text = the job's first line, with the rest of `job` and `context`
    recorded as the step's note; owner `who`, scope as given. The step's id is the **job id** the
    tool returns and every later message names. A session with the task engine off still runs the
-   job; the id is then `job-N` and nothing is filed.
+   job; the id is then `job-N` and nothing is filed. (Struck 2026-11-03: dispatch needs the
+   task store, see §9/§10.)
 3. Dispatches it at once through the existing path (`dispatchPicked`): same consent, same snapshot
    branch, same scoped registry, same `ask_main`. The dispatch text is the step's text plus the
    note, so the sub-agent reads exactly what the main model wrote. The step carries a **job
