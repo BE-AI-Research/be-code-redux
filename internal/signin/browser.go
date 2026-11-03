@@ -23,7 +23,13 @@ func OpenBrowser(url string) error {
 		cmd = exec.Command("xdg-open", url)
 	}
 	procattr.Hide(cmd)
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the launcher when it exits: the session host lives for days and
+	// must not collect a zombie per sign-in.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // displayAvailable is false on a Linux box with no display: the URL is
