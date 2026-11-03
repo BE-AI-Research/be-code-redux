@@ -360,3 +360,33 @@ func TestOnlineAddContextMenuPasteGoesToTheMaskedField(t *testing.T) {
 		t.Fatal("after Esc the textarea is not empty")
 	}
 }
+
+// I6b (final review): a terminal that goes away mid-flow does not keep the
+// flow — its context (the sign-in's listener, the validation) is cancelled,
+// the key is dropped, and another terminal may start one at once.
+func TestOnlineAddEndsWhenTheViewIsRetired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	s, a, b := twoViews(t)
+	_, _ = b.startOnlineAdd("groq")
+	f := b.onlineAdd
+	if f == nil {
+		t.Fatal("flow not started")
+	}
+	f.secret.SetValue("good")
+	f.key = "good"
+	s.retireView(b)
+	if f.ctx.Err() == nil {
+		t.Fatal("the retired terminal's flow context is still live")
+	}
+	if f.key != "" || f.secret.Value() != "" || b.onlineAdd != nil {
+		t.Fatal("the retired terminal's flow still holds the key")
+	}
+	if s.onlineAdding {
+		t.Fatal("the session still says a terminal is adding a provider")
+	}
+	_, _ = a.startOnlineAdd("groq")
+	if a.onlineAdd == nil {
+		t.Fatal("another terminal could not start the flow")
+	}
+}

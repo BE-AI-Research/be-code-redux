@@ -476,6 +476,12 @@ func (s *Session) retireView(v *View) {
 	// delivery hold that popup took would then stop every later run's
 	// queued messages from ever being delivered.
 	s.holdQueueLocked(v.id, false)
+	// Nor can it finish or cancel an /online add: end it here, so its
+	// loopback listener closes and the key it may hold leaves memory now
+	// rather than at the sign-in's five-minute bound. No transcript line:
+	// the terminal that would read it has gone. The program has exited,
+	// so the view's own fields are nobody else's to touch.
+	v.clearOnlineAdd()
 	s.mu.Unlock()
 	s.detachView(v.id)
 	v.mb.close()
