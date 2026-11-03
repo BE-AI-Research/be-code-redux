@@ -293,6 +293,9 @@ func (m *View) handlePickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if f := m.onlineAdd; f != nil && f.onlinePickerStep() {
 			m.cancelOnlineAdd()
 		}
+		if m.coworkerAdd != nil {
+			m.cancelCoworkerAdd()
+		}
 		return m, nil
 	case tea.KeyEnter:
 		items := p.filtered()

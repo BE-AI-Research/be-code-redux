@@ -252,6 +252,7 @@ func (m *View) menuEntries() []menuEntry {
 		{"Models", "Switch model", "list models on the backend", func(m *View) (tea.Model, tea.Cmd) { return m, m.askModelPicker() }},
 		{"Models", "Switch provider", "ollama, llama.cpp, vLLM, LM Studio…", func(m *View) (tea.Model, tea.Cmd) { return m, m.askProviderPicker() }},
 		{"Models", "Add an online provider", "OpenRouter sign-in, or a pasted key for any OpenAI-compatible endpoint", cmd("/online add")},
+		{"Models", "Add a co-worker", "a second model the agent can consult, from any configured provider's listing", cmd("/coworkers add")},
 		{"Tools", "List tools", "what the agent can call", cmd("/tools")},
 		{"Tools", "Run verification", "build/lint/test checks for this workspace", cmd("/verify")},
 		{"Tools", "Undo last turn", "roll back the last turn's file changes", cmd("/undo")},

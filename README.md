@@ -315,6 +315,10 @@ plain mode; `-y` allows it, and a headless run without `-y` declines with
 `consultation declined`. Local co-workers, and a person's own `/consult`,
 never ask.
 
+`/coworkers add` (also **Add a co-worker** in `/menu`) adds one from inside a session: pick a
+configured provider, pick a model from its live listing, name it, say whether it may own task
+steps; the entry is saved and `consult` is usable at once (the sub-agent role takes effect at the
+next launch). `/coworkers remove <name>` is the inverse.
 `/coworkers` lists the configured co-workers and how many times each has been
 consulted this session. `/consult [name] <question>` asks one directly —
 busy-safe; asked mid-run it runs on the session's own root context rather

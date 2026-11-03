@@ -84,9 +84,117 @@ var (
 // is copied: a UI listing co-workers must not be able to reorder or
 // overwrite the agent's own.
 func (a *Agent) Coworkers() []config.CoworkerConfig {
-	out := make([]config.CoworkerConfig, len(a.coworkers))
-	copy(out, a.coworkers)
+	cws := a.coworkerList()
+	out := make([]config.CoworkerConfig, len(cws))
+	copy(out, cws)
 	return out
+}
+
+// coworkerList is the current list under coworkMu: AddCoworker swaps it
+// from a UI goroutine while /consult may be reading it on another.
+func (a *Agent) coworkerList() []config.CoworkerConfig {
+	a.coworkMu.Lock()
+	defer a.coworkMu.Unlock()
+	return a.coworkers
+}
+
+// HasCoworkers reports whether anyone can be consulted.
+func (a *Agent) HasCoworkers() bool { return len(a.coworkerList()) > 0 }
+
+// AddCoworker adds a co-worker mid-session (/coworkers add) after the same
+// checks config.ValidCoworkers applies at startup: a name, a model, a
+// configured provider, no duplicate; an endpoint off this machine counts
+// as online whatever the entry says. The consult tool is registered or
+// refreshed so the next turn can call it.
+func (a *Agent) AddCoworker(cw config.CoworkerConfig) error {
+	cw.Name = strings.TrimSpace(cw.Name)
+	cw.Model = strings.TrimSpace(cw.Model)
+	switch {
+	case cw.Name == "":
+		return errors.New("a co-worker needs a name")
+	case cw.Model == "":
+		return errors.New("a co-worker needs a model")
+	}
+	pc, ok := a.Cfg.Providers[cw.Provider]
+	if !ok {
+		return fmt.Errorf("provider %q is not configured", cw.Provider)
+	}
+	if !config.LocalEndpoint(pc.BaseURL) {
+		cw.Online = true
+	}
+	a.coworkMu.Lock()
+	for _, have := range a.coworkers {
+		if have.Name == cw.Name {
+			a.coworkMu.Unlock()
+			return fmt.Errorf("a co-worker named %q already exists", cw.Name)
+		}
+	}
+	next := make([]config.CoworkerConfig, 0, len(a.coworkers)+1)
+	next = append(next, a.coworkers...)
+	a.coworkers = append(next, cw)
+	a.coworkMu.Unlock()
+	a.RegisterConsultTool()
+	return nil
+}
+
+// RemoveCoworker takes a co-worker out of the session; the consult tool
+// goes with the last one.
+func (a *Agent) RemoveCoworker(name string) error {
+	a.coworkMu.Lock()
+	var next []config.CoworkerConfig
+	found := false
+	for _, cw := range a.coworkers {
+		if cw.Name == name {
+			found = true
+			continue
+		}
+		next = append(next, cw)
+	}
+	a.coworkers = next
+	a.coworkMu.Unlock()
+	if !found {
+		return fmt.Errorf("no co-worker named %q", name)
+	}
+	a.RegisterConsultTool()
+	return nil
+}
+
+// RegisterConsultTool puts the consult tool in the registry for the
+// current co-worker list (replacing an earlier registration), or removes
+// it when the list is empty, and recomposes the prompt so the known-tool
+// list sees the change. cmd calls it at startup; AddCoworker and
+// RemoveCoworker call it mid-session.
+func (a *Agent) RegisterConsultTool() {
+	if a.Tools == nil {
+		return
+	}
+	cws := a.coworkerList()
+	if len(cws) == 0 {
+		a.Tools.RemoveTool("consult")
+		a.RefreshSystem()
+		return
+	}
+	roster := make([]tools.CoworkerInfo, 0, len(cws))
+	for _, cw := range cws {
+		roster = append(roster, tools.CoworkerInfo{Name: cw.Name, Skills: cw.Skills})
+	}
+	a.Tools.AddTool(tools.NewConsult(roster, func(ctx context.Context, args tools.ConsultArgs) (string, error) {
+		// RecentContext reads agent-goroutine-only fields; this runs
+		// inside dispatch, which is that goroutine.
+		res, err := a.Consult(ctx, ConsultRequest{
+			Who: args.Who, Question: args.Question, Files: args.Files,
+			Origin: "tool", Recent: a.RecentContext(),
+		})
+		if err != nil {
+			return "", err
+		}
+		out := "co-worker " + res.Coworker + " replied:\n\n" + res.Answer
+		if res.Partial {
+			out += "\n\n(the co-worker was cut short; this is what it had)"
+		}
+		return out, nil
+	}))
+	a.RefreshSystem() // the known-tool list and the prompt must see consult
 }
 
 // ConsultsThisRun is how many consultations the current RunFull has used
@@ -150,14 +258,15 @@ func (a *Agent) allow(name string) {
 }
 
 func (a *Agent) coworkerByName(who string) (config.CoworkerConfig, error) {
-	if len(a.coworkers) == 0 {
+	cws := a.coworkerList()
+	if len(cws) == 0 {
 		return config.CoworkerConfig{}, errors.New("no co-working models are configured")
 	}
 	if who == "" {
-		return a.coworkers[0], nil
+		return cws[0], nil
 	}
-	names := make([]string, 0, len(a.coworkers))
-	for _, cw := range a.coworkers {
+	names := make([]string, 0, len(cws))
+	for _, cw := range cws {
 		if cw.Name == who {
 			return cw, nil
 		}

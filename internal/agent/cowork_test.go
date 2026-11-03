@@ -797,3 +797,60 @@ func TestCoworkerFactoryGetsTheCallersContext(t *testing.T) {
 		t.Fatal("the factory did not get the caller's context")
 	}
 }
+
+func TestAddCoworkerRegistersConsultAndRemoveTakesItAway(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{}, func(c *config.Config) {
+		c.RepoMap = false
+		c.Providers["far"] = config.ProviderConfig{Type: "openai", BaseURL: "https://api.example.com/v1"}
+	})
+	if _, ok := ag.Tools.Tool("consult"); ok {
+		t.Fatal("consult registered with no co-workers")
+	}
+	for _, bad := range []config.CoworkerConfig{
+		{Name: "", Provider: "far", Model: "m"},
+		{Name: "x", Provider: "far", Model: ""},
+		{Name: "x", Provider: "nope", Model: "m"},
+	} {
+		if err := ag.AddCoworker(bad); err == nil {
+			t.Fatalf("accepted %+v", bad)
+		}
+	}
+	if err := ag.AddCoworker(config.CoworkerConfig{Name: " big ", Provider: "far", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ag.AddCoworker(config.CoworkerConfig{Name: "big", Provider: "far", Model: "m2"}); err == nil {
+		t.Fatal("duplicate name accepted")
+	}
+	cws := ag.Coworkers()
+	if len(cws) != 1 || cws[0].Name != "big" || !cws[0].Online {
+		t.Fatalf("%+v", cws)
+	}
+	if _, ok := ag.Tools.Tool("consult"); !ok {
+		t.Fatal("consult not registered")
+	}
+	if !ag.knownTools["consult"] {
+		t.Fatal("the known-tool list does not know consult")
+	}
+	if err := ag.AddCoworker(config.CoworkerConfig{Name: "small", Provider: "far", Model: "m2"}); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, s := range ag.Tools.Specs() {
+		if s.Name == "consult" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("consult listed %d times", n)
+	}
+	if err := ag.RemoveCoworker("nobody"); err == nil {
+		t.Fatal("removed a missing co-worker")
+	}
+	_ = ag.RemoveCoworker("big")
+	if err := ag.RemoveCoworker("small"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ag.Tools.Tool("consult"); ok || ag.HasCoworkers() {
+		t.Fatal("consult must go with the last co-worker")
+	}
+}

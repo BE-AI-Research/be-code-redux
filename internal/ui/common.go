@@ -87,7 +87,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/config", "show effective configuration", false},
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
-	{"/coworkers", "list co-working models and how often each was consulted", false},
+	{"/coworkers", "co-working models: list, /coworkers add (pick a provider and model), /coworkers remove <name>", true},
 	{"/api", "application API: status, /api on|off for this session", true},
 	{"/apps", "registered apps that may call the API", false},
 	{"/session", "this session's API token: /session token | rotate [grace]", true},
@@ -226,6 +226,11 @@ func RevokeCredential(cfg *config.Config, name string) string {
 // agent is busy. Everything else waits until the turn ends.
 func BusySafeCommand(line string) bool {
 	f := strings.Fields(line)
+	// Adding or removing a co-worker rewrites the tool catalog and the
+	// prompt; never under a running turn.
+	if len(f) > 1 && f[0] == "/coworkers" && (f[1] == "add" || f[1] == "remove") {
+		return false
+	}
 	if len(f) > 1 && f[0] == "/online" && f[1] == "add" {
 		// It prompts and ends in a provider switch (online setup spec §5):
 		// never mid-run, in either UI.

@@ -1789,7 +1789,7 @@ func (a *Agent) dispatch(ctx context.Context, call provider.ToolCall) tools.Resu
 		if len(a.toolFailStreak.last) > 3 {
 			a.toolFailStreak.last = a.toolFailStreak.last[1:]
 		}
-		if a.toolFailStreak.n == 3 && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && call.Name != "consult" {
+		if a.toolFailStreak.n == 3 && a.Cfg.Cowork.Auto && a.HasCoworkers() && call.Name != "consult" {
 			consult = fmt.Sprintf("the tool %s has failed three times in a row with these arguments:\n%s\n\nerrors:\n- %s",
 				call.Name, call.Arguments, strings.Join(a.toolFailStreak.last, "\n- "))
 		}
@@ -2435,7 +2435,7 @@ func (a *Agent) runFull(ctx context.Context, userInput string) (string, *Reviewe
 			// co-worker is worth the wait. One extra round, once per
 			// request — if that does not fix it, a second opinion on the
 			// same evidence would not either.
-			if rep.Verify != nil && !rep.Verify.Passed() && a.Cfg.Cowork.Auto && len(a.coworkers) > 0 && !a.autoVerifyUsed {
+			if rep.Verify != nil && !rep.Verify.Passed() && a.Cfg.Cowork.Auto && a.HasCoworkers() && !a.autoVerifyUsed {
 				a.autoVerifyUsed = true
 				files := a.changedFiles()
 				evidence := rep.Verify.ModelSummary()

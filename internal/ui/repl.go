@@ -996,6 +996,38 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			fmt.Println(dim("the token is not shown because stdout is not a terminal; use be-code session token --stdout"))
 		}
 	case "/coworkers":
+		if len(fields) > 1 && fields[1] == "add" {
+			r.mu.Lock()
+			busy := r.busy
+			r.mu.Unlock()
+			if busy {
+				fmt.Println(dim(busyLine))
+				break
+			}
+			var line string
+			var err error
+			func() {
+				c, cancel := context.WithCancel(ctx)
+				defer cancel()
+				r.SetPromptContext(c)
+				defer r.SetPromptContext(nil)
+				line, err = CoworkerAdd(c, r.Cfg, r.Agent, replPrompter{r})
+			}()
+			if err != nil {
+				fmt.Printf("%s %v\n", red("error>"), err)
+			}
+			_ = line
+			break
+		}
+		if len(fields) > 2 && fields[1] == "remove" {
+			line, err := RemoveCoworker(r.Cfg, r.Agent, fields[2])
+			if err != nil {
+				fmt.Printf("%s %v\n", red("error>"), err)
+				break
+			}
+			fmt.Println(line)
+			break
+		}
 		cws := r.Agent.Coworkers()
 		if len(cws) == 0 {
 			fmt.Println(dim(`no co-working models configured (see README "Co-working models")`))

@@ -289,27 +289,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 			fmt.Fprintf(os.Stderr, "warn: %s\n", w)
 		}
 		if len(cws) > 0 {
-			roster := make([]tools.CoworkerInfo, 0, len(cws))
-			for _, cw := range cws {
-				roster = append(roster, tools.CoworkerInfo{Name: cw.Name, Skills: cw.Skills})
-			}
-			reg.AddTool(tools.NewConsult(roster, func(ctx context.Context, a tools.ConsultArgs) (string, error) {
-				// RecentContext reads agent-goroutine-only fields; this
-				// runs inside dispatch, which is that goroutine.
-				res, err := ag.Consult(ctx, agent.ConsultRequest{
-					Who: a.Who, Question: a.Question, Files: a.Files,
-					Origin: "tool", Recent: ag.RecentContext(),
-				})
-				if err != nil {
-					return "", err
-				}
-				out := "co-worker " + res.Coworker + " replied:\n\n" + res.Answer
-				if res.Partial {
-					out += "\n\n(the co-worker was cut short; this is what it had)"
-				}
-				return out, nil
-			}))
-			ag.RefreshSystem() // the known-tool list and the prompt must see consult
+			ag.RegisterConsultTool() // the known-tool list and the prompt must see consult
 		}
 	}
 

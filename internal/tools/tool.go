@@ -477,9 +477,39 @@ func (r *Registry) add(ts ...Tool) {
 	r.toolsMu.Lock()
 	defer r.toolsMu.Unlock()
 	for _, t := range ts {
-		r.tools = append(r.tools, t)
+		// A tool added under a name that exists replaces it in place (the
+		// consult tool is re-registered when a co-worker is added), so
+		// the catalog never lists one name twice.
+		if _, ok := r.byName[t.Name()]; ok {
+			for i, old := range r.tools {
+				if old.Name() == t.Name() {
+					r.tools[i] = t
+					break
+				}
+			}
+		} else {
+			r.tools = append(r.tools, t)
+		}
 		r.byName[t.Name()] = t
 	}
+}
+
+// RemoveTool takes a tool out of the catalog by name; a missing name is
+// a no-op. The consult tool goes when the last co-worker is removed.
+func (r *Registry) RemoveTool(name string) {
+	r.toolsMu.Lock()
+	defer r.toolsMu.Unlock()
+	if _, ok := r.byName[name]; !ok {
+		return
+	}
+	delete(r.byName, name)
+	kept := r.tools[:0]
+	for _, t := range r.tools {
+		if t.Name() != name {
+			kept = append(kept, t)
+		}
+	}
+	r.tools = kept
 }
 
 // Specs returns provider-level tool specs.

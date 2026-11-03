@@ -267,6 +267,8 @@ type View struct {
 	// onlineAdd is this terminal's /online add in progress (onlineadd.go),
 	// nil when none; the Enter and Esc handlers and inputView consult it.
 	onlineAdd *onlineAddFlow
+	// coworkerAdd is this terminal's /coworkers add in progress.
+	coworkerAdd *coworkerAddFlow
 	// lastCmd is the Cmd the last Update returned, so a test can drive a
 	// Cmd the flow handed back without a running program.
 	lastCmd tea.Cmd
@@ -693,6 +695,10 @@ func (m *View) setIdleMode(to mode) {
 // terminal's own draft.
 func (m *View) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	in := &m.input
+	if m.coworkerAdd != nil && k.Type == tea.KeyEsc {
+		m.cancelCoworkerAdd()
+		return m, nil
+	}
 	if f := m.onlineAdd; f != nil {
 		if k.Type == tea.KeyEsc {
 			m.cancelOnlineAdd()
@@ -738,6 +744,9 @@ func (m *View) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		in.Reset()
 		// Before the history file: nothing typed into the flow is history.
 		if ok, cmd := m.onlineLine(text); ok {
+			return m, cmd
+		}
+		if ok, cmd := m.coworkerLine(text); ok {
 			return m, cmd
 		}
 		m.histFile.add(text, m.id)
@@ -1964,6 +1973,22 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 		}
 		m.renderLocalLines([]string{m.st.Dim.Render(note), m.st.Accent.Render(secret)})
 	case "/coworkers":
+		if len(fields) > 1 && fields[1] == "add" {
+			return m.startCoworkerAdd()
+		}
+		if len(fields) > 2 && fields[1] == "remove" {
+			if m.running {
+				m.appendEntryLocked(entry{Kind: entryDim, Text: "commands wait until the agent is done (Esc cancels); plain text is queued"})
+				return m, nil
+			}
+			line, err := ui.RemoveCoworker(m.cfg, m.ag, fields[2])
+			if err != nil {
+				m.appendEntryLocked(entry{Kind: entryErr, Text: err.Error()})
+				return m, nil
+			}
+			m.appendEntryLocked(entry{Kind: entryOK, Text: line})
+			return m, nil
+		}
 		// A listing, not a shared event: the terminal that asked is the one
 		// that wants to read it.
 		cws := m.ag.Coworkers()
