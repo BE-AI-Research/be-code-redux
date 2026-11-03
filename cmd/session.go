@@ -16,20 +16,37 @@ var sessionCmd = &cobra.Command{
 	Short: "A saved session's application-API token",
 }
 
-// loadForToken loads a session file that no running host owns. A live
-// session's file belongs to its host: join it and use /session token.
-func loadForToken(code string) (*store.Session, error) {
-	s, err := store.Load(code)
+// refuseIfLive refuses when any of codes is the code of a live host. It runs
+// before the store is read: a live session may have no file yet.
+func refuseIfLive(codes ...string) error {
+	dir, err := live.Dir()
+	if err != nil {
+		return nil
+	}
+	recs, _ := live.List(dir)
+	for _, r := range recs {
+		for _, c := range codes {
+			if c != "" && r.Code == c {
+				return fmt.Errorf("%s is live; join it (be-code attach %s) and use /session token there", r.Code, r.Code)
+			}
+		}
+	}
+	return nil
+}
+
+// loadForToken loads a session file that no running host owns. The live
+// registry is asked first, by code and by the code of a session id, and the
+// loaded session's own code is checked again once it is read.
+func loadForToken(arg string) (*store.Session, error) {
+	if err := refuseIfLive(arg, store.CodeFor(arg)); err != nil {
+		return nil, err
+	}
+	s, err := store.Load(arg)
 	if err != nil {
 		return nil, err
 	}
-	if dir, derr := live.Dir(); derr == nil {
-		recs, _ := live.List(dir)
-		for _, r := range recs {
-			if r.Code == s.ResumeCode() {
-				return nil, fmt.Errorf("%s is live; join it (be-code attach %s) and use /session token there", r.Code, r.Code)
-			}
-		}
+	if err := refuseIfLive(s.ResumeCode()); err != nil {
+		return nil, err
 	}
 	return s, nil
 }

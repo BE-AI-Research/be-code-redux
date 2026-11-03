@@ -57,6 +57,9 @@ func TestSessionTokenRefusesANonTTYWithoutStdout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--stdout") || strings.Contains(out, "sess_1_") {
 		t.Fatalf("a pipe without --stdout is refused and nothing is printed: %v %q", err, out)
 	}
+	if again, _ := store.Load(s.ID); again.Token != "" {
+		t.Fatal("a refused token call mints nothing and saves nothing")
+	}
 }
 
 func TestSessionRotateWithGrace(t *testing.T) {
@@ -114,5 +117,24 @@ func TestSessionSaveDoesNotStampHostPID(t *testing.T) {
 	again, _ := store.Load(s.ID)
 	if again.HostPID != 0 {
 		t.Fatalf("a command-line save must not stamp host_pid, got %d", again.HostPID)
+	}
+}
+
+// A host's session exists in memory before its first autosave, so a live
+// code may have no file at all; the refusal must not become a not-found.
+func TestSessionTokenRefusesALiveCodeWithNoFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	resetSessionFlags(t)
+	t.Cleanup(func() { resetSessionFlags(t) })
+	dir, _ := live.Dir()
+	_ = os.MkdirAll(dir, 0o700)
+	rec := live.Record{Code: "LIVE01", PID: os.Getpid(), Socket: "x", Workspace: t.TempDir()}
+	if err := rec.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	_ = sessionTokenCmd.Flags().Set("stdout", "true")
+	_, err := captureAppsStdout(t, func() error { return sessionTokenCmd.RunE(sessionTokenCmd, []string{"LIVE01"}) })
+	if err == nil || !strings.Contains(err.Error(), "/session token") || !strings.Contains(err.Error(), "be-code attach LIVE01") {
+		t.Fatalf("a live code without a file is refused, not not-found: %v", err)
 	}
 }
