@@ -409,3 +409,13 @@ func TestRejectedKeyErrorNamesTheAddCommand(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// I1 (final review): a rejected stored key says so, never naming an unset
+// variable it did not come from.
+func TestRejectedKeyErrorForAStoredKey(t *testing.T) {
+	he := &provider.HTTPError{Provider: "openrouter", Code: 401, Body: "x"}
+	got := rejectedKeyError("stored key for openrouter", he).Error()
+	if !strings.HasPrefix(got, "stored key for openrouter rejected by openrouter; or run /online add openrouter") {
+		t.Fatalf("%q", got)
+	}
+}

@@ -1132,6 +1132,17 @@ func applyOnline(cfg *config.Config, p provider.Provider, ag *agent.Agent, name,
 	resolveOnline(context.Background(), cfg, p, ag, name, model, true)
 }
 
+// keyDescription is how the key-rejected message names where the main
+// provider's key came from — never the key: the variable named by
+// api_key_env, or "stored key for <name>" when the stored credential is
+// what ProviderKey hands the provider.
+func keyDescription(cfg *config.Config, name string, pc config.ProviderConfig) string {
+	if src, _ := cfg.KeySource(name); src == "stored" {
+		return "stored key for " + name
+	}
+	return pc.APIKeyEnv
+}
+
 // onlineSwitchWindow is the window a switch to an online model applies when
 // neither its preset nor a configured context_window gives one (startup
 // instead falls through to ExplainBudget's derived default).
@@ -1153,7 +1164,8 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 		}
 		return
 	}
-	ag.SetKeyEnv(pc.APIKeyEnv)
+	keyDesc := keyDescription(cfg, name, pc)
+	ag.SetKeyEnv(keyDesc)
 	if !config.ProviderIsOnline(pc) {
 		setShareGate(cfg, ag, "")
 		ag.SetOnline("", "", agent.Pricing{})
@@ -1169,13 +1181,16 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 	if mc, ok := cfg.Models[model]; ok && mc.ContextWindow > 0 {
 		configured = mc.ContextWindow
 	}
-	keyMissing := pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == ""
+	// A stored credential is a key (online setup spec §2): only a provider
+	// that names a key variable and has neither it nor a stored key is
+	// missing one. A keyless endpoint (no api_key_env) is still listed.
+	keyMissing := pc.APIKeyEnv != "" && cfg.ProviderKey(name) == ""
 	if !wait {
 		// Only the state the gate reads is set here, synchronously: a TUI
 		// switch runs inside Update, under the session lock, and the window
 		// is applied behind it because ApplyWindow may raise a notice, which
 		// takes that same lock.
-		ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, provider.ModelInfo{}, preset))
+		ag.SetOnline(name, keyDesc, agent.PricingFor(model, provider.ModelInfo{}, preset))
 		go func() {
 			defer func() { _ = recover() }() // advisory: the preset already applies
 			current := func() bool {
@@ -1204,7 +1219,7 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 			if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
 				ag.ApplyWindow(w)
 			}
-			ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
+			ag.SetOnline(name, keyDesc, agent.PricingFor(model, listed, preset))
 		}()
 		return
 	}
@@ -1223,5 +1238,5 @@ func resolveOnline(ctx context.Context, cfg *config.Config, p provider.Provider,
 	if w := agent.OnlineWindow(listed, preset, configured); w > 0 {
 		ag.ApplyWindow(w)
 	}
-	ag.SetOnline(name, pc.APIKeyEnv, agent.PricingFor(model, listed, preset))
+	ag.SetOnline(name, keyDesc, agent.PricingFor(model, listed, preset))
 }

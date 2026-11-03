@@ -30,8 +30,9 @@ func (a *Agent) SetOnline(providerName, keyEnv string, p Pricing) {
 	}
 }
 
-// KeyEnv names the environment variable the main provider's API key came
-// from; "" when none. Read under onlineMu: a provider switch changes it.
+// KeyEnv names where the main provider's API key came from — the
+// environment variable, or "stored key for <name>" for a stored credential;
+// "" when none. Read under onlineMu: a provider switch changes it.
 func (a *Agent) KeyEnv() string {
 	a.onlineMu.Lock()
 	defer a.onlineMu.Unlock()

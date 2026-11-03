@@ -107,7 +107,8 @@ func wholeSeconds(d time.Duration) int {
 	return s
 }
 
-// rejectedKeyError names the variable the key came from, never the key.
+// rejectedKeyError names where the key came from — the variable, or "stored
+// key for <name>" (cmd's keyDescription) — never the key.
 func rejectedKeyError(keyEnv string, he *provider.HTTPError) error {
 	who := keyEnv
 	if who == "" {
