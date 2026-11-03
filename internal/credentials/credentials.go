@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 )
@@ -71,7 +72,8 @@ func (s *Store) load() error {
 	if err != nil {
 		return err
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
+	// Windows does not enforce modes on these paths, so the check is skipped there.
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("%w: run chmod 600 %s", ErrLooseMode, s.path)
 	}
 	b, err := os.ReadFile(s.path)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,8 +37,8 @@ func TestRoundTripAnd0600(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := s2.Key("groq")
-	if !ok || got != c {
-		t.Fatalf("got %+v ok=%v", got, ok)
+	if !ok || got.Kind != c.Kind || got.Source != c.Source || !got.Created.Equal(c.Created) || got.Key != c.Key {
+		t.Fatalf("round trip mismatch: ok=%v Kind=%q Source=%q Created=%v", ok, got.Kind, got.Source, got.Created)
 	}
 }
 
@@ -135,5 +136,57 @@ func TestRevokeMissingIsNoop(t *testing.T) {
 	}
 	if _, err := os.Stat(s.Path()); !os.IsNotExist(err) {
 		t.Fatal("revoke of a missing entry created the file")
+	}
+}
+
+func TestLooseModeRefusedOnWriteAndRevoke(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not enforce modes on credentials.json")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "credentials.json")
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("groq", Credential{Kind: KindAPIKey, Key: "k", Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(p)
+	if err := s.Put("other", Credential{Kind: KindAPIKey, Key: "k2", Created: time.Now()}); !errors.Is(err, ErrLooseMode) {
+		t.Fatalf("put on loose file: %v", err)
+	}
+	if err := s.Revoke("groq"); !errors.Is(err, ErrLooseMode) {
+		t.Fatalf("revoke on loose file: %v", err)
+	}
+	after, _ := os.ReadFile(p)
+	if string(before) != string(after) {
+		t.Fatal("loose file was rewritten")
+	}
+}
+
+func TestRevokeCorruptReportsParseError(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "credentials.json")
+	if err := os.WriteFile(p, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Revoke("groq")
+	if err == nil || !strings.Contains(err.Error(), "does not parse") || !strings.Contains(err.Error(), p) {
+		t.Fatalf("revoke on corrupt file: %v", err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{not json` {
+		t.Fatal("corrupt file was overwritten")
 	}
 }
