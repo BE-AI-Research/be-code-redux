@@ -155,7 +155,7 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 		p.Say("checking " + ch.Name + "…")
 		ms, err := onlineValidate(ctx, ch, key)
 		if errors.Is(err, setup.ErrKeyRejected) {
-			p.Say("key rejected by " + ch.Name)
+			p.Say(setup.RejectionLine(err, ch.Name))
 			browser = false
 			continue
 		}

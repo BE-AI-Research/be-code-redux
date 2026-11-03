@@ -246,7 +246,7 @@ func wizardOnlineKey(ctx context.Context, in *bufio.Reader, out io.Writer, pre p
 		fmt.Fprintf(out, "checking %s...\n", pre.Name)
 		ms, err := onlineValidate(ctx, ch, key)
 		if errors.Is(err, ErrKeyRejected) {
-			fmt.Fprintf(out, "key rejected by %s\n", pre.Name)
+			fmt.Fprintln(out, RejectionLine(err, pre.Name))
 			browser = false
 			continue
 		}

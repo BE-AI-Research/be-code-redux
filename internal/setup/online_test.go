@@ -256,3 +256,25 @@ func TestKeysPageLine(t *testing.T) {
 		t.Fatalf("not opened: %q", got)
 	}
 }
+
+func TestValidateCarriesTheProvidersRejectionMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`))
+	}))
+	defer srv.Close()
+	ch, _, _ := ChoiceFor(config.Default(), "mine", srv.URL+"/v1")
+	_, err := Validate(context.Background(), ch, "sk-ant-secret")
+	if !errors.Is(err, ErrKeyRejected) {
+		t.Fatalf("not a rejection: %v", err)
+	}
+	if got := RejectionLine(err, "anthropic"); got != "key rejected by anthropic: authentication_error: invalid x-api-key" {
+		t.Fatalf("%q", got)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatal("the key reached the error")
+	}
+	if got := RejectionLine(ErrKeyRejected, "groq"); got != "key rejected by groq" {
+		t.Fatalf("bare sentinel: %q", got)
+	}
+}

@@ -30,6 +30,26 @@ var (
 	ErrUnreachable = errors.New("endpoint unreachable or not OpenAI-compatible")
 )
 
+// KeyRejected is Validate's 401/403: the provider's own message rides
+// along (sanitised by provider.HTTPError.ProviderMessage, never a key),
+// because "rejected" alone leaves a person guessing between a typo, a key
+// for the wrong product and an account-side rule.
+type KeyRejected struct {
+	Provider, Detail string
+}
+
+func (e *KeyRejected) Error() string   { return RejectionLine(e, e.Provider) }
+func (e *KeyRejected) Is(t error) bool { return t == ErrKeyRejected }
+
+// RejectionLine is what every UI prints for a rejected key.
+func RejectionLine(err error, name string) string {
+	var kr *KeyRejected
+	if errors.As(err, &kr) && kr.Detail != "" {
+		return fmt.Sprintf("key rejected by %s: %s", name, kr.Detail)
+	}
+	return "key rejected by " + name
+}
+
 // ValidateTimeout bounds the one listing Validate makes.
 const ValidateTimeout = 15 * time.Second
 
@@ -86,7 +106,7 @@ func Validate(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo,
 	if errors.As(err, &he) {
 		switch he.Code {
 		case 401, 403:
-			return nil, fmt.Errorf("%w by %s", ErrKeyRejected, ch.Name)
+			return nil, &KeyRejected{Provider: ch.Name, Detail: he.ProviderMessage()}
 		case 404:
 			return nil, nil // no listing route: a typed model name instead
 		}

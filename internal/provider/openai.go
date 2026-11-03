@@ -327,7 +327,9 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		Data []struct {
 			ID            string     `json:"id"`
 			ContextLength flexNumber `json:"context_length"`
-			Pricing       struct {
+			// Anthropic's listing calls the window max_input_tokens.
+			MaxInput flexNumber `json:"max_input_tokens"`
+			Pricing  struct {
 				Prompt     flexNumber `json:"prompt"`
 				Completion flexNumber `json:"completion"`
 			} `json:"pricing"`
@@ -338,9 +340,13 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	}
 	out := make([]ModelInfo, 0, len(body.Data))
 	for _, m := range body.Data {
+		window := int(m.ContextLength)
+		if window == 0 {
+			window = int(m.MaxInput)
+		}
 		out = append(out, ModelInfo{
 			ID:              m.ID,
-			ContextLength:   int(m.ContextLength),
+			ContextLength:   window,
 			PromptPrice:     float64(m.Pricing.Prompt),
 			CompletionPrice: float64(m.Pricing.Completion),
 		})

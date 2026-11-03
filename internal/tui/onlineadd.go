@@ -344,7 +344,7 @@ func (m *View) onlineMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		case errors.Is(msg.err, setup.ErrKeyRejected):
 			// The sentinel's own text names no provider; Validate's
 			// wrapping does, but say it the same way whatever came back.
-			m.appendEntryLocked(entry{Kind: entryErr, Text: "key rejected by " + f.choice.Name})
+			m.appendEntryLocked(entry{Kind: entryErr, Text: setup.RejectionLine(msg.err, f.choice.Name)})
 			f.key = ""
 			mm, cmd := m.onlineAskKey()
 			return mm, cmd, true

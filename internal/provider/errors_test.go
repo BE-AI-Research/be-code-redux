@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,5 +62,37 @@ func TestOpenAIErrorCarriesStatusAndRetryAfter(t *testing.T) {
 	}
 	if he.Error() != `openrouter: HTTP 429: {"error":"rate limited"}` {
 		t.Fatalf("text = %q", he.Error())
+	}
+}
+
+func TestHTTPErrorProviderMessage(t *testing.T) {
+	cases := map[string]string{
+		`listing models: {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`:                                                      "authentication_error: invalid x-api-key",
+		`{"error":{"message":"Incorrect API key provided: sk-proj-abc***xyz. You can find your key at https://platform.openai.com.","type":"invalid_request_error"}}`: "invalid_request_error: Incorrect API key provided: [redacted]. You can find your key at https://platform.openai.com.",
+		`{"error":"plain string error"}`: "plain string error",
+		`<html>nope</html>`:              "",
+		``:                               "",
+	}
+	for body, want := range cases {
+		he := &HTTPError{Provider: "p", Code: 401, Body: body}
+		if got := he.ProviderMessage(); got != want {
+			t.Errorf("%q:\n got %q\nwant %q", body, got, want)
+		}
+	}
+	long := &HTTPError{Code: 400, Body: `{"error":{"message":"` + strings.Repeat("x\x1b[31m", 100) + `"}}`}
+	got := long.ProviderMessage()
+	if strings.ContainsRune(got, '\x1b') || len(got) > 163 {
+		t.Fatalf("control chars or length: %q", got)
+	}
+}
+
+func TestListModelsReadsAnthropicsWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"claude-x","max_input_tokens":200000,"display_name":"Claude X"},{"id":"or-y","context_length":131072}]}`))
+	}))
+	defer srv.Close()
+	ms, err := NewOpenAICompat("t", srv.URL+"/v1", "k").ListModels(context.Background())
+	if err != nil || len(ms) != 2 || ms[0].ContextLength != 200000 || ms[1].ContextLength != 131072 {
+		t.Fatalf("%v %v", ms, err)
 	}
 }

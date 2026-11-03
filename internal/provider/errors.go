@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,4 +49,50 @@ func ParseRetryAfter(h string, now time.Time) time.Duration {
 		}
 	}
 	return 0
+}
+
+// keyLike matches what an API key looks like inside a provider's error
+// text (OpenAI echoes a partly masked key back: "sk-proj-abc***xyz").
+// Nothing shaped like one is ever shown.
+var keyLike = regexp.MustCompile(`\b(?:sk|gsk|key)[-_][A-Za-z0-9*_-]{6,}|\bAIza[0-9A-Za-z_-]{20,}`)
+
+// ProviderMessage is the human-readable message inside the error body,
+// when the body is the JSON shape OpenAI-compatible servers (and
+// Anthropic) answer with: {"error":{"type":…,"message":…}} or
+// {"error":"…"}. It is sanitised for a terminal: control characters
+// removed, anything key-shaped redacted, at most 160 characters. Empty
+// when the body is not that shape (HTML, plain text).
+func (e *HTTPError) ProviderMessage() string {
+	body := e.Body
+	if i := strings.IndexByte(body, '{'); i > 0 {
+		body = body[i:]
+	}
+	var shape struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &shape) != nil || len(shape.Error) == 0 {
+		return ""
+	}
+	var msg string
+	var obj struct{ Type, Message string }
+	if json.Unmarshal(shape.Error, &obj) == nil && obj.Message != "" {
+		msg = obj.Message
+		if obj.Type != "" {
+			msg = obj.Type + ": " + msg
+		}
+	} else if json.Unmarshal(shape.Error, &msg) != nil {
+		return ""
+	}
+	msg = keyLike.ReplaceAllString(msg, "[redacted]")
+	msg = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, msg)
+	msg = strings.TrimSpace(msg)
+	if len(msg) > 160 {
+		msg = msg[:160] + "…"
+	}
+	return msg
 }
