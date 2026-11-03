@@ -11,7 +11,7 @@ The same port also plays a fake Ollama on /api/*, for the native scenario:
 the window) and /api/show offers no Modelfile num_ctx. Requests are routed
 by path first, since the native path is a different protocol on the same
 server, not another model on the OpenAI one."""
-import json, http.server, itertools
+import os, json, http.server, itertools
 
 counter = itertools.count()
 
@@ -218,7 +218,19 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(obj).encode())
 
+    def _denied(self):
+        # BE_E2E_KEY set: every request must carry that bearer key.
+        key = os.environ.get("BE_E2E_KEY")
+        if key and self.headers.get("Authorization") != "Bearer " + key:
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+        return False
+
     def do_POST(self):
+        if self._denied():
+            return
         if self.path.startswith("/api/"):
             return self.do_native()
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -292,6 +304,8 @@ class H(http.server.BaseHTTPRequestHandler):
         self._json({"done": True})
 
     def do_GET(self):
+        if not self.path.startswith("/api/") and self._denied():
+            return
         if self.path.startswith("/api/ps"):
             # Nothing resident: the loader may choose the configured window
             # without evicting anyone, so it needs no consent — which a
@@ -303,4 +317,4 @@ class H(http.server.BaseHTTPRequestHandler):
         self._json({"data": [{"id": "mock-model"}, {"id": "coworker-model"}, {"id": "task-model"},
                               {"id": "lead-model"}, {"id": "sub-model"}]})
 
-http.server.HTTPServer(("127.0.0.1", 18111), H).serve_forever()
+http.server.HTTPServer(("127.0.0.1", int(os.environ.get("BE_E2E_PORT", "18111"))), H).serve_forever()
