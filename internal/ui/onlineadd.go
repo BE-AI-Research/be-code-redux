@@ -99,13 +99,21 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 	for {
 		if browser {
 			pasted := make(chan string, 1)
+			bctx, bcancel := context.WithCancel(ctx)
+			done := make(chan struct{})
 			go func() {
+				defer close(done)
 				// The person may paste the redirect URL while the browser is awaited.
-				if s, ok := p.Ask(ctx, "waiting for the browser; or paste the redirect URL here: "); ok {
-					pasted <- s
+				if s, ok := p.Ask(bctx, "waiting for the browser; or paste the redirect URL here: "); ok {
+					select {
+					case pasted <- s:
+					default:
+					}
 				}
 			}()
 			k, err := onlineSignIn(ctx, signin.Options{Open: onlineOpenBrowser, Show: func(u string) { p.Say("open this URL to sign in: " + u) }, Pasted: pasted})
+			bcancel()
+			<-done
 			if err != nil {
 				if errors.Is(err, signin.ErrCancelled) {
 					p.Say(err.Error())

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/brown-enterprises/be-code/internal/config"
@@ -15,12 +16,20 @@ import (
 )
 
 type scriptedPrompter struct {
+	mu      sync.Mutex
 	answers []string
 	secrets []string
 	said    []string
 }
 
-func (s *scriptedPrompter) Ask(_ context.Context, q string) (string, bool) {
+func (s *scriptedPrompter) Ask(ctx context.Context, q string) (string, bool) {
+	if strings.HasPrefix(q, "waiting for the browser") {
+		// The paste prompt: nobody types; it ends when the flow cancels it.
+		<-ctx.Done()
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.said = append(s.said, q)
 	if len(s.answers) == 0 {
 		return "", false
@@ -30,6 +39,8 @@ func (s *scriptedPrompter) Ask(_ context.Context, q string) (string, bool) {
 	return a, true
 }
 func (s *scriptedPrompter) AskSecret(_ context.Context, q string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.said = append(s.said, q)
 	if len(s.secrets) == 0 {
 		return "", false
@@ -38,8 +49,14 @@ func (s *scriptedPrompter) AskSecret(_ context.Context, q string) (string, bool)
 	s.secrets = s.secrets[1:]
 	return a, true
 }
-func (s *scriptedPrompter) Say(line string) { s.said = append(s.said, line) }
-func (s *scriptedPrompter) all() string     { return strings.Join(s.said, "\n") }
+func (s *scriptedPrompter) Say(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.said = append(s.said, line)
+}
+func (s *scriptedPrompter) all() string {
+	return strings.Join(s.said, "\n")
+}
 
 func stubOnlineUI(t *testing.T) {
 	t.Helper()
