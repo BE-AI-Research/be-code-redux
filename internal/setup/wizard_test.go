@@ -142,9 +142,9 @@ func TestWizardOnlineAcceptsAPastedKey(t *testing.T) {
 		return []provider.ModelInfo{{ID: "m1"}, {ID: "m2"}}, nil
 	}
 	t.Cleanup(func() { onlineValidate = ov })
-	// [2] online (no backend found); provider 3 = groq; a rejected key,
-	// then the good one; model 2.
-	in := bufio.NewReader(strings.NewReader("2\n3\nbad\ngood\n2\n"))
+	// [2] online (no backend found); provider 5 = groq (after the four
+	// quick sign-in rows); a rejected key, then the good one; model 2.
+	in := bufio.NewReader(strings.NewReader("2\n5\nbad\ngood\n2\n"))
 	var out bytes.Buffer
 	cfg, err := Wizard(context.Background(), in, &out)
 	if err != nil || cfg == nil {
@@ -169,5 +169,39 @@ func TestWizardOnlineAcceptsAPastedKey(t *testing.T) {
 	reloaded, err := config.Load()
 	if err != nil || reloaded.DefaultProvider != "groq" || reloaded.Model != "m2" {
 		t.Fatalf("reloaded: %v %+v", err, reloaded)
+	}
+}
+
+func TestWizardAnthropicOpensItsKeysPageBeforeThePastedKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	oldP, oldL, oldO := probeBackends, listOnline, wizardOpenPage
+	t.Cleanup(func() { probeBackends, listOnline, wizardOpenPage = oldP, oldL, oldO })
+	probeBackends = func(context.Context, []Candidate, time.Duration) []Found { return nil }
+	listOnline = func(context.Context, provider.Preset) ([]provider.ModelInfo, error) { return nil, errors.New("unused") }
+	opened := ""
+	wizardOpenPage = func(u string) bool { opened = u; return false }
+	ov := onlineValidate
+	onlineValidate = func(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo, error) {
+		return []provider.ModelInfo{{ID: "m1"}}, nil
+	}
+	t.Cleanup(func() { onlineValidate = ov })
+	// [2] online; provider 3 = anthropic; the key; model 1.
+	in := bufio.NewReader(strings.NewReader("2\n3\ngood\n1\n"))
+	var out bytes.Buffer
+	cfg, err := Wizard(context.Background(), in, &out)
+	if err != nil || cfg == nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if opened != "https://console.anthropic.com/settings/keys" {
+		t.Fatalf("opened %q", opened)
+	}
+	if !strings.Contains(out.String(), "create a key at https://console.anthropic.com/settings/keys and paste it below") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	if cfg.DefaultProvider != "anthropic" || cfg.ProviderKey("anthropic") != "good" {
+		t.Fatalf("%+v", cfg)
 	}
 }

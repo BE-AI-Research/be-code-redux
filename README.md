@@ -671,7 +671,10 @@ from the provider's listing, and the first local backend found, if any, becomes 
 `/online add` in a session take the key three ways: the environment variable the preset names,
 a key pasted into a masked field, or, for OpenRouter, a sign-in in the browser that issues a key
 for this machine (no account registration; on a box without a browser the URL is printed and the
-redirect can be pasted back). A pasted or signed-in key is stored in `~/.be-code/credentials.json`
+redirect can be pasted back). The list opens with a quick sign-in row for OpenRouter, OpenAI,
+Anthropic and Gemini: the last three open the provider's own API-keys page in the browser and
+then ask for the key, because none of them issues a key to a third-party app through a login.
+A pasted or signed-in key is stored in `~/.be-code/credentials.json`
 at mode 0600; `config.json` never holds a secret, and the environment variable always wins when
 set. `/online` shows where the key comes from, `/online revoke <name>` (or `be-code online
 revoke`) deletes the stored one, and `doctor` reports the file and each provider's key source.

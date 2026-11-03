@@ -54,7 +54,7 @@
   Callers are registered apps (`be-code apps add`, a key shown once, a profile of tiers, models,
   packs and budgets); browsers are refused; one session serves per machine; headless runs never
   serve. `/api`, `/apps` and `/session token|rotate` in both UIs; `api.enabled` in config.
-- **Add an online provider from inside the harness.** `/online add` (and `be-code online add`, and `be-code setup`) takes a pasted key or, for OpenRouter, a browser sign-in, validates it against the provider's listing, and stores it in `~/.be-code/credentials.json` (0600). An environment variable still wins. `/online revoke`, `doctor` lines, and a `/online add` hint on a rejected key.
+- **Add an online provider from inside the harness.** `/online add` (and `be-code online add`, and `be-code setup`) takes a pasted key or, for OpenRouter, a browser sign-in, validates it against the provider's listing, and stores it in `~/.be-code/credentials.json` (0600). The list opens with a quick sign-in: OpenRouter signs in through the browser, and OpenAI, Anthropic and Gemini open their own API-keys page in the browser before the masked field (no provider issues a key to a third-party app through a login, so the page is the honest shortcut). An environment variable still wins. `/online revoke`, `doctor` lines, and a `/online add` hint on a rejected key.
 - `scripts/fix-provider-config.py` repairs `~/.be-code/config.json`, the file be-code loads; it
   no longer honours a `BE_CODE_CONFIG` variable be-code itself never read.
 - `uninstall.ps1` points the `-Purge` hint at `.\uninstall.cmd -Purge`, the launcher a default

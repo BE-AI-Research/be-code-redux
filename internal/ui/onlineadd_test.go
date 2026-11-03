@@ -69,7 +69,9 @@ func stubOnlineUI(t *testing.T) {
 	}
 	onlineSignIn = func(ctx context.Context, o signin.Options) (string, error) { return "sk-or-test", nil }
 	onlineOpenBrowser = func(string) error { t.Fatal("no browser in tests"); return nil }
-	t.Cleanup(func() { onlineValidate, onlineSignIn, onlineOpenBrowser = ov, os_, ob })
+	op := onlineOpenPage
+	onlineOpenPage = func(string) bool { t.Fatal("no keys page in tests without a stub"); return false }
+	t.Cleanup(func() { onlineValidate, onlineSignIn, onlineOpenBrowser, onlineOpenPage = ov, os_, ob, op })
 }
 
 func TestOnlineAddPlainFlow(t *testing.T) {
@@ -77,8 +79,8 @@ func TestOnlineAddPlainFlow(t *testing.T) {
 	t.Setenv("HOME", home)
 	stubOnlineUI(t)
 	cfg := config.Default()
-	// answers: preset number for groq (3rd preset), model 2, default no
-	p := &scriptedPrompter{answers: []string{"3", "2", "n"}, secrets: []string{"bad", "good\n"}}
+	// answers: preset number for groq (5th: after the four quick sign-in rows), model 2, default no
+	p := &scriptedPrompter{answers: []string{"5", "2", "n"}, secrets: []string{"bad", "good\n"}}
 	name, model, err := OnlineAdd(context.Background(), cfg, p, "")
 	if err != nil || name != "groq" || model != "m2" {
 		t.Fatalf("%q %q %v\n%s", name, model, err, p.all())
@@ -115,7 +117,7 @@ func TestOnlineAddPlainBrowserAndCancel(t *testing.T) {
 	// Withdrawn at the key step: nothing written.
 	home2 := t.TempDir()
 	t.Setenv("HOME", home2)
-	p = &scriptedPrompter{answers: []string{"3"}}
+	p = &scriptedPrompter{answers: []string{"5"}} // groq: no keys page to open
 	if name, _, err := OnlineAdd(context.Background(), config.Default(), p, ""); name != "" || err != nil {
 		t.Fatalf("cancel: %q %v", name, err)
 	}
@@ -134,5 +136,36 @@ func TestOnlineAddPlainNonTTYRefused(t *testing.T) {
 	out := capture(t, func() { r.command(context.Background(), "/online add groq") })
 	if !strings.Contains(out, "needs a terminal") {
 		t.Fatalf("%q", out)
+	}
+}
+
+func TestOnlineAddPlainListsQuickSignInFirstAndOpensTheKeysPage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnlineUI(t)
+	opened := ""
+	onlineOpenPage = func(u string) bool { opened = u; return true }
+	cfg := config.Default()
+	// [2] openai, model 1, default no
+	p := &scriptedPrompter{answers: []string{"2", "1", "n"}, secrets: []string{"good"}}
+	name, _, err := OnlineAdd(context.Background(), cfg, p, "")
+	if err != nil || name != "openai" {
+		t.Fatalf("%q %v\n%s", name, err, p.all())
+	}
+	out := p.all()
+	for _, want := range []string{
+		"[1] openrouter   sign in with browser, or paste a key",
+		"[2] openai       opens the API keys page, then paste a key",
+		"[3] anthropic    opens the API keys page, then paste a key",
+		"[4] gemini       opens the API keys page, then paste a key",
+		"[5] groq         paste a key",
+		"[8] custom OpenAI-compatible endpoint",
+		"opened https://platform.openai.com/api-keys in your browser; create a key there and paste it below",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if opened != "https://platform.openai.com/api-keys" {
+		t.Fatalf("opened %q", opened)
 	}
 }

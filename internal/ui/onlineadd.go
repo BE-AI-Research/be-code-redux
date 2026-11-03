@@ -21,6 +21,7 @@ var (
 	onlineValidate    = setup.Validate
 	onlineSignIn      = signin.SignIn
 	onlineOpenBrowser = signin.OpenBrowser
+	onlineOpenPage    = signin.OpenPage
 )
 
 // Prompter is one terminal's questions and lines for OnlineAdd.
@@ -40,12 +41,12 @@ type unrecordedAsker interface {
 // OnlineAdd is /online add [name] on numbered prompts (spec §6).
 func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string) (string, string, error) {
 	cancelled := func() (string, string, error) { p.Say("cancelled; nothing was stored"); return "", "", nil }
-	presets := provider.Presets()
+	presets := provider.SignInOrder()
 	var ch setup.Choice
 	if name == "" {
 		p.Say("Online providers:")
 		for i, pre := range presets {
-			p.Say(fmt.Sprintf("  [%d] %-12s %s", i+1, pre.Name, pre.Docs))
+			p.Say(fmt.Sprintf("  [%d] %-12s %s", i+1, pre.Name, pre.SignInHint()))
 		}
 		p.Say(fmt.Sprintf("  [%d] custom OpenAI-compatible endpoint", len(presets)+1))
 		n, ok := askNumber(ctx, p, "Choose", 1, len(presets)+1)
@@ -95,6 +96,11 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 	key, source := "", "pasted"
 	var models []provider.ModelInfo
 	browser := false
+	if pre, ok := provider.PresetByName(ch.Name); ok && pre.KeysURL != "" {
+		// The "sign in" these providers can honestly offer: their own keys
+		// page, opened here, then the masked prompt.
+		p.Say(setup.KeysPageLine(pre.KeysURL, onlineOpenPage(pre.KeysURL)))
+	}
 	if ch.Name == "openrouter" {
 		p.Say("  [1] Sign in with browser\n  [2] Paste a key")
 		n, ok := askNumber(ctx, p, "Choose", 1, 2)

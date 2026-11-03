@@ -43,6 +43,23 @@ func QuickSignIn() []Preset {
 	return out
 }
 
+// SignInOrder is every preset in the order the numbered UIs list them:
+// the quick sign-in rows first, then the rest.
+func SignInOrder() []Preset {
+	return append(QuickSignIn(), OtherPresets()...)
+}
+
+// SignInHint is the one-line description a listing shows beside a preset.
+func (p Preset) SignInHint() string {
+	switch {
+	case p.Name == "openrouter":
+		return "sign in with browser, or paste a key"
+	case p.KeysURL != "":
+		return "opens the API keys page, then paste a key"
+	}
+	return "paste a key · " + p.Docs
+}
+
 // OtherPresets returns the presets that are not quick sign-in rows.
 func OtherPresets() []Preset {
 	var out []Preset

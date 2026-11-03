@@ -23,9 +23,10 @@ import (
 // probeBackends, listOnline and wizardSignIn are the wizard's network
 // seams (onlineValidate, in online.go, is the fourth); tests replace them.
 var (
-	wizardSignIn  = signin.SignIn
-	probeBackends = Probe
-	listOnline    = func(ctx context.Context, p provider.Preset) ([]provider.ModelInfo, error) {
+	wizardSignIn   = signin.SignIn
+	wizardOpenPage = signin.OpenPage
+	probeBackends  = Probe
+	listOnline     = func(ctx context.Context, p provider.Preset) ([]provider.ModelInfo, error) {
 		return provider.NewOpenAICompat(p.Name, p.BaseURL, os.Getenv(p.KeyEnv)).ListModels(ctx)
 	}
 )
@@ -136,10 +137,10 @@ var errWizardCancelled = errors.New("setup cancelled; nothing was saved")
 // credential file, never in config.json; input that ends first saves
 // nothing.
 func wizardOnline(ctx context.Context, in *bufio.Reader, out io.Writer, found []Found) (*config.Config, error) {
-	presets := provider.Presets()
+	presets := provider.SignInOrder()
 	fmt.Fprintln(out, "\nOnline providers:")
 	for i, p := range presets {
-		fmt.Fprintf(out, "  [%d] %-12s %s (key in %s)\n", i+1, p.Name, p.BaseURL, p.KeyEnv)
+		fmt.Fprintf(out, "  [%d] %-12s %s (key in %s)\n", i+1, p.Name, p.SignInHint(), p.KeyEnv)
 	}
 	pre := presets[pickNumber(in, out, "Choose a provider", 1, len(presets))-1]
 	var helper *Found
@@ -204,6 +205,11 @@ func wizardOnlineKey(ctx context.Context, in *bufio.Reader, out io.Writer, pre p
 		browser = n == 1
 	} else {
 		fmt.Fprintln(out, "  Paste a key (it is stored in ~/.be-code/"+credentials.FileName+", mode 0600)")
+		if pre.KeysURL != "" {
+			// The "sign in" these providers can honestly offer: their own
+			// keys page, opened here, then the masked field.
+			fmt.Fprintln(out, KeysPageLine(pre.KeysURL, wizardOpenPage(pre.KeysURL)))
+		}
 	}
 	var (
 		key, source string
