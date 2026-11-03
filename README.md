@@ -543,14 +543,19 @@ Three things a caller can ask for, each with `Authorization: Bearer <key>`:
 
 - `POST /v1/query` `{prompt, system?, model?, pack?, json_schema?, max_tokens?}` → one answer
   with no tools and no history; `pack` puts an active pack's rules in front of `system`;
-  `json_schema` has the reply checked on the way out (422 `schema_mismatch` with the text).
+  `json_schema` is sent to the model as its structured-output format (Ollama's `format`,
+  OpenAI's `response_format`) and the reply is checked on the way out (422 `schema_mismatch`
+  with the text). A named `model` runs on the provider the session is using now, and is refused
+  (403 `model_not_allowed`) while that provider is online, since only the session's own model's
+  spend is counted and capped.
 - `POST /v1/chat/completions` — the OpenAI shape, streaming with `stream: true`. Point an
   existing OpenAI client at the socket with `base_url` and the key as `api_key`; `model:
   "default"` is the session's model. Requests with `tools` or `n > 1` are refused with
-  `not_supported`, since this tier serves inference only.
+  `not_supported`, since this tier serves inference only. A `response_format` is passed to the
+  provider unchanged.
 - `POST /v1/sessions/<token>/query` — the same question answered with the serving session's
   conversation as context, never appended to it. The token is `/session token` in the session
-  (or `be-code session token <code>` for one that is not running), sent as `X-BE-Session`;
+  (or `be-code session token <code>` for one no running process has open), sent as `X-BE-Session`;
   `/session rotate [grace]` replaces it. Browser and web page text in the conversation is
   withheld from the caller.
 
@@ -564,8 +569,9 @@ refused: the API is for programs, not pages. `~/.be-code/api` must be mode 0700 
 on Windows the directory's ACL is the boundary. The access log at `~/.be-code/api/access.log`
 names apps and session codes, never keys or tokens.
 
-A request on the session's own model makes the server's prompt cache cold for the person's next
-turn; the session re-reads its prompt in the background afterwards, so the cost that remains
+An app's request waits its turn on the session's server behind the person's own, and while
+a model switch is still settling its context window. A request on the session's own model makes
+the server's prompt cache cold for the person's next turn; the session re-reads its prompt in the background afterwards, so the cost that remains
 is the request's own. A streamed completion's chunks carry the requested model name; the final
 response carries the resolved one. An older build that resaves a session drops its token, and
 the app must fetch a new one.

@@ -422,3 +422,14 @@ lock-based reclaim; token commands refused mid-turn; no `api:` marker on the com
 streamed chunks name the requested model. Error codes added to the list the spec implies:
 `bad_request`, `timeout`, `not_found`, `online_not_approved`. `session_busy` (409) stands as
 planned.
+
+Final-review fixes (2026-11-02): a named model is built on the session's *current* provider (not
+`default_provider`) and refused with 403 `model_not_allowed` while that provider is online, since
+spend is counted and capped only at the primary's pricing; the API path takes the primary
+server's lane (created by `Agent.EnsurePrimaryLane` when no sub-agent runner exists) at
+background priority, waits for a window resolution (`awaitWindow`) and stops a prefill before
+its call; structured output reaches the provider (`json_schema` as Ollama's `format` / OpenAI's
+`response_format` json_schema, a completion's `response_format` unchanged, JSON `null` meaning
+none); app budgets are defaulted on every read, so a hand-edited 0 is never unbounded; and
+`session token|rotate` refuse while any live process owns the file — a live host by the live
+registry, a plain or `--no-host` session by its `host_pid`.
