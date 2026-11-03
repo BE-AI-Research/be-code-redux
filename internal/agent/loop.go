@@ -375,6 +375,11 @@ type Agent struct {
 	// laneAcquire wraps every model call once lanes exist (spec §2.2).
 	subs        *subAgents
 	laneAcquire func(ctx context.Context) (func(), error)
+	// ownLanes are the primary server's lanes when no sub-agent runner
+	// exists (EnsurePrimaryLane): the application API needs its calls and
+	// the person's serialised on one server without the runner's other
+	// effects (guidance block, dispatch). nil until something asks.
+	ownLanes atomic.Pointer[subagent.Lanes]
 
 	// sessionMu guards the Session pointer against a UI reading it while
 	// /clear or /resume swaps it from a goroutine of their own. It guards

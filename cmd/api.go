@@ -107,6 +107,9 @@ func (s *apiService) Start() error {
 	if logf != nil {
 		opts.AccessLog = logf
 	}
+	// The API's model calls share the primary server's lane with the
+	// person's own, which a session with no sub-agent would otherwise lack.
+	s.ag.EnsurePrimaryLane()
 	srv := api.New(opts)
 	s.mu.Lock()
 	s.srv, s.ln, s.logf = srv, ln, logf
@@ -187,11 +190,13 @@ func apiDoctorLines(cfg *config.Config) []string {
 }
 
 // apiModelFactory serves a named model the way a reviewer is built: its own
-// provider from the default provider's config, loaded through a loader with
-// no approver so the primary's window is never touched.
-func apiModelFactory(ag *agent.Agent) func(ctx context.Context, c *config.Config, model string) (provider.Provider, error) {
-	return func(ctx context.Context, c *config.Config, model string) (provider.Provider, error) {
-		p, err := provider.FromConfig(c, c.DefaultProvider)
+// provider from the config of the provider the session is talking to now
+// (never c.DefaultProvider, which --provider and /provider leave behind),
+// loaded through a loader with no approver so the primary's window is never
+// touched. The adapter refuses named models while that provider is online.
+func apiModelFactory(ag *agent.Agent) func(ctx context.Context, c *config.Config, providerName, model string) (provider.Provider, error) {
+	return func(ctx context.Context, c *config.Config, providerName, model string) (provider.Provider, error) {
+		p, err := provider.FromConfig(c, providerName)
 		if err != nil {
 			return nil, err
 		}

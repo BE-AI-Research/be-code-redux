@@ -124,7 +124,12 @@ func rejectedKeyError(keyEnv string, he *provider.HTTPError) error {
 // message — because a compaction colliding with a sub-agent on one Ollama is
 // exactly the overload the lane exists to prevent.
 func (a *Agent) inLane(ctx context.Context, fn func() (*provider.ChatResponse, error)) (*provider.ChatResponse, error) {
-	return inLaneWith(ctx, a.laneAcquire, fn)
+	acquire := a.laneAcquire
+	if acquire == nil {
+		// No runner: the lane EnsurePrimaryLane made for the API, if any.
+		acquire = a.ownPrimaryLane(true)
+	}
+	return inLaneWith(ctx, acquire, fn)
 }
 
 // inLaneWith is inLane for a caller with a lane of its own rather than the

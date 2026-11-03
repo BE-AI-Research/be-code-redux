@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,10 +21,12 @@ import (
 )
 
 // APIModelFactory builds a provider for a model the serving session is not
-// running, loaded as a reviewer is (cmd/root.go: FromConfig + secondaryLoad)
-// so the primary's window is never touched. Nil means only "default" is
-// served. Injected from cmd/root.go like ReviewerFactory.
-var APIModelFactory func(ctx context.Context, cfg *config.Config, model string) (provider.Provider, error)
+// running, on providerName — the session's *current* provider, never
+// cfg.DefaultProvider, which --provider and /provider leave behind — loaded
+// as a reviewer is (cmd/root.go: FromConfig + secondaryLoad) so the
+// primary's window is never touched. Nil means only "default" is served.
+// Injected from cmd/root.go like ReviewerFactory.
+var APIModelFactory func(ctx context.Context, cfg *config.Config, providerName, model string) (provider.Provider, error)
 
 // APIBackend answers the application API from the running session (spec
 // 2026-11-02-app-api-design.md §4–§5). Nothing here is a typed request: it
@@ -34,7 +38,7 @@ type APIBackend struct {
 	since   time.Time
 
 	mu    sync.Mutex
-	provs map[string]provider.Provider // named models, built once each
+	provs map[string]provider.Provider // named models by provider + model, built once each
 }
 
 func NewAPIBackend(a *Agent, version string) *APIBackend {
@@ -90,11 +94,22 @@ func (b *APIBackend) Query(ctx context.Context, q api.QueryRequest) (api.QueryRe
 		msgs = append(msgs, provider.Message{Role: provider.RoleSystem, Content: system})
 	}
 	msgs = append(msgs, provider.Message{Role: provider.RoleUser, Content: q.Prompt})
-	resp, model, err := b.chat(ctx, q.Model, provider.ChatRequest{Messages: msgs, MaxTokens: q.MaxTokens, NoThink: true}, nil)
+	req := provider.ChatRequest{Messages: msgs, MaxTokens: q.MaxTokens, NoThink: true, Format: rawOrNil(q.JSONSchema)}
+	resp, model, err := b.chat(ctx, q.Model, req, nil)
 	if err != nil {
 		return api.QueryResponse{}, err
 	}
 	return api.QueryResponse{Text: strings.TrimSpace(resp.Content), Model: model, Pack: used, Usage: usageOf(resp)}, nil
+}
+
+// rawOrNil is r, or nil when it is absent or JSON null: "null" asks for no
+// structured output, and must not reach a provider as a format.
+func rawOrNil(r json.RawMessage) json.RawMessage {
+	t := bytes.TrimSpace(r)
+	if len(t) == 0 || bytes.Equal(t, []byte("null")) {
+		return nil
+	}
+	return r
 }
 
 // systemFor is the caller's system text with an allowed, active pack's
@@ -122,7 +137,8 @@ func (b *APIBackend) Complete(ctx context.Context, c api.CompletionRequest, onDe
 	for _, m := range c.Messages {
 		msgs = append(msgs, provider.Message{Role: provider.Role(m.Role), Content: m.Content})
 	}
-	req := provider.ChatRequest{Messages: msgs, MaxTokens: c.MaxTokens, NoThink: true}
+	// The caller's response_format goes to the provider unchanged (spec §4.2).
+	req := provider.ChatRequest{Messages: msgs, MaxTokens: c.MaxTokens, NoThink: true, ResponseFormat: rawOrNil(c.ResponseFormat)}
 	if c.Temperature != nil {
 		req.Temperature = *c.Temperature
 	}
@@ -146,24 +162,10 @@ func (b *APIBackend) Complete(ctx context.Context, c api.CompletionRequest, onDe
 // stripped, web page text withheld, never appended.
 func (b *APIBackend) SessionQuery(ctx context.Context, q api.QueryRequest) (api.QueryResponse, error) {
 	a := b.a
-	if !a.turnMu.TryLock() {
+	system, snapshot, ok := a.apiSnapshot()
+	if !ok {
 		return api.QueryResponse{}, api.Errorf(http.StatusConflict, "session_busy", "the session is in the middle of a turn; try again shortly")
 	}
-	a.modelMu.Lock()
-	system := a.History.System.Content
-	a.modelMu.Unlock()
-	snapshot := make([]provider.Message, 0, len(a.History.Messages)+1)
-	all := a.History.Messages
-	for _, m := range all {
-		m := m
-		if webResult(m, all) {
-			m.Content = "(page text is not shown)"
-		} else {
-			m.Content = StripHarnessState(m.Content)
-		}
-		snapshot = append(snapshot, m)
-	}
-	a.turnMu.Unlock()
 
 	callerSystem, used := b.systemFor(q)
 	if callerSystem != "" {
@@ -190,6 +192,35 @@ func (b *APIBackend) SessionQuery(ctx context.Context, q api.QueryRequest) (api.
 	return api.QueryResponse{Text: strings.TrimSpace(resp.Content), Model: model, Pack: used, Usage: usageOf(resp)}, nil
 }
 
+// apiSnapshot copies the system prompt and the conversation, harness state
+// stripped and web page text withheld, with the turn lock held (TryLock: ok
+// is false while a turn runs). Both locks are released by defer, so a panic
+// while copying — recovered by net/http — never leaves the session locked
+// for the life of the process.
+func (a *Agent) apiSnapshot() (system string, snapshot []provider.Message, ok bool) {
+	if !a.turnMu.TryLock() {
+		return "", nil, false
+	}
+	defer a.turnMu.Unlock()
+	system = func() string {
+		a.modelMu.Lock()
+		defer a.modelMu.Unlock()
+		return a.History.System.Content
+	}()
+	all := a.History.Messages
+	snapshot = make([]provider.Message, 0, len(all)+1)
+	for _, m := range all {
+		m := m
+		if webResult(m, all) {
+			m.Content = "(page text is not shown)"
+		} else {
+			m.Content = StripHarnessState(m.Content)
+		}
+		snapshot = append(snapshot, m)
+	}
+	return system, snapshot, true
+}
+
 // chat runs one request inside the server's lane on the primary's own
 // provider (model "" or "default") or on a named model's provider built by
 // APIModelFactory. It deliberately does not go through chatFiltered: that
@@ -200,22 +231,37 @@ func (b *APIBackend) SessionQuery(ctx context.Context, q api.QueryRequest) (api.
 // §5: the API call made the cache cold).
 func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRequest, onDelta provider.StreamFunc) (*provider.ChatResponse, string, error) {
 	a := b.a
-	prov, name, profile := a.modelSnapshot()
 	primary := model == "" || model == "default"
 	// The person's gate and cap, never a prompt: an app's request is refused
 	// outright (spec §5), not put to the terminal. The gate covers named
-	// models too: they are built from the same default provider's config.
+	// models too: they are built on the same, current provider.
 	if err := a.checkOnlineGate(ctx, false); err != nil {
 		return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
 	}
+	_, online := a.Online()
+	if !primary && online {
+		// Spend is counted and capped only at the primary's own pricing; a
+		// named model's bill could be neither, and an uncapped bill is
+		// worse than a refusal.
+		return nil, "", api.Errorf(http.StatusForbidden, "model_not_allowed", "named models are not served while the session's provider is online; use the default model")
+	}
 	if primary {
-		if _, online := a.Online(); online {
+		if online {
 			if capUSD := a.SpendCap(); capUSD > 0 && a.Usage().SpendUSD >= capUSD {
 				return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "the session's spend cap of $%.2f is reached", capUSD)
 			}
 		}
-	} else {
-		p, err := b.providerFor(ctx, model)
+		// Never with no window on the wire (the 0.12.1 incident): after a
+		// /model the request waits for the resolution, as every primary
+		// call site does. The model is read after the wait.
+		a.awaitWindow(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+	}
+	prov, name, profile, provName := a.apiModelSnapshot()
+	if !primary {
+		p, err := b.providerFor(ctx, provName, model)
 		if err != nil {
 			return nil, "", err
 		}
@@ -236,7 +282,11 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 			}
 		}()
 	}
-	resp, err := a.inLane(ctx, func() (*provider.ChatResponse, error) { return prov.Chat(ctx, req, onDelta) })
+	// A prefill never shares the server with a real request, and the lane
+	// is the primary server's at background priority: the person's own
+	// requests go first, and the API never runs alongside them (spec §5).
+	a.stopPrefill()
+	resp, err := inLaneWith(ctx, a.laneFor(provName, false), func() (*provider.ChatResponse, error) { return prov.Chat(ctx, req, onDelta) })
 	if err != nil {
 		return nil, "", err
 	}
@@ -262,20 +312,24 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 	return resp, name, nil
 }
 
-func (b *APIBackend) providerFor(ctx context.Context, model string) (provider.Provider, error) {
+// providerFor is the named model's provider on providerName, built once
+// per provider and model: keyed by both, so a /provider switch never serves
+// a provider built for the backend the session has left.
+func (b *APIBackend) providerFor(ctx context.Context, providerName, model string) (provider.Provider, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if APIModelFactory == nil {
 		return nil, api.Errorf(http.StatusForbidden, "model_not_allowed", "this session serves only its own model")
 	}
-	if p, ok := b.provs[model]; ok {
+	key := providerName + "\x00" + model
+	if p, ok := b.provs[key]; ok {
 		return p, nil
 	}
-	p, err := APIModelFactory(ctx, b.a.Cfg, model)
+	p, err := APIModelFactory(ctx, b.a.Cfg, providerName, model)
 	if err != nil {
 		return nil, fmt.Errorf("model %s: %w", model, err)
 	}
-	b.provs[model] = p
+	b.provs[key] = p
 	return p, nil
 }
 
@@ -285,6 +339,19 @@ func (a *Agent) modelSnapshot() (provider.Provider, string, profiles.Profile) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	return a.Provider, a.Model, a.Profile
+}
+
+// apiModelSnapshot is modelSnapshot plus the provider's name, read together
+// under modelMu so a /provider switch cannot pair one backend's name with
+// another's model.
+func (a *Agent) apiModelSnapshot() (provider.Provider, string, profiles.Profile, string) {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	name := ""
+	if a.Provider != nil {
+		name = a.Provider.Name()
+	}
+	return a.Provider, a.Model, a.Profile, name
 }
 
 func usageOf(r *provider.ChatResponse) api.Usage {

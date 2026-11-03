@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,5 +102,21 @@ func TestAPIServiceLifecycleStopRacingStart(t *testing.T) {
 		if _, ok := api.Serving(dir); !ok {
 			t.Fatalf("round %d: record gone", i)
 		}
+	}
+}
+
+// A named model is built on the provider the session talks to now, never on
+// default_provider (--provider and /provider leave that behind).
+func TestAPIModelFactoryUsesTheNamedProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers["here"] = config.ProviderConfig{Type: "openai", BaseURL: "http://127.0.0.1:1/v1"}
+	cfg.Providers["elsewhere"] = config.ProviderConfig{Type: "openai", BaseURL: "https://example.invalid/v1"}
+	cfg.DefaultProvider = "elsewhere"
+	p, err := apiModelFactory(nil)(context.Background(), cfg, "here", "big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name() != "here" {
+		t.Fatalf("built on %q, want the session's current provider", p.Name())
 	}
 }

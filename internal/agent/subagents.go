@@ -183,7 +183,13 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 			return
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		a.subs = &subAgents{lanes: subagent.NewLanes(), runs: map[string]*subRun{}, refused: map[string]bool{},
+		// Lanes the API already ensured are adopted, so a call holding one
+		// of them is still seen by the runner's own requests.
+		lanes := a.ownLanes.Load()
+		if lanes == nil {
+			lanes = subagent.NewLanes()
+		}
+		a.subs = &subAgents{lanes: lanes, runs: map[string]*subRun{}, refused: map[string]bool{},
 			hold: map[string]bool{}, pending: map[string]bool{}, root: ctx, cancel: cancel}
 	}
 	s := a.subs
@@ -242,7 +248,7 @@ func (a *Agent) RebindPrimaryLane() {
 func (a *Agent) prefillLane() func(ctx context.Context) (func(), error) {
 	s := a.subs
 	if s == nil {
-		return nil
+		return a.ownPrimaryLane(false)
 	}
 	s.mu.Lock()
 	key, lanes := s.primary, s.lanes
@@ -260,7 +266,10 @@ func (a *Agent) prefillLane() func(ctx context.Context) (func(), error) {
 // second-model review both block the request the person is watching.
 func (a *Agent) laneFor(providerName string, primary bool) func(ctx context.Context) (func(), error) {
 	s := a.subs
-	if s == nil || a.Cfg == nil {
+	if s == nil {
+		return a.ownLaneFor(providerName, primary)
+	}
+	if a.Cfg == nil {
 		return nil
 	}
 	pc, ok := a.Cfg.Providers[providerName]
@@ -270,6 +279,63 @@ func (a *Agent) laneFor(providerName string, primary bool) func(ctx context.Cont
 	key := subagent.LaneKey(pc.BaseURL)
 	lanes := s.lanes
 	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, primary) }
+}
+
+// EnsurePrimaryLane gives the primary's server a lane when no sub-agent
+// runner has one, so the person's own model calls and the application
+// API's (laneFor) are serialised on it, the person's first (spec
+// 2026-11-02-app-api-design.md §5). It creates no runner: nothing else
+// about a configuration with no sub-agent changes. Idempotent; a no-op once
+// a runner exists, whose lanes already serialise the primary.
+func (a *Agent) EnsurePrimaryLane() {
+	if a.subs != nil {
+		return
+	}
+	a.ownLanes.CompareAndSwap(nil, subagent.NewLanes())
+}
+
+// ownLaneKey is the lane key EnsurePrimaryLane's lanes use for a provider:
+// its server, as laneFor derives it, or the provider's own name when the
+// config does not name it — the primary and the API both derive it here,
+// so they meet on the same key either way.
+func (a *Agent) ownLaneKey(providerName string) string {
+	if a.Cfg != nil {
+		if pc, ok := a.Cfg.Providers[providerName]; ok {
+			return subagent.LaneKey(pc.BaseURL)
+		}
+	}
+	return "provider:" + providerName
+}
+
+// ownLaneFor is laneFor over EnsurePrimaryLane's lanes; nil when none.
+func (a *Agent) ownLaneFor(providerName string, primary bool) func(ctx context.Context) (func(), error) {
+	lanes := a.ownLanes.Load()
+	if lanes == nil {
+		return nil
+	}
+	key := a.ownLaneKey(providerName)
+	return func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, key, primary) }
+}
+
+// ownPrimaryLane is the primary's own lane over EnsurePrimaryLane's lanes,
+// keyed by the provider it is talking to at the moment it asks, so a
+// /provider switch needs no rebind. nil when no lane was ensured.
+func (a *Agent) ownPrimaryLane(primary bool) func(ctx context.Context) (func(), error) {
+	lanes := a.ownLanes.Load()
+	if lanes == nil {
+		return nil
+	}
+	return func(ctx context.Context) (func(), error) {
+		// modelMu is never held across a model call, so this cannot be
+		// reached with it held.
+		a.modelMu.Lock()
+		name := ""
+		if a.Provider != nil {
+			name = a.Provider.Name()
+		}
+		a.modelMu.Unlock()
+		return lanes.Acquire(ctx, a.ownLaneKey(name), primary)
+	}
 }
 
 // StartSubAgents runs the resume pass, the startup resume gate and the

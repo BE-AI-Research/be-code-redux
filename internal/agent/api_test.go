@@ -176,7 +176,7 @@ func TestNamedModelGoesThroughTheFactory(t *testing.T) {
 	ag, p := apiAgent(t, "primary")
 	other := &scriptedProvider{responses: []provider.ChatResponse{{Content: "other"}}}
 	calls := 0
-	APIModelFactory = func(ctx context.Context, cfg *config.Config, model string) (provider.Provider, error) {
+	APIModelFactory = func(ctx context.Context, cfg *config.Config, providerName, model string) (provider.Provider, error) {
 		calls++
 		return other, nil
 	}
@@ -224,7 +224,7 @@ func TestAPIUnapprovedOnlineProviderIs403(t *testing.T) {
 		t.Fatalf("want 403 online_not_approved, nothing sent, nobody asked: %v", err)
 	}
 	calls := 0
-	APIModelFactory = func(ctx context.Context, cfg *config.Config, model string) (provider.Provider, error) {
+	APIModelFactory = func(ctx context.Context, cfg *config.Config, providerName, model string) (provider.Provider, error) {
 		calls++
 		return &scriptedProvider{}, nil
 	}
