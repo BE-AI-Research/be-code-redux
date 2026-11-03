@@ -667,10 +667,14 @@ DeepSeek, Mistral, Gemini, Anthropic) while a small local model does the houseke
 `be-code setup` offers it as the last numbered choice, next to the local default when no
 backend is found (so no local GPU is needed): pick a preset (OpenRouter first), pick a model
 from the provider's listing, and the first local backend found, if any, becomes the helper
-(without one, `local_helper` stays unset). Setup saves nothing and says
-`set <KEY_ENV> in your shell, then run be-code setup again` when the key is not in the
-environment — keys come only from the environment variable the preset names, never from the
-config file.
+(without one, `local_helper` stays unset). `be-code setup`, `be-code online add [name]` and
+`/online add` in a session take the key three ways: the environment variable the preset names,
+a key pasted into a masked field, or, for OpenRouter, a sign-in in the browser that issues a key
+for this machine (no account registration; on a box without a browser the URL is printed and the
+redirect can be pasted back). A pasted or signed-in key is stored in `~/.be-code/credentials.json`
+at mode 0600; `config.json` never holds a secret, and the environment variable always wins when
+set. `/online` shows where the key comes from, `/online revoke <name>` (or `be-code online
+revoke`) deletes the stored one, and `doctor` reports the file and each provider's key source.
 
 A provider counts as online when it says `"online": true` **or** its address is off this machine
 and network, whatever the entry says (startup warns once). Local means loopback, link-local,
@@ -1361,6 +1365,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 | `run [prompt]` | headless run, verification included; `--json` for a machine-readable result; reads stdin when no prompt is given |
 | `init` | measure the workspace and write `BECODE.md` project notes |
 | `setup` | the first-run wizard: probe backends, list models, write the config |
+| `online add [name]` / `online revoke <name>` | add an online provider with a pasted key or (OpenRouter) a browser sign-in, stored in `~/.be-code/credentials.json`; delete a stored key. Needs a terminal; there is no `--key` flag |
 | `doctor` | probe every configured backend, the workspace toolchain and the editor bridge |
 | `verify` | run the workspace's own build/lint/test checks, non-zero exit on failure |
 | `models` / `pull <model>` | list the backend's models / pull one (Ollama backends) |
@@ -1378,7 +1383,7 @@ visualstudio/        the Visual Studio bridge and package (C#, its own solution)
 | | |
 | --- | --- |
 | **Session** | `/sessions` `/resume <code>` `/handoff` `/clear` `/quit` `/detach` `/clients` `/stats` `/update` `/config` `/browser [close\|forget <host>\|attach\|tabs\|tab <id>\|untab <id\|all>]` |
-| **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` `/online [forget]` |
+| **Models** | `/model <name>` `/models` `/provider <name>` `/coworkers` `/consult [name] <q>` `/agents [stop <name>\|start]` `/online [forget\|add [name]\|revoke <name>]` |
 | **Work** | `/plan <task>` `/verify` `/commit` `/undo` `/compact` `/init` `/map` `/tools` `/queue [edit N\|drop N]` |
 | **Record** | `/task [show <id>\|open\|clear\|assign <id> <owner>\|scope <id> <paths>\|reply <id> <text>]` `/notes [add <text>\|drop N\|clear]` |
 | **People** | `/chat` `/inbox` `/dm [name]` `/whoami [set]` `/back` |
@@ -1449,10 +1454,11 @@ hand; `/config` prints what the running session actually resolved.
   lights the `⬆ vX.Y.Z available` notice; `false` turns it off (also **Update check** in `/menu`,
   or `/update check on|off`). `/update` works either way.
   Online providers: presets exist for `openrouter` (listed first), `openai`, `groq`, `deepseek`,
-  `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes only
-  from its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,
-  `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`). See
-  [Online providers](#online-providers).
+  `mistral`, `gemini` and `anthropic`, each an OpenAI-compatible endpoint whose key comes from
+  its environment variable (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`,
+  `DEEPSEEK_API_KEY`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) or, when that
+  is unset, from `~/.be-code/credentials.json` (written by `/online add`; see
+  [Online providers](#online-providers)).
 - `models{}` ({}) — the same three keys per model, keyed by the model name
   exactly as the backend spells it (tag included), e.g.
   `"models": {"qwen3:8b": {"context_window": 32768, "keep_alive": "30m",

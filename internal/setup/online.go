@@ -63,6 +63,9 @@ func ChoiceFor(cfg *config.Config, name, baseURL string) (Choice, string, error)
 	return Choice{Name: name, BaseURL: strings.TrimRight(baseURL, "/")}, "", nil
 }
 
+// onlineValidate is the wizard's seam over Validate; tests replace it.
+var onlineValidate = Validate
+
 // Validate lists models at the endpoint with key. The key is trimmed (a
 // copy from a web page carries a newline).
 func Validate(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo, error) {

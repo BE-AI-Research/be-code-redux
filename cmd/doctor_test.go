@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/brown-enterprises/be-code/internal/browser/browsertest"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/credentials"
 	"github.com/brown-enterprises/be-code/internal/provider"
 )
 
@@ -273,5 +275,66 @@ func TestDoctorOnlineLine(t *testing.T) {
 	cfg.Providers = map[string]config.ProviderConfig{"or": {Type: "openai", BaseURL: "http://127.0.0.1:1/v1"}}
 	if got := onlineDoctorLine(context.Background(), cfg); got != "" {
 		t.Fatalf("local default should print nothing, got %q", got)
+	}
+}
+
+func TestCredentialDoctorLines(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	cfg.Providers["groq"] = config.ProviderConfig{Type: "openai", BaseURL: "https://api.groq.com/openai/v1", APIKeyEnv: "BE_TEST_GROQ_KEY", Online: true}
+	t.Setenv("BE_TEST_GROQ_KEY", "")
+	lines := strings.Join(credentialDoctorLines(cfg), "\n")
+	for _, want := range []string{"credentials: none (~/.be-code/credentials.json absent)", "groq: key none: run /online add groq"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("missing %q in:\n%s", want, lines)
+		}
+	}
+	dir := filepath.Join(home, ".be-code")
+	s, err := credentials.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("groq", credentials.Credential{Kind: credentials.KindAPIKey, Key: "gsk_secret", Source: "pasted", Created: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Join(credentialDoctorLines(cfg), "\n")
+	if strings.Contains(lines, "gsk_secret") {
+		t.Fatal("doctor printed a key")
+	}
+	for _, want := range []string{"credentials: ~/.be-code/credentials.json (mode 0600)", "groq: key stored (pasted 2026-11-02)"} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("missing %q in:\n%s", want, lines)
+		}
+	}
+	os.Chmod(filepath.Join(dir, "credentials.json"), 0o644)
+	lines = strings.Join(credentialDoctorLines(cfg), "\n")
+	if !strings.Contains(lines, "readable by others; run chmod 600") {
+		t.Fatalf("loose mode not flagged:\n%s", lines)
+	}
+	t.Setenv("BE_TEST_GROQ_KEY", "x")
+	if lines = strings.Join(credentialDoctorLines(cfg), "\n"); !strings.Contains(lines, "groq: key $BE_TEST_GROQ_KEY (set)") {
+		t.Fatalf("%s", lines)
+	}
+}
+
+// A stored key is probed and named as stored, never printed.
+func TestDoctorOnlineLineStoredKey(t *testing.T) {
+	var hits int32
+	srv := onlineTestServer(t, &hits)
+	cfg := onlineTestConfig(srv.URL)
+	t.Setenv("BE_TEST_ONLINE_KEY", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s, err := credentials.Open(filepath.Join(home, ".be-code"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("or", credentials.Credential{Kind: credentials.KindAPIKey, Key: "sk-stored-secret", Source: "oauth", Created: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	got := onlineDoctorLine(context.Background(), cfg)
+	if strings.Contains(got, "sk-stored-secret") || !strings.Contains(got, "key stored (oauth 2026-11-02)") || !strings.Contains(got, "· reachable") {
+		t.Fatalf("%q hits=%d", got, hits)
 	}
 }

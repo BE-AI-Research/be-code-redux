@@ -20,6 +20,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/bench"
 	"github.com/brown-enterprises/be-code/internal/browser"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/credentials"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/ide"
 	"github.com/brown-enterprises/be-code/internal/live"
@@ -549,6 +550,9 @@ var doctorCmd = &cobra.Command{
 		if line := onlineDoctorLine(cmd.Context(), cfg); line != "" {
 			fmt.Println(line)
 		}
+		for _, line := range credentialDoctorLines(cfg) {
+			fmt.Println(line)
+		}
 		for _, line := range apiDoctorLines(cfg) {
 			fmt.Println(line)
 		}
@@ -772,8 +776,12 @@ func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
 	if pc.APIKeyEnv == "" {
 		keyEnv = "(no api_key_env)"
 	}
-	if pc.APIKeyEnv != "" && os.Getenv(pc.APIKeyEnv) == "" {
-		return fmt.Sprintf("online: %s · %s — key %s missing · not checked", name, model, keyEnv)
+	if cfg.ProviderKey(name) == "" {
+		return fmt.Sprintf("online: %s · %s — key missing · not checked", name, model)
+	}
+	keyPhrase := "$" + keyEnv + " set"
+	if src, stored := cfg.KeySource(name); src == "stored" {
+		keyPhrase = fmt.Sprintf("stored (%s %s)", stored.Source, stored.Created.UTC().Format("2006-01-02"))
 	}
 	p, err := provider.FromConfig(cfg, name)
 	if err != nil {
@@ -800,5 +808,52 @@ func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
 	if pr := agent.PricingFor(model, listed, preset); pr.Known {
 		price = fmt.Sprintf("$%.2f/$%.2f per Mtok", pr.Prompt*1e6, pr.Completion*1e6)
 	}
-	return fmt.Sprintf("online: %s · %s — key %s set · %s · window %s · %s", name, model, keyEnv, state, window, price)
+	return fmt.Sprintf("online: %s · %s — key %s · %s · window %s · %s", name, model, keyPhrase, state, window, price)
+}
+
+// credentialDoctorLines: the credential file's state and, per online
+// provider, where its key would come from. Never a key.
+func credentialDoctorLines(cfg *config.Config) []string {
+	var out []string
+	dir, err := config.Dir()
+	if err != nil {
+		return nil
+	}
+	path := filepath.Join(dir, credentials.FileName)
+	shown := "~/.be-code/" + credentials.FileName
+	if fi, err := os.Stat(path); os.IsNotExist(err) {
+		out = append(out, fmt.Sprintf("credentials: none (%s absent)", shown))
+	} else if err == nil {
+		if fi.Mode().Perm()&0o077 != 0 {
+			out = append(out, fmt.Sprintf("credentials: %s is readable by others; run chmod 600 %s", shown, path))
+		} else {
+			out = append(out, fmt.Sprintf("credentials: %s (mode %04o)", shown, fi.Mode().Perm()))
+		}
+	} else {
+		out = append(out, fmt.Sprintf("credentials: %s: %v", shown, err))
+	}
+	if s, err := credentials.Open(dir); err == nil {
+		for _, name := range s.Unsupported() {
+			out = append(out, fmt.Sprintf("credentials: %s: unsupported credential kind; update be-code", name))
+		}
+	}
+	names := make([]string, 0, len(cfg.Providers))
+	for name, pc := range cfg.Providers {
+		if config.ProviderIsOnline(pc) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		src, stored := cfg.KeySource(name)
+		switch src {
+		case "env":
+			out = append(out, fmt.Sprintf("%s: key $%s (set)", name, tools.EnvNameForDisplay(cfg.Providers[name].APIKeyEnv)))
+		case "stored":
+			out = append(out, fmt.Sprintf("%s: key stored (%s %s)", name, stored.Source, stored.Created.UTC().Format("2006-01-02")))
+		default:
+			out = append(out, fmt.Sprintf("%s: key none: run /online add %s", name, name))
+		}
+	}
+	return out
 }

@@ -150,7 +150,7 @@ func init() {
 	runCmd.Flags().BoolVar(&flagJSON, "json", false, "emit a machine-readable JSON result on stdout")
 	benchCmd.Flags().StringVar(&flagBenchModels, "models", "", "comma-separated models to benchmark (default: current model)")
 	benchCmd.Flags().BoolVar(&flagJSON, "json", false, "emit JSON results")
-	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd, appsCmd, sessionCmd)
+	rootCmd.AddCommand(runCmd, modelsCmd, pullCmd, doctorCmd, verifyCmd, configCmd, sessionsCmd, setupCmd, benchCmd, attachCmd, initCmd, packsCmd, appsCmd, onlineCmd, sessionCmd)
 	sessionsCmd.AddCommand(sessionsDeleteCmd, sessionsKillCmd)
 	packsCmd.AddCommand(packsValidateCmd, packsInfoCmd, packsAddCmd, packsUpdateCmd, packsRemoveCmd)
 	packsAddCmd.Flags().StringVar(&flagPackSource, "source", "", "a directory or git URL to fetch from (default: packs.source)")
@@ -184,9 +184,9 @@ func stdoutIsTTY() bool {
 // we're on a real terminal; otherwise loads (writing defaults if needed).
 func loadOrWizard(ctx context.Context) (*config.Config, error) {
 	if !config.Exists() && stdinIsTTY() && stdoutIsTTY() {
-		// A missing key comes back as setup.MissingKeyError, whose text is
-		// the same "set <KEY_ENV> in your shell, then run be-code setup
-		// again" `be-code setup` prints.
+		// A key missing from the environment is asked for (pasted, or a
+		// browser sign-in for OpenRouter); input that ends first comes back
+		// as an error saying nothing was saved.
 		cfg, err := setup.Wizard(ctx, bufio.NewReader(os.Stdin), os.Stdout)
 		if err == nil && cfg == nil {
 			return nil, errors.New("no config saved; run be-code setup again")
