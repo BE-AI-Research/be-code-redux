@@ -384,6 +384,10 @@ type Agent struct {
 	// laneAcquire wraps every model call once lanes exist (spec §2.2).
 	subs        *subAgents
 	laneAcquire func(ctx context.Context) (func(), error)
+	// anySubAgent is whether any configured co-worker has sub_agent set:
+	// the runner now exists for any co-worker (jobs), but the guidance on
+	// assigning steps is only true of a sub-agent.
+	anySubAgent atomic.Bool
 	// ownLanes are the primary server's lanes when no sub-agent runner
 	// exists (EnsurePrimaryLane): the application API needs its calls and
 	// the person's serialised on one server without the runner's other
@@ -1136,7 +1140,7 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	}
 	// Stable for the session, so the prompt cache never pays for it: the
 	// block says what sub-agents are, never what any one of them is doing.
-	if a.subs != nil && a.systemOverride == "" {
+	if a.subs != nil && a.anySubAgent.Load() && a.systemOverride == "" {
 		sys += "\n\n" + subAgentGuidance
 	}
 	// Stable for the session, like the sub-agent block: whether the browser

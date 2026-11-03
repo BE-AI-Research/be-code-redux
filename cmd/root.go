@@ -407,7 +407,9 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		ag.RefreshSystem()
 	}
 	cws, _ := cfg.ValidCoworkers()
-	if anySubAgent(cws) {
+	// Any co-worker may be dispatched a job, so the runner and its lanes
+	// exist whenever one is configured; only sub_agent ones own steps.
+	if len(cws) > 0 {
 		name := flagProvider
 		if name == "" {
 			name = cfg.DefaultProvider
@@ -417,7 +419,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		// The store validates a document's owner tags against the cards it
 		// holds, so it must be told "there are none" as explicitly as it is
 		// told who exists: a workspace carrying "@big" under a config with
-		// no sub-agent then gets exactly one accurate warning instead of
+		// no co-worker then gets exactly one accurate warning instead of
 		// silence. EnableSubAgents does this itself when there are cards.
 		ag.SetEngineCards(nil)
 	}
@@ -459,16 +461,6 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 
 	ag.ExplainBudget() // a session that learned no window says what its budget leaves too
 	return p, ag, nil
-}
-
-// anySubAgent reports whether any usable co-worker is marked sub_agent: true.
-func anySubAgent(cws []config.CoworkerConfig) bool {
-	for _, cw := range cws {
-		if cw.SubAgent {
-			return true
-		}
-	}
-	return false
 }
 
 // chooseIDELock decides which live lock (if any) attachIDE should connect

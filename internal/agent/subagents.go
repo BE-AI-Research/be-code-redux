@@ -179,24 +179,26 @@ type SubAgentState struct {
 	At string
 }
 
-// EnableSubAgents wires the runner for the co-workers that are sub-agents
-// and runs the resume pass (spec §3.6). It may be called again on resume;
-// a second call replaces the cards and re-evaluates. primaryServer is the
-// primary model's lane key.
+// EnableSubAgents wires the runner for every co-worker — any of them may be
+// dispatched a job (dispatch-jobs spec §3); only those with sub_agent get a
+// card the scheduler dispatches steps to (Card.SubAgent) — and runs the
+// resume pass (spec §3.6). It may be called again on resume; a second call
+// replaces the cards and re-evaluates. primaryServer is the primary model's
+// lane key.
 func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer string) {
 	cards := map[string]subagent.Card{}
 	byName := map[string]config.CoworkerConfig{}
+	anySub := false
 	for _, cw := range cws {
-		if !cw.SubAgent {
-			continue
-		}
 		pc := a.Cfg.Providers[cw.Provider]
 		cards[cw.Name] = subagent.Card{Name: cw.Name, Provider: cw.Provider,
-			Server: subagent.LaneKey(pc.BaseURL), Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope}
+			Server: subagent.LaneKey(pc.BaseURL), Online: cw.Online, SubAgent: cw.SubAgent, MaxScope: cw.MaxScope}
 		byName[cw.Name] = cw
+		anySub = anySub || cw.SubAgent
 	}
+	a.anySubAgent.Store(anySub)
 	if a.subs == nil {
-		// Nothing changes for a configuration with no sub-agent: no runner,
+		// Nothing changes for a configuration with no co-worker: no runner,
 		// no lane wrapper, and no guidance block in the system prompt. A
 		// second call with none (the owner left the config) still goes
 		// through, so a resume can block what it can no longer dispatch.
@@ -747,7 +749,7 @@ func (a *Agent) scheduleSubAgentsDispatched() []string {
 	s.mu.Unlock()
 	var dispatched []string
 	for _, p := range picks {
-		if a.dispatchPicked(steps, p.c, p.cw) {
+		if a.dispatchPicked(steps, p.c, p.cw, false) {
 			dispatched = append(dispatched, p.c.ID)
 			if reasserted[p.c.ID] {
 				a.notice("%s re-assigned; starting %s", p.c.ID, p.c.Owner)
@@ -763,7 +765,11 @@ func (a *Agent) scheduleSubAgentsDispatched() []string {
 // the dispatch panicked; the candidate is released either way.
 // **Called with mu NOT held** and it must stay that way: the DispatchContext
 // read, the workspace scan and both engineDo calls below all happen here.
-func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw config.CoworkerConfig) bool {
+//
+// job marks a run the main model dispatched (DispatchJob): its dispatch text
+// carries the step's notes — the rest of the job and its context — and at
+// session end it closes rather than waiting to be resumed.
+func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw config.CoworkerConfig, job bool) bool {
 	s := a.subs
 	// Whatever happens, the reservation is given back.
 	unreserve := func() {
@@ -795,6 +801,16 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 		got := false
 		a.engineDo("sub-agent dispatch", func(st *engine.Store) {
 			text, children, ctxText = st.DispatchContext(c.ID)
+			if job {
+				// The sub-agent reads exactly what the main model wrote:
+				// the step's text plus its note (spec §3, step 3).
+				tr := st.Tree()
+				if n := tr.Find(c.ID); n != nil {
+					for _, nt := range n.Evidence.Notes {
+						text += "\n\n" + nt.Text
+					}
+				}
+			}
 			got = true
 		})
 		if !got {
@@ -831,7 +847,7 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	// Under mu because root is reassigned on resume — and because deriving
 	// a context calls into neither the store nor a notice.
 	ctx, cancel := context.WithCancel(s.root)
-	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(),
+	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(), job: job,
 		reply: make(chan string, 1), done: make(chan struct{}), drift: workledger.NewRun(a.Tools.Root)}
 	s.runs[c.ID] = run
 	s.wg.Add(1)
@@ -977,7 +993,7 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	// One read of the run's mutable state, under the lock that guards it.
 	s.mu.Lock()
 	scratch, question, stopReason := run.scratch, run.question, run.stopReason
-	interrupt, timedOut := run.interrupt, run.timedOut
+	interrupt, timedOut, job := run.interrupt, run.timedOut, run.job
 	hb.Base = run.d.Base
 	s.mu.Unlock()
 	if scratch != nil {
@@ -988,6 +1004,18 @@ func (a *Agent) settleSub(run *subRun, answer string, err error) subagent.HandBa
 	// the summary is most likely to be stale. Its own mutex, not s.mu.
 	hb.Drifted = run.drift.Drifted()
 	switch {
+	case interrupt && job:
+		// A job is the main model's, dispatched in a session that is now
+		// ending; nobody will be there to receive it on resume, and the
+		// ready rule never offers a job, so it closes here instead of going
+		// back to todo (spec §6). The hand-back stays "interrupted" so
+		// nothing is queued into a session on its way out.
+		hb.Status, hb.Reason = "interrupted", jobSessionEnded
+		a.engineDo("sub-agent close", func(st *engine.Store) {
+			_ = st.CloseAs(run.d.Node, run.d.Owner, "blocked", jobSessionEnded)
+			hb.Files = st.Touched(run.d.Node)
+		})
+		return hb
 	case interrupt:
 		hb.Status = "interrupted"
 		files := []string{}
@@ -1477,7 +1505,7 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].d.Node < runs[j].d.Node })
 	for _, r := range runs {
 		cw := s.cws[r.d.Owner]
-		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope}
+		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: cw.SubAgent, MaxScope: cw.MaxScope}
 		row.Node, row.Since = r.d.Node, r.started
 		row.At = row.Node
 		if r.scratch != nil {
@@ -1503,12 +1531,12 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 	sort.Strings(names)
 	for _, n := range names {
 		cw := s.cws[n]
-		out = append(out, SubAgentState{Name: n, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope, State: "idle"})
+		out = append(out, SubAgentState{Name: n, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: cw.SubAgent, MaxScope: cw.MaxScope, State: "idle"})
 	}
 	if len(steps) > 0 {
 		_, waiting := subagent.Ready(steps, s.cards, s.runningLocked())
 		for _, w := range waiting {
-			out = append(out, SubAgentState{Name: w.Owner, SubAgent: true, Node: w.ID, State: "waiting: " + w.Reason})
+			out = append(out, SubAgentState{Name: w.Owner, SubAgent: s.cards[w.Owner].SubAgent, Node: w.ID, State: "waiting: " + w.Reason})
 		}
 	}
 	s.mu.Unlock()
@@ -1556,7 +1584,7 @@ func (a *Agent) RunningSubAgents() []SubAgentState {
 	for _, r := range s.runs {
 		cw := s.cws[r.d.Owner]
 		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider,
-			Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope,
+			Online: cw.Online, SubAgent: cw.SubAgent, MaxScope: cw.MaxScope,
 			Node: r.d.Node, At: r.d.Node, Since: r.started}
 		applyRunState(&row, r)
 		if r.at != "" {

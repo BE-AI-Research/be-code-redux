@@ -41,6 +41,12 @@ type CoworkerConfig struct {
 	// it may ever be given; empty means the whole workspace.
 	SubAgent bool     `json:"sub_agent,omitempty"`
 	MaxScope []string `json:"max_scope,omitempty"`
+	// MaxScopeInvalid is set by ValidCoworkers when max_scope was given
+	// and no entry of it survived: the stated confinement is unusable, and
+	// an empty MaxScope would read as the whole workspace, so such a
+	// co-worker may not be dispatched a job either (dispatch-jobs spec §3).
+	// Never read from or written to the config file.
+	MaxScopeInvalid bool `json:"-"`
 }
 
 // SubAgentsConfig tunes sub-agent dispatch: how many run at once across
@@ -755,6 +761,7 @@ func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
 					kept = append(kept, c)
 				}
 				cw.MaxScope = kept
+				cw.MaxScopeInvalid = len(kept) == 0
 				if len(kept) == 0 && cw.SubAgent {
 					// An empty max_scope means "the whole workspace"
 					// (subagent.Within(scope, nil) is true), so dropping
