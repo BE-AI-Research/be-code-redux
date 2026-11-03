@@ -9,8 +9,9 @@ you're looking at, folded into each prompt automatically.
 
 ## Install
 
-- From a packaged release: download `be-code-vscode-<version>.vsix` from the
-  [GitHub release](https://github.com/BE-AI-Research/be-code-redux/releases/latest) (or build
+- From a packaged release: download
+  <https://github.com/BE-AI-Research/be-code-redux/releases/latest/download/be-code-vscode-1.1.1.vsix>
+  (every release carries it as an asset; or build
   it as `dist/be-code-vscode-<version>.vsix` with `make -f build.mk vscode` or `make -f build.mk
   release` in the `be-code` repo), open the Extensions view, `...` menu → **Install from
   VSIX...**, and pick it.

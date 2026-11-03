@@ -1150,7 +1150,9 @@ config; its tools appear to the agent as `mcp_<server>_<tool>`:
 
 Build the extension with `make -f build.mk vscode` (or as part of `make -f build.mk
 release`), which type-checks, runs its tests and packages
-`dist/be-code-vscode-<version>.vsix`; each GitHub release carries the same file as an asset.
+`dist/be-code-vscode-<version>.vsix`. You do not need to build it: every GitHub release carries
+the same file as an asset, and the current one is always at
+<https://github.com/BE-AI-Research/be-code-redux/releases/latest/download/be-code-vscode-1.1.1.vsix>.
 Install it from the Extensions view → `...` → **Install from VSIX...**. To run it from source instead —
 for development, or to try changes before packaging — `cd vscode && npm install && npm
 run build`, then use VS Code's "Run Extension" launch configuration to open an Extension
