@@ -32,6 +32,20 @@ func OpenBrowser(url string) error {
 	return nil
 }
 
+// launch is OpenBrowser behind a seam so OpenPage's tests never open one.
+var launch = OpenBrowser
+
+// OpenPage opens a provider's keys page in the person's browser and reports
+// whether it did: false on a box with no display or when the launcher
+// fails, in which case the caller shows the URL instead. Never an error:
+// a page the person can open by hand is not a failure.
+func OpenPage(url string) bool {
+	if !displayAvailable() {
+		return false
+	}
+	return launch(url) == nil
+}
+
 // displayAvailable is false on a Linux box with no display: the URL is
 // shown instead of launched, and the pasted redirect finishes the flow.
 func displayAvailable() bool {

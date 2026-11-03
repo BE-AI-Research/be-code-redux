@@ -100,6 +100,15 @@ func Validate(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo,
 	return nil, fmt.Errorf("%w: %s did not answer with a models listing", ErrUnreachable, ch.BaseURL)
 }
 
+// KeysPageLine is what a UI says after trying to open a provider's keys
+// page: where the key is made, and that the masked field comes next.
+func KeysPageLine(url string, opened bool) string {
+	if opened {
+		return fmt.Sprintf("opened %s in your browser; create a key there and paste it below", url)
+	}
+	return fmt.Sprintf("create a key at %s and paste it below", url)
+}
+
 // Added is what AddOnline did.
 type Added struct {
 	Model   string

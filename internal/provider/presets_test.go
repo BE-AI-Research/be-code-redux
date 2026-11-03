@@ -26,3 +26,23 @@ func TestPresetsVerbatim(t *testing.T) {
 		t.Error("unknown preset found")
 	}
 }
+
+func TestQuickSignInPresetsNameTheirKeysPage(t *testing.T) {
+	want := map[string]string{
+		"openai":    "https://platform.openai.com/api-keys",
+		"anthropic": "https://console.anthropic.com/settings/keys",
+		"gemini":    "https://aistudio.google.com/apikey",
+	}
+	for name, url := range want {
+		p, ok := PresetByName(name)
+		if !ok || p.KeysURL != url {
+			t.Errorf("%s: KeysURL %q, want %q", name, p.KeysURL, url)
+		}
+	}
+	if p, _ := PresetByName("openrouter"); p.KeysURL != "" {
+		t.Errorf("openrouter signs in with the browser; it has no keys page: %q", p.KeysURL)
+	}
+	if got := QuickSignIn(); len(got) != 4 || got[0].Name != "openrouter" || got[1].Name != "openai" || got[2].Name != "anthropic" || got[3].Name != "gemini" {
+		t.Errorf("QuickSignIn order: %v", got)
+	}
+}

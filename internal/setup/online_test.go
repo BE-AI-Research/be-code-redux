@@ -246,3 +246,13 @@ func TestAddOnlineKeepsACustomBlocksConsentFields(t *testing.T) {
 		t.Fatal("a new LAN endpoint must not be marked online")
 	}
 }
+
+func TestKeysPageLine(t *testing.T) {
+	const u = "https://console.anthropic.com/settings/keys"
+	if got := KeysPageLine(u, true); got != "opened https://console.anthropic.com/settings/keys in your browser; create a key there and paste it below" {
+		t.Fatalf("opened: %q", got)
+	}
+	if got := KeysPageLine(u, false); got != "create a key at https://console.anthropic.com/settings/keys and paste it below" {
+		t.Fatalf("not opened: %q", got)
+	}
+}
