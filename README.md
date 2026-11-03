@@ -1314,8 +1314,9 @@ write instead of writing unattended.
   `/menu` (`update_check: false`) turns both off, and then BE-Code is fully offline with a local
   backend.
 - With an online main model, nothing is sent until the project is approved (`online_project`),
-  page text reaches it only per site (`share_page`), spend can be capped (`max_spend_usd`), and
-  API keys are read only from the environment.
+  page text reaches it only per site (`share_page`), and spend can be capped (`max_spend_usd`).
+  `config.json` never holds a secret; stored credentials live in `~/.be-code/credentials.json` at
+  mode 0600, and an env var named by `api_key_env` always wins.
 - An update installs only after you approve it and its checksum matches the release's
   `SHA256SUMS`, and it replaces only the `be-code` binary.
 
