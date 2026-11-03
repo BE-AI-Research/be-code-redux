@@ -252,3 +252,42 @@ func TestRunHeldAtConsentReturnsUndispatched(t *testing.T) {
 		t.Fatalf("the person is asked once the event is over (asked %d)", asked.Load())
 	}
 }
+
+// A dispatched job held at consent by a scheduled event cannot go back to
+// todo (nothing offers a job again): it closes blocked, is settled like any
+// finished job and its hand-back is queued, so a wait never reports a
+// hand-back that never existed.
+func TestJobHeldAtConsentClosesBlocked(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "ported"}}},
+		func(c *config.Config) { c.Coworkers[0].Online = true })
+	f.ag.Tools.Approve = func(string, string) bool { return true }
+	id := f.assign(t)
+
+	s := f.ag.subs
+	ctx, cancel := context.WithCancel(s.root)
+	run := &subRun{d: subagent.Dispatch{Node: id, Owner: "big", Scope: []string{"internal/scan"}}, job: true,
+		cw: s.cws["big"], ctx: ctx, cancel: cancel, started: time.Now(),
+		reply: make(chan string, 1), done: make(chan struct{}), events: make(chan jobEvent, 8)}
+	s.mu.Lock()
+	s.runs[id] = run
+	s.wg.Add(1)
+	s.mu.Unlock()
+	f.st.SetDispatched(id, true)
+	f.ag.Tools.SetAllowance(nil, time.Minute)
+	f.ag.runSub(run)
+	f.ag.Tools.ClearAllowance()
+
+	if n := f.st.Tree().Find(id); n == nil || n.Status != engine.StatusBlocked {
+		t.Fatalf("node: %+v", n)
+	}
+	s.mu.Lock()
+	done, running := s.jobsDone[id], s.runs[id]
+	s.mu.Unlock()
+	if done == nil || running != nil || !strings.Contains(done.endLine, "not started: a scheduled event began") {
+		t.Fatalf("not settled: %+v", done)
+	}
+	line, err := f.ag.JobWait(context.Background(), id, time.Second)
+	if err != nil || !strings.Contains(line, "not started: a scheduled event began") || strings.Contains(line, "delivered earlier") {
+		t.Fatalf("JobWait: %q %v", line, err)
+	}
+}

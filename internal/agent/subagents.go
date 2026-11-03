@@ -1035,9 +1035,16 @@ func (a *Agent) runSub(run *subRun) {
 		}
 		answer, err = scratch.Run(run.ctx, "Begin your step.")
 	}()
-	if held {
+	if held && !run.job {
 		a.unDispatch(run)
 		return
+	}
+	if held {
+		// A job is the main model's own and the ready rule never offers it
+		// again, so it cannot go back to todo: it closes blocked, settled
+		// like any finished job, and the main model is told.
+		run.cancel()
+		err = errors.New(jobHeldReason)
 	}
 	hb = a.settleSub(run, answer, err)
 	line := handBackLine(hb)
@@ -1101,6 +1108,9 @@ func (a *Agent) snapshotBase(run *subRun) {
 	run.d.Base = branch
 	a.subs.mu.Unlock()
 }
+
+// jobHeldReason closes a job whose consent was held by a scheduled event.
+const jobHeldReason = "not started: a scheduled event began"
 
 // unDispatch gives back a run that never started because a scheduled
 // event's turn began between its dispatch and its consent: nobody refused
