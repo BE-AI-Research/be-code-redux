@@ -450,6 +450,9 @@ func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string
 		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(timer.C)},
 		reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())})
 	for {
+		if line := a.openAskLine(runs); line != "" {
+			return line, nil
+		}
 		chosen, v, _ := reflect.Select(cases)
 		if chosen >= timerCase {
 			return "", nil // the deadline or ctx: nothing consumed
@@ -481,6 +484,38 @@ func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string
 		}
 		return line, nil
 	}
+}
+
+// openAskLine answers a wait that would otherwise deadlock: a run still
+// parked on its question whose ask line is no longer queued reached the main
+// model mid-turn, so nothing more will arrive until the main model replies.
+// It returns a sentence saying so (consuming nothing), or "" when no run is
+// in that state. An ask line still queued is left to the select, which
+// returns and consumes it.
+func (a *Agent) openAskLine(runs []*subRun) string {
+	s := a.subs
+	type open struct{ id, q, line string }
+	var asks []open
+	s.mu.Lock()
+	for _, r := range runs {
+		if s.runs[r.d.Node] == r && r.question != "" && r.askLine != "" {
+			asks = append(asks, open{r.d.Node, r.question, r.askLine})
+		}
+	}
+	s.mu.Unlock()
+	for _, o := range asks {
+		queued := false
+		for _, it := range a.PeekItems() {
+			if it.Harness && it.Text == o.line {
+				queued = true
+				break
+			}
+		}
+		if !queued {
+			return fmt.Sprintf("job %s is waiting for your answer: %s — jobs reply %s <text>", o.id, o.q, o.id)
+		}
+	}
+	return ""
 }
 
 // jobEventLive reports whether ev still describes run: a hand-back always

@@ -726,3 +726,37 @@ func TestJobReplyRestartsTheClock(t *testing.T) {
 		t.Fatalf("after reply: activity %s intervention %s stalls %d", act, iv, stalls)
 	}
 }
+
+// A job still asking whose ask line was delivered mid-turn must not leave a
+// wait blocked until ask_timeout: the wait says it is the main model's move.
+func TestJobWaitOnAnAskAlreadyDeliveredReturnsAtOnce(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"which config file?"}`),
+		{Content: "ported"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, f.asks, "the ask")
+	if got := f.ag.DrainInbox(); len(got) != 1 || !strings.Contains(got[0], "which config file?") {
+		t.Fatalf("ask not queued: %q", got)
+	}
+	start := time.Now()
+	line, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	want := "job " + id + " is waiting for your answer: which config file? — jobs reply " + id + " <text>"
+	if err != nil || line != want || time.Since(start) > 10*time.Second {
+		t.Fatalf("JobWait: %q %v", line, err)
+	}
+	f.ag.subs.mu.Lock()
+	_, running := f.ag.subs.runs[id]
+	f.ag.subs.mu.Unlock()
+	if !running {
+		t.Fatal("the job should still be running")
+	}
+	if err := f.ag.JobReply(id, "app.toml"); err != nil {
+		t.Fatal(err)
+	}
+	if line, _ := f.ag.JobWait(context.Background(), id, time.Minute); !strings.Contains(line, "done") {
+		t.Fatalf("final JobWait: %q", line)
+	}
+}
