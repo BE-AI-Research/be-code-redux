@@ -27,7 +27,19 @@ func stubOnline(t *testing.T) {
 	}
 	onlineSignIn = func(ctx context.Context, o signinOptions) (string, error) { return "sk-or-test", nil }
 	onlineOpenBrowser = func(string) error { t.Fatal("the browser must never be launched in a test"); return nil }
-	t.Cleanup(func() { onlineValidate, onlineSignIn, onlineOpenBrowser = ov, os_, ob })
+	op := onlineOpenPage
+	onlineOpenPage = func(string) bool { t.Fatal("a keys page must never be opened in a test without a stub"); return false }
+	t.Cleanup(func() { onlineValidate, onlineSignIn, onlineOpenBrowser, onlineOpenPage = ov, os_, ob, op })
+}
+
+// stubKeysPage records the page the flow asked to open and reports opened.
+func stubKeysPage(t *testing.T, opened bool) *string {
+	t.Helper()
+	got := new(string)
+	prev := onlineOpenPage
+	onlineOpenPage = func(u string) bool { *got = u; return opened }
+	t.Cleanup(func() { onlineOpenPage = prev })
+	return got
 }
 
 // pickRow answers the open picker with the row id. The Cmd the pick
@@ -84,6 +96,7 @@ func TestOnlineAddPasteFlowWritesBothFilesAndSwitches(t *testing.T) {
 	}
 	typeLine(v, "/online add")
 	runCmd(t, v, v.lastCmd) // the preset picker's load Cmd
+	pickRow(t, v, "other")  // groq sits behind the quick sign-in rows
 	pickRow(t, v, "groq")
 	if v.onlineAdd == nil || v.onlineAdd.step != stepKey {
 		t.Fatalf("after preset: %+v", v.onlineAdd)
@@ -388,5 +401,80 @@ func TestOnlineAddEndsWhenTheViewIsRetired(t *testing.T) {
 	_, _ = a.startOnlineAdd("groq")
 	if a.onlineAdd == nil {
 		t.Fatal("another terminal could not start the flow")
+	}
+}
+
+func pickerIDs(v *View) []string {
+	var ids []string
+	if v.picker != nil {
+		for _, it := range v.picker.items {
+			ids = append(ids, it.id)
+		}
+	}
+	return ids
+}
+
+func TestOnlineAddQuickListThenOtherPresets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	v := newTestModel(t)
+	_, _ = v.startOnlineAdd("")
+	want := []string{"openrouter", "openai", "anthropic", "gemini", "other", "custom"}
+	if got := pickerIDs(v); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("quick list %v, want %v", got, want)
+	}
+	for _, it := range v.picker.items {
+		switch it.id {
+		case "openrouter":
+			if it.desc != "Sign in with browser (issues a key)" {
+				t.Fatalf("openrouter desc %q", it.desc)
+			}
+		case "openai", "anthropic", "gemini":
+			if it.desc != "Open the API keys page, then paste a key" {
+				t.Fatalf("%s desc %q", it.id, it.desc)
+			}
+		}
+	}
+	pickRow(t, v, "other")
+	if got := pickerIDs(v); strings.Join(got, ",") != "groq,deepseek,mistral" {
+		t.Fatalf("other presets %v", got)
+	}
+	pickRow(t, v, "groq")
+	if v.onlineAdd == nil || v.onlineAdd.step != stepKey || v.onlineAdd.choice.Name != "groq" {
+		t.Fatalf("after groq: %+v", v.onlineAdd)
+	}
+}
+
+func TestOnlineAddAnthropicOpensTheKeysPageThenAsksForTheKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	got := stubKeysPage(t, true)
+	v := newTestModel(t)
+	_, _ = v.startOnlineAdd("anthropic")
+	if *got != "https://console.anthropic.com/settings/keys" {
+		t.Fatalf("opened %q", *got)
+	}
+	flush(v)
+	if !strings.Contains(v.transcriptText(), "opened https://console.anthropic.com/settings/keys in your browser; create a key there and paste it below") {
+		t.Fatalf("transcript: %s", v.transcriptText())
+	}
+	if v.onlineAdd == nil || v.onlineAdd.step != stepKey || v.onlineAdd.secret.Prompt != "key for anthropic: " {
+		t.Fatalf("after open: %+v", v.onlineAdd)
+	}
+}
+
+func TestOnlineAddKeysPageFallsBackToTheURLWithoutABrowser(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	_ = stubKeysPage(t, false)
+	v := newTestModel(t)
+	_, _ = v.startOnlineAdd("")
+	pickRow(t, v, "gemini")
+	flush(v)
+	if !strings.Contains(v.transcriptText(), "create a key at https://aistudio.google.com/apikey and paste it below") {
+		t.Fatalf("transcript: %s", v.transcriptText())
+	}
+	if v.onlineAdd == nil || v.onlineAdd.step != stepKey {
+		t.Fatalf("%+v", v.onlineAdd)
 	}
 }

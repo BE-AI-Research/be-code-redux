@@ -67,6 +67,7 @@ var (
 	onlineValidate    = setup.Validate
 	onlineSignIn      = signin.SignIn
 	onlineOpenBrowser = signin.OpenBrowser
+	onlineOpenPage    = signin.OpenPage
 )
 
 type signinOptions = signin.Options
@@ -99,12 +100,34 @@ func (m *View) startOnlineAdd(name string) (tea.Model, tea.Cmd) {
 	return m.onlineChose(name)
 }
 
+// presetRows is the first screen: the quick sign-in rows (OpenRouter's
+// real browser sign-in, then the providers people ask for by name, each
+// opening its keys page), the remaining presets behind one row, and a
+// custom endpoint.
 func presetRows() []pickItem {
 	var items []pickItem
-	for _, p := range provider.Presets() {
+	for _, p := range provider.QuickSignIn() {
+		desc := "Open the API keys page, then paste a key"
+		if p.KeysURL == "" {
+			desc = "Sign in with browser (issues a key)"
+		}
+		items = append(items, pickItem{id: p.Name, label: p.Name, desc: desc})
+	}
+	var names []string
+	for _, p := range provider.OtherPresets() {
+		names = append(names, p.Name)
+	}
+	items = append(items, pickItem{id: "other", label: "other preset…", desc: strings.Join(names, ", ")})
+	return append(items, pickItem{id: "custom", label: "custom OpenAI-compatible endpoint", desc: "a name and a base URL"})
+}
+
+// otherRows lists the presets the quick list leaves out.
+func otherRows() []pickItem {
+	var items []pickItem
+	for _, p := range provider.OtherPresets() {
 		items = append(items, pickItem{id: p.Name, label: p.Name, desc: p.Docs})
 	}
-	return append(items, pickItem{id: "custom", label: "custom OpenAI-compatible endpoint", desc: "a name and a base URL"})
+	return items
 }
 
 // openFlowPicker opens a view-local picker whose rows are already known.
@@ -137,6 +160,12 @@ func (m *View) onlineChose(id string) (tea.Model, tea.Cmd) {
 		m.appendEntryLocked(entry{Kind: entryDim, Text: "name for the new provider:"})
 		return m, nil
 	}
+	if id == "other" {
+		f.step = stepPreset
+		return m.openFlowPicker("Other presets", otherRows(), func(v *View, it pickItem) (tea.Model, tea.Cmd) {
+			return v.onlineChose(it.id)
+		})
+	}
 	ch, note, err := setup.ChoiceFor(m.cfg, id, "")
 	if err != nil {
 		return m.endOnlineAdd(err.Error())
@@ -160,6 +189,12 @@ func (m *View) onlineChose(id string) (tea.Model, tea.Cmd) {
 			}
 			return v.onlineAskKey()
 		})
+	}
+	// A provider with a keys page gets it opened (or shown) before the
+	// masked field: the "sign in" these providers can honestly offer.
+	if pre, ok := provider.PresetByName(id); ok && pre.KeysURL != "" {
+		opened := onlineOpenPage(pre.KeysURL)
+		m.appendEntryLocked(entry{Kind: entryDim, Text: setup.KeysPageLine(pre.KeysURL, opened)})
 	}
 	return m.onlineAskKey()
 }
