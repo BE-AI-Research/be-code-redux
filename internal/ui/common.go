@@ -84,6 +84,9 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/theme", "pick this terminal's colour theme, or /theme <name> · /theme default <name>", false},
 	{"/review", "show or set where file changes are reviewed: /review [auto|editor|tui|both]", true},
 	{"/coworkers", "list co-working models and how often each was consulted", false},
+	{"/api", "application API: status, /api on|off for this session", true},
+	{"/apps", "registered apps that may call the API", false},
+	{"/session", "this session's API token: /session token | rotate [grace]", true},
 	{"/packs", "list installed packs and which are active; /packs add <name>[@ref] [source] · /packs update|remove <name> · /packs on|off|default <name> · /packs reload", false},
 	{"/consult", "ask a co-working model directly: /consult [name] <question>", true},
 	{"/agents", "sub-agents: model cards and what each is doing; /agents stop <name>|start", true},
@@ -126,6 +129,8 @@ var busySafe = map[string]bool{
 	// A consultation is the co-worker's own scratch agent: it never touches
 	// the primary's history, so both may run mid-turn.
 	"/coworkers": true, "/consult": true, "/agents": true,
+	// The API serves on its own goroutine and a token is a session field under saveMu; none of it touches the turn.
+	"/api": true, "/apps": true, "/session": true,
 	// The browser's status, a consent revoked, or a disconnect: none of it
 	// touches the turn's history.
 	"/browser": true,

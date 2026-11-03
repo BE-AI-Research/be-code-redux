@@ -1239,6 +1239,9 @@ func (m *View) headerView() string {
 		code = sess.ResumeCode()
 	}
 	logo := m.st.Accent.Render("session " + code)
+	if m.ag.API != nil && m.ag.API.Status().Serving {
+		logo = m.st.Accent.Render("api · ") + logo
+	}
 	if len(lines) >= 2 {
 		gap := m.width - lipgloss.Width(lines[1]) - lipgloss.Width(logo) - 1
 		if gap < 1 {
@@ -1262,6 +1265,11 @@ func (m *View) bottomLine() string {
 		state = m.spin.View() + " " + m.statusNote + m.st.Dim.Render(" · Enter queues · Esc cancels")
 		if n := m.ag.Pending(); n > 0 {
 			state += m.st.Accent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
+		}
+	}
+	if m.ag.API != nil {
+		if st := m.ag.API.Status(); st.InFlight != "" {
+			state += m.st.Dim.Render(" · api: " + st.InFlight)
 		}
 	}
 	modelSeg := m.st.Dim.Render(" · " + shortModel(m.ag.CurrentModel()) + " · ")
@@ -1894,6 +1902,20 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			return m, m.packsCmd(fields)
 		}
 		m.renderLocalNote(ui.PacksCommand(m.Session.baseCtx(), m.ag, fields))
+	case "/api":
+		m.renderLocalNote(ui.APICommand(m.ag, fields))
+	case "/apps":
+		m.renderLocalLines(strings.Split(ui.AppsCommand(), "\n"))
+	case "/session":
+		// Shown on this terminal only, never an entry: a token in the
+		// transcript would be saved with the session and shared with
+		// every attached terminal.
+		secret, note, err := ui.SessionCommand(m.ag, fields)
+		if err != nil {
+			m.renderLocalNote(err.Error())
+			return m, nil
+		}
+		m.renderLocalLines([]string{m.st.Dim.Render(note), m.st.Accent.Render(secret)})
 	case "/coworkers":
 		// A listing, not a shared event: the terminal that asked is the one
 		// that wants to read it.

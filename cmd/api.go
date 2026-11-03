@@ -28,6 +28,7 @@ type apiService struct {
 	mu     sync.Mutex
 	srv    *api.Server
 	ln     net.Listener
+	logf   *os.File
 	status agent.APIStatus
 }
 
@@ -48,7 +49,10 @@ func (s *apiService) StartIfEnabled() {
 		return
 	}
 	if err := s.Start(); err != nil {
-		s.ag.QueueNotice("api: " + err.Error())
+		msg := "api: " + err.Error()
+		if !s.ag.Notice(msg) {
+			s.ag.QueueNotice(msg)
+		}
 	}
 }
 
@@ -85,38 +89,46 @@ func (s *apiService) Start() error {
 		return err
 	}
 	reg := api.NewRegistry(filepath.Join(s.dir, "apps"))
-	reg.Warn = func(msg string) { s.ag.QueueNotice(msg) }
+	reg.Warn = func(msg string) {
+		if !s.ag.Notice(msg) {
+			s.ag.QueueNotice(msg)
+		}
+	}
 	logf, _ := os.OpenFile(filepath.Join(s.dir, "access.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	opts := api.Options{Backend: agent.NewAPIBackend(s.ag, Version), Apps: reg, Timeout: timeout}
 	if logf != nil {
 		opts.AccessLog = logf
 	}
 	srv := api.New(opts)
-	s.srv, s.ln = srv, ln
+	s.srv, s.ln, s.logf = srv, ln, logf
 	s.status = agent.APIStatus{Serving: true, Socket: api.SocketPath(s.dir)}
 	go func() {
 		_ = srv.Serve(ln)
-		if logf != nil {
-			logf.Close()
-		}
 	}()
 	return nil
 }
 
-// Stop is idempotent.
+// Stop is idempotent. The fields come out under the lock and the slow
+// shutdown (Close waits up to 2 s) runs outside it, so Status, which every
+// render calls, never waits on it.
 func (s *apiService) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.srv == nil {
+	srv, ln, logf := s.srv, s.ln, s.logf
+	if srv == nil {
+		s.mu.Unlock()
 		return
 	}
+	s.srv, s.ln, s.logf = nil, nil, nil
+	s.status = agent.APIStatus{}
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = s.srv.Close(ctx)
-	_ = s.ln.Close()
+	_ = srv.Close(ctx)
+	_ = ln.Close()
+	if logf != nil {
+		logf.Close()
+	}
 	api.Release(s.dir)
-	s.srv, s.ln = nil, nil
-	s.status = agent.APIStatus{}
 }
 
 // Status is cheap on purpose: the header and bottom line call it on every

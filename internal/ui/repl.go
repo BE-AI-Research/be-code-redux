@@ -937,6 +937,22 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Printf("review: %s (resolves to %s)\n", r.Review.Mode(), r.Review.Resolve())
 	case "/packs":
 		fmt.Println(PacksCommand(ctx, r.Agent, fields))
+	case "/api":
+		fmt.Println(APICommand(r.Agent, fields))
+	case "/apps":
+		fmt.Println(AppsCommand())
+	case "/session":
+		secret, note, err := SessionCommand(r.Agent, fields)
+		if err != nil {
+			fmt.Println(dim(err.Error()))
+			break
+		}
+		fmt.Println(dim(note))
+		if isTTY() {
+			fmt.Println(secret)
+		} else {
+			fmt.Println(dim("the token is not shown because stdout is not a terminal; use be-code session token --stdout"))
+		}
 	case "/coworkers":
 		cws := r.Agent.Coworkers()
 		if len(cws) == 0 {
