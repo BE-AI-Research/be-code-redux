@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ type ServerStats struct {
 	Served   int
 	LastApp  string
 	LastAt   time.Time
-	InFlight string // the app whose request is being answered now, "" when idle
+	InFlight string // the apps whose requests are being answered now, joined with ","; "" when idle
 }
 
 // Server is the application API: one http.Server on a unix socket, the
@@ -56,8 +57,9 @@ type Server struct {
 	failWindow time.Time
 	failures   int
 
-	statsMu sync.Mutex
-	stats   ServerStats
+	statsMu  sync.Mutex
+	stats    ServerStats
+	inFlight map[string]int // app name → requests being answered
 }
 
 // call is one authenticated request, handed to a route handler.
@@ -191,7 +193,32 @@ func (s *Server) mapErr(err error) *Error {
 func (s *Server) Stats() ServerStats {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
-	return s.stats
+	st := s.stats
+	names := make([]string, 0, len(s.inFlight))
+	for n := range s.inFlight {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	st.InFlight = strings.Join(names, ",")
+	return st
+}
+
+// beginInFlight marks app as being answered; the returned func unmarks it.
+// The caller defers it, so a panicking handler cannot leave the mark behind.
+func (s *Server) beginInFlight(app string) func() {
+	s.statsMu.Lock()
+	if s.inFlight == nil {
+		s.inFlight = map[string]int{}
+	}
+	s.inFlight[app]++
+	s.statsMu.Unlock()
+	return func() {
+		s.statsMu.Lock()
+		if s.inFlight[app]--; s.inFlight[app] <= 0 {
+			delete(s.inFlight, app)
+		}
+		s.statsMu.Unlock()
+	}
 }
 
 // serve is the check order of spec §2.4 steps 2–8 and the access log.
@@ -259,13 +286,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, template, tier st
 	defer stop()
 	defer cancel()
 	c.r = r.WithContext(ctx)
-	s.statsMu.Lock()
-	s.stats.InFlight = app.Name
-	s.statsMu.Unlock()
+	defer s.beginInFlight(app.Name)()
 	h(s, c)
-	s.statsMu.Lock()
-	s.stats.InFlight = ""
-	s.statsMu.Unlock()
 	s.statsMu.Lock()
 	s.stats.Served++
 	s.stats.LastApp, s.stats.LastAt = app.Name, s.o.Now()

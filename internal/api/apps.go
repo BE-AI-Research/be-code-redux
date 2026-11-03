@@ -38,7 +38,8 @@ var (
 
 // Budget bounds what one app may ask for: Tokens is the most a reply may be
 // asked to produce, PerHour the requests allowed in any sliding hour. Zero
-// means unbounded for that limit.
+// is never unbounded: Add and every read put the default in its place
+// (DefaultTokens, DefaultPerHour; spec §2.1).
 type Budget struct {
 	Tokens  int `json:"tokens"`
 	PerHour int `json:"per_hour"`
@@ -310,6 +311,8 @@ func (r *Registry) readApp(file string) (App, error) {
 	if a.KeyHash == "" {
 		return App{}, errors.New("no key_hash")
 	}
+	// A hand-edited 0 means the default, as it does in Add: never unbounded.
+	a.Profile = a.Profile.withDefaults()
 	return a, nil
 }
 

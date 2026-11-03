@@ -198,3 +198,34 @@ func TestRotateInTheSameMtimeTickIsSeen(t *testing.T) {
 		t.Fatal("the new key must work")
 	}
 }
+
+// A hand-edited file with both budgets at 0 is not unbounded: the read
+// applies the same defaults Add does (spec §2.1).
+func TestLookupDefaultsZeroBudgets(t *testing.T) {
+	r := newReg(t)
+	key, err := r.Add("app", Profile{Tiers: []string{"query"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(r.Dir, "app.json")
+	raw, _ := os.ReadFile(path)
+	var on map[string]any
+	_ = json.Unmarshal(raw, &on)
+	on["profile"].(map[string]any)["budget"] = map[string]any{"tokens": 0, "per_hour": 0}
+	raw, _ = json.Marshal(on)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-2 * time.Second)
+	_ = os.Chtimes(path, past, past)
+	a, ok := NewRegistry(r.Dir).Lookup(key)
+	if !ok {
+		t.Fatal("lookup")
+	}
+	if a.Profile.Budget.Tokens != DefaultTokens || a.Profile.Budget.PerHour != DefaultPerHour {
+		t.Fatalf("budget %+v, want %d/%d", a.Profile.Budget, DefaultTokens, DefaultPerHour)
+	}
+	if DefaultTokens != 4096 || DefaultPerHour != 120 {
+		t.Fatalf("defaults %d/%d", DefaultTokens, DefaultPerHour)
+	}
+}

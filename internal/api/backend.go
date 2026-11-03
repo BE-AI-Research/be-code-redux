@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -106,10 +107,11 @@ func writeError(w http.ResponseWriter, e *Error) {
 // toError maps any backend error to an *Error. A context deadline is the
 // request's own timeout; a cancellation is the client gone.
 func toError(err error) *Error {
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		return e
 	}
-	if err == context.DeadlineExceeded {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return Errorf(http.StatusGatewayTimeout, "timeout", "the request did not finish within api.timeout")
 	}
 	return Errorf(http.StatusBadGateway, "backend_error", "%v", err)
