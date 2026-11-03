@@ -338,3 +338,25 @@ func TestDoctorOnlineLineStoredKey(t *testing.T) {
 		t.Fatalf("%q hits=%d", got, hits)
 	}
 }
+
+// I5 (final review): on Windows the mode is not a boundary, so doctor
+// never calls the file loose there.
+func TestCredentialDoctorLinesSkipModeOnWindows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".be-code")
+	s, err := credentials.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("groq", credentials.Credential{Kind: credentials.KindAPIKey, Key: "k", Source: "pasted", Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(filepath.Join(dir, "credentials.json"), 0o666)
+	prev := credentialModeChecked
+	credentialModeChecked = false
+	t.Cleanup(func() { credentialModeChecked = prev })
+	if lines := strings.Join(credentialDoctorLines(config.Default()), "\n"); strings.Contains(lines, "chmod") {
+		t.Fatalf("Windows doctor flagged the mode:\n%s", lines)
+	}
+}

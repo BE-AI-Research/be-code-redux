@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -811,6 +812,12 @@ func onlineDoctorLine(ctx context.Context, cfg *config.Config) string {
 	return fmt.Sprintf("online: %s · %s — key %s · %s · window %s · %s", name, model, keyPhrase, state, window, price)
 }
 
+// credentialModeChecked is false on Windows, where Go reports every file
+// as 0666 and the profile directory's ACL is the boundary — the rule
+// internal/credentials follows (spec §2). A variable so a test can take
+// the Windows branch.
+var credentialModeChecked = runtime.GOOS != "windows"
+
 // credentialDoctorLines: the credential file's state and, per online
 // provider, where its key would come from. Never a key.
 func credentialDoctorLines(cfg *config.Config) []string {
@@ -824,7 +831,7 @@ func credentialDoctorLines(cfg *config.Config) []string {
 	if fi, err := os.Stat(path); os.IsNotExist(err) {
 		out = append(out, fmt.Sprintf("credentials: none (%s absent)", shown))
 	} else if err == nil {
-		if fi.Mode().Perm()&0o077 != 0 {
+		if credentialModeChecked && fi.Mode().Perm()&0o077 != 0 {
 			out = append(out, fmt.Sprintf("credentials: %s is readable by others; run chmod 600 %s", shown, path))
 		} else {
 			out = append(out, fmt.Sprintf("credentials: %s (mode %04o)", shown, fi.Mode().Perm()))
