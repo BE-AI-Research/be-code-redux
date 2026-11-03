@@ -113,7 +113,7 @@ func rejectedKeyError(keyEnv string, he *provider.HTTPError) error {
 	if who == "" {
 		who = "API key"
 	}
-	return fmt.Errorf("%s rejected by %s (%w)", who, he.Provider, he)
+	return fmt.Errorf("%s rejected by %s; or run /online add %s (%w)", who, he.Provider, he.Provider, he)
 }
 
 // inLane runs one model call inside the primary's lane on its server, when

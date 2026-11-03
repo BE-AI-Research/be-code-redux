@@ -398,3 +398,14 @@ func TestSetModelReserveSurvivesAnUnsetContextTokens(t *testing.T) {
 		t.Fatalf("reserve collapsed to the floor: %d", ag.History.Reserve)
 	}
 }
+
+func TestRejectedKeyErrorNamesTheAddCommand(t *testing.T) {
+	he := &provider.HTTPError{Provider: "groq", Code: 401, Body: "x"}
+	got := rejectedKeyError("GROQ_API_KEY", he).Error()
+	if !strings.Contains(got, "GROQ_API_KEY") || !strings.Contains(got, "or run /online add groq") {
+		t.Fatalf("%q", got)
+	}
+	if got := rejectedKeyError("", he).Error(); !strings.Contains(got, "API key rejected by groq") || !strings.Contains(got, "or run /online add groq") {
+		t.Fatalf("%q", got)
+	}
+}

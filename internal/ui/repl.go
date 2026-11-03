@@ -1125,7 +1125,7 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/stats":
 		fmt.Println(r.Agent.StatsReport(nil))
 	case "/online":
-		fmt.Println(OnlineCommand(r.Agent, fields[1:]))
+		fmt.Println(OnlineCommand(r.Agent, r.Cfg, fields[1:]))
 	case "/update":
 		if len(fields) > 1 && fields[1] == "check" {
 			fmt.Println(UpdateCheckCommand(r.Cfg, strings.Join(fields[2:], " ")))

@@ -1801,7 +1801,7 @@ Tab completes commands and @file mentions; @path pins a file into context.`)
 			sess.finishTurn(nil, nil)
 		}()
 	case "/online":
-		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, fields[1:])})
+		m.appendEntryLocked(entry{Kind: entryPlain, Text: ui.OnlineCommand(m.ag, m.cfg, fields[1:])})
 	case "/update":
 		if len(fields) > 1 && fields[1] == "check" {
 			line := ui.UpdateCheckCommand(m.cfg, strings.Join(fields[2:], " "))

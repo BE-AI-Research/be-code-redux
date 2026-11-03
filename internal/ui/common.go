@@ -3,11 +3,15 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"unicode"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/credentials"
+	"github.com/brown-enterprises/be-code/internal/provider"
 )
 
 // ANSI helpers — plain enough for any terminal, disabled when not a TTY.
@@ -77,7 +81,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/handoff", "show the briefing carried over from a resumed session", false},
 	{"/map", "show the repo map", false},
 	{"/stats", "session metrics: context, model cost, tools, tasks", false},
-	{"/online", "the online main model: provider, approval, spend; /online forget", true},
+	{"/online", "the online main model: provider, approval, spend, credential; /online add [name] · revoke <name> · forget", true},
 	{"/update", "check for a newer BE-Code and install it; /update check on|off", false},
 	{"/tools", "list available tools", false},
 	{"/config", "show effective configuration", false},
@@ -154,19 +158,68 @@ var busySafe = map[string]bool{
 	"/update": true,
 }
 
-// OnlineCommand is /online in both UIs: the report, or /online forget.
-func OnlineCommand(ag *agent.Agent, args []string) string {
-	if len(args) > 0 && args[0] == "forget" {
-		if err := ag.ForgetOnline(); err != nil {
-			return "error: " + err.Error()
-		}
-		name, _ := ag.Online()
-		return "forgot the approval for " + name + "; the next session asks again"
-	}
+// OnlineCommand is /online in both UIs: the report, /online forget,
+// /online revoke <name>. /online add is each UI's own flow (it prompts),
+// so here it is usage.
+func OnlineCommand(ag *agent.Agent, cfg *config.Config, args []string) string {
+	const usage = "usage: /online [forget | add [name] | revoke <name>]"
 	if len(args) > 0 {
-		return "usage: /online [forget]"
+		switch args[0] {
+		case "forget":
+			if err := ag.ForgetOnline(); err != nil {
+				return "error: " + err.Error()
+			}
+			name, _ := ag.Online()
+			return "forgot the approval for " + name + "; the next session asks again"
+		case "revoke":
+			if len(args) != 2 {
+				return usage
+			}
+			return RevokeCredential(cfg, args[1])
+		}
+		return usage
 	}
-	return ag.OnlineReport()
+	report := ag.OnlineReport()
+	if name, online := ag.Online(); online && cfg != nil {
+		report += "\n" + CredentialLine(cfg, name)
+	}
+	return report
+}
+
+// CredentialLine says where name's key comes from, never what it is.
+func CredentialLine(cfg *config.Config, name string) string {
+	src, stored := cfg.KeySource(name)
+	switch src {
+	case "env":
+		return "credential: from $" + cfg.Providers[name].APIKeyEnv
+	case "stored":
+		return fmt.Sprintf("credential: stored (%s, %s)", stored.Source, stored.Created.UTC().Format("2006-01-02"))
+	}
+	return fmt.Sprintf("credential: none (run /online add %s)", name)
+}
+
+// RevokeCredential deletes the stored credential for name. The harness
+// cannot revoke the key at the provider, so the line says to.
+func RevokeCredential(cfg *config.Config, name string) string {
+	dir, err := config.Dir()
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	s, err := credentials.Open(dir)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	if _, ok := s.Key(name); !ok {
+		return "no stored credential for " + name
+	}
+	if err := s.Revoke(name); err != nil {
+		return "error: " + err.Error()
+	}
+	where := "the provider's site"
+	if pre, ok := provider.PresetByName(name); ok {
+		where = pre.Docs
+	}
+	return fmt.Sprintf("revoked locally; revoke it at %s too", where)
 }
 
 // BusySafeCommand reports whether a slash command line may run while the
