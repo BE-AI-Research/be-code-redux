@@ -1375,24 +1375,30 @@ func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, err
 	case <-run.reply:
 	default:
 	}
+	line := fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q)
+	if run.job {
+		line = jobTag(run.d.Node) + "asks: " + q
+	}
+	line = strings.TrimSpace(line)
 	s.mu.Lock()
 	if run.question != "" {
 		s.mu.Unlock()
 		return "", errors.New("a question is already waiting for an answer")
 	}
 	run.question = q
-	job := run.job
+	// The previous question's line is cleared with the new question and
+	// this one's is set only once it is queued: openAskLine (a jobs wait)
+	// pairs question with askLine and reports "waiting for your answer"
+	// when the line is no longer queued — a new question beside an old,
+	// already-delivered line would be reported, and then delivered again
+	// when its own line was queued a moment later.
+	run.askLine = ""
 	s.mu.Unlock()
 	a.engineDo("sub-agent ask", func(st *engine.Store) { _ = st.Note(run.d.Node, "asked: "+q, "", false, false) })
-	line := fmt.Sprintf("sub-agent %s asks about %s: %s", run.d.Owner, run.d.Node, q)
-	if job {
-		line = jobTag(run.d.Node) + "asks: " + q
-	}
-	line = strings.TrimSpace(line)
+	a.EnqueueHarness(line)
 	s.mu.Lock()
 	run.askLine = line
 	s.mu.Unlock()
-	a.EnqueueHarness(line)
 	run.sendEvent(jobEvent{Kind: "ask", Line: line})
 	if a.Events.OnSubAgentAsk != nil {
 		a.Events.OnSubAgentAsk(subagent.Ask{Node: run.d.Node, Owner: run.d.Owner, Question: q})
