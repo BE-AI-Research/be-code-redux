@@ -1148,7 +1148,11 @@ func (a *Agent) composeSystem(gitInfo string) string {
 	// Stable for the session, so the prompt cache never pays for it: the
 	// block says what sub-agents are, never what any one of them is doing.
 	if a.subs != nil && a.systemOverride == "" {
-		sys += "\n\n" + subAgentGuidance
+		if a.anySubAgent.Load() {
+			sys += "\n\n" + subAgentGuidance
+		} else {
+			sys += "\n\n" + subAgentJobsGuidance
+		}
 	}
 	// Stable for the session, like the sub-agent block: whether the browser
 	// is registered never changes mid-session, so the cache never pays.

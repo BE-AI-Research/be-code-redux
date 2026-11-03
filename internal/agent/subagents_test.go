@@ -1395,3 +1395,21 @@ func TestSubAgentGuidanceNamesJobTools(t *testing.T) {
 		}
 	}
 }
+
+func TestGuidanceVariantFollowsSubAgentFlag(t *testing.T) {
+	for name, sub := range map[string]bool{"sub_agent": true, "consult-only": false} {
+		f := newSubFixture(t, &scriptedProvider{}, func(c *config.Config) { c.Coworkers[0].SubAgent = sub })
+		sys := f.ag.History.System.Content
+		hasSteps := strings.Contains(sys, "A step you assign with an owner and a scope")
+		if hasSteps != sub || !strings.Contains(sys, "dispatch {who, job, scope}") {
+			t.Fatalf("%s: steps paragraph %v\n%s", name, hasSteps, sys)
+		}
+		want := subAgentJobsGuidance
+		if sub {
+			want = subAgentGuidance
+		}
+		if !strings.Contains(sys, want) {
+			t.Fatalf("%s: wrong variant", name)
+		}
+	}
+}

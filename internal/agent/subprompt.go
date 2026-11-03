@@ -12,10 +12,18 @@ import (
 // purpose: prompt guidance moves a local model more than mechanism does.
 const SubAgentFrame = `You are a sub-agent working one step of a larger task for a main model that owns the whole task. Your step, its sub-steps, and the files you may change are listed below. Do the step completely: read what you need anywhere in the repository, change only files inside your scope, run the project's checks when you have changed code, and mark each sub-step done as you finish it. If you need a file outside your scope, a decision you cannot make, or information only the main model has, use ask_main once with a precise question and wait. When the step is done, reply with a short summary of what you changed and anything the main model must know. Do not restate the task.`
 
-// subAgentGuidance is the one block the main model gets when sub-agents
-// are configured. It follows taskGuidance and pacingGuidance, which stay
-// verbatim.
-const subAgentGuidance = `Sub-agents: dispatch {who, job, scope} hands a scoped job to a co-worker, which runs it on its own and reports back in a later message; jobs status|wait|stop|reply|extend looks at, waits for, ends, steers or extends a job. Never edit inside a running job's scope. A job that goes quiet is reported to you as "job <id> … has been quiet"; decide: extend it, stop it, or reply to it. A step you assign with an owner and a scope in the task record is also run by that model. Answer a sub-agent's question with jobs reply or task reply.`
+// subAgentGuidance is the block the main model gets when sub-agents are
+// configured. It follows taskGuidance and pacingGuidance, which stay
+// verbatim. Two variants, each stable for the session: this one when some
+// co-worker has sub_agent set (a step can be assigned an owner and a scope),
+// subAgentJobsGuidance when co-workers can only be dispatched jobs.
+const subAgentGuidance = subAgentGuidanceHead + ` A step you assign with an owner and a scope in the task record is also run by that model. Answer a sub-agent's question with jobs reply or task reply.`
+
+// subAgentJobsGuidance is the same block without step assignment, for a
+// configuration where no co-worker is a sub-agent: task owner would refuse.
+const subAgentJobsGuidance = subAgentGuidanceHead + ` Answer a job's question with jobs reply.`
+
+const subAgentGuidanceHead = `Sub-agents: dispatch {who, job, scope} hands a scoped job to a co-worker, which runs it on its own and reports back in a later message; jobs status|wait|stop|reply|extend looks at, waits for, ends, steers or extends a job. Never edit inside a running job's scope. A job that goes quiet is reported to you as "job <id> … has been quiet"; decide: extend it, stop it, or reply to it.`
 
 // renderDispatch is the Dispatch as the sub-agent reads it, after the frame.
 func renderDispatch(d subagent.Dispatch) string {
