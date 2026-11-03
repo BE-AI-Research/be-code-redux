@@ -215,6 +215,7 @@ type SubAgentState struct {
 	LastActivity time.Time
 	LastTool     string
 	Stalls       int
+	Stalled      bool // stalled now (cleared by progress or an extend)
 	// At is what the bottom line shows for a running row: the doing node
 	// inside Node's dispatched subtree when the store can name one, else
 	// Node itself (the coarser root id). Set only for a running row — ""
@@ -1680,6 +1681,7 @@ func applyRunState(row *SubAgentState, r *subRun) {
 	row.LastActivity = r.lastActivity
 	row.LastTool = r.lastTool
 	row.Stalls = r.stalls
+	row.Stalled = r.stalled
 }
 
 // SubAgentStates is /agents: one row per run (sorted by node id), then an

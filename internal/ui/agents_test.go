@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -246,11 +247,17 @@ func TestAgentsStartDuringFiredTurnIsHeld(t *testing.T) {
 // it and its last tool; a job waiting on something names what.
 func TestAgentLinesShowStalledAndWaiting(t *testing.T) {
 	stalled := agent.SubAgentState{Name: "big", Model: "m", Provider: "ollama", SubAgent: true,
-		Node: "1.1", State: "working", Calls: 4, Since: time.Now(), Stalls: 1,
+		Node: "1.1", State: "working", Calls: 4, Since: time.Now(), Stalls: 1, Stalled: true,
 		LastTool: "read_file x.go", LastActivity: time.Now().Add(-90 * time.Second)}
 	line := subAgentLine(stalled)
-	if !strings.Contains(line, " stalled") || !strings.Contains(line, "last read_file x.go 1m30s") {
+	if !strings.Contains(line, " stalled") || !regexp.MustCompile(`last read_file x\.go 1m(29|30|31)s ago`).MatchString(line) {
 		t.Fatalf("stalled row: %q", line)
+	}
+	// After an extend the count stays but the flag is cleared.
+	extended := stalled
+	extended.Stalled = false
+	if line := subAgentLine(extended); strings.Contains(line, " stalled") {
+		t.Fatalf("an extended row still says stalled: %q", line)
 	}
 	waiting := agent.SubAgentState{Name: "big", Model: "m", Provider: "ollama", SubAgent: true,
 		Node: "1.1", State: "working", Since: time.Now(), Waiting: "approval"}

@@ -146,14 +146,14 @@ func subAgentLine(s agent.SubAgentState) string {
 		return line + "  " + s.State
 	}
 	line += fmt.Sprintf("  %s  %s (%d tool calls, %s)", s.Node, s.State, s.Calls, time.Since(s.Since).Round(time.Minute))
-	if s.Stalls > 0 {
+	if s.Stalled {
 		line += " stalled"
 	}
 	if s.Waiting != "" {
 		line += " waiting (" + s.Waiting + ")"
 	}
 	if s.LastTool != "" {
-		line += " last " + s.LastTool + " " + time.Since(s.LastActivity).Round(time.Second).String()
+		line += " last " + s.LastTool + " " + time.Since(s.LastActivity).Round(time.Second).String() + " ago"
 	}
 	return line
 }
