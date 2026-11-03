@@ -1240,7 +1240,11 @@ func (m *View) headerView() string {
 	}
 	logo := m.st.Accent.Render("session " + code)
 	if m.ag.API != nil && m.ag.API.Status().Serving {
-		logo = m.st.Accent.Render("api · ") + logo
+		sep := "api · "
+		if m.ascii {
+			sep = "api | "
+		}
+		logo = m.st.Accent.Render(sep) + logo
 	}
 	if len(lines) >= 2 {
 		gap := m.width - lipgloss.Width(lines[1]) - lipgloss.Width(logo) - 1

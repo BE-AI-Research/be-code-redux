@@ -25,6 +25,9 @@ type apiService struct {
 	ag  *agent.Agent
 	dir string
 
+	// opMu serialises Start and Stop (never taken by Status); mu guards
+	// only the fields, briefly.
+	opMu   sync.Mutex
 	mu     sync.Mutex
 	srv    *api.Server
 	ln     net.Listener
@@ -59,9 +62,12 @@ func (s *apiService) StartIfEnabled() {
 // Start begins serving. A failed Listen leaves s.srv nil so a later /api on
 // can retry.
 func (s *apiService) Start() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.srv != nil {
+	running := s.srv != nil
+	s.mu.Unlock()
+	if running {
 		return nil
 	}
 	if s.dir == "" {
@@ -80,12 +86,14 @@ func (s *apiService) Start() error {
 	}
 	ln, err := api.Listen(s.dir, api.Record{PID: os.Getpid(), SessionCode: code})
 	if err != nil {
+		st := agent.APIStatus{Err: err.Error()}
 		var se *api.ServedElsewhere
 		if errors.As(err, &se) {
-			s.status = agent.APIStatus{ServedBy: se.Record.SessionCode, ServedByPID: se.Record.PID, Socket: se.Record.Socket, Err: err.Error()}
-		} else {
-			s.status = agent.APIStatus{Err: err.Error()}
+			st = agent.APIStatus{ServedBy: se.Record.SessionCode, ServedByPID: se.Record.PID, Socket: se.Record.Socket, Err: err.Error()}
 		}
+		s.mu.Lock()
+		s.status = st
+		s.mu.Unlock()
 		return err
 	}
 	reg := api.NewRegistry(filepath.Join(s.dir, "apps"))
@@ -100,8 +108,10 @@ func (s *apiService) Start() error {
 		opts.AccessLog = logf
 	}
 	srv := api.New(opts)
+	s.mu.Lock()
 	s.srv, s.ln, s.logf = srv, ln, logf
 	s.status = agent.APIStatus{Serving: true, Socket: api.SocketPath(s.dir)}
+	s.mu.Unlock()
 	go func() {
 		_ = srv.Serve(ln)
 	}()
@@ -112,6 +122,8 @@ func (s *apiService) Start() error {
 // shutdown (Close waits up to 2 s) runs outside it, so Status, which every
 // render calls, never waits on it.
 func (s *apiService) Stop() {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	srv, ln, logf := s.srv, s.ln, s.logf
 	if srv == nil {
