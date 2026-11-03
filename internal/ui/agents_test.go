@@ -241,3 +241,20 @@ func TestAgentsStartDuringFiredTurnIsHeld(t *testing.T) {
 		t.Fatalf("a person's /task assign was refused: %v", lines)
 	}
 }
+
+// TestAgentLinesShowStalledAndWaiting: a running job that has stalled shows
+// it and its last tool; a job waiting on something names what.
+func TestAgentLinesShowStalledAndWaiting(t *testing.T) {
+	stalled := agent.SubAgentState{Name: "big", Model: "m", Provider: "ollama", SubAgent: true,
+		Node: "1.1", State: "working", Calls: 4, Since: time.Now(), Stalls: 1,
+		LastTool: "read_file x.go", LastActivity: time.Now().Add(-90 * time.Second)}
+	line := subAgentLine(stalled)
+	if !strings.Contains(line, " stalled") || !strings.Contains(line, "last read_file x.go 1m30s") {
+		t.Fatalf("stalled row: %q", line)
+	}
+	waiting := agent.SubAgentState{Name: "big", Model: "m", Provider: "ollama", SubAgent: true,
+		Node: "1.1", State: "working", Since: time.Now(), Waiting: "approval"}
+	if line := subAgentLine(waiting); !strings.Contains(line, " waiting (approval)") {
+		t.Fatalf("waiting row: %q", line)
+	}
+}

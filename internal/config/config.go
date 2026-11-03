@@ -50,6 +50,12 @@ type SubAgentsConfig struct {
 	MaxTurns      int `json:"max_turns"`
 	// AskTimeout is in seconds.
 	AskTimeout int `json:"ask_timeout"`
+	// StallAfter is in seconds: how long a job may go without a tool call or
+	// output before the main model is told it has stalled. 0 disables.
+	StallAfter int `json:"stall_after"`
+	// MaxRuntime is in seconds of running time, waits excluded, a job may
+	// use before it is stopped.
+	MaxRuntime int `json:"max_runtime"`
 }
 
 // CoworkConfig tunes co-worker consultations.
@@ -507,7 +513,7 @@ func Default() *Config {
 		IDE:              IDEConfig{Enabled: true, AutoContext: true, Review: "auto"},
 		Chat:             ChatConfig{Enabled: true, MentionContext: 10},
 		Cowork:           CoworkConfig{Auto: true, MaxConsultsPerRun: 3, ConsultTurns: 12, ConsultTimeout: 300},
-		SubAgents:        SubAgentsConfig{MaxConcurrent: 2, MaxTurns: 40, AskTimeout: 600},
+		SubAgents:        SubAgentsConfig{MaxConcurrent: 2, MaxTurns: 40, AskTimeout: 600, StallAfter: 180, MaxRuntime: 1800},
 		Coworkers:        nil,
 		ReasoningEffort:  "medium",
 		ResumeReplay:     true,

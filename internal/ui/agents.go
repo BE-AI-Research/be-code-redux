@@ -122,24 +122,38 @@ func AgentLines(ag *agent.Agent, args []string) []string {
 	}
 	var lines []string
 	for _, s := range ag.SubAgentStates() {
-		if s.Model == "" { // a waiting row
-			lines = append(lines, fmt.Sprintf("  %s  %s  %s", s.Name, s.Node, s.State))
-			continue
-		}
-		where := "local"
-		if s.Online {
-			where = "online"
-		}
-		line := fmt.Sprintf("  %s  %s/%s  %s  sub-agent", s.Name, s.Provider, s.Model, where)
-		if len(s.MaxScope) > 0 {
-			line += "  max_scope: " + strings.Join(s.MaxScope, ", ")
-		}
-		if s.Node != "" {
-			line += fmt.Sprintf("  %s  %s (%d tool calls, %s)", s.Node, s.State, s.Calls, time.Since(s.Since).Round(time.Minute))
-		} else {
-			line += "  " + s.State
-		}
-		lines = append(lines, line)
+		lines = append(lines, subAgentLine(s))
 	}
 	return lines
+}
+
+// subAgentLine is one /agents row: a waiting step, an idle card, or a run.
+// A running row also says when it has stalled, why it is paused, and its
+// last tool call.
+func subAgentLine(s agent.SubAgentState) string {
+	if s.Model == "" { // a waiting row
+		return fmt.Sprintf("  %s  %s  %s", s.Name, s.Node, s.State)
+	}
+	where := "local"
+	if s.Online {
+		where = "online"
+	}
+	line := fmt.Sprintf("  %s  %s/%s  %s  sub-agent", s.Name, s.Provider, s.Model, where)
+	if len(s.MaxScope) > 0 {
+		line += "  max_scope: " + strings.Join(s.MaxScope, ", ")
+	}
+	if s.Node == "" {
+		return line + "  " + s.State
+	}
+	line += fmt.Sprintf("  %s  %s (%d tool calls, %s)", s.Node, s.State, s.Calls, time.Since(s.Since).Round(time.Minute))
+	if s.Stalls > 0 {
+		line += " stalled"
+	}
+	if s.Waiting != "" {
+		line += " waiting (" + s.Waiting + ")"
+	}
+	if s.LastTool != "" {
+		line += " last " + s.LastTool + " " + time.Since(s.LastActivity).Round(time.Second).String()
+	}
+	return line
 }

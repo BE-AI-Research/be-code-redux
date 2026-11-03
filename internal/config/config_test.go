@@ -581,3 +581,19 @@ func TestAPIConfigDefaultsOff(t *testing.T) {
 		t.Fatalf("api defaults: %+v", d.API)
 	}
 }
+
+// The stall and runtime knobs (dispatch jobs, Task 2): a job may go quiet
+// for three minutes before the main model is told, and may run for half an
+// hour of its own time. An older config without the keys keeps both.
+func TestSubAgentsConfigDefaults(t *testing.T) {
+	c := Default()
+	if c.SubAgents.StallAfter != 180 || c.SubAgents.MaxRuntime != 1800 {
+		t.Fatalf("defaults: %+v", c.SubAgents)
+	}
+	if err := json.Unmarshal([]byte(`{"sub_agents":{"max_turns":9}}`), c); err != nil {
+		t.Fatal(err)
+	}
+	if c.SubAgents.StallAfter != 180 || c.SubAgents.MaxRuntime != 1800 || c.SubAgents.MaxTurns != 9 {
+		t.Fatalf("absent keys keep their defaults: %+v", c.SubAgents)
+	}
+}

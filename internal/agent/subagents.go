@@ -140,6 +140,19 @@ type subRun struct {
 	// the session and exactly wrong for the sub-agent. Set at dispatch, read
 	// only through its own mutex.
 	drift *workledger.Run
+
+	// Dispatch jobs (Task 2 of the jobs plan). Nothing writes these yet;
+	// the stall watch, the run-time meter and the waits fill them in. All
+	// zero at install, all read under subAgents.mu like the rest above.
+	job              bool          // a job the main model dispatched, not a standing step
+	lastActivity     time.Time     // last tool call or output from the run
+	lastTool         string        // the last tool call, e.g. "read_file x.go"
+	waiting          string        // "" or ask_main | lane | consent | approval
+	waitSince        time.Time     // when waiting last began
+	runFor           time.Duration // accumulated running time, waits excluded
+	stalls           int           // times the run has been reported stalled
+	stalled          bool          // currently past stall_after without activity
+	lastIntervention time.Time     // last time the main model intervened
 }
 
 // SubAgentState is one row of /agents.
@@ -150,6 +163,14 @@ type SubAgentState struct {
 	Node, State           string
 	Calls                 int
 	Since                 time.Time
+	// Job is a dispatched job (not a standing step); Waiting is why a
+	// running job is paused ("" when it is not); LastActivity and LastTool
+	// are its last sign of life; Stalls counts how often it has stalled.
+	Job          bool
+	Waiting      string
+	LastActivity time.Time
+	LastTool     string
+	Stalls       int
 	// At is what the bottom line shows for a running row: the doing node
 	// inside Node's dispatched subtree when the store can name one, else
 	// Node itself (the coarser root id). Set only for a running row — ""
@@ -1426,8 +1447,19 @@ func (a *Agent) StopAllSubAgents(reason string) {
 	a.engineDo("sub-agent flush", func(st *engine.Store) { _ = st.Flush() })
 }
 
-// SubAgentStates is /agents: every card, then one row per assigned step
-// that is running or waiting.
+// applyRunState copies a run's job bookkeeping onto its /agents row. The
+// caller holds subAgents.mu.
+func applyRunState(row *SubAgentState, r *subRun) {
+	row.Job = r.job
+	row.Waiting = r.waiting
+	row.LastActivity = r.lastActivity
+	row.LastTool = r.lastTool
+	row.Stalls = r.stalls
+}
+
+// SubAgentStates is /agents: one row per run (sorted by node id), then an
+// idle row for each co-worker with no run, then one row per assigned step
+// that is waiting.
 func (a *Agent) SubAgentStates() []SubAgentState {
 	s := a.subs
 	if s == nil {
@@ -1436,35 +1468,42 @@ func (a *Agent) SubAgentStates() []SubAgentState {
 	steps := a.subSteps("sub-agent states")
 	s.mu.Lock()
 	var out []SubAgentState
+	runs := make([]*subRun, 0, len(s.runs))
+	busy := map[string]bool{}
+	for _, r := range s.runs {
+		runs = append(runs, r)
+		busy[r.d.Owner] = true
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].d.Node < runs[j].d.Node })
+	for _, r := range runs {
+		cw := s.cws[r.d.Owner]
+		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope}
+		row.Node, row.Since = r.d.Node, r.started
+		row.At = row.Node
+		if r.scratch != nil {
+			row.Calls = r.scratch.Usage().ToolCalls
+		}
+		switch {
+		case r.question != "":
+			row.State = "asking: " + r.question
+		case r.scratch == nil:
+			row.State = "starting"
+		default:
+			row.State = "working"
+		}
+		applyRunState(&row, r)
+		out = append(out, row)
+	}
 	names := make([]string, 0, len(s.cws))
 	for n := range s.cws {
-		names = append(names, n)
+		if !busy[n] {
+			names = append(names, n)
+		}
 	}
 	sort.Strings(names)
-	byOwner := map[string][]*subRun{}
-	for _, r := range s.runs {
-		byOwner[r.d.Owner] = append(byOwner[r.d.Owner], r)
-	}
 	for _, n := range names {
 		cw := s.cws[n]
-		row := SubAgentState{Name: n, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope, State: "idle"}
-		if runs := byOwner[n]; len(runs) > 0 {
-			r := runs[0]
-			row.Node, row.Since = r.d.Node, r.started
-			row.At = row.Node
-			if r.scratch != nil {
-				row.Calls = r.scratch.Usage().ToolCalls
-			}
-			switch {
-			case r.question != "":
-				row.State = "asking: " + r.question
-			case r.scratch == nil:
-				row.State = "starting"
-			default:
-				row.State = "working"
-			}
-		}
-		out = append(out, row)
+		out = append(out, SubAgentState{Name: n, Model: cw.Model, Provider: cw.Provider, Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope, State: "idle"})
 	}
 	if len(steps) > 0 {
 		_, waiting := subagent.Ready(steps, s.cards, s.runningLocked())
@@ -1519,6 +1558,7 @@ func (a *Agent) RunningSubAgents() []SubAgentState {
 		row := SubAgentState{Name: r.d.Owner, Model: cw.Model, Provider: cw.Provider,
 			Online: cw.Online, SubAgent: true, MaxScope: cw.MaxScope,
 			Node: r.d.Node, At: r.d.Node, Since: r.started}
+		applyRunState(&row, r)
 		if r.at != "" {
 			row.At = r.at
 		}

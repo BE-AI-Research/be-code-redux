@@ -1363,3 +1363,27 @@ func TestAPanickingReviewerDoesNotStrandItsLane(t *testing.T) {
 	}
 	release()
 }
+
+// SubAgentStates lists every run a co-worker holds, not only the first one:
+// /agents must show each job, one row per node.
+func TestSubAgentStatesListsEveryRun(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	f.ag.subs.mu.Lock()
+	f.ag.subs.runs["1.2"] = &subRun{d: subagent.Dispatch{Owner: "big", Node: "1.2"}, started: time.Now()}
+	f.ag.subs.runs["1.1"] = &subRun{d: subagent.Dispatch{Owner: "big", Node: "1.1"}, started: time.Now()}
+	f.ag.subs.mu.Unlock()
+	defer func() {
+		f.ag.subs.mu.Lock()
+		f.ag.subs.runs = map[string]*subRun{}
+		f.ag.subs.mu.Unlock()
+	}()
+	states := f.ag.SubAgentStates()
+	if len(states) != 2 {
+		t.Fatalf("want one row per run, got %+v", states)
+	}
+	for i, want := range []string{"1.1", "1.2"} {
+		if states[i].Name != "big" || states[i].Node != want {
+			t.Fatalf("row %d: %+v, want big on %s", i, states[i], want)
+		}
+	}
+}

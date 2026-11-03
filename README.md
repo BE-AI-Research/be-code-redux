@@ -1602,6 +1602,10 @@ hand; `/config` prints what the running session actually resolved.
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an
   answer before the step is marked blocked
+  `sub_agents.stall_after` (180, seconds) — seconds a job may go without a tool call or
+  output before the main model is told it has stalled; 0 disables;
+  `sub_agents.max_runtime` (1800, seconds) — seconds of running time (waits excluded) a job
+  may use before it is stopped
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;
