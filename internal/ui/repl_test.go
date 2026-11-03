@@ -958,3 +958,115 @@ func TestOnlineAddWhileBusyPrintsTheBusyLine(t *testing.T) {
 		t.Fatal("a prompt was raised")
 	}
 }
+
+// C1 (final review): a key answered at the secret prompt never reaches the
+// history file, nor does a pasted sign-in redirect; an ordinary line does.
+// The readline is built the way NewREPL builds it, on a temp history file
+// and piped input, with the REPL's own reader goroutine.
+func TestSecretAnswersStayOutOfTheHistoryFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	hist := filepath.Join(t.TempDir(), "history")
+	in, feed := io.Pipe()
+	cfg := readlineConfig("> ", hist, nil)
+	cfg.Stdin = in
+	cfg.Stdout, cfg.Stderr = io.Discard, io.Discard
+	rl, err := readline.NewEx(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestREPL(t)
+	r.rl = rl
+	r.startReader()
+	p := replPrompter{r}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	answer := func(ask func() (string, bool), line string) string {
+		t.Helper()
+		got := make(chan string, 1)
+		go func() { s, _ := ask(); got <- s }()
+		// Each answer is fed only once the question is waiting, as a
+		// person would type it.
+		time.Sleep(50 * time.Millisecond)
+		if _, err := io.WriteString(feed, line+"\n"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case s := <-got:
+			return s
+		case <-ctx.Done():
+			t.Fatalf("no answer for %q", line)
+		}
+		return ""
+	}
+	if got := answer(func() (string, bool) {
+		s, ok := p.AskSecret(ctx, "key: ")
+		return s, ok
+	}, "sk-secret-123"); got != "sk-secret-123" {
+		t.Fatalf("secret answer wrong (%d chars)", len(got))
+	}
+	if rl.Config.EnableMask {
+		t.Fatal("the masked config was not restored after the secret read")
+	}
+	if got := answer(func() (string, bool) { return p.AskUnrecorded(ctx, "paste: ") }, "http://127.0.0.1:1/cb/x?code=c0de-secret"); !strings.Contains(got, "c0de-secret") {
+		t.Fatalf("pasted answer wrong (%d chars)", len(got))
+	}
+	if got := answer(func() (string, bool) { return p.Ask(ctx, "model: ") }, "ordinary-line"); got != "ordinary-line" {
+		t.Fatalf("ordinary answer %q", got)
+	}
+	feed.Close()
+	rl.Close()
+	b, err := os.ReadFile(hist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "sk-secret") || strings.Contains(string(b), "c0de-secret") {
+		t.Fatal("a private answer reached the history file")
+	}
+	if !strings.Contains(string(b), "ordinary-line") {
+		t.Fatalf("the ordinary line is missing from the history file (%d bytes), so the check above proves nothing", len(b))
+	}
+}
+
+// The secret read really masks: readline draws '*' only with EnableMask
+// set, which the swapped config carries for the span of the read.
+func TestAskSecretMasksWhileReading(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	in, feed := io.Pipe()
+	cfg := readlineConfig("> ", filepath.Join(t.TempDir(), "history"), nil)
+	cfg.Stdin = in
+	cfg.Stdout, cfg.Stderr = io.Discard, io.Discard
+	rl, err := readline.NewEx(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rl.Close()
+	defer feed.Close()
+	r := newTestREPL(t)
+	r.rl = rl
+	r.startReader()
+	seen := make(chan bool, 1)
+	go func() {
+		// Observe the config only between the swap and the answer: the
+		// question is waiting once r.private is set and the prompt shows.
+		for i := 0; i < 200; i++ {
+			if c := rl.Config; c != cfg && c.EnableMask && c.MaskRune == '*' {
+				seen <- true
+				_, _ = io.WriteString(feed, "k\n")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		seen <- false
+		_, _ = io.WriteString(feed, "k\n")
+	}()
+	if _, ok := (replPrompter{r}).AskSecret(context.Background(), "key: "); !ok {
+		t.Fatal("not answered")
+	}
+	if !<-seen {
+		t.Fatal("the secret prompt never enabled readline's mask")
+	}
+	if rl.Config != cfg {
+		t.Fatal("the original config was not restored")
+	}
+}

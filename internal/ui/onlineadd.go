@@ -30,6 +30,13 @@ type Prompter interface {
 	Say(line string)
 }
 
+// unrecordedAsker is a Prompter that can ask a question whose answer stays
+// out of the input history (the REPL's; spec §2 Secrecy). The pasted
+// redirect URL during the browser wait carries the sign-in code.
+type unrecordedAsker interface {
+	AskUnrecorded(ctx context.Context, q string) (string, bool)
+}
+
 // OnlineAdd is /online add [name] on numbered prompts (spec §6).
 func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string) (string, string, error) {
 	cancelled := func() (string, string, error) { p.Say("cancelled; nothing was stored"); return "", "", nil }
@@ -104,7 +111,11 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 			go func() {
 				defer close(done)
 				// The person may paste the redirect URL while the browser is awaited.
-				if s, ok := p.Ask(bctx, "waiting for the browser; or paste the redirect URL here: "); ok {
+				ask := p.Ask
+				if u, ok := p.(unrecordedAsker); ok {
+					ask = u.AskUnrecorded
+				}
+				if s, ok := ask(bctx, "waiting for the browser; or paste the redirect URL here: "); ok {
 					select {
 					case pasted <- s:
 					default:

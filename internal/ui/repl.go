@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"time"
 
@@ -70,6 +71,11 @@ type REPL struct {
 	// reader that has already exited.
 	OnStart func()
 
+	// private marks the next line read as an answer to a private question
+	// (a key, a pasted sign-in redirect): the reader goroutine does not save
+	// it to the history file. See startReader.
+	private atomic.Bool
+
 	// wakeCh asks the main loop to start a turn for whatever is queued.
 	// Buffered by one and never blocking: a sub-agent's goroutine pokes it
 	// and carries on (see wakeQueue).
@@ -93,6 +99,24 @@ func HistoryFile() string {
 	return filepath.Join(d, "history")
 }
 
+// readlineConfig is the REPL's readline setup. History is never saved by
+// readline itself (DisableAutoSaveHistory): the reader goroutine saves each
+// line it hands on, except one that answered a private question — a key, or
+// a pasted sign-in redirect carrying its code (online setup spec §2, §6) —
+// which must never reach the history file both UIs read back.
+func readlineConfig(prompt, historyFile string, completer readline.AutoCompleter) *readline.Config {
+	return &readline.Config{
+		Prompt:                 prompt,
+		HistoryFile:            historyFile,
+		HistoryLimit:           2000,
+		DisableAutoSaveHistory: true,
+		AutoComplete:           completer,
+		InterruptPrompt:        "^C",
+		EOFPrompt:              "exit",
+		HistorySearchFold:      true,
+	}
+}
+
 // NewREPL builds the REPL with readline configured.
 // The provider argument is not kept: the REPL reads the agent's current one.
 func NewREPL(cfg *config.Config, ag *agent.Agent, _ provider.Provider) (*REPL, error) {
@@ -102,15 +126,7 @@ func NewREPL(cfg *config.Config, ag *agent.Agent, _ provider.Provider) (*REPL, e
 		items = append(items, readline.PcItem("/"+n))
 	}
 	completer := readline.NewPrefixCompleter(items...)
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:            cyan(MainPrompt(ag)),
-		HistoryFile:       HistoryFile(),
-		HistoryLimit:      2000,
-		AutoComplete:      completer,
-		InterruptPrompt:   "^C",
-		EOFPrompt:         "exit",
-		HistorySearchFold: true,
-	})
+	rl, err := readline.NewEx(readlineConfig(cyan(MainPrompt(ag)), HistoryFile(), completer))
 	if err != nil {
 		return nil, err
 	}
@@ -384,16 +400,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		r.printResume(r.Agent.Session)
 	}
 
-	r.lines = make(chan lineEvent)
-	go func() {
-		for {
-			line, err := r.rl.Readline()
-			r.lines <- lineEvent{line: line, err: err}
-			if err != nil && err != readline.ErrInterrupt {
-				return
-			}
-		}
-	}()
+	r.startReader()
 	if r.OnStart != nil {
 		r.OnStart()
 		if r.quitAfter {
@@ -442,6 +449,31 @@ func (r *REPL) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// startReader starts the single goroutine that reads the terminal and feeds
+// r.lines. It saves each line to the history file itself — readline's own
+// auto-save is off — unless the line answered a private question
+// (r.private, set by AskSecret and AskUnrecorded). The flag is taken with
+// Swap after the read returns, so it covers the line typed at that prompt;
+// a private question withdrawn before its answer (the browser sign-in
+// finished first) leaves it set and the next line goes unrecorded too,
+// which is the safe way to be wrong about a half-typed redirect URL.
+func (r *REPL) startReader() {
+	r.lines = make(chan lineEvent)
+	go func() {
+		for {
+			line, err := r.rl.Readline()
+			private := r.private.Swap(false)
+			if err == nil && !private {
+				_ = r.rl.SaveHistory(line)
+			}
+			r.lines <- lineEvent{line: line, err: err}
+			if err != nil && err != readline.ErrInterrupt {
+				return
+			}
+		}
+	}()
 }
 
 // prompt asks a one-off question through readline with a temporary prompt,
@@ -1442,9 +1474,27 @@ func (p replPrompter) Ask(ctx context.Context, q string) (string, bool) {
 	return p.r.promptAnswer(ctx, q)
 }
 
+// AskSecret reads a key: drawn as '*' (readline masks only with EnableMask
+// set, so the config is swapped for a masked copy for the span of the read
+// and restored after) and never saved to the history file.
 func (p replPrompter) AskSecret(ctx context.Context, q string) (string, bool) {
-	p.r.rl.SetMaskRune('*')
-	defer p.r.rl.SetMaskRune(0)
+	p.r.private.Store(true)
+	if rl := p.r.rl; rl != nil {
+		masked := *rl.Config // shares the history and the terminal's streams
+		masked.EnableMask, masked.MaskRune = true, '*'
+		old := rl.SetConfig(&masked)
+		defer func() {
+			rl.SetConfig(old)
+			p.r.setPrompt(cyan(MainPrompt(p.r.Agent)))
+		}()
+	}
+	return p.r.promptAnswer(ctx, q)
+}
+
+// AskUnrecorded is Ask whose answer is echoed but kept out of the history
+// file: the browser wait's pasted redirect URL carries the sign-in code.
+func (p replPrompter) AskUnrecorded(ctx context.Context, q string) (string, bool) {
+	p.r.private.Store(true)
 	return p.r.promptAnswer(ctx, q)
 }
 
