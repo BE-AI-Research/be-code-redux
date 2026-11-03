@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -185,7 +186,11 @@ type subRun struct {
 	// inTool is the tool call in flight ("" between calls): a wait for the
 	// stall clock, not for the meter. askLine is the line the open ask
 	// queued, so WaitSubAgents can tell an unread ask from an answered one.
-	inTool  string
+	inTool string
+	// inChore is set while the run's own housekeeping call (a compaction
+	// summary) is in flight: a wait of its own, which a lane wait ending
+	// inside it hands back to (compactionWait).
+	inChore bool
 	askLine string
 
 	// events carries a job's hand-back, ask and stall lines to JobWait, each
@@ -290,7 +295,7 @@ func (a *Agent) bindPrimaryLane(server string) {
 	s.primary = server
 	lanes := s.lanes
 	s.mu.Unlock()
-	a.laneAcquire = func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, server, true) }
+	a.laneAcquire = func(ctx context.Context) (func(), error) { return a.acquirePrimaryLane(ctx, lanes, server) }
 }
 
 // RebindPrimaryLane re-derives the primary's lane from the provider it is
@@ -741,12 +746,26 @@ func (a *Agent) resumeSubAgents() {
 // a session that crashed under a job wrote no "session ended" (ruling R8).
 // The ready rule never offers a job, so an orphan would otherwise stay open
 // forever and refuse every later dispatch whose scope overlaps it.
+//
+// Unless another session is live on this workspace: a job step records no
+// session, so an open one may be that session's running job, and closing
+// it would strand the run. Such a job is left as it is and the operator
+// told; the next start with nobody else live closes it if it is still
+// open, and the scope it holds still refuses an overlapping dispatch.
 func (a *Agent) closeOrphanJobs(steps []subagent.Step, running map[string]bool) {
+	var others []int
+	if a.OtherSessions != nil {
+		others = a.OtherSessions()
+	}
 	var walk func(st []subagent.Step)
 	walk = func(st []subagent.Step) {
 		for _, x := range st {
 			if x.Job && (x.Status == "todo" || x.Status == "doing") && !running[x.ID] {
 				id, owner := x.ID, x.Owner
+				if len(others) > 0 {
+					a.notice("job %s (%s) is open and another session (pid %s) is on this workspace; left as is — it may be running there", id, owner, pidList(others))
+					continue
+				}
 				a.engineDo("job resume", func(st *engine.Store) { _ = st.CloseAs(id, owner, "blocked", jobInterrupted) })
 				a.notice("job %s (%s) was left open by an earlier session; closed blocked: %s", id, owner, jobInterrupted)
 				continue
@@ -755,6 +774,14 @@ func (a *Agent) closeOrphanJobs(steps []subagent.Step, running map[string]bool) 
 		}
 	}
 	walk(steps)
+}
+
+func pidList(pids []int) string {
+	parts := make([]string, len(pids))
+	for i, p := range pids {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func findStep(steps []subagent.Step, id string) *subagent.Step {
@@ -1330,6 +1357,9 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 		},
 		OnDelta:     func(string) { a.noteActivity(run, "", "") },
 		OnReasoning: func(string) { a.noteActivity(run, "", "") },
+		// A compaction streams nothing: bracketed as a wait (ruling R20).
+		OnChoreStart: func() { a.choreStarted(run) },
+		OnChoreEnd:   func() { a.choreEnded(run) },
 	}
 	a.subs.mu.Lock()
 	server := a.subs.cards[d.Owner].Server

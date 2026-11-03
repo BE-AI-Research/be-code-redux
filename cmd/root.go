@@ -376,6 +376,15 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 	})
 	reg.OnRead = workLedger.OnRead
 	reg.OnWrote = workLedger.OnWrote
+	// Which other sessions are live here, for the startup pass that would
+	// otherwise close a job one of them is still running.
+	ag.OtherSessions = func() []int {
+		var pids []int
+		for _, r := range workLedger.Others() {
+			pids = append(pids, r.PID)
+		}
+		return pids
+	}
 	packs.OnStateRead = workLedger.OnRead
 	store.OnSessionRead = workLedger.OnRead
 	// The engine hands its own hash rather than its bytes, so the ledger

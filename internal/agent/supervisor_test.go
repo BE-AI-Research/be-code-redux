@@ -10,6 +10,7 @@ import (
 
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/provider"
 )
 
 // stallClock is the supervisor's fake clock: set once before anything runs,
@@ -424,5 +425,144 @@ func TestWaitSubAgentsReturnsOnAStallLine(t *testing.T) {
 	s.f.ag.WaitSubAgents(short)
 	if d := time.Since(start); d < 250*time.Millisecond {
 		t.Fatalf("WaitSubAgents returned after %s with nothing unread", d)
+	}
+}
+
+// A sub-agent's compaction summary streams nothing back (ruling R20): it is
+// a wait for the stall clock, like a tool call, and the job's own time on
+// the run-time meter. The lane wait inside it hands back to the compaction
+// wait, and the clock starts afresh when the chore ends.
+func TestCompactionIsAWaitNotAStall(t *testing.T) {
+	s := stallJob(t, nil)
+	s.f.ag.choreStarted(s.run)
+	s.clk.Advance(181 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 0 {
+		t.Fatalf("a compacting job stalled: %q", s.f.ag.Peek())
+	}
+	s.f.ag.subs.mu.Lock()
+	waiting, runFor := s.run.waiting, s.run.runFor
+	s.f.ag.subs.mu.Unlock()
+	if waiting != compactionWait {
+		t.Fatalf("waiting %q, want %q", waiting, compactionWait)
+	}
+	if runFor < 181*time.Second {
+		t.Fatalf("the meter paused for a compaction: ran %s", runFor)
+	}
+	s.f.ag.setWaiting(s.run, "lane")
+	s.f.ag.setWaiting(s.run, "")
+	s.f.ag.subs.mu.Lock()
+	waiting = s.run.waiting
+	s.f.ag.subs.mu.Unlock()
+	if waiting != compactionWait {
+		t.Fatalf("the lane wait ending left %q, want the compaction wait back", waiting)
+	}
+	s.f.ag.choreEnded(s.run)
+	s.clk.Advance(90 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 0 {
+		t.Fatalf("stalled before a fresh stall_after after the chore: %q", s.f.ag.Peek())
+	}
+	s.clk.Advance(91 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 1 {
+		t.Fatalf("no stall after the chore ended and stall_after passed: %q", s.f.ag.Peek())
+	}
+}
+
+// choreDo brackets every housekeeping call with OnChoreStart/OnChoreEnd, on
+// the primary branch and the helper's alike, so a runner can see it.
+func TestChoreDoFiresTheChoreEvents(t *testing.T) {
+	ag, _ := newTestAgent(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "summary"}}}, nil)
+	var starts, ends int
+	ag.Events.OnChoreStart = func() { starts++ }
+	ag.Events.OnChoreEnd = func() {
+		ends++
+		if starts != 1 {
+			t.Errorf("OnChoreEnd before OnChoreStart")
+		}
+	}
+	_, err := ag.choreDo(context.Background(), ag.primaryTarget(), choreOpts{}, provider.ChatRequest{Messages: []provider.Message{{Role: "user", Content: "summarise"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts != 1 || ends != 1 {
+		t.Fatalf("starts %d ends %d", starts, ends)
+	}
+}
+
+// The startup pass closes a job left open with no run (R8) — unless another
+// live session is on the workspace, where it may be that session's running
+// job: then it is left alone and the operator is told.
+func TestOrphanJobIsKeptWhileAnotherSessionIsLive(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	parkJobs(t)
+	var mu sync.Mutex
+	var notices []string
+	f.ag.Events.OnNotice = func(m string) { mu.Lock(); notices = append(notices, m); mu.Unlock() }
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	f.ag.OtherSessions = func() []int { return []int{4242} }
+	f.ag.closeOrphanJobs(f.ag.subSteps("test"), map[string]bool{})
+	if st := nodeOf(t, f.st, id).Status; st != "doing" && st != "todo" {
+		t.Fatalf("job closed as %q while another session is live", st)
+	}
+	mu.Lock()
+	got := strings.Join(notices, "\n")
+	mu.Unlock()
+	if !strings.Contains(got, "job "+id+" (big) is open") || !strings.Contains(got, "4242") || !strings.Contains(got, "left as is") {
+		t.Fatalf("notice: %q", got)
+	}
+	f.ag.OtherSessions = func() []int { return nil }
+	f.ag.closeOrphanJobs(f.ag.subSteps("test"), map[string]bool{})
+	if n := nodeOf(t, f.st, id); n.Status != "blocked" || n.Reason != jobInterrupted {
+		t.Fatalf("with nobody else live the orphan must close: %s %q", n.Status, n.Reason)
+	}
+}
+
+// A primary lane acquire that waits behind a request on the same server is
+// said after laneSayAfter, naming the co-worker when a job of its holds it.
+func TestPrimaryLaneWaitIsSaid(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	old := laneSayAfter
+	laneSayAfter = 10 * time.Millisecond
+	t.Cleanup(func() { laneSayAfter = old })
+	var mu sync.Mutex
+	var said []string
+	f.ag.Events.OnTransient = func(m string) { mu.Lock(); said = append(said, m); mu.Unlock() }
+	release, err := f.ag.subs.lanes.Acquire(context.Background(), "http://primary:11434", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		rel, err := f.ag.laneAcquire(context.Background())
+		if err == nil {
+			rel()
+		}
+		got <- err
+	}()
+	time.Sleep(60 * time.Millisecond)
+	release()
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(said) != 1 || !strings.Contains(said[0], "waiting for the shared server") {
+		t.Fatalf("said %q", said)
+	}
+	// Held and released within laneSayAfter: nothing is said.
+	said = nil
+	mu.Unlock()
+	if rel, err := f.ag.laneAcquire(context.Background()); err != nil {
+		t.Fatal(err)
+	} else {
+		rel()
+	}
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	if len(said) != 0 {
+		t.Fatalf("a short acquire was announced: %q", said)
 	}
 }

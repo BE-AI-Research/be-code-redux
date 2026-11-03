@@ -54,6 +54,12 @@ type Events struct {
 	// OnJobStall fires after a job's stall line is queued (dispatch-jobs
 	// spec §6), so an idle UI starts a turn for it as it does for an ask.
 	OnJobStall func(id, line string)
+	// OnChoreStart and OnChoreEnd bracket a housekeeping model call the
+	// loop makes on its own — a compaction summary — which streams nothing
+	// back. A sub-agent's runner marks the run waiting (compaction) between
+	// them so the silence is never read as a stall (dispatch-jobs ruling R20).
+	OnChoreStart func()
+	OnChoreEnd   func()
 	// OnScheduleFire fires after a due scheduled event was queued, so an
 	// idle UI can start its turn (the same wake a sub-agent's hand-back uses).
 	OnScheduleFire func(name string)
@@ -391,6 +397,11 @@ type Agent struct {
 	// laneAcquire wraps every model call once lanes exist (spec §2.2).
 	subs        *subAgents
 	laneAcquire func(ctx context.Context) (func(), error)
+	// OtherSessions names the pids of the other live sessions on this
+	// workspace (cmd wires it from the work ledger; nil means none known).
+	// The startup pass leaves an open job alone while one exists: it may be
+	// that session's running job, and closing it would strand that run.
+	OtherSessions func() []int
 	// anySubAgent is whether any configured co-worker has sub_agent set:
 	// the runner now exists for any co-worker (jobs), but the guidance on
 	// assigning steps is only true of a sub-agent.

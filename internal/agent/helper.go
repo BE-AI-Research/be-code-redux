@@ -286,6 +286,14 @@ func (a *Agent) choreSend(ctx context.Context, t choreTarget, o choreOpts, build
 // choreDo sends req to t: the primary in its own lane, unchanged from
 // before the helper existed, or the helper in its server's lane.
 func (a *Agent) choreDo(ctx context.Context, t choreTarget, o choreOpts, req provider.ChatRequest) (*provider.ChatResponse, error) {
+	// Bracketed here, the one place every chore's request passes, so a
+	// runner watching a sub-agent sees the call that streams nothing.
+	if a.Events.OnChoreStart != nil {
+		a.Events.OnChoreStart()
+	}
+	if a.Events.OnChoreEnd != nil {
+		defer a.Events.OnChoreEnd()
+	}
 	if !t.helper {
 		_, online := a.Online()
 		if online {

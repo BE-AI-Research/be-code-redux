@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -9,7 +10,14 @@ import (
 	"time"
 
 	"github.com/brown-enterprises/be-code/internal/engine"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
+
+// compactionWait is the wait reason of a run inside its own housekeeping
+// call (a compaction summary): a call that streams nothing back, so no
+// delta restarts the stall clock, bracketed instead like a tool call
+// (ruling R20). It is the job's own running time, so the meter runs.
+const compactionWait = "compaction"
 
 // supervisorTick is how often the supervisor looks at the running jobs
 // (dispatch-jobs spec §6).
@@ -308,7 +316,44 @@ func (a *Agent) setWaiting(run *subRun, reason string) {
 	now := a.subNow()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if reason == "" && run.inTool != "" {
+	switch {
+	case reason == "" && run.inTool != "":
+		reason = toolWait(run.inTool)
+	case reason == "" && run.inChore:
+		// The lane wait a chore takes on its way to the server ends
+		// inside the chore: back to the chore's own wait, not to quiet.
+		reason = compactionWait
+	}
+	changeWaitLocked(run, reason, now)
+}
+
+// choreStarted and choreEnded bracket one housekeeping call of the run
+// (OnChoreStart/OnChoreEnd from the scratch agent's choreDo): a wait for
+// the stall clock, on the meter, shown as "waiting (compaction)". The
+// clock starts afresh when the chore ends, as after any wait.
+func (a *Agent) choreStarted(run *subRun) {
+	s := a.subs
+	if s == nil || run == nil {
+		return
+	}
+	now := a.subNow()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run.inChore = true
+	changeWaitLocked(run, compactionWait, now)
+}
+
+func (a *Agent) choreEnded(run *subRun) {
+	s := a.subs
+	if s == nil || run == nil {
+		return
+	}
+	now := a.subNow()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run.inChore = false
+	reason := ""
+	if run.inTool != "" {
 		reason = toolWait(run.inTool)
 	}
 	changeWaitLocked(run, reason, now)
@@ -345,10 +390,66 @@ func (a *Agent) toolEnded(run *subRun) {
 func toolWait(name string) string { return "tool: " + name }
 
 // meterPaused reports whether a run waiting for reason is off the run-time
-// meter: every wait on someone else is; a tool call in flight is the job's
-// own running time.
+// meter: every wait on someone else is; a tool call in flight and the
+// run's own compaction are the job's own running time.
 func meterPaused(reason string) bool {
-	return reason != "" && !strings.HasPrefix(reason, "tool: ")
+	return reason != "" && !strings.HasPrefix(reason, "tool: ") && reason != compactionWait
+}
+
+// laneSayAfter is how long the primary's lane acquire waits in silence
+// before the wait is said (a variable for the tests).
+var laneSayAfter = 2 * time.Second
+
+// acquirePrimaryLane takes the primary's lane on server and, when a request
+// already in flight there holds it past laneSayAfter, says so once for this
+// wait — naming the co-worker whose job is on that server when there is
+// one. A co-worker on the primary's own server shares its lane (spec
+// §2.2), so the turn the main model owes a hand-back or a stall line
+// starts only when that co-worker's call ends; said, the pause is a wait,
+// and unsaid it reads as a hang.
+func (a *Agent) acquirePrimaryLane(ctx context.Context, lanes *subagent.Lanes, server string) (func(), error) {
+	done := make(chan struct{})
+	timer := time.AfterFunc(laneSayAfter, func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		a.transient("waiting for the shared server: %s is in flight; the turn starts when it ends", a.sharingServer(server))
+	})
+	release, err := lanes.Acquire(ctx, server, true)
+	close(done)
+	timer.Stop()
+	return release, err
+}
+
+// sharingServer names what holds the primary's server: the co-workers with a
+// run on it ("big's request", "big's and small's requests"), or, with none
+// known, "another request" (an API call, a consultation).
+func (a *Agent) sharingServer(server string) string {
+	s := a.subs
+	if s == nil {
+		return "another request"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var names []string
+	seen := map[string]bool{}
+	for _, r := range s.runs {
+		if s.cards[r.d.Owner].Server == server && !seen[r.d.Owner] {
+			seen[r.d.Owner] = true
+			names = append(names, r.d.Owner)
+		}
+	}
+	sort.Strings(names)
+	switch len(names) {
+	case 0:
+		return "another request"
+	case 1:
+		return names[0] + "'s request"
+	default:
+		return strings.Join(names, "'s and ") + "'s requests"
+	}
 }
 
 // changeWaitLocked moves run to reason, bringing the meter up to date. The
