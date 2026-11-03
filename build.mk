@@ -20,9 +20,11 @@ clean:
 	rm -f $(BINARY) $(BINARY).exe
 	rm -rf dist
 
-vscode: ## build and package the VS Code extension into dist/
-	mkdir -p dist
+vscode: ## build and package the VS Code extension into dist/ and refresh the committed copy in extensions/
+	mkdir -p dist extensions
 	cd vscode && npm install --no-audit --no-fund && npm test && npm run package
+	rm -f extensions/be-code-vscode-*.vsix
+	cp dist/be-code-vscode-*.vsix extensions/
 
 visualstudio-test: ## compile the Visual Studio bridge (VSIX layer included) and run its tests; needs the .NET SDK, not part of verify
 	cd visualstudio && dotnet build --no-incremental && dotnet test --no-build

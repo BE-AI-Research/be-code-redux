@@ -46,6 +46,9 @@ VS Code extension:
 | `dist/be-code-windows-amd64.exe` | windows / amd64 |
 | `dist/be-code-vscode-<ver>.vsix` | the VS Code extension (its own version, from `vscode/package.json`) |
 
+The `vscode` target also refreshes the committed copy in `extensions/`; if `git status`
+shows it changed, commit it with the version bump so the tree and the release agree.
+
 Confirm all five exist and are non-trivial in size:
 
 ```sh
