@@ -1649,15 +1649,42 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 
 ## Status
 
-**v1.4.0 — Packs closed, apps served, keys stored.** A pack is checked against the BE Skill Pack Format 1.0
-contract when it loads and `packs validate` names what is wrong; a pack installed under v1.3.0
-that no longer conforms is dropped at startup with a notice, and `packs update <name>` fetches
-one that does. An unapproved project pack no longer takes your own pack of the same name out of
-force. Two fixes from **kmesiab** ([#1](https://github.com/BE-AI-Research/be-code-redux/pull/1),
-[#2](https://github.com/BE-AI-Research/be-code-redux/pull/2)) ship here: the compat tool-call
-instructions document the `<tool_result>` format, and an empty model reply is nudged up to three
-times instead of ending the run after one. Thanks to Kevin Mesiab (https://github.com/kmesiab)
-for squashing these.
+**v1.4.0 — Packs closed, apps served, keys stored.** The biggest release since 1.2: four new
+subsystems and a closed pack contract.
+
+- **The pack contract is closed.** A pack is checked against the BE Skill Pack Format 1.0
+  contract when it loads and `packs validate` names what is wrong (the field, the key, the
+  value); a pack installed under v1.3.0 that no longer conforms is dropped at startup with a
+  notice, and `packs update <name>` fetches one that does. An unapproved project pack no longer
+  takes your own global pack of the same name out of force, and leftovers of an interrupted
+  install are never discovered as packs.
+- **An application API.** Other programs on the machine can ask a running session for an answer
+  over `~/.be-code/api/api.sock`: a plain `query`, OpenAI-compatible `chat/completions` that
+  existing clients reach with a URL change, and a query answered with a session's conversation
+  as context, addressed by a token the session mints and can rotate. Callers are registered apps
+  (`be-code apps add`, a key shown once, a profile of tiers, models, packs and budgets);
+  browsers are refused; headless runs never serve. `/api`, `/apps` and `/session` in both UIs.
+  See [Application API](#application-api).
+- **Online providers from inside the harness.** `/online add` (also `be-code online add` and
+  `be-code setup`) opens with a quick sign-in list: OpenRouter signs in through the browser and
+  issues a key; OpenAI, Anthropic and Gemini open their own API-keys page, then take the key in a
+  masked field; any other preset or OpenAI-compatible endpoint takes a pasted key. The key is
+  validated against the provider's listing and stored in `~/.be-code/credentials.json` (mode
+  0600; `config.json` never holds a secret; an environment variable still wins). Anthropic keys
+  get the headers they need, and a key not scoped to a workspace is asked for its workspace ID.
+  `/online revoke <name>`, `doctor` credential lines, and a rejected key shows the provider's
+  own message. See [Online providers](#online-providers).
+- **Co-workers from inside a session.** `/coworkers add` (and **Add a co-worker** in `/menu`)
+  picks a configured provider, a model from its live listing and a name, saves the entry and
+  makes `consult` usable at once; `/coworkers remove <name>` is the inverse.
+- **The installer verifies what it downloads.** `install.sh` checks the release binary against
+  the release's `SHA256SUMS`, as `install.ps1` and `/update` already did; a download that cannot
+  be verified is never installed.
+- Two fixes from **kmesiab** ([#1](https://github.com/BE-AI-Research/be-code-redux/pull/1),
+  [#2](https://github.com/BE-AI-Research/be-code-redux/pull/2)) ship here: the compat tool-call
+  instructions document the `<tool_result>` format, and an empty model reply is nudged up to
+  three times instead of ending the run after one. Thanks to Kevin Mesiab
+  (https://github.com/kmesiab) for squashing these.
 
 Recent releases:
 
