@@ -127,3 +127,29 @@ func TestReadySkipsJobSteps(t *testing.T) {
 		t.Fatalf("job: %+v %+v", ready, waiting)
 	}
 }
+
+func TestOpenJobDoesNotBlockLaterSiblings(t *testing.T) {
+	roots := []Step{{ID: "1", Status: "doing", Children: []Step{
+		{ID: "1.1", Status: "todo", Owner: "big", Scope: []string{"a"}, Job: true},
+		{ID: "1.2", Status: "todo", Owner: "big", Scope: []string{"b"}},
+	}}}
+	ready, waiting := Ready(roots, cards(), nil)
+	if len(ready) != 1 || ready[0].ID != "1.2" || len(waiting) != 0 {
+		t.Fatalf("%+v %+v", ready, waiting)
+	}
+}
+
+func TestReadyJobWithChildrenAndRunningScope(t *testing.T) {
+	roots := []Step{{ID: "1", Status: "doing", Children: []Step{
+		{ID: "1.1", Status: "todo", Owner: "big", Scope: []string{"internal/scan"}, Job: true,
+			Children: []Step{{ID: "1.1.1", Status: "todo", Owner: "big", Scope: []string{"internal/scan"}}}},
+		{ID: "1.2", Status: "todo", Owner: "big", Scope: []string{"internal/scan/x"}},
+	}}}
+	ready, waiting := Ready(roots, cards(), map[string]bool{"1.1": true})
+	if len(ready) != 0 || len(waiting) != 1 || waiting[0].ID != "1.2" || waiting[0].Reason != "scope overlaps 1.1" {
+		t.Fatalf("%+v %+v", ready, waiting)
+	}
+	if find(ready, "1.1") != nil || find(waiting, "1.1.1") != nil {
+		t.Fatal("job or its child became a candidate")
+	}
+}

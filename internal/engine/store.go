@@ -1529,21 +1529,33 @@ func (s *Store) AddJob(parent, text, note, owner string, scope []string) (string
 	if err != nil {
 		return "", err
 	}
-	if err := s.SetOwner(id, owner, false); err != nil {
+	// Any later failure removes the half-made step: an owner-assigned step
+	// with no scope is something the scheduler would report forever.
+	fail := func(err error) (string, error) {
+		s.mu.Lock()
+		s.tree.Remove(s.tree.Find(id))
+		s.markDirtyLocked()
+		s.mu.Unlock()
 		return "", err
+	}
+	if err := s.SetOwner(id, owner, false); err != nil {
+		return fail(err)
 	}
 	if err := s.SetScope(id, scope); err != nil {
-		return "", err
+		return fail(err)
 	}
 	s.mu.Lock()
-	if n := s.tree.Find(id); n != nil {
-		n.Job = true
-		s.markDirtyLocked()
+	n := s.tree.Find(id)
+	if n == nil {
+		s.mu.Unlock()
+		return "", fmt.Errorf("no node %s", id)
 	}
+	n.Job = true
+	s.markDirtyLocked()
 	s.mu.Unlock()
 	if strings.TrimSpace(note) != "" {
 		if err := s.Note(id, note, "", false, false); err != nil {
-			return "", err
+			return fail(err)
 		}
 	}
 	return id, nil

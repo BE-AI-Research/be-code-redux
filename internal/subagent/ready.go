@@ -77,7 +77,7 @@ func Ready(roots []Step, cards map[string]Card, running map[string]bool) (ready,
 						}
 					} else {
 						for j := 0; j < i; j++ {
-							if !closed[siblings[j].ID] {
+							if !closed[siblings[j].ID] && !siblings[j].Job { // a job runs beside the main model
 								c.Reason = "waiting for " + siblings[j].ID
 								break
 							}

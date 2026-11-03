@@ -62,7 +62,7 @@ func TestJobMarkSurvivesHandEdit(t *testing.T) {
 	if f.job || text != "finish the job" {
 		t.Fatalf("text-only job parsed as field: %q %+v", text, f)
 	}
-	s, root := openTest(t, "sess", false)
+	root := t.TempDir()
 	dir := filepath.Join(root, ".be-code", "tasks")
 	os.MkdirAll(dir, 0o755)
 	doc := "# Task\n\n- [ ] 1. Task\n  - [ ] 1.1. hand job  @big  scope: x  job\n"
@@ -73,9 +73,50 @@ func TestJobMarkSurvivesHandEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = s
 	n := s2.tree.Find("1.1")
 	if n == nil || !n.Job {
 		t.Fatalf("hand-written job lost: %+v", n)
 	}
+}
+
+func TestAddJobRollsBackOnFailure(t *testing.T) {
+	s, _ := openTest(t, "sess", false)
+	s.SetCards(cardsForTest())
+	task := s.Plan("port", []string{"look"})
+	before := len(s.tree.Find(task).Children)
+	// claude may only own paths under docs.
+	if _, err := s.AddJob(task, "bad", "", "claude", []string{"cmd"}); err == nil {
+		t.Fatal("expected scope refusal")
+	}
+	if _, err := s.AddJob(task, "bad owner", "", "nobody", []string{"docs"}); err == nil {
+		t.Fatal("expected owner refusal")
+	}
+	if got := len(s.tree.Find(task).Children); got != before {
+		t.Fatalf("children %d, want %d", got, before)
+	}
+}
+
+func TestTextEndingJobIsSingleSpacedOnWrite(t *testing.T) {
+	s, root := openTest(t, "sess", false)
+	task := s.Plan("port", []string{"look"})
+	id, err := s.Add(task, "finish the  job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(root, ".be-code", "tasks", "0*.md"))
+	var body string
+	for _, f := range files {
+		b, _ := os.ReadFile(f)
+		body += string(b)
+	}
+	if strings.Contains(body, "finish the  job") || !strings.Contains(body, "finish the job") {
+		t.Fatalf("document:\n%s", body)
+	}
+	if _, f := splitFields("finish the job"); f.job {
+		t.Fatal("reloaded as job")
+	}
+	_ = id
 }
