@@ -413,12 +413,15 @@ The main model can also hand a scoped job to any configured co-worker with one
 tool call, `dispatch` (`who`, `job`, `scope`, optional `context` and `wait`). No
 `sub_agent: true` is needed for that: the job gets the same scratch agent, consent,
 scoped registry and `ask_main` a sub-agent gets, and its step is filed under the
-active task and `/task` renders its step as `job`. The first line of `job` names
-the step; `scope` is required, and `"."` means the whole workspace. A scope that
-overlaps a running job or an assigned step, or that falls outside the co-worker's
-`max_scope`, is refused. One co-worker may run several jobs, all counted against
-`sub_agents.max_concurrent`. Dispatch needs the task store, so a session whose store
-failed to open refuses it.
+active task; `/task` renders that step as `job`. The first line of `job` becomes the
+step's text. `scope` is required; `"."` means the whole workspace, and a whole-workspace
+job is accepted only while nothing else runs. A scope that overlaps a running job or an
+assigned step, or that falls outside the co-worker's `max_scope`, is refused. One
+co-worker may run several jobs, all counted against `sub_agents.max_concurrent`.
+Dispatch needs the task store, so a session whose store failed to open refuses it.
+`sub_agent: true` still means that the scheduler dispatches that owner's assigned
+steps, as before. A scheduled event's turn refuses `dispatch` and the mutating `jobs`
+actions (`stop`, `reply`, `extend`).
 
 A job's hand-back arrives as a later message, or, with `wait: true`, as the tool's
 result. The `jobs` tool steers the jobs: `status`, `wait` (for one job or any), `reply`
@@ -429,12 +432,24 @@ to answer a pending question, `extend` to clear a stall, and `stop`. `/agents` a
 The stall clock runs only while the job is working. It pauses while the job waits on
 a question to the main model, the shared server lane, the online-consent prompt, a
 write approval or editor review, or a tool call in flight. After `sub_agents.stall_after`
-seconds with no progress the job is marked `stalled` and the main model is told, and
-it may `jobs extend`, `jobs reply` or `jobs stop`. A job that stalls a third time is
-stopped, its step closes `blocked: stalled`, and the operator is told in the
-transcript. A headless `be-code run`, with or without `-y`, stops it at the second
-stall instead (`stalled twice and was stopped`). `sub_agents.max_runtime` caps running
-time, waits excluded, and a job past it closes `blocked: ran out of time`.
+seconds with no progress the job is marked `stalled` and the main model is told:
+
+```
+job 2.3 (big) has been quiet for 3m: ... Options: jobs extend 2.3, jobs stop 2.3,
+jobs reply 2.3 <text>, or jobs status 2.3.
+```
+
+The main model decides whether to `jobs extend`, `jobs reply` or `jobs stop`. The
+stall rules are counted per job, and the two sessions differ:
+
+- An interactive session stops a job at its third stall: the step closes
+  `blocked: stalled`, and the operator is told in the transcript with
+  `job 2.3 (big) stalled three times and was stopped`.
+- A headless `be-code run`, with or without `-y`, stops it at its second stall instead,
+  with the notice `job 2.3 (big) stalled twice and was stopped`.
+
+`sub_agents.max_runtime` caps running time, waits excluded, and a job past it closes
+`blocked: ran out of time`.
 
 At exit a job's step closes `blocked: session ended`; a crash that left it open closes
 it `blocked: interrupted` at the next start. `/task assign` refuses a job id, since the
