@@ -1125,6 +1125,38 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 	case "/stats":
 		fmt.Println(r.Agent.StatsReport(nil))
 	case "/online":
+		if len(fields) > 1 && fields[1] == "add" {
+			if !stdinIsTerminal() {
+				fmt.Println("needs a terminal")
+				break
+			}
+			name := strings.Join(fields[2:], " ")
+			var provName, model string
+			var err error
+			// Not underPrompt: its bound is shorter than the sign-in's wait.
+			func() {
+				c, cancel := context.WithCancel(ctx)
+				defer cancel()
+				r.SetPromptContext(c)
+				defer r.SetPromptContext(nil)
+				provName, model, err = OnlineAdd(c, r.Cfg, replPrompter{r}, name)
+			}()
+			if err != nil {
+				fmt.Printf("%s %v\n", red("error>"), err)
+				break
+			}
+			if provName != "" {
+				p, err := provider.FromConfig(r.Cfg, provName)
+				if err != nil {
+					fmt.Printf("%s %v\n", red("error>"), err)
+					break
+				}
+				r.Agent.SetProvider(p)
+				r.underPrompt(ctx, func(c context.Context) { r.Agent.SetModelNow(c, model) })
+				fmt.Printf("provider set to %s (model %s)\n", r.Agent.CurrentProvider(), r.Agent.CurrentModel())
+			}
+			break
+		}
 		fmt.Println(OnlineCommand(r.Agent, r.Cfg, fields[1:]))
 	case "/update":
 		if len(fields) > 1 && fields[1] == "check" {
@@ -1389,3 +1421,18 @@ func (r *REPL) printResume(s *store.Session) {
 		fmt.Printf("%s\n", dim("handoff briefing loaded into the system prompt; /handoff shows it"))
 	}
 }
+
+// replPrompter lets OnlineAdd ask its questions on the REPL's terminal.
+type replPrompter struct{ r *REPL }
+
+func (p replPrompter) Ask(ctx context.Context, q string) (string, bool) {
+	return p.r.promptAnswer(ctx, q)
+}
+
+func (p replPrompter) AskSecret(ctx context.Context, q string) (string, bool) {
+	p.r.rl.SetMaskRune('*')
+	defer p.r.rl.SetMaskRune(0)
+	return p.r.promptAnswer(ctx, q)
+}
+
+func (p replPrompter) Say(line string) { fmt.Println(line) }
