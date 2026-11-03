@@ -192,3 +192,57 @@ func TestAddOnlineCustomOnlineByEndpoint(t *testing.T) {
 		t.Fatalf("lan=%+v far=%+v", re.Providers["lan"], re.Providers["far"])
 	}
 }
+
+// I2 (final review): a custom name may not take over an existing provider
+// of another type — the default local ollama block above all.
+func TestChoiceForRefusesAnExistingNonOpenAIProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers["ollama"] = config.ProviderConfig{Type: "ollama", BaseURL: "http://localhost:11434"}
+	_, _, err := ChoiceFor(cfg, "ollama", "https://api.together.xyz/v1")
+	if err == nil || err.Error() != "ollama is an existing ollama provider; a custom endpoint needs another name" {
+		t.Fatalf("err %v", err)
+	}
+	// An existing custom (openai-typed, or untyped) entry is still reusable.
+	cfg.Providers["mine"] = config.ProviderConfig{Type: "openai", BaseURL: "http://10.0.0.5:8000/v1"}
+	cfg.Providers["bare"] = config.ProviderConfig{BaseURL: "http://10.0.0.6:8000/v1"}
+	for _, n := range []string{"mine", "bare"} {
+		if _, _, err := ChoiceFor(cfg, n, "http://10.0.0.7:8000/v1"); err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+	}
+}
+
+// I4 (+R4, final review): re-adding a custom endpoint keeps its consent
+// fields — the api_key_env a person named and a hand-set online: true on a
+// LAN endpoint.
+func TestAddOnlineKeepsACustomBlocksConsentFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	cfg.Providers["lan"] = config.ProviderConfig{Type: "openai", BaseURL: "http://192.168.1.50:8000/v1", APIKeyEnv: "LAN_KEY", Online: true}
+	store, _ := credentials.Open(filepath.Join(home, ".be-code"))
+	t.Setenv("LAN_KEY", "")
+	ch, _, err := ChoiceFor(cfg, "lan", "http://192.168.1.50:8000/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddOnline(cfg, store, ch, "k", "pasted", "m", false); err != nil {
+		t.Fatal(err)
+	}
+	re, _ := config.Load()
+	pc := re.Providers["lan"]
+	if pc.APIKeyEnv != "LAN_KEY" {
+		t.Fatalf("api_key_env dropped: %+v", pc)
+	}
+	if !pc.Online {
+		t.Fatalf("a hand-set online: true was recomputed away: %+v", pc)
+	}
+	// A new LAN entry still follows the endpoint.
+	fresh, _, _ := ChoiceFor(cfg, "lan2", "http://192.168.1.51:8000/v1")
+	if _, err := AddOnline(cfg, store, fresh, "k", "pasted", "m", false); err != nil {
+		t.Fatal(err)
+	}
+	if re, _ := config.Load(); re.Providers["lan2"].Online {
+		t.Fatal("a new LAN endpoint must not be marked online")
+	}
+}

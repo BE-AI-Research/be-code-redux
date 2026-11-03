@@ -53,6 +53,12 @@ func ChoiceFor(cfg *config.Config, name, baseURL string) (Choice, string, error)
 		}
 		return Choice{Name: name, BaseURL: pre.BaseURL, KeyEnv: pre.KeyEnv, Preset: true}, note, nil
 	}
+	// A custom name is new or an existing custom (openai-typed) entry
+	// (spec §3): the flow writes an openai block, so reusing the name of
+	// an ollama provider would turn the local backend into a cloud one.
+	if pc, ok := cfg.Providers[name]; ok && pc.Type != "openai" && pc.Type != "" {
+		return Choice{}, "", fmt.Errorf("%s is an existing %s provider; a custom endpoint needs another name", name, pc.Type)
+	}
 	if baseURL == "" {
 		return Choice{}, "", fmt.Errorf("custom provider %s needs a base URL", name)
 	}
@@ -122,6 +128,14 @@ func AddOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, sou
 	if old, ok := cfg.Providers[ch.Name]; ok {
 		// Keep a person's tuning; only identity fields are ours.
 		pc.ContextWindow, pc.KeepAlive, pc.Options = old.ContextWindow, old.KeepAlive, old.Options
+		if !ch.Preset {
+			// A custom block's consent fields are the person's: a key
+			// variable they named stays, and a hand-set online: true (a
+			// LAN endpoint they treat as off-site) is never recomputed away
+			// — that would silently drop the online-project gate.
+			pc.APIKeyEnv = old.APIKeyEnv
+			pc.Online = old.Online || !config.LocalEndpoint(ch.BaseURL)
+		}
 	}
 	pc.DefaultModel = strings.TrimSpace(model)
 	if cfg.Providers == nil {
