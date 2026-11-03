@@ -24,6 +24,8 @@ type fakeOpenRouter struct {
 	callback  string
 	refuse    string // when set, the exchange answers 400 with this error.message ("" for a bodyless 500)
 	refuseRaw bool
+	wantCode  string        // the code the exchange accepts; "" means "the-code"
+	delay     time.Duration // how long the exchange takes to answer
 }
 
 func newFake(t *testing.T) *fakeOpenRouter {
@@ -42,6 +44,13 @@ func newFake(t *testing.T) *fakeOpenRouter {
 		var raw map[string]string
 		json.NewDecoder(r.Body).Decode(&raw)
 		body.Code, body.CodeVerifier, body.Method = raw["code"], raw["code_verifier"], raw["code_challenge_method"]
+		if f.delay > 0 {
+			time.Sleep(f.delay)
+		}
+		want := f.wantCode
+		if want == "" {
+			want = "the-code"
+		}
 		if f.refuseRaw {
 			w.WriteHeader(500)
 			return
@@ -52,7 +61,7 @@ func newFake(t *testing.T) *fakeOpenRouter {
 			return
 		}
 		sum := sha256.Sum256([]byte(body.CodeVerifier))
-		if base64.RawURLEncoding.EncodeToString(sum[:]) != f.challenge || body.Code != "the-code" || body.Method != "S256" {
+		if base64.RawURLEncoding.EncodeToString(sum[:]) != f.challenge || body.Code != want || body.Method != "S256" {
 			w.WriteHeader(403)
 			return
 		}
@@ -103,6 +112,9 @@ func TestBrowserPath(t *testing.T) {
 
 func TestPastedURLDecodesCode(t *testing.T) {
 	f := newFake(t)
+	// A code with characters a query must escape, so the decode is
+	// really exercised (M2, final review).
+	f.wantCode = "a/b+c="
 	pasted := make(chan string, 1)
 	o := f.options(t, pasted)
 	o.Open = func(u string) error {
@@ -110,7 +122,7 @@ func TestPastedURLDecodesCode(t *testing.T) {
 		if err == nil {
 			resp.Body.Close()
 		}
-		pasted <- "  " + f.callback + "?code=" + url.QueryEscape("the-code") + "&x=1\n"
+		pasted <- "  " + f.callback + "?code=" + url.QueryEscape(f.wantCode) + "&x=1\n"
 		return nil
 	}
 	key, err := SignIn(context.Background(), o)
@@ -223,4 +235,26 @@ func TestCodeFromPaste(t *testing.T) {
 func TestMain(m *testing.M) {
 	os.Setenv("DISPLAY", ":0") // so the Open path runs on a headless box
 	os.Exit(m.Run())
+}
+
+// R5 (final review): the exchange has its own fifteen-second bound, not
+// what is left of the wait — a code arriving at the end of the wait still
+// completes its exchange.
+func TestExchangeOutlivesTheWait(t *testing.T) {
+	f := newFake(t)
+	f.delay = 300 * time.Millisecond
+	pasted := make(chan string, 1)
+	o := f.options(t, pasted)
+	o.Timeout = 100 * time.Millisecond
+	o.Open = func(u string) error {
+		resp, err := http.Get(u)
+		if err == nil {
+			resp.Body.Close()
+		}
+		pasted <- "the-code"
+		return nil
+	}
+	if key, err := SignIn(context.Background(), o); err != nil || key != "sk-or-test" {
+		t.Fatalf("exchange cut short by the wait: got %d chars, %v", len(key), err)
+	}
 }

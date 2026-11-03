@@ -106,7 +106,7 @@ func SignIn(ctx context.Context, o Options) (string, error) {
 		o.Show(authURL)
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
+	wctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
 	var code string
 	for code == "" {
@@ -117,11 +117,16 @@ func SignIn(ctx context.Context, o Options) (string, error) {
 				return "", ErrCancelled
 			}
 			code = CodeFromPaste(s)
-		case <-ctx.Done():
+		case <-wctx.Done():
 			return "", ErrCancelled
 		}
 	}
-	return exchange(ctx, o, code, verifier)
+	// The exchange has its own bound (spec §4 step 5), under the caller's
+	// context, not the wait's: a code that arrives near the end of the five
+	// minutes must still get its full fifteen seconds.
+	ectx, ecancel := context.WithTimeout(ctx, exchangeTimeout)
+	defer ecancel()
+	return exchange(ectx, o, code, verifier)
 }
 
 // CodeFromPaste reads the code out of what a person pasted: the whole
