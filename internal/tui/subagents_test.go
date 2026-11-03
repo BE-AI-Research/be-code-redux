@@ -547,3 +547,24 @@ func TestStartupResumeAskDeclineOnTheSharedModal(t *testing.T) {
 		t.Fatal("a decline must dispatch nothing")
 	}
 }
+
+// TestAJobStallToAnIdleMainModelStartsATurn: a stall line is queued for the
+// main model like an ask, and an idle one would never read it.
+func TestAJobStallToAnIdleMainModelStartsATurn(t *testing.T) {
+	s, a, _ := twoViews(t)
+	if s.ag.Events.OnJobStall == nil {
+		t.Fatal("OnJobStall is not wired")
+	}
+	var started []string
+	s.startTurnHook = func(text string) { started = append(started, text) }
+	line := "job 1.1 (big) has been quiet for 3m: 0 tool calls. jobs extend 1.1 to give it more time"
+	s.ag.EnqueueHarness(line)
+	s.ag.Events.OnJobStall("1.1", line)
+	if len(started) != 1 || !strings.Contains(started[0], "has been quiet") {
+		t.Fatalf("no turn was started for the stall: %q", started)
+	}
+	flush(a)
+	if !strings.Contains(a.View(), "job 1.1 stalled") {
+		t.Fatalf("the stall is not in the transcript:\n%s", a.View())
+	}
+}

@@ -324,3 +324,37 @@ func TestScopedOnAskBracketsTheApproval(t *testing.T) {
 		t.Fatalf("events %q", got)
 	}
 }
+
+// TestScopedOnAskBracketsTheEditorReview: fs.go asks ReviewWrite before
+// Approve, so an editor review of a sub-agent's write is bracketed too.
+func TestScopedOnAskBracketsTheEditorReview(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "internal/scan"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	reg, err := NewRegistry(dir, func(string, string) bool { events = append(events, "approve"); return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.ApproveWrites = true
+	reg.ReviewWrite = func(context.Context, string, string, string) ReviewDecision {
+		events = append(events, "review")
+		return ReviewAccept
+	}
+	sub := reg.Scoped([]string{"internal/scan"}, nil, "big (3.2)")
+	sub.OnAsk = func(start bool) {
+		if start {
+			events = append(events, "start")
+		} else {
+			events = append(events, "end")
+		}
+	}
+	res := sub.Dispatch(context.Background(), call("write_file", `{"path":"internal/scan/b.go","content":"x\n"}`))
+	if res.IsError {
+		t.Fatal(res.Content)
+	}
+	if got := strings.Join(events, ","); got != "start,review,end" {
+		t.Fatalf("events %q", got)
+	}
+}

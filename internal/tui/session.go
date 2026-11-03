@@ -321,6 +321,7 @@ func wireEvents(s *Session) {
 		OnSubAgentStart:   s.onSubAgentStart,
 		OnSubAgentAsk:     s.onSubAgentAsk,
 		OnSubAgentEnd:     s.onSubAgentEnd,
+		OnJobStall:        s.onJobStall,
 		OnScheduleFire:    s.onScheduleFire,
 	}
 	ag.Tools.OnStatus = s.setStatus
@@ -776,6 +777,17 @@ func (s *Session) onSubAgentAsk(a subagent.Ask) {
 	// before it fires this event). If the main model is idle it would sit
 	// there until the operator typed something — and the sub-agent is
 	// parked on the answer, so nothing would move until its ask timed out.
+	s.startQueuedLocked()
+}
+
+// onJobStall is Events.OnJobStall: a job has been quiet past stall_after and
+// its stall line is queued for the main model (dispatch-jobs spec §6). An
+// idle main model would never read it, so it starts a turn like an ask.
+func (s *Session) onJobStall(id, line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flushLocked()
+	s.appendEntryLocked(entry{Kind: entryDim, Text: "job " + id + " stalled"})
 	s.startQueuedLocked()
 }
 

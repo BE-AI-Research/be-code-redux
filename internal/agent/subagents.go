@@ -182,6 +182,11 @@ type subRun struct {
 	calls     int
 	stallAt   time.Time
 	stallLine string
+	// inTool is the tool call in flight ("" between calls): a wait for the
+	// stall clock, not for the meter. askLine is the line the open ask
+	// queued, so WaitSubAgents can tell an unread ask from an answered one.
+	inTool  string
+	askLine string
 
 	// events carries a job's hand-back, ask and stall lines to JobWait, each
 	// sent after the same line is queued (so the queue stays the truth and a
@@ -612,13 +617,51 @@ func (a *Agent) WaitSubAgents(ctx context.Context) {
 	if a.subs == nil {
 		return
 	}
-	for a.subAgentsBusy() {
+	for a.subAgentsBusy() && !a.subAgentsNeedMain() {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
+}
+
+// subAgentsNeedMain reports whether a run has queued something the main
+// model must act on while it still runs — an ask or a stall line not yet
+// read (ruling R13) — so a headless run gives the main model its turn now
+// rather than when every run has ended. Only an unread line counts: one
+// already delivered would return at once on every round.
+func (a *Agent) subAgentsNeedMain() bool {
+	s := a.subs
+	if s == nil {
+		return false
+	}
+	var lines []string
+	s.mu.Lock()
+	for _, r := range s.runs {
+		if r.question != "" && r.askLine != "" {
+			lines = append(lines, r.askLine)
+		}
+		if r.stalled && r.stallLine != "" {
+			lines = append(lines, r.stallLine)
+		}
+	}
+	s.mu.Unlock()
+	if len(lines) == 0 {
+		return false
+	}
+	queued := map[string]bool{}
+	for _, it := range a.PeekItems() {
+		if it.Harness {
+			queued[it.Text] = true
+		}
+	}
+	for _, l := range lines {
+		if queued[l] {
+			return true
+		}
+	}
+	return false
 }
 
 // subAgentsBusy reports whether any run is actually working — never a run
@@ -1269,8 +1312,11 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 	var lastArgs string
 	scratch.Events = Events{
 		OnTransient: func(msg string) { a.transient("%s", msg) },
-		OnToolStart: func(_, args string) { lastArgs = args },
-		OnToolEnd:   func(name string, _ tools.Result) { a.noteActivity(run, name, toolFile(lastArgs)) },
+		OnToolStart: func(name, args string) { lastArgs = args; a.toolStarted(run, name) },
+		OnToolEnd: func(name string, _ tools.Result) {
+			a.toolEnded(run)
+			a.noteActivity(run, name, toolFile(lastArgs))
+		},
 		OnDelta:     func(string) { a.noteActivity(run, "", "") },
 		OnReasoning: func(string) { a.noteActivity(run, "", "") },
 	}
@@ -1332,6 +1378,9 @@ func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, err
 		line = jobTag(run.d.Node) + "asks: " + q
 	}
 	line = strings.TrimSpace(line)
+	s.mu.Lock()
+	run.askLine = line
+	s.mu.Unlock()
 	a.EnqueueHarness(line)
 	run.sendEvent(jobEvent{Kind: "ask", Line: line})
 	if a.Events.OnSubAgentAsk != nil {

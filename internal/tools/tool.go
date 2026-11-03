@@ -117,7 +117,7 @@ type Registry struct {
 	OnWrote func(absPath string)
 
 	// OnAsk, on a scoped registry only, is told when one of its approvals
-	// goes to a person (start true) and when the answer comes back (start
+	// or editor reviews (ReviewWrite) goes to a person (start true) and when the answer comes back (start
 	// false): a sub-agent waiting on someone else is not stalled, so its
 	// stall clock pauses for the question (dispatch-jobs spec §6). Read at
 	// call time; Scoped's Approve closure is the only caller.
@@ -331,6 +331,19 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 				defer on(false)
 			}
 			return parent(action, "sub-agent "+label+":\n"+detail)
+		}
+	}
+	if r.ReviewWrite != nil {
+		// A write reviewed in the editor is the same wait on a person as an
+		// approval: fs.go asks ReviewWrite before Approve, so without this an
+		// editor review would run the sub-agent's stall clock.
+		review := r.ReviewWrite
+		sub.ReviewWrite = func(ctx context.Context, rel, oldContent, newContent string) ReviewDecision {
+			if on := sub.OnAsk; on != nil {
+				on(true)
+				defer on(false)
+			}
+			return review(ctx, rel, oldContent, newContent)
 		}
 	}
 	return sub

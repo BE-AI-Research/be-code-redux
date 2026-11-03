@@ -164,7 +164,7 @@ func (a *Agent) sweepJobs() {
 		if r.stopReason != "" || r.interrupt {
 			continue // already on its way out
 		}
-		if r.waiting == "" {
+		if !meterPaused(r.waiting) {
 			r.runFor += now.Sub(r.meterAt)
 			r.meterAt = now
 		}
@@ -173,7 +173,7 @@ func (a *Agent) sweepJobs() {
 			acts = append(acts, supAction{run: r, stop: true})
 			continue
 		}
-		// A wait is never a stall; during a scheduled event's turn nothing
+		// A wait (a tool call in flight included) is never a stall; during a scheduled event's turn nothing
 		// is judged at all — the turn receives no queued line and could not
 		// act on one — and the quiet time it covers is judged by the first
 		// sweep after it, which is how a stall "fires after the turn ends".
@@ -211,8 +211,21 @@ func (a *Agent) sweepJobs() {
 
 	for _, act := range acts {
 		if act.line != "" {
-			a.EnqueueHarness(act.line)
-			act.run.sendEvent(jobEvent{Kind: "stall", Line: act.line})
+			// Re-checked under mu: progress in the gap since the decision
+			// (noteActivity) or the run's end has already answered it.
+			s.mu.Lock()
+			live := s.runs[act.run.d.Node] == act.run && act.run.stalled && act.run.stallLine == act.line
+			s.mu.Unlock()
+			if live {
+				a.EnqueueHarness(act.line)
+				act.run.sendEvent(jobEvent{Kind: "stall", Line: act.line})
+				// The queue first, the event second, as a hand-back and an
+				// ask do: a UI answers it by starting a turn for whatever is
+				// queued when the main model is idle.
+				if a.Events.OnJobStall != nil {
+					a.Events.OnJobStall(act.run.d.Node, act.line)
+				}
+			}
 		}
 		if act.stop {
 			act.run.cancel()
@@ -260,8 +273,8 @@ func (a *Agent) noteActivity(run *subRun, tool, file string) {
 	if s == nil || run == nil {
 		return
 	}
+	now := a.subNow()
 	s.mu.Lock()
-	now := s.sup.now()
 	run.lastActivity, run.clockFrom = now, now
 	if tool != "" {
 		run.calls++
@@ -281,33 +294,80 @@ func (a *Agent) noteActivity(run *subRun, tool, file string) {
 
 // setWaiting records that run is waiting on someone else — reason is
 // "ask_main", "lane", "consent" or "approval" — or, with "", that the wait
-// ended. The stall clock and the run-time meter both stop while it waits;
-// when the wait ends the stall clock starts again from zero (clockFrom is
-// stamped, lastActivity is not: a wait ending is not the job's progress)
-// and the meter resumes from now, so the wait is never counted as running
-// time. Waits do not nest: a second reason replaces the first.
+// ended. The stall clock stops while it waits; when the wait ends it starts
+// again from zero (clockFrom is stamped, lastActivity is not: a wait ending
+// is not the job's progress). The run-time meter stops too, for every wait
+// but a tool call in flight (meterPaused). A wait that began inside a tool
+// call (an approval, ask_main) hands back to that tool's wait when it ends,
+// rather than leaving the tool's remaining time on the stall clock.
 func (a *Agent) setWaiting(run *subRun, reason string) {
 	s := a.subs
 	if s == nil || run == nil {
 		return
 	}
+	now := a.subNow()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.sup.now()
-	if reason != "" {
-		if run.waiting == "" {
-			run.runFor += now.Sub(run.meterAt)
-			run.waitSince = now
-		}
-		run.waiting = reason
-		run.meterAt = now
+	if reason == "" && run.inTool != "" {
+		reason = toolWait(run.inTool)
+	}
+	changeWaitLocked(run, reason, now)
+}
+
+// toolStarted and toolEnded bracket one tool call of the run (ruling R11):
+// a tool in flight is a wait for the stall clock — every scoped tool is
+// bounded, and a check running for minutes is not quiet — but not for the
+// run-time meter. jobs status and /agents show "waiting (tool: <name>)".
+func (a *Agent) toolStarted(run *subRun, name string) {
+	s := a.subs
+	if s == nil || run == nil {
 		return
 	}
-	if run.waiting == "" {
+	now := a.subNow()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run.inTool = name
+	changeWaitLocked(run, toolWait(name), now)
+}
+
+func (a *Agent) toolEnded(run *subRun) {
+	s := a.subs
+	if s == nil || run == nil {
 		return
 	}
-	run.waiting = ""
-	run.meterAt, run.clockFrom = now, now
+	now := a.subNow()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run.inTool = ""
+	changeWaitLocked(run, "", now)
+}
+
+func toolWait(name string) string { return "tool: " + name }
+
+// meterPaused reports whether a run waiting for reason is off the run-time
+// meter: every wait on someone else is; a tool call in flight is the job's
+// own running time.
+func meterPaused(reason string) bool {
+	return reason != "" && !strings.HasPrefix(reason, "tool: ")
+}
+
+// changeWaitLocked moves run to reason, bringing the meter up to date. The
+// caller holds subAgents.mu.
+func changeWaitLocked(run *subRun, reason string, now time.Time) {
+	if run.waiting == reason {
+		return
+	}
+	if !meterPaused(run.waiting) {
+		run.runFor += now.Sub(run.meterAt)
+	}
+	run.meterAt = now
+	switch {
+	case reason == "":
+		run.clockFrom = now
+	case run.waiting == "":
+		run.waitSince = now
+	}
+	run.waiting = reason
 }
 
 // toolFile is the path a tool call names, for the "last read_file x.go"

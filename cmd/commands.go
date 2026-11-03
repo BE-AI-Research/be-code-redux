@@ -90,9 +90,10 @@ var runCmd = &cobra.Command{
 		ag.BeginTypedRequest()
 		answer, rep, err := ag.RunFull(cmd.Context(), prompt)
 		// Sub-agents hand back into the queue; headless, nobody types the
-		// next turn, so the run itself takes up to three of them (a
-		// question, its answer, the hand-back).
-		for round := 0; err == nil && ag.SubAgentsEnabled() && round < 3; round++ {
+		// next turn, so the run itself takes up to ten of them (questions,
+		// stall lines and hand-backs — WaitSubAgents returns as soon as a
+		// job asks or stalls, so the main model can act while it runs).
+		for round := 0; err == nil && ag.SubAgentsEnabled() && round < 10; round++ {
 			ag.WaitSubAgents(cmd.Context())
 			next, ok := nextHeadlessRequest(ag)
 			if !ok {

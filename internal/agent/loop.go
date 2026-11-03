@@ -51,6 +51,9 @@ type Events struct {
 	OnSubAgentStart func(d subagent.Dispatch)
 	OnSubAgentAsk   func(ask subagent.Ask)
 	OnSubAgentEnd   func(hb subagent.HandBack)
+	// OnJobStall fires after a job's stall line is queued (dispatch-jobs
+	// spec §6), so an idle UI starts a turn for it as it does for an ask.
+	OnJobStall func(id, line string)
 	// OnScheduleFire fires after a due scheduled event was queued, so an
 	// idle UI can start its turn (the same wake a sub-agent's hand-back uses).
 	OnScheduleFire func(name string)

@@ -720,6 +720,25 @@ func TestAHandBackToAnIdleReplStartsATurn(t *testing.T) {
 	}
 }
 
+// TestAJobStallWakesAnIdleRepl: a stall line is queued for the main model
+// like an ask, and wakes the idle loop the same way.
+func TestAJobStallWakesAnIdleRepl(t *testing.T) {
+	r := newTestREPL(t)
+	r.wakeCh = make(chan struct{}, 1)
+	var saw bool
+	r.Agent.Events.OnJobStall = func(string, string) { saw = true }
+	r.wireQueueWake()
+	r.Agent.Events.OnJobStall("1.1", "job 1.1 (big) has been quiet for 3m")
+	if !saw {
+		t.Fatal("the wrapper swallowed the caller's own handler")
+	}
+	select {
+	case <-r.wakeCh:
+	default:
+		t.Fatal("a stall did not wake the idle loop")
+	}
+}
+
 // TestNextLineStillReadsTypedLines: the wake channel must not take the
 // select's place for ordinary input.
 func TestNextLineStillReadsTypedLines(t *testing.T) {

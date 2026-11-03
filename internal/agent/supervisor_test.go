@@ -344,3 +344,85 @@ func TestSupervisorStartsAndStops(t *testing.T) {
 	s.f.ag.stopSupervisor()
 	s.f.ag.stopSupervisor()
 }
+
+func TestStallFiresOnJobStallWithTheQueuedLine(t *testing.T) {
+	s := stallJob(t, nil)
+	type ev struct{ id, line string }
+	got := make(chan ev, 2)
+	s.f.ag.Events.OnJobStall = func(id, line string) { got <- ev{id, line} }
+	s.stallOnce(t)
+	e := wait(t, got, "OnJobStall")
+	if q := s.f.ag.Peek(); e.id != s.id || len(q) != 1 || q[0] != e.line {
+		t.Fatalf("hook (%q, %q), queued %q", e.id, e.line, q)
+	}
+}
+
+// TestToolInFlightIsNotQuiet is ruling R11: a tool call in flight is a wait
+// for the stall clock but not for the run-time meter.
+func TestToolInFlightIsNotQuiet(t *testing.T) {
+	s := stallJob(t, nil)
+	s.f.ag.toolStarted(s.run, "shell")
+	s.clk.Advance(400 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 0 {
+		t.Fatalf("a running check stalled: %q", s.f.ag.Peek())
+	}
+	var state string
+	for _, js := range s.f.ag.JobStates() {
+		if js.ID == s.id {
+			state = js.State
+		}
+	}
+	if state != "waiting (tool: shell)" {
+		t.Fatalf("status %q", state)
+	}
+	// An approval inside the tool hands back to the tool's wait.
+	s.f.ag.setWaiting(s.run, "approval")
+	s.f.ag.setWaiting(s.run, "")
+	s.f.ag.subs.mu.Lock()
+	w, runFor := s.run.waiting, s.run.runFor
+	s.f.ag.subs.mu.Unlock()
+	if w != "tool: shell" {
+		t.Fatalf("after the inner approval: waiting %q", w)
+	}
+	if runFor < 400*time.Second {
+		t.Fatalf("the tool's time was not metered: runFor %s", runFor)
+	}
+	s.f.ag.toolEnded(s.run)
+	s.clk.Advance(100 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if s.f.ag.Pending() != 0 {
+		t.Fatalf("stalled before stall_after after the tool: %q", s.f.ag.Peek())
+	}
+	s.clk.Advance(81 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if q := s.f.ag.Peek(); len(q) != 1 || !strings.Contains(q[0], "has been quiet for 3m") {
+		t.Fatalf("queued: %q", q)
+	}
+}
+
+// TestWaitSubAgentsReturnsOnAStallLine is ruling R13: headless, the main
+// model gets its turn as soon as a job stalls, not when every run ends.
+func TestWaitSubAgentsReturnsOnAStallLine(t *testing.T) {
+	s := stallJob(t, nil)
+	s.stallOnce(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	s.f.ag.WaitSubAgents(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("WaitSubAgents took %s with a stall line queued", d)
+	}
+	if len(s.f.ag.RunningSubAgents()) != 1 {
+		t.Fatal("the job is no longer running")
+	}
+	// Once the line is read, the wait is for the run again.
+	s.f.ag.DrainInbox()
+	short, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+	start = time.Now()
+	s.f.ag.WaitSubAgents(short)
+	if d := time.Since(start); d < 250*time.Millisecond {
+		t.Fatalf("WaitSubAgents returned after %s with nothing unread", d)
+	}
+}

@@ -161,6 +161,13 @@ func (r *REPL) wireQueueWake() {
 		}
 		r.wakeQueue()
 	}
+	stall := ag.Events.OnJobStall
+	ag.Events.OnJobStall = func(id, line string) {
+		if stall != nil {
+			stall(id, line)
+		}
+		r.wakeQueue()
+	}
 	fire := ag.Events.OnScheduleFire
 	ag.Events.OnScheduleFire = func(name string) {
 		if fire != nil {
@@ -1440,6 +1447,10 @@ func Events() agent.Events {
 		OnSubAgentAsk: func(a subagent.Ask) {
 			endThinking()
 			fmt.Printf("%s %s\n", cyan(fmt.Sprintf("%s (%s)?", a.Owner, a.Node)), a.Question)
+		},
+		OnJobStall: func(id, _ string) {
+			endThinking()
+			fmt.Println(dim("job " + id + " stalled"))
 		},
 		OnSubAgentEnd: func(hb subagent.HandBack) {
 			endThinking()
