@@ -371,10 +371,12 @@ func TestJobWaitReturnsTheHandBackAndConsumesIt(t *testing.T) {
 	if q := queued(f); strings.Contains(q, id) {
 		t.Fatalf("the hand-back JobWait returned is still queued: %q", q)
 	}
-	// A late wait on a finished job answers at once with its hand-back.
+	// A late wait on a finished job whose hand-back was taken answers at
+	// once that it was delivered, not with the line again.
 	start := time.Now()
 	again, err := f.ag.JobWait(context.Background(), id, time.Minute)
-	if err != nil || again != line || time.Since(start) > 2*time.Second {
+	want := "job " + id + " already finished (done); its hand-back was delivered earlier"
+	if err != nil || again != want || time.Since(start) > 2*time.Second {
 		t.Fatalf("late JobWait: %q %v after %s", again, err, time.Since(start))
 	}
 	if _, err := f.ag.JobWait(context.Background(), "9.9", time.Second); err == nil || err.Error() != "no job 9.9" {
@@ -610,4 +612,117 @@ func TestJobStatesShapes(t *testing.T) {
 		t.Fatalf("order: %+v", rows)
 	}
 	f.ag.StopAllSubAgents("test over")
+}
+
+func TestJobWaitOnAFinishedJobReturnsAQueuedHandBack(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "ported"}}}, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, f.ends, "hand-back")
+	f.ag.WaitSubAgents(context.Background())
+	line, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	if err != nil || !strings.HasPrefix(line, "job "+id+" ") || !strings.Contains(line, "ported") {
+		t.Fatalf("JobWait on a finished, still-queued job: %q %v", line, err)
+	}
+	if f.ag.Pending() != 0 {
+		t.Fatalf("hand-back still queued: %q", f.ag.Peek())
+	}
+}
+
+func TestJobWaitAfterTheHandBackWasDelivered(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "ported"}}}, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, f.ends, "hand-back")
+	f.ag.WaitSubAgents(context.Background())
+	if got := f.ag.DrainInbox(); len(got) != 1 {
+		t.Fatalf("queued: %q", got) // delivered through the ordinary queue
+	}
+	line, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	if want := "job " + id + " already finished (done); its hand-back was delivered earlier"; err != nil || line != want {
+		t.Fatalf("JobWait after delivery: %q %v", line, err)
+	}
+}
+
+// Ruling R10: an ask delivered through the queue leaves its event behind;
+// a later wait must skip it and return the ask that is still queued.
+func TestJobWaitSkipsAnAskAlreadyDelivered(t *testing.T) {
+	sub := &scriptedProvider{responses: []provider.ChatResponse{
+		toolCall("ask_main", `{"question":"first?"}`),
+		toolCall("ask_main", `{"question":"second?"}`),
+		{Content: "ported"},
+	}}
+	f := newSubFixture(t, sub, nil)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, f.asks, "first ask")
+	if got := f.ag.DrainInbox(); len(got) != 1 || !strings.Contains(got[0], "first?") {
+		t.Fatalf("first ask not queued: %q", got)
+	}
+	if err := f.ag.JobReply(id, "one"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, f.asks, "second ask")
+	line, err := f.ag.JobWait(context.Background(), id, time.Minute)
+	if err != nil || line != "job "+id+" asks: second?" {
+		t.Fatalf("JobWait: %q %v", line, err)
+	}
+	if q := queued(f); strings.Contains(q, "second?") {
+		t.Fatalf("the second ask is still queued: %q", q)
+	}
+	if err := f.ag.JobReply(id, "two"); err != nil {
+		t.Fatal(err)
+	}
+	if line, _ := f.ag.JobWait(context.Background(), id, time.Minute); !strings.Contains(line, "done") {
+		t.Fatalf("final JobWait: %q", line)
+	}
+}
+
+func TestJobWaitFindsALiveAskBehindAFullBuffer(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	f.ag.subs.mu.Lock()
+	run := f.ag.subs.runs[id]
+	run.question = "live?"
+	f.ag.subs.mu.Unlock()
+	// Eight asks that reached the main model through the queue: their
+	// events fill the buffer, their lines are gone.
+	for i := 0; i < cap(run.events); i++ {
+		run.sendEvent(jobEvent{Kind: "ask", Line: "job " + id + " asks: stale " + string(rune('a'+i))})
+	}
+	live := "job " + id + " asks: live?"
+	f.ag.EnqueueHarness(live)
+	run.sendEvent(jobEvent{Kind: "ask", Line: live})
+	line, err := f.ag.JobWait(context.Background(), id, 2*time.Second)
+	if err != nil || line != live {
+		t.Fatalf("JobWait: %q %v", line, err)
+	}
+	if f.ag.Pending() != 0 {
+		t.Fatalf("the live ask is still queued: %q", f.ag.Peek())
+	}
+}
+
+func TestJobReplyRestartsTheClock(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	f.ag.subs.mu.Lock()
+	run := f.ag.subs.runs[id]
+	run.stalls = 2
+	f.ag.subs.mu.Unlock()
+	before := time.Now()
+	if err := f.ag.JobReply(id, "keep going"); err != nil {
+		t.Fatal(err)
+	}
+	f.ag.subs.mu.Lock()
+	act, iv, stalls := run.lastActivity, run.lastIntervention, run.stalls
+	f.ag.subs.mu.Unlock()
+	if act.Before(before) || iv.Before(before) || stalls != 2 {
+		t.Fatalf("after reply: activity %s intervention %s stalls %d", act, iv, stalls)
+	}
 }

@@ -240,17 +240,45 @@ type jobEvent struct {
 	Line string
 }
 
-// sendEvent hands ev to a waiting JobWait without ever blocking the run: the
-// line is already queued, so a full buffer loses nothing the main model
-// would not otherwise see.
+// sendEvent hands ev to a waiting JobWait without ever blocking the run. A
+// full buffer drops its oldest event, never the new one: an old event is
+// most likely stale (its line already delivered through the queue), and
+// JobWait skips a stale one anyway (ruling R10), so the newest is what
+// matters. The line itself is already queued, so nothing is lost to the
+// main model either way.
 func (r *subRun) sendEvent(ev jobEvent) {
 	if r == nil || r.events == nil {
 		return
 	}
-	select {
-	case r.events <- ev:
-	default:
+	for i := 0; i < cap(r.events)+1; i++ {
+		select {
+		case r.events <- ev:
+			return
+		default:
+		}
+		select {
+		case <-r.events:
+		default:
+		}
 	}
+}
+
+// jobFinishedState is a finished run's state word for JobStates and the
+// already-finished answer. The caller holds s.mu.
+func jobFinishedState(r *subRun) string {
+	switch {
+	case r.stopReason != "":
+		return "stopped"
+	case r.endHB.Status == "done":
+		return "done"
+	}
+	return "blocked" // blocked, or interrupted at session end
+}
+
+// jobDelivered is JobWait's answer for a finished job whose hand-back is
+// no longer queued: the main model already has it.
+func jobDelivered(id, state string) string {
+	return fmt.Sprintf("job %s already finished (%s); its hand-back was delivered earlier", id, state)
 }
 
 // jobRun is the running job id names, else its finished run; ok is false
@@ -333,14 +361,7 @@ func (a *Agent) JobStates() []tools.JobState {
 		hb := r.endHB
 		st := tools.JobState{ID: r.d.Node, Owner: r.d.Owner, Elapsed: hb.Elapsed, Calls: hb.Calls,
 			At: r.d.Node, LastTool: r.lastTool, LastActivity: r.lastActivity, Summary: hb.Summary}
-		switch {
-		case r.stopReason != "":
-			st.State = "stopped"
-		case hb.Status == "done":
-			st.State = "done"
-		default:
-			st.State = "blocked" // blocked, or interrupted at session end
-		}
+		st.State = jobFinishedState(r)
 		if st.Summary == "" {
 			st.Summary = hb.Reason
 		}
@@ -363,8 +384,13 @@ func (a *Agent) JobStates() []tools.JobState {
 // queued for that event and takes exactly that line out of the queue; a
 // wait that runs out returns "" and consumes nothing, so the line is still
 // delivered the ordinary way. With id "" and nothing running it returns ""
-// at once; a finished id answers at once with its hand-back; an unknown id
-// is "no job <id>".
+// at once; a finished id answers at once with its hand-back, or — when the
+// hand-back is no longer queued — says it was delivered earlier; an
+// unknown id is "no job <id>".
+//
+// The queue is the truth of liveness (ruling R10): an ask or stall event
+// whose line is no longer queued reached the main model some other way (a
+// mid-turn delivery) and is skipped, and the wait goes on.
 func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string, error) {
 	s := a.subs
 	if s == nil {
@@ -388,9 +414,11 @@ func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string
 			return "", fmt.Errorf("no job %s", id)
 		}
 		if finished {
-			line := run.endLine
+			line, state := run.endLine, jobFinishedState(run)
 			s.mu.Unlock()
-			a.consumeJobLine(line)
+			if a.consumeJobLine(line) == 0 {
+				return jobDelivered(id, state), nil
+			}
 			return line, nil
 		}
 		runs = []*subRun{run}
@@ -422,20 +450,30 @@ func (a *Agent) JobWait(ctx context.Context, id string, d time.Duration) (string
 			return "", nil // the deadline or ctx: nothing consumed
 		}
 		run := runs[chosen/2]
+		ended := chosen%2 == 1
 		line := ""
-		if chosen%2 == 1 {
-			// Finished: its hand-back, whatever is still in its events.
-			s.mu.Lock()
-			line = run.endLine
-			s.mu.Unlock()
-		} else {
+		if !ended {
 			ev := v.Interface().(jobEvent)
 			if !a.jobEventLive(run, ev) {
 				continue // an ask already answered, a stall already extended
 			}
+			ended = ev.Kind == "done"
 			line = ev.Line
 		}
-		a.consumeJobLine(line)
+		if ended {
+			// Finished: its hand-back, whatever is still in its events.
+			s.mu.Lock()
+			line = run.endLine
+			state := jobFinishedState(run)
+			s.mu.Unlock()
+			if a.consumeJobLine(line) == 0 {
+				return jobDelivered(run.d.Node, state), nil
+			}
+			return line, nil
+		}
+		if a.consumeJobLine(line) == 0 {
+			continue // stale: the line already reached the main model
+		}
 		return line, nil
 	}
 }
@@ -464,11 +502,13 @@ func (a *Agent) jobEventLive(run *subRun, ev jobEvent) bool {
 // consumeJobLine takes one returned line out of the main model's queue: it
 // has been handed over as the jobs tool's result, and delivering it again
 // as a queued line would tell the model twice.
-func (a *Agent) consumeJobLine(line string) {
+// It returns how many queued items it removed: 0 means the line had
+// already left the queue.
+func (a *Agent) consumeJobLine(line string) int {
 	if line == "" {
-		return
+		return 0
 	}
-	a.RemoveWhere(func(it InboxItem) bool { return it.Harness && it.Text == line })
+	return a.RemoveWhere(func(it InboxItem) bool { return it.Harness && it.Text == line })
 }
 
 // JobStop stops a running job; its step closes blocked with reason (default
@@ -483,6 +523,10 @@ func (a *Agent) JobStop(id, reason string) error {
 	}
 	s := a.subs
 	s.mu.Lock()
+	if s.runs[id] != run {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s has already finished", id)
+	}
 	run.stopReason = reason
 	cancel := run.cancel
 	s.mu.Unlock()
@@ -499,6 +543,10 @@ func (a *Agent) JobReply(id, text string) error {
 	}
 	s := a.subs
 	s.mu.Lock()
+	if s.runs[id] != run {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s has already finished", id)
+	}
 	asking, scratch := run.question != "", run.scratch
 	s.mu.Unlock()
 	if asking {
@@ -511,6 +559,15 @@ func (a *Agent) JobReply(id, text string) error {
 	if scratch == nil {
 		return fmt.Errorf("job %s has not started yet", id)
 	}
+	// A reply restarts the clock but not the stall count (spec §6).
+	now := time.Now()
+	s.mu.Lock()
+	if s.runs[id] != run {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s has already finished", id)
+	}
+	run.lastActivity, run.lastIntervention = now, now
+	s.mu.Unlock()
 	scratch.EnqueueHarness(text)
 	return nil
 }
@@ -526,6 +583,10 @@ func (a *Agent) JobExtend(id string) error {
 	now := time.Now()
 	s := a.subs
 	s.mu.Lock()
+	if s.runs[id] != run {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s has already finished", id)
+	}
 	run.stalled = false
 	run.lastActivity = now
 	run.lastIntervention = now
