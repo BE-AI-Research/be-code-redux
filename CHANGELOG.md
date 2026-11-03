@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## v1.3.1 — The pack contract, closed (2026-11-02)
+## v1.4.0 — Packs closed, apps served, keys stored (2026-11-02)
 
 - **A pack is checked against the BE Skill Pack Format 1.0 contract when it loads.** `pack.json`
   is a closed document now: every key must be one the format names, `description` and

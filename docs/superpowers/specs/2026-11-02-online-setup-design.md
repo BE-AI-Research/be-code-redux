@@ -1,6 +1,6 @@
 # Online provider setup — design
 
-**Status:** approved in brainstorming, 2026-11-02. Target release: 1.3.1 (not yet released).
+**Status:** approved in brainstorming, 2026-11-02. Target release: 1.4.0 (not yet released; was planned as 1.3.1).
 Branch `feature/online-setup` off `main`.
 
 **Builds on:** `2026-10-04-online-providers-design.md` (the presets, `LocalEndpoint`, the

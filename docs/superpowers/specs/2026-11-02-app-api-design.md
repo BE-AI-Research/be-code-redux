@@ -1,6 +1,6 @@
 # Application API — design
 
-**Status:** approved in brainstorming, 2026-11-02. Target release: 1.3.1 (not yet released).
+**Status:** approved in brainstorming, 2026-11-02. Target release: 1.4.0 (not yet released; was planned as 1.3.1).
 Branch `feature/app-api` off `main`.
 
 **Supersedes** the draft at the workspace root, `docs/2026-11-01-app-api-and-session-tokens-design.md`,
