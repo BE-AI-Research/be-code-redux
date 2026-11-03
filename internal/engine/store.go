@@ -1519,6 +1519,36 @@ func (s *Store) SetScope(id string, scope []string) error {
 	return nil
 }
 
+// AddJob adds a step under parent already assigned as a job: owner, scope
+// and the job mark, plus note (when non-empty) as a note on the node. Each
+// piece goes through the store's own method, so every rule those enforce
+// (sub-agent owner, max_scope, one pen per path) applies; they only mark the
+// tree dirty, so the document is written once, at the next flush.
+func (s *Store) AddJob(parent, text, note, owner string, scope []string) (string, error) {
+	id, err := s.Add(parent, text)
+	if err != nil {
+		return "", err
+	}
+	if err := s.SetOwner(id, owner, false); err != nil {
+		return "", err
+	}
+	if err := s.SetScope(id, scope); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	if n := s.tree.Find(id); n != nil {
+		n.Job = true
+		s.markDirtyLocked()
+	}
+	s.mu.Unlock()
+	if strings.TrimSpace(note) != "" {
+		if err := s.Note(id, note, "", false, false); err != nil {
+			return "", err
+		}
+	}
+	return id, nil
+}
+
 // SetDispatched marks a subtree as being worked by its owner.
 func (s *Store) SetDispatched(id string, on bool) {
 	s.mu.Lock()
@@ -1690,7 +1720,7 @@ func (s *Store) Steps() []subagent.Step {
 			owner = inherited
 		}
 		st := subagent.Step{ID: n.ID, Text: n.Text, Status: string(n.Status), Owner: owner,
-			Scope: append([]string(nil), n.Scope...), After: append([]string(nil), n.After...)}
+			Scope: append([]string(nil), n.Scope...), After: append([]string(nil), n.After...), Job: n.Job}
 		for _, note := range n.Evidence.Notes {
 			if strings.HasPrefix(note.Text, InterruptedNote) {
 				st.Interrupted = true

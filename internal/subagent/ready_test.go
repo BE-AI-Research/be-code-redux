@@ -114,3 +114,16 @@ func TestReadyIgnoresClosedAndMain(t *testing.T) {
 		t.Fatal("closed or main-owned nodes are not candidates")
 	}
 }
+
+func TestReadySkipsJobSteps(t *testing.T) {
+	step := Step{ID: "1", Status: "todo", Owner: "big", Scope: []string{"internal/scan"}}
+	ready, waiting := Ready([]Step{step}, cards(), nil)
+	if len(ready) != 1 || len(waiting) != 0 {
+		t.Fatalf("plain: %+v %+v", ready, waiting)
+	}
+	step.Job = true
+	ready, waiting = Ready([]Step{step}, cards(), nil)
+	if len(ready) != 0 || len(waiting) != 0 {
+		t.Fatalf("job: %+v %+v", ready, waiting)
+	}
+}

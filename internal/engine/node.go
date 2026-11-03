@@ -45,13 +45,18 @@ type Node struct {
 	// After overrides the positional ready rule. DoneBy is stamped when a
 	// sub-agent closes the node. Dispatched and DispatchedAt are transient
 	// render state the store sets on its copy of the tree (spec §1.5).
-	Owner        string   `json:"owner,omitempty"`
-	OwnerPinned  bool     `json:"owner_pinned,omitempty"`
-	Scope        []string `json:"scope,omitempty"`
-	After        []string `json:"after,omitempty"`
-	DoneBy       string   `json:"done_by,omitempty"`
-	Dispatched   bool     `json:"-"`
-	DispatchedAt string   `json:"-"`
+	Owner       string   `json:"owner,omitempty"`
+	OwnerPinned bool     `json:"owner_pinned,omitempty"`
+	Scope       []string `json:"scope,omitempty"`
+	After       []string `json:"after,omitempty"`
+	// Job marks a step the main model dispatched as a scoped job: its
+	// subtree is the co-worker's own, and the ready rule never picks it
+	// (it is run by the dispatch tool, not the scheduler). Document form:
+	// the bare trailing word "job", rendered last.
+	Job          bool   `json:"job,omitempty"`
+	DoneBy       string `json:"done_by,omitempty"`
+	Dispatched   bool   `json:"-"`
+	DispatchedAt string `json:"-"`
 }
 
 // now is the package clock, replaceable in tests.

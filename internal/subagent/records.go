@@ -69,6 +69,7 @@ type Step struct {
 	Owner       string // nearest owner up the tree; "" is the main model
 	Scope       []string
 	After       []string
+	Job         bool // a dispatched job: never a candidate of the ready rule
 	Interrupted bool
 	Touched     []string
 	Children    []Step

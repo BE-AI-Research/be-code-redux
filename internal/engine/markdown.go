@@ -66,14 +66,15 @@ var linesRange = regexp.MustCompile(`^(\d+)[–-](\d+)$`)
 // single spaces but never two in a row, which is what lets one field end
 // where the next begins. ParseDoc peels fields off the end until none
 // match, so their order does not matter on read; renderFields writes them
-// owner, scope, after.
-var trailingField = regexp.MustCompile(`^(.*?)\s{2,}(?:@([A-Za-z0-9_.-]+)(!?)|scope:\s*((?:\S| \S)+?)|after:\s*((?:\S| \S)+?))\s*$`)
+// owner, scope, after, job.
+var trailingField = regexp.MustCompile(`^(.*?)\s{2,}(?:@([A-Za-z0-9_.-]+)(!?)|scope:\s*((?:\S| \S)+?)|after:\s*((?:\S| \S)+?)|(job))\s*$`)
 
 type nodeFields struct {
 	owner  string
 	pinned bool
 	scope  []string
 	after  []string
+	job    bool
 }
 
 // splitFields separates a node's trailing fields from its text.
@@ -92,6 +93,8 @@ func splitFields(text string) (string, nodeFields) {
 			f.scope = splitList(m[4])
 		case m[5] != "":
 			f.after = splitList(m[5])
+		case m[6] != "":
+			f.job = true
 		}
 	}
 }
@@ -142,6 +145,9 @@ func renderFields(n *Node) string {
 	}
 	if len(n.After) > 0 {
 		b.WriteString("  after: " + strings.Join(n.After, ", "))
+	}
+	if n.Job {
+		b.WriteString("  job")
 	}
 	return b.String()
 }
@@ -259,7 +265,7 @@ func nodeLineBody(n *Node) string {
 	line := build()
 	t, _ := splitReason(strings.TrimSpace(line))
 	_, f := splitFields(t)
-	if renderFields(&Node{Owner: f.owner, OwnerPinned: f.pinned, Scope: f.scope, After: f.after}) != renderFields(n) {
+	if renderFields(&Node{Owner: f.owner, OwnerPinned: f.pinned, Scope: f.scope, After: f.after, Job: f.job}) != renderFields(n) {
 		text, reason = oneSpaced(text), oneSpaced(reason)
 		line = build()
 	}
@@ -435,7 +441,7 @@ func ParseDoc(text string) (*Tree, []string, error) {
 			text, reason := splitReason(strings.TrimSpace(m[4]))
 			text, fields := splitFields(text)
 			n := &Node{Text: text, Status: st, Reason: reason, Opened: now}
-			n.Owner, n.OwnerPinned, n.Scope, n.After = fields.owner, fields.pinned, fields.scope, fields.after
+			n.Owner, n.OwnerPinned, n.Scope, n.After, n.Job = fields.owner, fields.pinned, fields.scope, fields.after, fields.job
 			if len(n.Scope) > 0 {
 				clean, dropped := cleanScopeField(n.Scope)
 				n.Scope = clean

@@ -34,6 +34,9 @@ func Ready(roots []Step, cards map[string]Card, running map[string]bool) (ready,
 	}
 	var walk func(s Step, siblings []Step, i int, inherited string)
 	walk = func(s Step, siblings []Step, i int, inherited string) {
+		if s.Job {
+			return // a job runs under the dispatch tool; its subtree is its own
+		}
 		if inherited != "" {
 			return // inside an assigned subtree: the sub-agent's own steps
 		}
