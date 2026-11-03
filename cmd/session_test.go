@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/store"
@@ -136,5 +139,46 @@ func TestSessionTokenRefusesALiveCodeWithNoFile(t *testing.T) {
 	_, err := captureAppsStdout(t, func() error { return sessionTokenCmd.RunE(sessionTokenCmd, []string{"LIVE01"}) })
 	if err == nil || !strings.Contains(err.Error(), "/session token") || !strings.Contains(err.Error(), "be-code attach LIVE01") {
 		t.Fatalf("a live code without a file is refused, not not-found: %v", err)
+	}
+}
+
+// A session a plain-REPL or --no-host process has open is in no live
+// registry, but its host_pid names that process: its next autosave would
+// write its own token back over a rotate, so both commands refuse.
+func TestSessionTokenRefusesAFileALiveProcessOwns(t *testing.T) {
+	s := savedSession(t)
+	s.HostPID = os.Getppid()
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	_ = sessionTokenCmd.Flags().Set("stdout", "true")
+	_ = sessionRotateCmd.Flags().Set("stdout", "true")
+	for _, c := range []*cobra.Command{sessionTokenCmd, sessionRotateCmd} {
+		c := c
+		_, err := captureAppsStdout(t, func() error { return c.RunE(c, []string{s.ResumeCode()}) })
+		if err == nil || !strings.Contains(err.Error(), "/session token") {
+			t.Fatalf("%s: a file a live process owns is refused: %v", c.Name(), err)
+		}
+	}
+	if again, _ := store.Load(s.ID); again.Token != "" {
+		t.Fatal("a refusal mints and saves nothing")
+	}
+}
+
+// A host_pid whose process is gone is a stale stamp: the file is served.
+func TestSessionTokenServesAFileOfADeadPid(t *testing.T) {
+	s := savedSession(t)
+	c := exec.Command("true")
+	if err := c.Run(); err != nil {
+		t.Skip("no `true` to run:", err)
+	}
+	s.HostPID = c.Process.Pid
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	_ = sessionTokenCmd.Flags().Set("stdout", "true")
+	out, err := captureAppsStdout(t, func() error { return sessionTokenCmd.RunE(sessionTokenCmd, []string{s.ResumeCode()}) })
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(out), "sess_1_") {
+		t.Fatalf("a dead pid's stamp is ignored: %v %q", err, out)
 	}
 }

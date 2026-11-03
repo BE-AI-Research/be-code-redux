@@ -3,11 +3,13 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/brown-enterprises/be-code/internal/live"
+	"github.com/brown-enterprises/be-code/internal/procattr"
 	"github.com/brown-enterprises/be-code/internal/store"
 )
 
@@ -34,9 +36,10 @@ func refuseIfLive(codes ...string) error {
 	return nil
 }
 
-// loadForToken loads a session file that no running host owns. The live
+// loadForToken loads a session file that no running process owns. The live
 // registry is asked first, by code and by the code of a session id, and the
-// loaded session's own code is checked again once it is read.
+// loaded session's own code is checked again once it is read; then its
+// host_pid, which names a non-hosted process the registry never sees.
 func loadForToken(arg string) (*store.Session, error) {
 	if err := refuseIfLive(arg, store.CodeFor(arg)); err != nil {
 		return nil, err
@@ -47,6 +50,12 @@ func loadForToken(arg string) (*store.Session, error) {
 	}
 	if err := refuseIfLive(s.ResumeCode()); err != nil {
 		return nil, err
+	}
+	// A plain-REPL or --no-host session is in no live registry, yet it may
+	// be open and serving the API; its next autosave would write its own
+	// token back over this one. Its save stamp names it.
+	if pid := s.HostPID; pid != 0 && pid != os.Getpid() && procattr.Alive(pid) {
+		return nil, fmt.Errorf("%s is open in a running session (pid %d); join it and use /session token there", s.ResumeCode(), pid)
 	}
 	return s, nil
 }
