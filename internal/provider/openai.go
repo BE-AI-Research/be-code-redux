@@ -85,6 +85,7 @@ type oaRequest struct {
 	StreamOpts      *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options,omitempty"`
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
 }
 
 type oaChoiceDelta struct {
@@ -128,6 +129,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, req ChatRequest, onDelta Stream
 		Stream:      true,
 	}
 	wire.ReasoningEffort = req.ReasoningEffort
+	wire.ResponseFormat = openAIResponseFormat(req)
 	// Ask for usage in the final chunk; servers that don't know the field
 	// ignore it, and the ones that do give us real token counts.
 	wire.StreamOpts = &struct {

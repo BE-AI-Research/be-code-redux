@@ -66,6 +66,60 @@ type ChatRequest struct {
 	// PrefillOnly asks the server to read the prompt and generate nothing
 	// (Prefiller). Set by Prefill, never by a caller.
 	PrefillOnly bool `json:"-"`
+	// Format is a JSON schema object for structured output; nil means none.
+	// Native Ollama sends it as "format", the OpenAI path as response_format
+	// {"type":"json_schema","json_schema":{"name":"response","schema":…}}.
+	Format json.RawMessage `json:"-"`
+	// ResponseFormat is an OpenAI response_format object as a caller gave
+	// it; nil means none. The OpenAI path sends it unchanged, and it wins
+	// over Format there; native Ollama, when Format is nil, derives its
+	// "format" from it (json_schema → the schema, json_object → "json").
+	ResponseFormat json.RawMessage `json:"-"`
+}
+
+// nativeFormat is what native Ollama's "format" carries for req, or nil.
+func nativeFormat(req ChatRequest) any {
+	if len(req.Format) > 0 {
+		return req.Format
+	}
+	if len(req.ResponseFormat) == 0 {
+		return nil
+	}
+	var rf struct {
+		Type       string `json:"type"`
+		JSONSchema struct {
+			Schema json.RawMessage `json:"schema"`
+		} `json:"json_schema"`
+	}
+	if json.Unmarshal(req.ResponseFormat, &rf) != nil {
+		return nil
+	}
+	switch rf.Type {
+	case "json_schema":
+		if len(rf.JSONSchema.Schema) > 0 {
+			return rf.JSONSchema.Schema
+		}
+		return "json"
+	case "json_object":
+		return "json"
+	}
+	return nil
+}
+
+// openAIResponseFormat is what the OpenAI path's response_format carries
+// for req, or nil.
+func openAIResponseFormat(req ChatRequest) json.RawMessage {
+	if len(req.ResponseFormat) > 0 {
+		return req.ResponseFormat
+	}
+	if len(req.Format) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "response", "schema": req.Format}})
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // Usage reports token accounting when the backend supplies it.

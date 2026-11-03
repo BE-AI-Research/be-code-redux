@@ -439,6 +439,9 @@ func (p *Ollama) nativeChat(ctx context.Context, req ChatRequest, onDelta Stream
 	if len(req.Tools) > 0 {
 		body["tools"] = nativeTools(req.Tools)
 	}
+	if f := nativeFormat(req); f != nil {
+		body["format"] = f
+	}
 	p.mu.RLock()
 	ka := p.keepAlive
 	p.mu.RUnlock()
