@@ -169,3 +169,29 @@ func TestOnlineAddPlainListsQuickSignInFirstAndOpensTheKeysPage(t *testing.T) {
 		t.Fatalf("opened %q", opened)
 	}
 }
+
+func TestOnlineAddPlainAsksForAWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnlineUI(t)
+	onlineOpenPage = func(string) bool { return false }
+	secrets := 0
+	onlineValidate = func(ctx context.Context, ch setup.Choice, key string) ([]provider.ModelInfo, error) {
+		if ch.Headers[setup.WorkspaceHeader] != "wrkspc_01" {
+			return nil, &setup.WorkspaceNeeded{Provider: ch.Name}
+		}
+		return []provider.ModelInfo{{ID: "claude-x"}}, nil
+	}
+	p := &scriptedPrompter{answers: []string{"wrkspc_01", "1", "n"}, secrets: []string{"good"}}
+	name, model, err := OnlineAdd(context.Background(), config.Default(), p, "anthropic")
+	if err != nil || name != "anthropic" || model != "claude-x" {
+		t.Fatalf("%q %q %v\n%s", name, model, err, p.all())
+	}
+	if !strings.Contains(p.all(), setup.WorkspacePrompt) || len(p.secrets) != 0 {
+		t.Fatalf("prompted wrong:\n%s", p.all())
+	}
+	_ = secrets
+	re, _ := config.Load()
+	if re.Providers["anthropic"].Headers[setup.WorkspaceHeader] != "wrkspc_01" {
+		t.Fatalf("header not saved: %+v", re.Providers["anthropic"])
+	}
+}

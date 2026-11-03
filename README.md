@@ -1433,6 +1433,10 @@ hand; `/config` prints what the running session actually resolved.
   passed through to Ollama's options block untouched, so config can reach keys
   the harness knows nothing about (`top_k`, `top_p`, `repeat_penalty`...).
   Ignored for `type: openai`, which has no such knob.
+- `providers.<name>.headers` ({}) — extra headers sent on every request to that endpoint after
+  the key, e.g. `{"anthropic-workspace-id": "wrkspc_…"}` for an Anthropic key that is not scoped
+  to a workspace (`/online add anthropic` asks for the ID when Anthropic says one is needed).
+  Never a secret: keys live in the environment or `credentials.json`.
 - `providers.<name>.online` (false) — marks an endpoint as off this machine and network. An
   endpoint at a non-local address counts as online whatever this says (startup warns once).
 - `local_helper` (`{"provider": "", "model": ""}`) — the local model for housekeeping (compaction

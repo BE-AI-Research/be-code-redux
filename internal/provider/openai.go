@@ -21,11 +21,24 @@ type OpenAICompat struct {
 	ProviderName string
 	BaseURL      string // e.g. http://localhost:11434/v1
 	APIKey       string
-	HTTPClient   *http.Client
+	// Headers are sent on every request after the Authorization header
+	// (config providers.<name>.headers).
+	Headers    map[string]string
+	HTTPClient *http.Client
 }
 
 // NewOpenAICompat builds a client with a generous timeout suited to local
 // inference (first-token latency on CPU/consumer GPUs can be long).
+// setAuth puts the key and the endpoint's extra headers on a request.
+func (p *OpenAICompat) setAuth(req *http.Request) {
+	if p.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	}
+	for k, v := range p.Headers {
+		req.Header.Set(k, v)
+	}
+}
+
 func NewOpenAICompat(name, baseURL, apiKey string) *OpenAICompat {
 	return &OpenAICompat{
 		ProviderName: name,
@@ -148,9 +161,7 @@ func (p *OpenAICompat) Chat(ctx context.Context, req ChatRequest, onDelta Stream
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if p.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-	}
+	p.setAuth(httpReq)
 
 	resp, err := p.HTTPClient.Do(httpReq)
 	if err != nil {
@@ -308,9 +319,7 @@ func (p *OpenAICompat) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.APIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.APIKey)
-	}
+	p.setAuth(httpReq)
 	resp, err := p.HTTPClient.Do(httpReq)
 	if err != nil {
 		return nil, err

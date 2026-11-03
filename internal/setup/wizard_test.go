@@ -205,3 +205,35 @@ func TestWizardAnthropicOpensItsKeysPageBeforeThePastedKey(t *testing.T) {
 		t.Fatalf("%+v", cfg)
 	}
 }
+
+func TestWizardAsksForAWorkspaceOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	oldP, oldL, oldO := probeBackends, listOnline, wizardOpenPage
+	t.Cleanup(func() { probeBackends, listOnline, wizardOpenPage = oldP, oldL, oldO })
+	probeBackends = func(context.Context, []Candidate, time.Duration) []Found { return nil }
+	listOnline = func(context.Context, provider.Preset) ([]provider.ModelInfo, error) { return nil, errors.New("unused") }
+	wizardOpenPage = func(string) bool { return false }
+	ov := onlineValidate
+	keys := 0
+	onlineValidate = func(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo, error) {
+		keys++
+		if ch.Headers[WorkspaceHeader] != "wrkspc_01" {
+			return nil, &WorkspaceNeeded{Provider: ch.Name}
+		}
+		return []provider.ModelInfo{{ID: "claude-x"}}, nil
+	}
+	t.Cleanup(func() { onlineValidate = ov })
+	// [2] online; provider 3 = anthropic; the key; the workspace ID; model 1.
+	in := bufio.NewReader(strings.NewReader("2\n3\ngood\nwrkspc_01\n1\n"))
+	var out bytes.Buffer
+	cfg, err := Wizard(context.Background(), in, &out)
+	if err != nil || cfg == nil {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if keys != 2 || cfg.Providers["anthropic"].Headers[WorkspaceHeader] != "wrkspc_01" {
+		t.Fatalf("validations=%d headers=%v", keys, cfg.Providers["anthropic"].Headers)
+	}
+}

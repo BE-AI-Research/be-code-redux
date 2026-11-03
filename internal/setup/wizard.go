@@ -216,8 +216,11 @@ func wizardOnlineKey(ctx context.Context, in *bufio.Reader, out io.Writer, pre p
 		models      []provider.ModelInfo
 		noted       bool
 	)
+	keep := false // validate again with the same key (a workspace ID was added)
 	for {
-		if browser {
+		if keep {
+			keep = false
+		} else if browser {
 			k, err := wizardBrowser(ctx, in, out)
 			if errors.Is(err, signin.ErrCancelled) {
 				return nil, fmt.Errorf("%w; run be-code setup again", err)
@@ -248,6 +251,20 @@ func wizardOnlineKey(ctx context.Context, in *bufio.Reader, out io.Writer, pre p
 		if errors.Is(err, ErrKeyRejected) {
 			fmt.Fprintln(out, RejectionLine(err, pre.Name))
 			browser = false
+			continue
+		}
+		if errors.As(err, new(*WorkspaceNeeded)) {
+			fmt.Fprintln(out, WorkspacePrompt)
+			fmt.Fprint(out, "workspace ID: ")
+			id, ok := readLine(in)
+			if !ok {
+				return nil, errWizardCancelled
+			}
+			if ch.Headers == nil {
+				ch.Headers = map[string]string{}
+			}
+			ch.Headers[WorkspaceHeader] = strings.TrimSpace(id)
+			keep = true
 			continue
 		}
 		if err != nil {

@@ -278,3 +278,48 @@ func TestValidateCarriesTheProvidersRejectionMessage(t *testing.T) {
 		t.Fatalf("bare sentinel: %q", got)
 	}
 }
+
+func TestValidateAsksForTheWorkspaceThenSucceedsWithIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("anthropic-workspace-id") == "" {
+			w.WriteHeader(400)
+			w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header with the ID of the workspace to use."}}`))
+			return
+		}
+		if r.Header.Get("anthropic-workspace-id") != "wrkspc_1" {
+			w.WriteHeader(400)
+			w.Write([]byte(`{"type":"error","error":{"type":"invalid_request_error","message":"anthropic-workspace-id header must be a valid workspace ID."}}`))
+			return
+		}
+		w.Write([]byte(`{"data":[{"id":"claude-x","max_input_tokens":200000}]}`))
+	}))
+	defer srv.Close()
+	ch, _, _ := ChoiceFor(config.Default(), "mine", srv.URL+"/v1")
+	_, err := Validate(context.Background(), ch, "k")
+	var wn *WorkspaceNeeded
+	if !errors.As(err, &wn) || wn.Provider != "mine" {
+		t.Fatalf("want WorkspaceNeeded, got %v", err)
+	}
+	ch.Headers = map[string]string{WorkspaceHeader: "bogus"}
+	_, err = Validate(context.Background(), ch, "k")
+	if err == nil || errors.As(err, &wn) || !strings.Contains(err.Error(), "must be a valid workspace ID") {
+		t.Fatalf("bad id: %v", err)
+	}
+	ch.Headers[WorkspaceHeader] = "wrkspc_1"
+	ms, err := Validate(context.Background(), ch, "k")
+	if err != nil || len(ms) != 1 || ms[0].ContextLength != 200000 {
+		t.Fatalf("%v %v", ms, err)
+	}
+	// AddOnline writes the header so every later request carries it.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	store, _ := credentials.Open(filepath.Join(home, ".be-code"))
+	if _, err := AddOnline(cfg, store, ch, "k", "pasted", "claude-x", false); err != nil {
+		t.Fatal(err)
+	}
+	re, _ := config.Load()
+	if re.Providers["mine"].Headers[WorkspaceHeader] != "wrkspc_1" {
+		t.Fatalf("headers not saved: %+v", re.Providers["mine"])
+	}
+}

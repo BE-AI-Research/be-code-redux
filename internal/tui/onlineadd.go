@@ -19,14 +19,15 @@ import (
 type onlineStep int
 
 const (
-	stepPreset  onlineStep = iota // picker: presets + custom
-	stepName                      // input line: custom name
-	stepURL                       // input line: custom base URL
-	stepMethod                    // picker: browser | paste (openrouter only)
-	stepKey                       // masked field
-	stepWait                      // validating, or waiting for the browser (pasted redirect accepted)
-	stepModel                     // picker over the listing, or typed when empty
-	stepDefault                   // picker: yes | no
+	stepPreset    onlineStep = iota // picker: presets + custom
+	stepName                        // input line: custom name
+	stepURL                         // input line: custom base URL
+	stepMethod                      // picker: browser | paste (openrouter only)
+	stepKey                         // masked field
+	stepWait                        // validating, or waiting for the browser (pasted redirect accepted)
+	stepWorkspace                   // input line: Anthropic workspace ID (a key not scoped to one)
+	stepModel                       // picker over the listing, or typed when empty
+	stepDefault                     // picker: yes | no
 )
 
 // onlineAddFlow is one terminal's /online add in progress. Everything a
@@ -233,6 +234,16 @@ func (m *View) onlineLine(text string) (bool, tea.Cmd) {
 		f.step = stepURL
 		m.appendEntryLocked(entry{Kind: entryDim, Text: "base URL (ending in /v1):"})
 		return true, nil
+	case stepWorkspace:
+		id := strings.TrimSpace(text)
+		if id == "" {
+			return true, nil
+		}
+		if f.choice.Headers == nil {
+			f.choice.Headers = map[string]string{}
+		}
+		f.choice.Headers[setup.WorkspaceHeader] = id
+		return true, m.onlineValidateCmd()
 	case stepURL:
 		ch, note, err := setup.ChoiceFor(m.cfg, f.choice.Name, text)
 		if err != nil {
@@ -348,6 +359,11 @@ func (m *View) onlineMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 			f.key = ""
 			mm, cmd := m.onlineAskKey()
 			return mm, cmd, true
+		case errors.As(msg.err, new(*setup.WorkspaceNeeded)):
+			// The key is fine; the request needs the workspace header.
+			f.step = stepWorkspace
+			m.appendEntryLocked(entry{Kind: entryDim, Text: setup.WorkspacePrompt})
+			return m, nil, true
 		case msg.err != nil:
 			m.appendEntryLocked(entry{Kind: entryErr, Text: msg.err.Error() + " (Enter the key again to retry, Esc to cancel)"})
 			f.key = ""

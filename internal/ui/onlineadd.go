@@ -109,8 +109,11 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 		}
 		browser = n == 1
 	}
+	keep := false // validate again with the same key (a workspace ID was added)
 	for {
-		if browser {
+		if keep {
+			keep = false
+		} else if browser {
 			pasted := make(chan string, 1)
 			bctx, bcancel := context.WithCancel(ctx)
 			done := make(chan struct{})
@@ -157,6 +160,21 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 		if errors.Is(err, setup.ErrKeyRejected) {
 			p.Say(setup.RejectionLine(err, ch.Name))
 			browser = false
+			continue
+		}
+		if errors.As(err, new(*setup.WorkspaceNeeded)) {
+			// The key is fine; the request needs the workspace header. Ask
+			// once and validate again with the same key.
+			p.Say(setup.WorkspacePrompt)
+			id, ok := p.Ask(ctx, "workspace ID: ")
+			if !ok {
+				return cancelled()
+			}
+			if ch.Headers == nil {
+				ch.Headers = map[string]string{}
+			}
+			ch.Headers[setup.WorkspaceHeader] = strings.TrimSpace(id)
+			keep = true
 			continue
 		}
 		if err != nil {

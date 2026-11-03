@@ -21,6 +21,29 @@ type Choice struct {
 	BaseURL string
 	KeyEnv  string
 	Preset  bool
+	// Headers ride every request to the endpoint (config
+	// providers.<name>.headers): the workspace a key not scoped to one
+	// must name, set when Validate answers WorkspaceNeeded.
+	Headers map[string]string
+}
+
+// WorkspaceHeader is Anthropic's header naming the workspace a request
+// runs in; a personal or service-account key not scoped to one workspace
+// is refused (HTTP 400) without it.
+const WorkspaceHeader = "anthropic-workspace-id"
+
+// WorkspacePrompt is the question every UI asks when Validate answers
+// WorkspaceNeeded.
+const WorkspacePrompt = "this key is not scoped to a workspace; paste its workspace ID from https://platform.claude.com/settings/workspaces (wrkspc_…):"
+
+// WorkspaceNeeded is Validate's answer to Anthropic's 400 for a key that
+// is not scoped to a workspace: the key is fine, the request needs the
+// workspace header. The UI asks for the ID, sets Choice.Headers and
+// validates again.
+type WorkspaceNeeded struct{ Provider string }
+
+func (e *WorkspaceNeeded) Error() string {
+	return e.Provider + ": this key is not scoped to a workspace; a workspace ID is needed"
 }
 
 // ErrKeyRejected (401/403) sends a UI back to the key step; ErrUnreachable
@@ -98,17 +121,26 @@ func Validate(ctx context.Context, ch Choice, key string) ([]provider.ModelInfo,
 	ctx, cancel := context.WithTimeout(ctx, ValidateTimeout)
 	defer cancel()
 	p := provider.NewOpenAICompat(ch.Name, ch.BaseURL, strings.TrimSpace(key))
+	p.Headers = ch.Headers
 	models, err := p.ListModels(ctx)
 	if err == nil {
 		return models, nil
 	}
 	var he *provider.HTTPError
 	if errors.As(err, &he) {
+		msg := he.ProviderMessage()
 		switch he.Code {
 		case 401, 403:
-			return nil, &KeyRejected{Provider: ch.Name, Detail: he.ProviderMessage()}
+			return nil, &KeyRejected{Provider: ch.Name, Detail: msg}
 		case 404:
 			return nil, nil // no listing route: a typed model name instead
+		case 400:
+			if strings.Contains(msg, "not scoped to a workspace") {
+				return nil, &WorkspaceNeeded{Provider: ch.Name}
+			}
+		}
+		if msg != "" {
+			return nil, fmt.Errorf("%w: %s answered HTTP %d: %s", ErrUnreachable, ch.BaseURL, he.Code, msg)
 		}
 		return nil, fmt.Errorf("%w: %s answered HTTP %d", ErrUnreachable, ch.BaseURL, he.Code)
 	}
@@ -156,7 +188,7 @@ func AddOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, sou
 	}
 	if old, ok := cfg.Providers[ch.Name]; ok {
 		// Keep a person's tuning; only identity fields are ours.
-		pc.ContextWindow, pc.KeepAlive, pc.Options = old.ContextWindow, old.KeepAlive, old.Options
+		pc.ContextWindow, pc.KeepAlive, pc.Options, pc.Headers = old.ContextWindow, old.KeepAlive, old.Options, old.Headers
 		if !ch.Preset {
 			// A custom block's consent fields are the person's: a key
 			// variable they named stays, and a hand-set online: true (a
@@ -165,6 +197,9 @@ func AddOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, sou
 			pc.APIKeyEnv = old.APIKeyEnv
 			pc.Online = old.Online || !config.LocalEndpoint(ch.BaseURL)
 		}
+	}
+	if len(ch.Headers) > 0 {
+		pc.Headers = ch.Headers
 	}
 	pc.DefaultModel = strings.TrimSpace(model)
 	if cfg.Providers == nil {

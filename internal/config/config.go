@@ -173,6 +173,10 @@ type ProviderConfig struct {
 	// project is sent elsewhere. An endpoint that is not local counts as
 	// online whatever this says (ProviderIsOnline).
 	Online bool `json:"online,omitempty"`
+	// Headers are sent on every request to this endpoint, after the
+	// Authorization header: Anthropic's anthropic-workspace-id for a key
+	// not scoped to a workspace, a proxy's own header. Never a secret.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // LocalHelperConfig names the local model that does housekeeping chores

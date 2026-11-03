@@ -96,3 +96,32 @@ func TestListModelsReadsAnthropicsWindow(t *testing.T) {
 		t.Fatalf("%v %v", ms, err)
 	}
 }
+
+func TestExtraHeadersRideEveryRequest(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.Path+" "+r.Header.Get("anthropic-workspace-id")+" "+r.Header.Get("Authorization"))
+		if r.URL.Path == "/v1/models" {
+			w.Write([]byte(`{"data":[{"id":"m"}]}`))
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`))
+	}))
+	defer srv.Close()
+	p := NewOpenAICompat("t", srv.URL+"/v1", "k")
+	p.Headers = map[string]string{"anthropic-workspace-id": "wrkspc_1"}
+	if _, err := p.ListModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "x"}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range got {
+		if !strings.Contains(g, "wrkspc_1 Bearer k") {
+			t.Fatalf("header missing on %q", g)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("requests: %v", got)
+	}
+}

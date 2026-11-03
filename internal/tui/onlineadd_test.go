@@ -478,3 +478,40 @@ func TestOnlineAddKeysPageFallsBackToTheURLWithoutABrowser(t *testing.T) {
 		t.Fatalf("%+v", v.onlineAdd)
 	}
 }
+
+func TestOnlineAddAsksForAWorkspaceWhenAnthropicNeedsOne(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	_ = stubKeysPage(t, false)
+	var seen []map[string]string
+	onlineValidate = func(ctx context.Context, ch setup.Choice, key string) ([]provider.ModelInfo, error) {
+		seen = append(seen, ch.Headers)
+		if ch.Headers[setup.WorkspaceHeader] == "" {
+			return nil, &setup.WorkspaceNeeded{Provider: ch.Name}
+		}
+		return []provider.ModelInfo{{ID: "claude-x"}}, nil
+	}
+	v := newTestModel(t)
+	_, _ = v.startOnlineAdd("anthropic")
+	v.onlineAdd.secret.SetValue("good")
+	v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	runCmd(t, v, v.lastCmd)
+	if v.onlineAdd == nil || v.onlineAdd.step != stepWorkspace {
+		t.Fatalf("want the workspace step, got %+v", v.onlineAdd)
+	}
+	flush(v)
+	if !strings.Contains(v.transcriptText(), setup.WorkspacePrompt) {
+		t.Fatalf("no prompt: %s", v.transcriptText())
+	}
+	typeLine(v, " wrkspc_01 ")
+	runCmd(t, v, v.lastCmd)
+	if v.onlineAdd == nil || v.onlineAdd.step != stepModel {
+		t.Fatalf("after the workspace: %+v", v.onlineAdd)
+	}
+	if len(seen) != 2 || seen[1][setup.WorkspaceHeader] != "wrkspc_01" {
+		t.Fatalf("validations: %v", seen)
+	}
+	if strings.Contains(strings.Join(v.histFile.lines, "\n"), "wrkspc_01") {
+		t.Fatal("the flow's line reached the history")
+	}
+}
