@@ -3,6 +3,7 @@
 # broken Go and repairs it when verification feedback arrives.
 set -e
 DIR=$(mktemp -d); trap 'rm -rf "$DIR"; kill $SRV 2>/dev/null' EXIT
+# (Also inherited by online_e2e.sh's mock, which logs to it too; harmless.)
 export BE_E2E_LOG="$DIR/mock.log"
 cp /dev/null "$BE_E2E_LOG"
 python3 "$(dirname "$0")/mock_server.py" & SRV=$!
@@ -165,29 +166,42 @@ DISPWS="$DIR/dispws"; mkdir -p "$DISPWS/pkg"
 OUT7="$DIR/dispatch.out"
 "$(dirname "$0")/../../be-code" run -y -C "$DISPWS" "dispatch scenario: port the scanner" > "$OUT7"
 cat "$OUT7"
-grep -q "DISPATCHED:done" "$OUT7"
-test -f "$DISPWS/pkg/x.go"
-# The job field renders as trailing "  job" (internal/engine/markdown.go).
-grep -q "job$" "$DISPWS"/.be-code/tasks/*.md
+# DISPATCHED:done cannot pass vacuously: the mock emits it only once a user
+# message holds "sub-agent mock-cw finished" and "wrote pkg/x.go", i.e. the
+# hand-back text reached the primary; otherwise it says "dispatched; waiting".
+grep -q "DISPATCHED:done" "$OUT7" || { echo "FAIL dispatch: primary never saw the hand-back (no DISPATCHED:done)"; exit 1; }
+test -f "$DISPWS/pkg/x.go" || { echo "FAIL dispatch: job did not write pkg/x.go"; exit 1; }
+# The job field renders as trailing "  job" (internal/engine/markdown.go). Not
+# vacuous: the tasks README has no line ending in "job" and no step text here
+# does, so only the rendered field matches.
+grep -q "job$" "$DISPWS"/.be-code/tasks/*.md || { echo "FAIL dispatch: task document has no job field"; exit 1; }
 DISPWS2="$DIR/dispws2"; mkdir -p "$DISPWS2/pkg"
 OUT8="$DIR/dispatch-stall.out"
 "$(dirname "$0")/../../be-code" run -y -C "$DISPWS2" "dispatch scenario stall: port the scanner" > "$OUT8"
 cat "$OUT8"
-grep -q "DISPATCHED:done" "$OUT8"
-test -f "$DISPWS2/pkg/x.go"
+grep -q "DISPATCHED:done" "$OUT8" || { echo "FAIL dispatch(stall): no DISPATCHED:done after the stall"; exit 1; }
+test -f "$DISPWS2/pkg/x.go" || { echo "FAIL dispatch(stall): job did not write pkg/x.go"; exit 1; }
+# The supervisor announces the stall on the run's output as "job <id> stalled".
+grep -q "job .* stalled" "$OUT8" || { echo "FAIL dispatch(stall): supervisor never reported a stall"; exit 1; }
 # The mock log holds every request body; a request whose history carries an
 # assistant tool call named jobs with action extend proves the primary acted
-# on the stall line (the tool schema text alone cannot satisfy this).
+# on the stall line (the tool schema text alone cannot satisfy this). The
+# mock's 75 s release of the held job reply does not make this vacuous: the
+# release writes the file but never records an extend call, so a run that
+# merely waited the hold out fails here.
 python3 -I -c '
 import json, sys
 for l in open(sys.argv[1]):
-    for m in json.loads(l)["messages"]:
+    try:
+        body = json.loads(l)
+    except ValueError:
+        continue
+    for m in body["messages"]:
         for tc in m.get("tool_calls") or []:
             f = tc["function"]
             if f["name"] == "jobs" and json.loads(f["arguments"]).get("action") == "extend":
                 sys.exit(0)
-sys.exit(1)' "$DIR/mock.log"
-grep -q "has been quiet for" "$OUT8" || echo "note: stall line not printed by headless run (asserted via mock log)"
+sys.exit(1)' "$DIR/mock.log" || { echo "FAIL dispatch(stall): primary never issued jobs extend after the stall line"; exit 1; }
 echo "[PASS] dispatch"
 
 sh "$(dirname "$0")/online_e2e.sh"

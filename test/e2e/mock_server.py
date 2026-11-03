@@ -11,7 +11,7 @@ The same port also plays a fake Ollama on /api/*, for the native scenario:
 the window) and /api/show offers no Modelfile num_ctx. Requests are routed
 by path first, since the native path is a different protocol on the same
 server, not another model on the OpenAI one."""
-import os, json, http.server, itertools, time
+import os, json, http.server, itertools, time, threading
 
 counter = itertools.count()
 
@@ -207,12 +207,11 @@ def sub_chunks(body):
 # seen the primary call jobs/extend, so the supervisor's stall line is the
 # only thing that can unblock it: a run that passes proves the line reached
 # the primary and the primary's extend reached the tool.
-BOSS = {"n": 0, "extended": False}
-JOB = {"n": 0}
+BOSS = {"extended": False}
+LOG_LOCK = threading.Lock()
 EXTEND_SEEN = {"v": False}
 
 def boss_chunks(body):
-    n = BOSS["n"]; BOSS["n"] += 1
     users = [m.get("content") or "" for m in body["messages"] if m["role"] == "user"]
     stall = any("dispatch scenario stall:" in u for u in users)
     if any("sub-agent mock-cw finished" in u and "wrote pkg/x.go" in u for u in users):
@@ -235,7 +234,6 @@ def boss_chunks(body):
     return [text_chunk("dispatched; waiting")]
 
 def job_chunks(body):
-    n = JOB["n"]; JOB["n"] += 1
     # The job text reaches the sub-agent in its system prompt, not a user turn.
     stall = any("stall:" in (m.get("content") or "") for m in body["messages"])
     if n_is_first(body):
@@ -288,8 +286,10 @@ class H(http.server.BaseHTTPRequestHandler):
         model = body.get("model", "")
         logp = os.environ.get("BE_E2E_LOG")
         if logp:
-            with open(logp, "a") as f:
-                f.write(json.dumps(body) + "\n")
+            # Threaded server and bodies over 8 KB: serialise whole-line appends.
+            with LOG_LOCK:
+                with open(logp, "a") as f:
+                    f.write(json.dumps(body) + "\n")
         for m in body["messages"]:
             for tc in (m.get("tool_calls") or []):
                 if tc.get("function", {}).get("name") == "jobs" and '"extend"' in tc["function"].get("arguments", ""):
