@@ -121,8 +121,8 @@ existing outage and key-rejected paths explain its failure.
 **Write order.** Credential first (`store.Put` with `source`), then the provider block through
 `cfg.Save`: the preset's `ProviderConfig` (`type: openai`, base URL, `api_key_env`, `online:
 true`) or, for a custom endpoint, the same with `online` decided by `config.LocalEndpoint`
-exactly as validation decides it for hand-written config; plus the chosen model under
-`models`. `default_provider` is changed only when `makeDefault` is true. Nothing is written
+exactly as validation decides it for hand-written config; with the chosen model as the
+block's `default_model`. `default_provider` is changed only when `makeDefault` is true. Nothing is written
 before validation succeeds, so a cancel at any earlier step leaves both files untouched.
 
 **Replacing a key.** Running the flow for a provider already configured overwrites the
