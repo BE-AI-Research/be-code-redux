@@ -728,6 +728,9 @@ func (r *REPL) queueCommand(input string) {
 	}
 }
 
+// busyLine is what a command that must wait for the run says.
+const busyLine = "commands wait until the agent is done (Ctrl-C cancels); plain text is queued; /queue edits the queue"
+
 // runBusy runs fn on its own goroutine while this goroutine keeps servicing
 // typed lines: plain text is queued for the agent, answers go to a waiting
 // prompt(), Ctrl-C cancels fn and discards the queue, and EOF is deferred
@@ -797,7 +800,7 @@ func (r *REPL) runBusy(ctx context.Context, fn func(ctx context.Context)) {
 						}
 						continue
 					}
-					fmt.Println(dim("commands wait until the agent is done (Ctrl-C cancels); plain text is queued; /queue edits the queue"))
+					fmt.Println(dim(busyLine))
 					continue
 				}
 				r.Agent.Enqueue(line)
@@ -1126,6 +1129,16 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 		fmt.Println(r.Agent.StatsReport(nil))
 	case "/online":
 		if len(fields) > 1 && fields[1] == "add" {
+			r.mu.Lock()
+			busy := r.busy
+			r.mu.Unlock()
+			if busy {
+				// BusySafeCommand already keeps it out of runBusy; this is the
+				// guard that its prompts, read by the very loop that is
+				// blocked running it, can never deadlock the terminal.
+				fmt.Println(dim(busyLine))
+				break
+			}
 			if !stdinIsTerminal() {
 				fmt.Println("needs a terminal")
 				break

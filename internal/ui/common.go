@@ -226,6 +226,11 @@ func RevokeCredential(cfg *config.Config, name string) string {
 // agent is busy. Everything else waits until the turn ends.
 func BusySafeCommand(line string) bool {
 	f := strings.Fields(line)
+	if len(f) > 1 && f[0] == "/online" && f[1] == "add" {
+		// It prompts and ends in a provider switch (online setup spec §5):
+		// never mid-run, in either UI.
+		return false
+	}
 	return len(f) > 0 && busySafe[f[0]]
 }
 

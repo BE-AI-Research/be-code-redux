@@ -936,3 +936,25 @@ func TestREPLToolCallApprovalHasNoAlways(t *testing.T) {
 		t.Fatalf("header/prompt:\n%s", out)
 	}
 }
+
+// C2 (final review): /online add reached while a run holds the reader (busy)
+// prints the busy line and returns without prompting — a prompt there would
+// wait on the very loop that is blocked running the command.
+func TestOnlineAddWhileBusyPrintsTheBusyLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	r := newTestREPL(t)
+	r.busy = true
+	done := make(chan string, 1)
+	go func() { done <- capture(t, func() { r.command(context.Background(), "/online add groq") }) }()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, "commands wait until the agent is done") || strings.Contains(out, "key for") {
+			t.Fatalf("output %q", out)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("/online add while busy blocked the REPL")
+	}
+	if r.ask != nil {
+		t.Fatal("a prompt was raised")
+	}
+}
