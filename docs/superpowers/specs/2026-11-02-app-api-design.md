@@ -433,3 +433,13 @@ its call; structured output reaches the provider (`json_schema` as Ollama's `for
 none); app budgets are defaulted on every read, so a hand-edited 0 is never unbounded; and
 `session token|rotate` refuse while any live process owns the file — a live host by the live
 registry, a plain or `--no-host` session by its `host_pid`.
+
+Post-merge fix (2026-11-02): the API path's gate check and its provider snapshot are paired
+through `Agent.switchGen`, a count of every `SetProvider` and `applySwitch` under `modelMu`,
+read before the checks and again with the snapshot. The gap between them is `awaitWindow`,
+which waits out a whole model resolution, and a `/provider` switch landing in it (the session
+is idle, so the UI allows it) sent an app's request to an unapproved online provider. A
+changed count re-runs the checks, three times at most, then 409 `session_busy`; a request
+between `SetProvider` and its paired `SetModel` is `session_busy` too, not
+`online_not_approved`. The tool loop never had the exposure: `/provider` and `/model` are not
+busy-safe, and the agent's own mid-run switches run on the loop goroutine.
