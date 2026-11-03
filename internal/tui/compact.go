@@ -116,6 +116,7 @@ func (m *View) compactBottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · q%d", n))
 		}
 	}
+	state = m.withFlowStatus(state)
 	modelSeg := m.st.Dim.Render(" · " + shortModelTo(m.ag.CurrentModel(), compactModelCap) + " · ")
 	if _, online := m.ag.Online(); online {
 		// Too narrow for the provider: the word itself is the badge.

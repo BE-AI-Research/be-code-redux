@@ -45,7 +45,7 @@ type onlineAddFlow struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	browser bool
-	status  string // the status note this flow last set, so clearing it never blanks another's
+	status  string // this terminal's status line while the flow waits (bottomLine)
 }
 
 // The flow's messages name the flow that sent them: a validation or a
@@ -71,7 +71,8 @@ var (
 
 type signinOptions = signin.Options
 
-// startOnlineAdd is /online add [name] and the menu row. Not while a run
+// startOnlineAdd is /online add [name], also reached from the palette and
+// the menu (both go through slashCommand). Not while a run
 // is in flight (it ends in a provider switch), and one terminal at a time.
 func (m *View) startOnlineAdd(name string) (tea.Model, tea.Cmd) {
 	if m.running {
@@ -230,18 +231,25 @@ func (m *View) onlineKeyEntered() tea.Cmd {
 	return m.onlineValidateCmd()
 }
 
-func (m *View) setFlowStatus(f *onlineAddFlow, note string) {
-	f.status = note
-	m.statusNote = note
-	m.broadcast(statusMsg(note))
-}
+// The flow's status is this terminal's alone: it lives on the flow and the
+// bottom line reads it from there (withFlowStatus), never the shared
+// Session.statusNote, which belongs to a run and is drawn only while one is.
+func (m *View) setFlowStatus(f *onlineAddFlow, note string) { f.status = note }
 
-func (m *View) clearFlowStatus(f *onlineAddFlow) {
-	if f.status != "" && m.statusNote == f.status {
-		m.statusNote = ""
-		m.broadcast(statusMsg(""))
+func (m *View) clearFlowStatus(f *onlineAddFlow) { f.status = "" }
+
+// withFlowStatus puts an open flow's status in place of "ready", or ahead
+// of a run's status, on this terminal's bottom line.
+func (m *View) withFlowStatus(state string) string {
+	f := m.onlineAdd
+	if f == nil || f.status == "" {
+		return state
 	}
-	f.status = ""
+	st := m.st.Accent.Render(f.status) + m.st.Dim.Render(" · Esc cancels")
+	if m.running {
+		return st + m.st.Dim.Render(" · ") + state
+	}
+	return st
 }
 
 func (m *View) onlineValidateCmd() tea.Cmd {

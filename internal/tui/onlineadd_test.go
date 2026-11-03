@@ -284,3 +284,39 @@ func TestOnlineAddKeyStepKeepsTheLineWhenARunStarts(t *testing.T) {
 		t.Fatalf("enter did not reach the flow: %+v", v.onlineAdd)
 	}
 }
+
+func TestOnlineAddStatusShowsOnThisTerminalsBottomLine(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	const waiting, checking = "waiting for the browser; or paste the redirect URL", "checking groq…"
+
+	v := newTestModel(t)
+	_, _ = v.startOnlineAdd("openrouter")
+	it := pickItem{id: "browser"}
+	_, signIn := v.picker.onPick(v, it) // the sign-in Cmd, not yet run
+	if !strings.Contains(v.bottomLine(), waiting) {
+		t.Fatalf("bottom line lacks the browser hint: %q", v.bottomLine())
+	}
+	v.cancelOnlineAdd()
+	_ = signIn
+	if b := v.bottomLine(); strings.Contains(b, waiting) {
+		t.Fatalf("status outlived the flow: %q", b)
+	}
+
+	w := newTestModel(t)
+	_, _ = w.startOnlineAdd("groq")
+	w.onlineAdd.secret.SetValue("good")
+	w.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(w.bottomLine(), checking) {
+		t.Fatalf("bottom line lacks the check: %q", w.bottomLine())
+	}
+	if w.statusNote == checking {
+		t.Fatal("the flow wrote the shared run status")
+	}
+	runCmd(t, w, w.lastCmd) // validation -> model picker
+	pickRow(t, w, "m1")
+	pickRow(t, w, "no") // ends the flow (its ping Cmd is not run)
+	if b := w.bottomLine(); strings.Contains(b, checking) || strings.Contains(b, waiting) {
+		t.Fatalf("status outlived the flow: %q", b)
+	}
+}

@@ -1307,6 +1307,7 @@ func (m *View) bottomLine() string {
 			state += m.st.Accent.Render(fmt.Sprintf(" · %d queued · ↑ edit", n))
 		}
 	}
+	state = m.withFlowStatus(state)
 	if m.ag.API != nil {
 		if st := m.ag.API.Status(); st.InFlight != "" {
 			state += m.st.Dim.Render(" · api: " + st.InFlight)
