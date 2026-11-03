@@ -216,7 +216,17 @@ func TestKeyPumpEscapeRaceStress(t *testing.T) {
 		kp.Feed(client, []byte("\x1b"))
 		kp.Feed(client, []byte("[A"))
 
+		// The first message gets a generous wait: a fresh client means a
+		// fresh parser goroutine, and under CPU contention it can take far
+		// longer than the holdback to be scheduled at all. Only the drain
+		// after it is short, to prove nothing else follows.
 		var msgs []tea.Msg
+		select {
+		case m := <-got:
+			msgs = append(msgs, m)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d (client %d): no message within 2s", i, client)
+		}
 	collect:
 		for {
 			select {
