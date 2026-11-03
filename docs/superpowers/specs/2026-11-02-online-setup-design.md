@@ -36,7 +36,8 @@ so `config` may import `credentials` and no cycle forms.
 first write. Reading and writing are both refused when the file's mode admits group or world
 (`mode&0o077 != 0`): the error names the file and the command, `credentials.json is readable
 by others; run chmod 600 ~/.be-code/credentials.json`, and the session continues with no
-stored keys. A file that does not parse reads as empty, but a write to it is refused naming
+stored keys. The mode check is skipped on Windows, where Go reports every file as 0666 and
+the profile directory's ACL is the boundary (the same rule the API socket directory follows). A file that does not parse reads as empty, but a write to it is refused naming
 the file, so a hand-edit that broke the JSON is never silently discarded.
 
 **Shape.** Keyed by the provider's name as it appears in `config.json`'s `providers` map, so a
