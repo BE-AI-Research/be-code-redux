@@ -327,6 +327,8 @@ var firedSelfGated = map[string]bool{
 	"search": true, "shell": true, "process": true, "browser": true,
 	"consult": true, "schedule": true, "task": true,
 	"lookup": true, "history": true, "show": true, "changes": true,
+	// dispatch and jobs refuse (or allow status/wait) for a fired turn themselves.
+	"dispatch": true, "jobs": true,
 }
 
 // firedGatedBuiltins are NewRegistry's own tools that deliberately ask
@@ -343,7 +345,8 @@ func firedExempt(t Tool) bool {
 	switch t.(type) {
 	case *readFileTool, *writeFileTool, *editFileTool, *listDirTool, *searchTool,
 		*shellTool, *processTool, *BrowserTool, *consultTool, *scheduleTool,
-		*taskTool, *lookupTool, *historyTool, *showTool, *changesTool, *packTool:
+		*taskTool, *lookupTool, *historyTool, *showTool, *changesTool, *packTool,
+		*dispatchTool, *jobsTool:
 		return true
 	}
 	return false

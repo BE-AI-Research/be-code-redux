@@ -1387,3 +1387,11 @@ func TestSubAgentStatesListsEveryRun(t *testing.T) {
 		}
 	}
 }
+
+func TestSubAgentGuidanceNamesJobTools(t *testing.T) {
+	for _, w := range []string{"dispatch {who, job, scope}", "jobs status|wait|stop|reply|extend", "jobs reply or task reply", "has been quiet"} {
+		if !strings.Contains(subAgentGuidance, w) {
+			t.Fatalf("guidance lacks %q", w)
+		}
+	}
+}

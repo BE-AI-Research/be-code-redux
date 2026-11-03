@@ -15,7 +15,7 @@ const SubAgentFrame = `You are a sub-agent working one step of a larger task for
 // subAgentGuidance is the one block the main model gets when sub-agents
 // are configured. It follows taskGuidance and pacingGuidance, which stay
 // verbatim.
-const subAgentGuidance = `Sub-agents: a step you assign with an owner and a scope is done by that model on its own; you are told in a later message when it finishes or asks something. Assign whole steps with a clear file scope, do not edit inside a running sub-agent's scope, and answer its questions with task reply.`
+const subAgentGuidance = `Sub-agents: dispatch {who, job, scope} hands a scoped job to a co-worker, which runs it on its own and reports back in a later message; jobs status|wait|stop|reply|extend looks at, waits for, ends, steers or extends a job. Never edit inside a running job's scope. A job that goes quiet is reported to you as "job <id> … has been quiet"; decide: extend it, stop it, or reply to it. A step you assign with an owner and a scope in the task record is also run by that model. Answer a sub-agent's question with jobs reply or task reply.`
 
 // renderDispatch is the Dispatch as the sub-agent reads it, after the frame.
 func renderDispatch(d subagent.Dispatch) string {

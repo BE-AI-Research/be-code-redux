@@ -230,7 +230,7 @@ func TestSelfGatedToolsNeverAskToolCall(t *testing.T) {
 		}
 	}
 	for name := range firedSelfGated {
-		if !strings.Contains(" read_file write_file edit_file list_dir search shell process browser consult schedule task lookup history show changes pack ", " "+name+" ") {
+		if !strings.Contains(" read_file write_file edit_file list_dir search shell process browser consult schedule task lookup history show changes pack dispatch jobs ", " "+name+" ") {
 			t.Fatalf("unexpected self-gated tool %q", name)
 		}
 	}

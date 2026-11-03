@@ -291,6 +291,10 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 		}
 		if len(cws) > 0 {
 			ag.RegisterConsultTool() // the known-tool list and the prompt must see consult
+			waitFor := time.Duration(cfg.SubAgents.MaxRuntime) * time.Second
+			reg.AddTool(tools.NewDispatch(ag, reg.Fired, waitFor))
+			reg.AddTool(tools.NewJobs(ag, reg.Fired, waitFor))
+			ag.RefreshSystem()
 		}
 	}
 
