@@ -36,7 +36,8 @@ type Ledger struct {
 	// there would be overwritten. It returns the doing task and the engine's
 	// turn counter; nil means the engine is off.
 	state    func() (task string, turn int)
-	session  func() string // the resume code, known only after the store loads
+	session  func() string   // the resume code, known only after the store loads
+	jobs     func() []string // the running jobs, pulled the same way
 	lastTurn int
 	written  []string
 	// closed is set by Close. The hooks in packs, store and engine are
@@ -193,12 +194,18 @@ func (l *Ledger) OnRead(path string, content []byte) {
 const heartbeat = time.Minute
 
 // touch refreshes Updated, at most once per heartbeat.
-func (l *Ledger) touch() {
+func (l *Ledger) touch() { l.write(false) }
+
+// Refresh writes the record now, heartbeat or not: a job began or ended,
+// and another session's startup pass reads Jobs to decide what is live.
+func (l *Ledger) Refresh() { l.write(true) }
+
+func (l *Ledger) write(force bool) {
 	if l.dir == "" {
 		return
 	}
 	l.mu.Lock()
-	if l.closed || time.Since(l.lastTouch) < heartbeat {
+	if l.closed || (!force && time.Since(l.lastTouch) < heartbeat) {
 		l.mu.Unlock()
 		return
 	}
@@ -213,6 +220,9 @@ func (l *Ledger) touch() {
 	}
 	if l.session != nil {
 		l.rec.Session = l.session()
+	}
+	if l.jobs != nil {
+		l.rec.Jobs = l.jobs()
 	}
 	rec := l.rec
 	rec.Updated = time.Now().UTC().Format(time.RFC3339)
@@ -255,6 +265,15 @@ func (l *Ledger) SetState(f func() (task string, turn int)) {
 func (l *Ledger) SetSession(f func() string) {
 	l.mu.Lock()
 	l.session = f
+	l.mu.Unlock()
+}
+
+// SetJobs gives the ledger a way to read the ids of the jobs this session is
+// running when it writes its record. Pulled like the task: the runner is
+// built after the ledger opens, and the list changes under it.
+func (l *Ledger) SetJobs(f func() []string) {
+	l.mu.Lock()
+	l.jobs = f
 	l.mu.Unlock()
 }
 

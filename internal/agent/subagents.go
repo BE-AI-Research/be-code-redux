@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -747,23 +746,26 @@ func (a *Agent) resumeSubAgents() {
 // The ready rule never offers a job, so an orphan would otherwise stay open
 // forever and refuse every later dispatch whose scope overlaps it.
 //
-// Unless another session is live on this workspace: a job step records no
-// session, so an open one may be that session's running job, and closing
-// it would strand the run. Such a job is left as it is and the operator
-// told; the next start with nobody else live closes it if it is still
-// open, and the scope it holds still refuses an overlapping dispatch.
+// Except a job another live session on this workspace reports running
+// (OtherJobs, from the work ledger's records): a job step records no
+// session, so without that report an open one looks orphaned while the
+// run is alive next door, and closing it would strand the run. Such a job
+// is left as it is and the operator told. The lookup reads records and
+// probes pids, so it is made only once an open job is found.
 func (a *Agent) closeOrphanJobs(steps []subagent.Step, running map[string]bool) {
-	var others []int
-	if a.OtherSessions != nil {
-		others = a.OtherSessions()
-	}
+	var others map[string]int
+	looked := false
 	var walk func(st []subagent.Step)
 	walk = func(st []subagent.Step) {
 		for _, x := range st {
 			if x.Job && (x.Status == "todo" || x.Status == "doing") && !running[x.ID] {
 				id, owner := x.ID, x.Owner
-				if len(others) > 0 {
-					a.notice("job %s (%s) is open and another session (pid %s) is on this workspace; left as is — it may be running there", id, owner, pidList(others))
+				if !looked && a.OtherJobs != nil {
+					others = a.OtherJobs()
+				}
+				looked = true
+				if pid, live := others[id]; live {
+					a.notice("job %s (%s) is open and the session with pid %d reports running it; left as is", id, owner, pid)
 					continue
 				}
 				a.engineDo("job resume", func(st *engine.Store) { _ = st.CloseAs(id, owner, "blocked", jobInterrupted) })
@@ -776,12 +778,29 @@ func (a *Agent) closeOrphanJobs(steps []subagent.Step, running map[string]bool) 
 	walk(steps)
 }
 
-func pidList(pids []int) string {
-	parts := make([]string, len(pids))
-	for i, p := range pids {
-		parts[i] = strconv.Itoa(p)
+// RunningJobIDs is the id of every job run in flight, sorted — what the
+// work ledger writes into this session's record.
+func (a *Agent) RunningJobIDs() []string {
+	s := a.subs
+	if s == nil {
+		return nil
 	}
-	return strings.Join(parts, ", ")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []string
+	for id, r := range s.runs {
+		if r.job {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (a *Agent) jobsChanged() {
+	if a.JobsChanged != nil {
+		a.JobsChanged()
+	}
 }
 
 func findStep(steps []subagent.Step, id string) *subagent.Step {
@@ -1004,6 +1023,9 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	delete(s.jobsDone, c.ID)
 	s.wg.Add(1)
 	s.mu.Unlock()
+	if job {
+		a.jobsChanged()
+	}
 	a.engineDo("sub-agent dispatch", func(st *engine.Store) { st.SetDispatched(c.ID, true) })
 	go a.runSub(run)
 	return true
@@ -1087,6 +1109,9 @@ func (a *Agent) runSub(run *subRun) {
 	delete(s.runs, run.d.Node)
 	s.finished = append(s.finished, hb)
 	s.mu.Unlock()
+	if run.job {
+		a.jobsChanged()
+	}
 	// The queue first, the event second: a UI answers OnSubAgentEnd by
 	// starting a turn for whatever is queued when the main model is idle
 	// (spec §2.6), and it can only do that once the hand-back is in the
@@ -1153,6 +1178,9 @@ func (a *Agent) unDispatch(run *subRun) {
 	s.mu.Lock()
 	delete(s.runs, run.d.Node)
 	s.mu.Unlock()
+	if run.job {
+		a.jobsChanged()
+	}
 	a.notice("%s waits for the scheduled event to end before %s starts", run.d.Node, run.d.Owner)
 	a.ScheduleSubAgents()
 	close(run.done)

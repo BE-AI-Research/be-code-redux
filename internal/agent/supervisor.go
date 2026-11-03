@@ -185,7 +185,12 @@ func (a *Agent) sweepJobs() {
 		// is judged at all — the turn receives no queued line and could not
 		// act on one — and the quiet time it covers is judged by the first
 		// sweep after it, which is how a stall "fires after the turn ends".
-		if stallAfter <= 0 || r.waiting != "" || fired {
+		// A compaction is a wait too, but a bounded one: a model call that
+		// streams nothing has no limit of its own short of the HTTP client's,
+		// so one longer than twice stall_after is judged quiet after all —
+		// the main model can still jobs stop a summary call that hung.
+		compacting := r.waiting == compactionWait && now.Sub(r.waitSince) >= 2*stallAfter
+		if stallAfter <= 0 || (r.waiting != "" && !compacting) || fired {
 			continue
 		}
 		if r.stallLine != "" && queued[r.stallLine] {
@@ -402,30 +407,53 @@ var laneSayAfter = 2 * time.Second
 
 // acquirePrimaryLane takes the primary's lane on server and, when a request
 // already in flight there holds it past laneSayAfter, says so once for this
-// wait — naming the co-worker whose job is on that server when there is
-// one. A co-worker on the primary's own server shares its lane (spec
-// §2.2), so the turn the main model owes a hand-back or a stall line
-// starts only when that co-worker's call ends; said, the pause is a wait,
-// and unsaid it reads as a hang.
+// wait — naming the co-worker whose job is in its model call on that
+// server when there is one — and takes the notice down again as soon as
+// the lane is had (a toast would otherwise outlive the wait by its own
+// duration). A co-worker on the primary's own server shares its lane
+// (spec §2.2), so the primary's next request — the turn that answers a
+// hand-back or a stall line, or a chore of its own — goes out only when
+// that co-worker's call ends; said, the pause is a wait, and unsaid it
+// reads as a hang. The notice is emitted under its own lock so that the
+// clearing, which waits for that lock, can never overtake it.
 func (a *Agent) acquirePrimaryLane(ctx context.Context, lanes *subagent.Lanes, server string) (func(), error) {
-	done := make(chan struct{})
+	var mu sync.Mutex
+	over, said := false, false
 	timer := time.AfterFunc(laneSayAfter, func() {
-		select {
-		case <-done:
+		mu.Lock()
+		defer mu.Unlock()
+		if over {
 			return
-		default:
 		}
-		a.transient("waiting for the shared server: %s is in flight; the turn starts when it ends", a.sharingServer(server))
+		said = true
+		a.transient("waiting for the shared server: %s is in flight; the request goes out when it ends", a.sharingServer(server))
 	})
 	release, err := lanes.Acquire(ctx, server, true)
-	close(done)
+	mu.Lock()
+	over = true
+	clear := said
+	mu.Unlock()
 	timer.Stop()
+	if clear {
+		a.transientClear()
+	}
 	return release, err
 }
 
-// sharingServer names what holds the primary's server: the co-workers with a
-// run on it ("big's request", "big's and small's requests"), or, with none
-// known, "another request" (an API call, a consultation).
+// transientClear takes a transient notice down early. Only a UI with its
+// own transient channel (a toast) has anything to clear; one that keeps
+// them as notices is left alone, since an empty notice would print.
+func (a *Agent) transientClear() {
+	if a.Events.OnTransient != nil {
+		a.Events.OnTransient("")
+	}
+}
+
+// sharingServer names what holds the primary's server: the co-workers
+// whose run on it is in a model call of its own — not one inside a tool
+// call, a question or a consent prompt, which hold no lane — ("big's
+// request", "big's and small's requests"), or, with none, "another
+// request" (an API call, a consultation).
 func (a *Agent) sharingServer(server string) string {
 	s := a.subs
 	if s == nil {
@@ -436,7 +464,8 @@ func (a *Agent) sharingServer(server string) string {
 	var names []string
 	seen := map[string]bool{}
 	for _, r := range s.runs {
-		if s.cards[r.d.Owner].Server == server && !seen[r.d.Owner] {
+		inCall := (r.waiting == "" || r.waiting == compactionWait) && r.inTool == ""
+		if inCall && s.cards[r.d.Owner].Server == server && !seen[r.d.Owner] {
 			seen[r.d.Owner] = true
 			names = append(names, r.d.Owner)
 		}

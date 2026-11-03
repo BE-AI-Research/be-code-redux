@@ -4,13 +4,16 @@
 
 - A job's own compaction summary — a model call that streams nothing back — no longer counts as
   silence for the stall clock: it is a wait like a tool call, shown as `waiting (compaction)`,
-  on the run-time meter. A long chore used to earn one spurious stall line.
+  on the run-time meter, until it has run for twice `stall_after` (a hung summary call is
+  still reported). A long chore used to earn one spurious stall line.
 - A second session on the same workspace no longer closes at startup a job the first session
-  is still running: with another session live, an open job is left as it is and a notice says
-  so; it is closed `blocked: interrupted` by a later start with nobody else live.
-- When the main model's turn waits behind a co-worker's request on the shared server, the
-  status line says so after two seconds (`waiting for the shared server: big's request is in
-  flight; the turn starts when it ends`) instead of pausing in silence.
+  is still running: each session's work record (`work.enabled`) now lists its running jobs,
+  and an open job another live session reports is left as it is with a notice naming that
+  session. A job nobody reports is closed `blocked: interrupted` as before.
+- When the main model's next request waits behind a co-worker's request on the shared server,
+  the status line says so after two seconds (`waiting for the shared server: big's request is
+  in flight; the request goes out when it ends`) until the lane is free, instead of pausing in
+  silence.
 
 ## v1.4.1 — Jobs for any co-worker (2026-11-03)
 

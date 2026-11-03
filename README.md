@@ -451,17 +451,20 @@ stall rules are counted per job, and the two sessions differ:
 `blocked: ran out of time`.
 
 At exit a job's step closes `blocked: session ended`; a crash that left it open closes
-it `blocked: interrupted` at the next start — unless another session is live on the
-workspace, in which case the job may be running there: it is left as it is and a notice
-says so. `/task assign` refuses a job id, since the jobs tool owns it.
+it `blocked: interrupted` at the next start — unless another live session on the
+workspace reports running it (each session's work record, `work.enabled`, lists its
+running jobs), in which case it is left as it is and a notice names that session.
+`/task assign` refuses a job id, since the jobs tool owns it.
 
 A co-worker on the primary's own server shares its request lane: one request in flight
 per server, the primary's always first. While a job's model call is in flight there,
-the main model's next turn — the one that answers a hand-back or a stall line — starts
-when that call ends, and after two seconds the status line says `waiting for the shared
-server: big's request is in flight`. Co-workers on another server never make it wait.
-A job's own compaction summary, which streams nothing back, is a wait for the stall
-clock like a tool call (`waiting (compaction)` in `/agents`), not silence.
+the main model's next request — the turn that answers a hand-back or a stall line —
+goes out when that call ends, and after two seconds the status line says `waiting for
+the shared server: big's request is in flight` until it does. Co-workers on another
+server never make it wait. A job's own compaction summary, which streams nothing back,
+is a wait for the stall clock like a tool call (`waiting (compaction)` in `/agents`),
+until it has run for twice `stall_after`: then it is judged quiet after all, so a
+summary call that hung can still be stopped.
 
 ## Select and copy
 

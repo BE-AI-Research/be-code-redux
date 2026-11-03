@@ -397,11 +397,14 @@ type Agent struct {
 	// laneAcquire wraps every model call once lanes exist (spec §2.2).
 	subs        *subAgents
 	laneAcquire func(ctx context.Context) (func(), error)
-	// OtherSessions names the pids of the other live sessions on this
-	// workspace (cmd wires it from the work ledger; nil means none known).
-	// The startup pass leaves an open job alone while one exists: it may be
-	// that session's running job, and closing it would strand that run.
-	OtherSessions func() []int
+	// OtherJobs maps the id of every job another live session on this
+	// workspace reports running to that session's pid (cmd wires it from the
+	// work ledger's records; nil, or an empty map, means none known). The
+	// startup pass leaves such a job alone: closing it would strand that run.
+	OtherJobs func() map[string]int
+	// JobsChanged fires after a job run is installed or removed, so the
+	// work ledger writes the list at once rather than on its heartbeat.
+	JobsChanged func()
 	// anySubAgent is whether any configured co-worker has sub_agent set:
 	// the runner now exists for any co-worker (jobs), but the guidance on
 	// assigning steps is only true of a sub-agent.

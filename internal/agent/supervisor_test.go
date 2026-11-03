@@ -11,6 +11,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/engine"
 	"github.com/brown-enterprises/be-code/internal/provider"
+	"github.com/brown-enterprises/be-code/internal/subagent"
 )
 
 // stallClock is the supervisor's fake clock: set once before anything runs,
@@ -431,7 +432,8 @@ func TestWaitSubAgentsReturnsOnAStallLine(t *testing.T) {
 // A sub-agent's compaction summary streams nothing back (ruling R20): it is
 // a wait for the stall clock, like a tool call, and the job's own time on
 // the run-time meter. The lane wait inside it hands back to the compaction
-// wait, and the clock starts afresh when the chore ends.
+// wait; one that runs past twice stall_after is judged quiet after all; and
+// the clock starts afresh when the chore ends.
 func TestCompactionIsAWaitNotAStall(t *testing.T) {
 	s := stallJob(t, nil)
 	s.f.ag.choreStarted(s.run)
@@ -457,7 +459,20 @@ func TestCompactionIsAWaitNotAStall(t *testing.T) {
 	if waiting != compactionWait {
 		t.Fatalf("the lane wait ending left %q, want the compaction wait back", waiting)
 	}
+	// Twice stall_after inside the chore: quiet after all.
+	s.clk.Advance(180 * time.Second)
+	s.f.ag.subs.sup.sweep()
+	if q := s.f.ag.Peek(); len(q) != 1 || !strings.Contains(q[0], "has been quiet for") {
+		t.Fatalf("a chore past twice stall_after was not reported: %q", q)
+	}
+	s.f.ag.DrainInbox()
 	s.f.ag.choreEnded(s.run)
+	s.f.ag.subs.mu.Lock()
+	waiting = s.run.waiting
+	s.f.ag.subs.mu.Unlock()
+	if waiting != "" {
+		t.Fatalf("after the chore: waiting %q", waiting)
+	}
 	s.clk.Advance(90 * time.Second)
 	s.f.ag.subs.sup.sweep()
 	if s.f.ag.Pending() != 0 {
@@ -470,8 +485,9 @@ func TestCompactionIsAWaitNotAStall(t *testing.T) {
 	}
 }
 
-// choreDo brackets every housekeeping call with OnChoreStart/OnChoreEnd, on
-// the primary branch and the helper's alike, so a runner can see it.
+// choreDo brackets a housekeeping call with OnChoreStart/OnChoreEnd (the
+// primary branch here; the helper branch shares the bracket, which sits
+// above both), so a runner can see the call that streams nothing.
 func TestChoreDoFiresTheChoreEvents(t *testing.T) {
 	ag, _ := newTestAgent(t, &scriptedProvider{responses: []provider.ChatResponse{{Content: "summary"}}}, nil)
 	var starts, ends int
@@ -492,77 +508,157 @@ func TestChoreDoFiresTheChoreEvents(t *testing.T) {
 }
 
 // The startup pass closes a job left open with no run (R8) — unless another
-// live session is on the workspace, where it may be that session's running
-// job: then it is left alone and the operator is told.
-func TestOrphanJobIsKeptWhileAnotherSessionIsLive(t *testing.T) {
+// live session reports running it (OtherJobs, from the work ledger): then it
+// is left alone and the operator told which session has it. A job nobody
+// reports is closed as before, however many sessions are live.
+func TestOrphanJobIsKeptWhileAnotherSessionRunsIt(t *testing.T) {
 	f := newSubFixture(t, &scriptedProvider{}, nil)
-	parkJobs(t)
 	var mu sync.Mutex
 	var notices []string
 	f.ag.Events.OnNotice = func(m string) { mu.Lock(); notices = append(notices, m); mu.Unlock() }
-	f.st.Plan("work", nil)
-	id := dispatchJob(t, f, "port it", "internal/scan")
-	f.ag.OtherSessions = func() []int { return []int{4242} }
+	root := f.st.Plan("work", nil)
+	// Filed as a job with no run in this process: what another session's
+	// live job, or a crash, looks like from here.
+	orphan, err := f.st.AddJob(root, "port it", "", "big", []string{"internal/scan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	looked := 0
+	f.ag.OtherJobs = func() map[string]int { looked++; return map[string]int{orphan: 4242} }
 	f.ag.closeOrphanJobs(f.ag.subSteps("test"), map[string]bool{})
-	if st := nodeOf(t, f.st, id).Status; st != "doing" && st != "todo" {
-		t.Fatalf("job closed as %q while another session is live", st)
+	if st := nodeOf(t, f.st, orphan).Status; st != engine.StatusTodo && st != engine.StatusDoing {
+		t.Fatalf("job closed as %q while another session runs it", st)
 	}
 	mu.Lock()
 	got := strings.Join(notices, "\n")
 	mu.Unlock()
-	if !strings.Contains(got, "job "+id+" (big) is open") || !strings.Contains(got, "4242") || !strings.Contains(got, "left as is") {
+	if !strings.Contains(got, "job "+orphan+" (big) is open") || !strings.Contains(got, "pid 4242") || !strings.Contains(got, "left as is") {
 		t.Fatalf("notice: %q", got)
 	}
-	f.ag.OtherSessions = func() []int { return nil }
+	if looked != 1 {
+		t.Fatalf("the records were read %d times for one orphan", looked)
+	}
+	// Another session is live but does not report this job: a leftover.
+	f.ag.OtherJobs = func() map[string]int { return map[string]int{"9.9": 4242} }
 	f.ag.closeOrphanJobs(f.ag.subSteps("test"), map[string]bool{})
-	if n := nodeOf(t, f.st, id); n.Status != "blocked" || n.Reason != jobInterrupted {
-		t.Fatalf("with nobody else live the orphan must close: %s %q", n.Status, n.Reason)
+	if n := nodeOf(t, f.st, orphan); n.Status != engine.StatusBlocked || n.Reason != jobInterrupted {
+		t.Fatalf("a job no live session reports must close: %s %q", n.Status, n.Reason)
+	}
+}
+
+// The work ledger is told at once when a job run begins and ends, and reads
+// the running ids back through RunningJobIDs.
+func TestJobRunsAreReportedToTheWorkLedger(t *testing.T) {
+	f := newSubFixture(t, &scriptedProvider{}, nil)
+	bp := parkJobs(t)
+	changed := make(chan struct{}, 8)
+	f.ag.JobsChanged = func() { changed <- struct{}{} }
+	f.st.Plan("work", nil)
+	id := dispatchJob(t, f, "port it", "internal/scan")
+	wait(t, bp.entered, "the job's request")
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("JobsChanged did not fire on dispatch")
+	}
+	if ids := f.ag.RunningJobIDs(); len(ids) != 1 || ids[0] != id {
+		t.Fatalf("running: %q", ids)
+	}
+	f.ag.StopAllSubAgents("test over")
+	select {
+	case <-changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("JobsChanged did not fire when the run ended")
+	}
+	if ids := f.ag.RunningJobIDs(); len(ids) != 0 {
+		t.Fatalf("still running after stop: %q", ids)
 	}
 }
 
 // A primary lane acquire that waits behind a request on the same server is
-// said after laneSayAfter, naming the co-worker when a job of its holds it.
+// said after laneSayAfter — naming the co-worker whose job is in its model
+// call there, else "another request" — and taken down once the lane is had.
+// A short acquire says nothing.
 func TestPrimaryLaneWaitIsSaid(t *testing.T) {
 	f := newSubFixture(t, &scriptedProvider{}, nil)
 	old := laneSayAfter
 	laneSayAfter = 10 * time.Millisecond
 	t.Cleanup(func() { laneSayAfter = old })
-	var mu sync.Mutex
-	var said []string
-	f.ag.Events.OnTransient = func(m string) { mu.Lock(); said = append(said, m); mu.Unlock() }
-	release, err := f.ag.subs.lanes.Acquire(context.Background(), "http://primary:11434", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make(chan error, 1)
-	go func() {
-		rel, err := f.ag.laneAcquire(context.Background())
-		if err == nil {
-			rel()
+	said := make(chan string, 8)
+	f.ag.Events.OnTransient = func(m string) { said <- m }
+	const primary = "http://primary:11434"
+	hear := func(t *testing.T, what string) string {
+		t.Helper()
+		select {
+		case m := <-said:
+			return m
+		case <-time.After(5 * time.Second):
+			t.Fatalf("nothing said: %s", what)
+			return ""
 		}
-		got <- err
-	}()
-	time.Sleep(60 * time.Millisecond)
-	release()
-	if err := <-got; err != nil {
-		t.Fatal(err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(said) != 1 || !strings.Contains(said[0], "waiting for the shared server") {
-		t.Fatalf("said %q", said)
+	waitBehind := func(t *testing.T, want, never string) {
+		t.Helper()
+		release, err := f.ag.subs.lanes.Acquire(context.Background(), primary, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make(chan error, 1)
+		go func() {
+			rel, err := f.ag.laneAcquire(context.Background())
+			if err == nil {
+				rel()
+			}
+			got <- err
+		}()
+		m := hear(t, "the wait")
+		if !strings.Contains(m, "waiting for the shared server: "+want+" is in flight; the request goes out when it ends") || (never != "" && strings.Contains(m, never)) {
+			t.Fatalf("said %q", m)
+		}
+		release()
+		if err := <-got; err != nil {
+			t.Fatal(err)
+		}
+		if m := hear(t, "the clear"); m != "" {
+			t.Fatalf("the notice was not taken down: %q", m)
+		}
+		select {
+		case m := <-said:
+			t.Fatalf("extra: %q", m)
+		default:
+		}
 	}
-	// Held and released within laneSayAfter: nothing is said.
-	said = nil
-	mu.Unlock()
+	// Nobody's run on the server: another request.
+	waitBehind(t, "another request", "")
+	// A co-worker's job in its model call on the primary's server is named;
+	// one inside a tool call holds no lane and is not.
+	s := f.ag.subs
+	s.mu.Lock()
+	s.cards["near"] = subagent.Card{Name: "near", Server: primary}
+	s.cards["busy"] = subagent.Card{Name: "busy", Server: primary}
+	s.runs["9.1"] = &subRun{d: subagent.Dispatch{Node: "9.1", Owner: "near"}, job: true}
+	s.runs["9.2"] = &subRun{d: subagent.Dispatch{Node: "9.2", Owner: "busy"}, job: true, inTool: "shell", waiting: "tool: shell"}
+	s.mu.Unlock()
+	t.Cleanup(func() {
+		s.mu.Lock()
+		delete(s.runs, "9.1")
+		delete(s.runs, "9.2")
+		s.mu.Unlock()
+	})
+	waitBehind(t, "near's request", "busy")
+	// Held and released long before laneSayAfter: nothing is said.
+	laneSayAfter = time.Hour
 	if rel, err := f.ag.laneAcquire(context.Background()); err != nil {
 		t.Fatal(err)
 	} else {
 		rel()
 	}
-	time.Sleep(30 * time.Millisecond)
-	mu.Lock()
-	if len(said) != 0 {
-		t.Fatalf("a short acquire was announced: %q", said)
+	select {
+	case m := <-said:
+		t.Fatalf("a short acquire was announced: %q", m)
+	default:
 	}
 }

@@ -64,6 +64,10 @@ type Record struct {
 	Model     string   `json:"model,omitempty"`
 	Task      string   `json:"task,omitempty"`
 	Writing   []string `json:"writing,omitempty"`
+	// Jobs are the ids of the task-tree jobs this session is running on
+	// co-workers, so another session's startup pass can tell a job that is
+	// live here from one a crash left behind.
+	Jobs []string `json:"jobs,omitempty"`
 	// Recent marks a Writing list that is the last few paths rather than this
 	// turn's: there was no engine, so no turn counter to reset on. The notice
 	// words it differently, because "writing" and "wrote recently" are
