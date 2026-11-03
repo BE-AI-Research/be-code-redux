@@ -407,6 +407,39 @@ hand-over is never that. A second server does not.
 and `coworkers[].max_scope` are in the config reference below. The full
 owner/scope syntax is in [`docs/task-format.md`](docs/task-format.md).
 
+### Jobs
+
+The main model can also hand a scoped job to any configured co-worker with one
+tool call, `dispatch` (`who`, `job`, `scope`, optional `context` and `wait`). No
+`sub_agent: true` is needed for that: the job gets the same scratch agent, consent,
+scoped registry and `ask_main` a sub-agent gets, and its step is filed under the
+active task and `/task` renders its step as `job`. The first line of `job` names
+the step; `scope` is required, and `"."` means the whole workspace. A scope that
+overlaps a running job or an assigned step, or that falls outside the co-worker's
+`max_scope`, is refused. One co-worker may run several jobs, all counted against
+`sub_agents.max_concurrent`. Dispatch needs the task store, so a session whose store
+failed to open refuses it.
+
+A job's hand-back arrives as a later message, or, with `wait: true`, as the tool's
+result. The `jobs` tool steers the jobs: `status`, `wait` (for one job or any), `reply`
+to answer a pending question, `extend` to clear a stall, and `stop`. `/agents` and
+`jobs status` show each job's state: `running`, `waiting (tool: shell)`, `asking`,
+`stalled`, `done`, `blocked` or `stopped`.
+
+The stall clock runs only while the job is working. It pauses while the job waits on
+a question to the main model, the shared server lane, the online-consent prompt, a
+write approval or editor review, or a tool call in flight. After `sub_agents.stall_after`
+seconds with no progress the job is marked `stalled` and the main model is told, and
+it may `jobs extend`, `jobs reply` or `jobs stop`. A job that stalls a third time is
+stopped, its step closes `blocked: stalled`, and the operator is told in the
+transcript. A headless `be-code run`, with or without `-y`, stops it at the second
+stall instead (`stalled twice and was stopped`). `sub_agents.max_runtime` caps running
+time, waits excluded, and a job past it closes `blocked: ran out of time`.
+
+At exit a job's step closes `blocked: session ended`; a crash that left it open closes
+it `blocked: interrupted` at the next start. `/task assign` refuses a job id, since the
+jobs tool owns it.
+
 ## Select and copy
 
 Drag with the mouse over the transcript to select text (Shift-drag uses your
@@ -1601,11 +1634,11 @@ hand; `/config` prints what the running session actually resolved.
 - `sub_agents.max_concurrent` (2) — sub-agents running at once across every server;
   `sub_agents.max_turns` (40) — turns one sub-agent gets on its step;
   `sub_agents.ask_timeout` (600, seconds) — how long an `ask_main` waits for an
-  answer before the step is marked blocked
+  answer before the step is marked blocked;
   `sub_agents.stall_after` (180, seconds) — seconds a job may go without a tool call or
-  output before the main model is told it has stalled; 0 disables;
+  output before the main model is told it has stalled; 0 disables stall supervision;
   `sub_agents.max_runtime` (1800, seconds) — seconds of running time (waits excluded) a job
-  may use before it is stopped
+  may use before it is stopped; 0 means no cap
 - `engine.enabled` (true) — the working-memory store, its `task` tool and the git
   lookups; `engine.budget` (6144) — byte cap on the `Working memory:` system-prompt
   block; `engine.notes_cap` (4096) — byte cap on the durable `notes.md`;

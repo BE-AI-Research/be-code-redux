@@ -1,5 +1,9 @@
 # BE-Code Changelog
 
+## Unreleased
+
+- **Jobs.** The main model dispatches a scoped job to any co-worker with one tool call, waits for it or is told when it ends, asks or stalls, and extends, steers or stops it; a job that stalls three times is stopped and the operator told. The stall clock pauses while a job waits on someone else. `/agents` shows every job, `sub_agents.stall_after` and `sub_agents.max_runtime` tune it.
+
 ## v1.4.0 — Packs closed, apps served, keys stored (2026-11-02)
 
 - **A pack is checked against the BE Skill Pack Format 1.0 contract when it loads.** `pack.json`
