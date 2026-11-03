@@ -173,6 +173,9 @@ func (m *View) onlineAskKey() (tea.Model, tea.Cmd) {
 	ti.Prompt = fmt.Sprintf("key for %s: ", f.choice.Name)
 	ti.Focus()
 	f.secret = ti
+	// Nothing typed before the key step may sit hidden under the masked
+	// field and resurface after it.
+	m.input.Reset()
 	return m, nil
 }
 
@@ -408,6 +411,8 @@ func (m *View) clearOnlineAdd() {
 	f.cancel()
 	f.key = ""
 	f.secret.SetValue("")
+	// The input line was the flow's while it was open (onlineLine).
+	m.input.Reset()
 	m.clearFlowStatus(f)
 	ownPicker := f.onlinePickerStep()
 	m.onlineAdd = nil

@@ -244,6 +244,13 @@ func (m *View) openContextMenu() (tea.Model, tea.Cmd) {
 				text, err := m.clipboardRead()
 				if err != nil {
 					m.appendEntryLocked(entry{Kind: entryError, Label: "paste failed: ", Text: err.Error()})
+				} else if f := m.onlineAdd; f != nil && f.step == stepKey {
+					// At /online add's key step the masked field is the
+					// input: a key pasted here must never land in the
+					// hidden textarea, where Esc would show it and Enter
+					// send it to the agent and the history.
+					f.secret.SetValue(f.secret.Value() + text)
+					f.secret.CursorEnd()
 				} else {
 					m.input.SetValue(m.input.Value() + text)
 					m.input.CursorEnd()

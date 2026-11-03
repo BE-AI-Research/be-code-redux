@@ -320,3 +320,43 @@ func TestOnlineAddStatusShowsOnThisTerminalsBottomLine(t *testing.T) {
 		t.Fatalf("status outlived the flow: %q", b)
 	}
 }
+
+// I3 (final review): the context menu's Paste at the key step lands in the
+// masked field, never the hidden textarea; and the textarea is empty on
+// entering the key step and after the flow ends.
+func TestOnlineAddContextMenuPasteGoesToTheMaskedField(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubOnline(t)
+	v := newTestModel(t)
+	v.input.SetValue("a draft typed before")
+	_, _ = v.startOnlineAdd("groq")
+	if v.onlineAdd == nil || v.onlineAdd.step != stepKey {
+		t.Fatalf("not at the key step: %+v", v.onlineAdd)
+	}
+	if v.input.Value() != "" {
+		t.Fatal("the textarea kept text under the masked field")
+	}
+	v.clipboardRead = func() (string, error) { return "sk-pasted-key", nil }
+	_, _ = v.openContextMenu()
+	if v.picker == nil {
+		t.Fatal("no context menu")
+	}
+	for _, it := range v.picker.items {
+		if it.id == "paste" {
+			v.picker.onPick(v, it)
+		}
+	}
+	if v.input.Value() != "" {
+		t.Fatal("the pasted key landed in the hidden textarea")
+	}
+	if v.onlineAdd == nil || v.onlineAdd.secret.Value() != "sk-pasted-key" {
+		t.Fatal("the pasted key is not in the masked field")
+	}
+	if strings.Contains(v.inputView(), "sk-pasted-key") {
+		t.Fatal("the masked field shows the key")
+	}
+	v.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if v.onlineAdd != nil || v.input.Value() != "" {
+		t.Fatal("after Esc the textarea is not empty")
+	}
+}
