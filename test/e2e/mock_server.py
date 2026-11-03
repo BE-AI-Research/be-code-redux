@@ -11,7 +11,7 @@ The same port also plays a fake Ollama on /api/*, for the native scenario:
 the window) and /api/show offers no Modelfile num_ctx. Requests are routed
 by path first, since the native path is a different protocol on the same
 server, not another model on the OpenAI one."""
-import os, json, http.server, itertools
+import os, json, http.server, itertools, time
 
 counter = itertools.count()
 
@@ -198,6 +198,57 @@ def sub_chunks(body):
         return [text_chunk("SUBDONE: token loop ported; lead said: stay inside internal/scan")]
     return [text_chunk("SUBDONE: no answer received")]
 
+
+# Seventh scenario: dispatch. The primary (boss-model) plans one task, then
+# hands a scoped job to co-worker mock-cw with the dispatch tool; the job
+# model (job-model) writes pkg/x.go and reports. The primary says
+# DISPATCHED:done only once the hand-back line names the co-worker and the
+# file. In the stall branch the job's first reply is held until the mock has
+# seen the primary call jobs/extend, so the supervisor's stall line is the
+# only thing that can unblock it: a run that passes proves the line reached
+# the primary and the primary's extend reached the tool.
+BOSS = {"n": 0, "extended": False}
+JOB = {"n": 0}
+EXTEND_SEEN = {"v": False}
+
+def boss_chunks(body):
+    n = BOSS["n"]; BOSS["n"] += 1
+    users = [m.get("content") or "" for m in body["messages"] if m["role"] == "user"]
+    stall = any("dispatch scenario stall:" in u for u in users)
+    if any("sub-agent mock-cw finished" in u and "wrote pkg/x.go" in u for u in users):
+        return [text_chunk("DISPATCHED:done")]
+    quiet = [u for u in users if u.startswith("job ") and "has been quiet for" in u]
+    if quiet and not BOSS["extended"]:
+        BOSS["extended"] = True
+        return [tool_call_chunk("jobs", {"action": "extend", "id": quiet[-1].split()[1]})]
+    if quiet:
+        return [text_chunk("extended; waiting")]
+    called = [tc["function"]["name"] for m in body["messages"] for tc in (m.get("tool_calls") or [])]
+    if "task" not in called:
+        return [tool_call_chunk("task", {"action": "plan", "text": "port the scanner",
+                                         "steps": ["port pkg"]})]
+    if "dispatch" not in called:
+        job = "port the scanner into pkg"
+        if stall:
+            job = "stall: " + job
+        return [tool_call_chunk("dispatch", {"who": "mock-cw", "job": job, "scope": ["pkg/"]})]
+    return [text_chunk("dispatched; waiting")]
+
+def job_chunks(body):
+    n = JOB["n"]; JOB["n"] += 1
+    # The job text reaches the sub-agent in its system prompt, not a user turn.
+    stall = any("stall:" in (m.get("content") or "") for m in body["messages"])
+    if n_is_first(body):
+        if stall:
+            t0 = time.time()
+            while not EXTEND_SEEN["v"] and time.time() - t0 < 75:
+                time.sleep(0.2)
+        return [tool_call_chunk("write_file", {"path": "pkg/x.go", "content": "package pkg\n"})]
+    return [text_chunk("JOBDONE: scanner ported")]
+
+def n_is_first(body):
+    return not any(m["role"] == "tool" for m in body["messages"])
+
 # The native (fake Ollama) scenario. /api/chat records the num_ctx it was
 # sent and answers with it, so the assertion is on what actually reached the
 # wire rather than on anything the harness reports about itself.
@@ -235,6 +286,14 @@ class H(http.server.BaseHTTPRequestHandler):
             return self.do_native()
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         model = body.get("model", "")
+        logp = os.environ.get("BE_E2E_LOG")
+        if logp:
+            with open(logp, "a") as f:
+                f.write(json.dumps(body) + "\n")
+        for m in body["messages"]:
+            for tc in (m.get("tool_calls") or []):
+                if tc.get("function", {}).get("name") == "jobs" and '"extend"' in tc["function"].get("arguments", ""):
+                    EXTEND_SEEN["v"] = True
         last = body["messages"][-1]["content"] or ""
 
         if model == "native-model":
@@ -263,6 +322,10 @@ class H(http.server.BaseHTTPRequestHandler):
             chunks = lead_chunks(body)
         elif model == "sub-model":
             chunks = sub_chunks(body)
+        elif model == "boss-model":
+            chunks = boss_chunks(body)
+        elif model == "job-model":
+            chunks = job_chunks(body)
         elif "consult scenario" in first_user_content(body):
             n = state["consult_n"]; state["consult_n"] += 1
             if n == 0:
@@ -315,6 +378,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._json({"models": [{"name": "native-model", "size": 1,
                                            "details": {"family": "mock", "quantization_level": "Q4"}}]})
         self._json({"data": [{"id": "mock-model"}, {"id": "coworker-model"}, {"id": "task-model"},
-                              {"id": "lead-model"}, {"id": "sub-model"}]})
+                              {"id": "lead-model"}, {"id": "sub-model"},
+                              {"id": "boss-model"}, {"id": "job-model"}]})
 
-http.server.HTTPServer(("127.0.0.1", int(os.environ.get("BE_E2E_PORT", "18111"))), H).serve_forever()
+http.server.ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("BE_E2E_PORT", "18111"))), H).serve_forever()

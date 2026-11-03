@@ -3,6 +3,8 @@
 # broken Go and repairs it when verification feedback arrives.
 set -e
 DIR=$(mktemp -d); trap 'rm -rf "$DIR"; kill $SRV 2>/dev/null' EXIT
+export BE_E2E_LOG="$DIR/mock.log"
+cp /dev/null "$BE_E2E_LOG"
 python3 "$(dirname "$0")/mock_server.py" & SRV=$!
 sleep 1
 WS="$DIR/ws"; mkdir -p "$WS"
@@ -138,6 +140,55 @@ test ! -f "$SUBWS/cmd/x.go"
 grep -q "@sub  scope: internal/scan" "$SUBWS"/.be-code/tasks/*.md
 grep -q "^  - \[x\] .*port internal/scan" "$SUBWS"/.be-code/tasks/*.md
 echo "[PASS] sub-agent"
+
+# Seventh scenario: dispatch. The primary hands a scoped job to co-worker
+# mock-cw (no sub_agent flag needed); the job writes pkg/x.go; the primary's
+# DISPATCHED:done is gated in the mock on the hand-back line naming the
+# co-worker and the file, so it cannot appear unless the hand-back reached
+# the primary. Then the stall branch: the job's first reply is held until
+# the primary has called jobs/extend, which it only does on the supervisor's
+# "has been quiet for" line, so the mock log holding an extend call proves
+# the whole stall -> notice -> extend path. The co-worker is on a different
+# provider spelling (localhost vs 127.0.0.1) of the same mock, so it has its
+# own lane: sharing the primary's lane, a held sub-agent request would block
+# the primary's extend call behind it (one request in flight per server).
+cat > "$HOME/.be-code/config.json" <<CFG
+{"default_provider":"mock","model":"boss-model",
+ "providers":{"mock":{"type":"openai","base_url":"http://127.0.0.1:18111/v1"},
+              "mockjob":{"type":"openai","base_url":"http://localhost:18111/v1"}},
+ "coworkers":[{"name":"mock-cw","provider":"mockjob","model":"job-model"}],
+ "sub_agents":{"max_concurrent":1,"max_turns":6,"ask_timeout":30,"stall_after":2},
+ "max_turns":8,"max_repairs":0,"compat_tool_calls":"auto","verify_on_done":false,
+ "engine":{"enabled":true}}
+CFG
+DISPWS="$DIR/dispws"; mkdir -p "$DISPWS/pkg"
+OUT7="$DIR/dispatch.out"
+"$(dirname "$0")/../../be-code" run -y -C "$DISPWS" "dispatch scenario: port the scanner" > "$OUT7"
+cat "$OUT7"
+grep -q "DISPATCHED:done" "$OUT7"
+test -f "$DISPWS/pkg/x.go"
+# The job field renders as trailing "  job" (internal/engine/markdown.go).
+grep -q "job$" "$DISPWS"/.be-code/tasks/*.md
+DISPWS2="$DIR/dispws2"; mkdir -p "$DISPWS2/pkg"
+OUT8="$DIR/dispatch-stall.out"
+"$(dirname "$0")/../../be-code" run -y -C "$DISPWS2" "dispatch scenario stall: port the scanner" > "$OUT8"
+cat "$OUT8"
+grep -q "DISPATCHED:done" "$OUT8"
+test -f "$DISPWS2/pkg/x.go"
+# The mock log holds every request body; a request whose history carries an
+# assistant tool call named jobs with action extend proves the primary acted
+# on the stall line (the tool schema text alone cannot satisfy this).
+python3 -I -c '
+import json, sys
+for l in open(sys.argv[1]):
+    for m in json.loads(l)["messages"]:
+        for tc in m.get("tool_calls") or []:
+            f = tc["function"]
+            if f["name"] == "jobs" and json.loads(f["arguments"]).get("action") == "extend":
+                sys.exit(0)
+sys.exit(1)' "$DIR/mock.log"
+grep -q "has been quiet for" "$OUT8" || echo "note: stall line not printed by headless run (asserted via mock log)"
+echo "[PASS] dispatch"
 
 sh "$(dirname "$0")/online_e2e.sh"
 sh "$(dirname "$0")/api_e2e.sh"
