@@ -232,34 +232,59 @@ func (a *Agent) apiSnapshot() (system string, snapshot []provider.Message, ok bo
 func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRequest, onDelta provider.StreamFunc) (*provider.ChatResponse, string, error) {
 	a := b.a
 	primary := model == "" || model == "default"
-	// The person's gate and cap, never a prompt: an app's request is refused
-	// outright (spec §5), not put to the terminal. The gate covers named
-	// models too: they are built on the same, current provider.
-	if err := a.checkOnlineGate(ctx, false); err != nil {
-		return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
-	}
-	_, online := a.Online()
-	if !primary && online {
-		// Spend is counted and capped only at the primary's own pricing; a
-		// named model's bill could be neither, and an uncapped bill is
-		// worse than a refusal.
-		return nil, "", api.Errorf(http.StatusForbidden, "model_not_allowed", "named models are not served while the session's provider is online; use the default model")
-	}
-	if primary {
-		if online {
-			if capUSD := a.SpendCap(); capUSD > 0 && a.Usage().SpendUSD >= capUSD {
-				return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "the session's spend cap of $%.2f is reached", capUSD)
+	var (
+		prov     provider.Provider
+		name     string
+		profile  profiles.Profile
+		provName string
+	)
+	// The checks and the snapshot they judge must be of one provider. A
+	// /provider switch can land anywhere between them — awaitWindow below
+	// waits out a whole model resolution — so the switch generation is read
+	// before the checks and again with the snapshot, and a changed count
+	// runs the checks again against what the session now serves.
+	for attempt := 0; ; attempt++ {
+		gen := a.switchGeneration()
+		// The person's gate and cap, never a prompt: an app's request is
+		// refused outright (spec §5), not put to the terminal. The gate
+		// covers named models too: they are built on the same, current
+		// provider.
+		if err := a.checkOnlineGate(ctx, false); err != nil {
+			if errors.Is(err, errProviderUnresolved) {
+				return nil, "", api.Errorf(http.StatusConflict, "session_busy", "the session's provider is changing; try again shortly")
+			}
+			return nil, "", api.Errorf(http.StatusForbidden, "online_not_approved", "%v", err)
+		}
+		_, online := a.Online()
+		if !primary && online {
+			// Spend is counted and capped only at the primary's own
+			// pricing; a named model's bill could be neither, and an
+			// uncapped bill is worse than a refusal.
+			return nil, "", api.Errorf(http.StatusForbidden, "model_not_allowed", "named models are not served while the session's provider is online; use the default model")
+		}
+		if primary {
+			if online {
+				if capUSD := a.SpendCap(); capUSD > 0 && a.Usage().SpendUSD >= capUSD {
+					return nil, "", api.Errorf(http.StatusTooManyRequests, "spend_cap", "the session's spend cap of $%.2f is reached", capUSD)
+				}
+			}
+			// Never with no window on the wire (the 0.12.1 incident): after
+			// a /model the request waits for the resolution, as every
+			// primary call site does. The model is read after the wait.
+			a.awaitWindow(ctx)
+			if err := ctx.Err(); err != nil {
+				return nil, "", err
 			}
 		}
-		// Never with no window on the wire (the 0.12.1 incident): after a
-		// /model the request waits for the resolution, as every primary
-		// call site does. The model is read after the wait.
-		a.awaitWindow(ctx)
-		if err := ctx.Err(); err != nil {
-			return nil, "", err
+		var now int
+		prov, name, profile, provName, now = a.apiModelSnapshot()
+		if now == gen {
+			break
+		}
+		if attempt+1 >= apiSwitchRetries {
+			return nil, "", api.Errorf(http.StatusConflict, "session_busy", "the session's provider is changing; try again shortly")
 		}
 	}
-	prov, name, profile, provName := a.apiModelSnapshot()
 	if !primary {
 		p, err := b.providerFor(ctx, provName, model)
 		if err != nil {
@@ -312,6 +337,12 @@ func (b *APIBackend) chat(ctx context.Context, model string, req provider.ChatRe
 	return resp, name, nil
 }
 
+// apiSwitchRetries bounds how often chat re-runs its checks when a
+// provider or model switch lands between them and the snapshot. Three
+// switches in a row during one request is a session being reconfigured,
+// which an app is told to try again later.
+const apiSwitchRetries = 3
+
 // providerFor is the named model's provider on providerName, built once
 // per provider and model: keyed by both, so a /provider switch never serves
 // a provider built for the backend the session has left.
@@ -341,17 +372,26 @@ func (a *Agent) modelSnapshot() (provider.Provider, string, profiles.Profile) {
 	return a.Provider, a.Model, a.Profile
 }
 
-// apiModelSnapshot is modelSnapshot plus the provider's name, read together
-// under modelMu so a /provider switch cannot pair one backend's name with
-// another's model.
-func (a *Agent) apiModelSnapshot() (provider.Provider, string, profiles.Profile, string) {
+// apiModelSnapshot is modelSnapshot plus the provider's name and the
+// switch generation, read together under modelMu so a /provider switch
+// cannot pair one backend's name with another's model, and so the caller
+// can tell whether the snapshot is of the provider its checks judged.
+func (a *Agent) apiModelSnapshot() (provider.Provider, string, profiles.Profile, string, int) {
 	a.modelMu.Lock()
 	defer a.modelMu.Unlock()
 	name := ""
 	if a.Provider != nil {
 		name = a.Provider.Name()
 	}
-	return a.Provider, a.Model, a.Profile, name
+	return a.Provider, a.Model, a.Profile, name, a.switchGen
+}
+
+// switchGeneration is the count of provider and model switches so far;
+// see Agent.switchGen.
+func (a *Agent) switchGeneration() int {
+	a.modelMu.Lock()
+	defer a.modelMu.Unlock()
+	return a.switchGen
 }
 
 func usageOf(r *provider.ChatResponse) api.Usage {

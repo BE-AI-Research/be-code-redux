@@ -258,3 +258,67 @@ func TestSessionTokenSaveStampsHostPID(t *testing.T) {
 		t.Fatalf("%v host_pid=%d", err, saved.HostPID)
 	}
 }
+
+// TestAPICallSwitchedOnlineWhileWaitingIsRefused pins the gate against a
+// /provider switch that lands between the gate check and the provider
+// snapshot. awaitWindow sits between the two and deliberately waits out a
+// model resolution, so the gap is the whole resolution, not an instant:
+// an app's request passes the gate on the local provider, the person
+// switches to an unapproved online one, and the request must not be the
+// first thing that provider ever receives.
+func TestAPICallSwitchedOnlineWhileWaitingIsRefused(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, local := apiAgent(t)
+	// Hold a resolution open so the call parks in awaitWindow after the gate.
+	ag.modelMu.Lock()
+	ag.modelGen++
+	gen := ag.modelGen
+	ag.beginResolveLocked(gen)
+	ag.modelMu.Unlock()
+	parked := make(chan struct{}, 1)
+	ag.Events.OnTransient = func(string) {
+		select {
+		case parked <- struct{}{}:
+		default:
+		}
+	}
+	var l safeLog
+	ag.Tools.Approve = l.approver(true)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewAPIBackend(ag, "1").Query(context.Background(), api.QueryRequest{Prompt: "q"})
+		done <- err
+	}()
+	<-parked // past the gate, waiting for the window
+
+	online := &scriptedProvider{}
+	ag.SetProvider(online)
+	ag.SetOnline("openrouter", "K", Pricing{Known: true})
+	ag.endResolve(gen)
+
+	err := <-done
+	var e *api.Error
+	if !errors.As(err, &e) || (e.Code != "online_not_approved" && e.Code != "session_busy") {
+		t.Fatalf("want a refusal (online_not_approved or session_busy), got %v", err)
+	}
+	if online.i != 0 || local.i != 0 || len(l.get()) != 0 {
+		t.Fatalf("nothing may be sent and nobody asked: online=%d local=%d asked=%q", online.i, local.i, l.get())
+	}
+}
+
+// Between SetProvider and its paired SetModel the gate cannot judge the new
+// provider yet. That is a moment, not a refusal: session_busy, so a client
+// retries, never online_not_approved, which it would treat as final.
+func TestAPICallDuringUnresolvedSwitchIsSessionBusy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ag, p := apiAgent(t)
+	ag.onlineMu.Lock()
+	ag.providerUnresolved = true
+	ag.onlineMu.Unlock()
+	_, err := NewAPIBackend(ag, "1").Query(context.Background(), api.QueryRequest{Prompt: "q"})
+	var e *api.Error
+	if !errors.As(err, &e) || e.Status != 409 || e.Code != "session_busy" || p.i != 0 {
+		t.Fatalf("want 409 session_busy, nothing sent: %v", err)
+	}
+}

@@ -371,6 +371,12 @@ type Agent struct {
 	modelMu  sync.Mutex
 	loader   ModelLoader
 	modelGen int
+	// switchGen counts every change of the provider or model (SetProvider,
+	// applySwitch). A reader that must pair a gate decision with the
+	// provider it judged reads it before the check and again with the
+	// snapshot (apiModelSnapshot): a changed count means the snapshot is
+	// of a provider the check never saw.
+	switchGen int
 	// subs is the sub-agent runner, nil unless EnableSubAgents ran.
 	// laneAcquire wraps every model call once lanes exist (spec §2.2).
 	subs        *subAgents
@@ -494,6 +500,7 @@ func (a *Agent) applyModelLocked(model string) {
 func (a *Agent) SetProvider(p provider.Provider) {
 	a.modelMu.Lock()
 	a.Provider = p
+	a.switchGen++
 	a.modelMu.Unlock()
 	if OnlineResolver != nil {
 		// Fail closed until the paired SetModel/SetModelNow resolves
@@ -566,6 +573,7 @@ func (a *Agent) applySwitch(model string) (ModelLoader, int) {
 		a.History.System.Content = a.composeSystem("")
 	}
 	a.modelGen++
+	a.switchGen++
 	gen, l := a.modelGen, a.loader
 	if l != nil {
 		a.beginResolveLocked(gen)

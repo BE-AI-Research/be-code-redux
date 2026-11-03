@@ -289,6 +289,11 @@ func (a *Agent) noteGood() {
 	a.onlineMu.Unlock()
 }
 
+// errProviderUnresolved is the gate's answer between SetProvider and its
+// paired SetModel: not a refusal of the provider, a moment too early to
+// judge it. The API maps it to session_busy, never online_not_approved.
+var errProviderUnresolved = errors.New("the provider switch has not finished; nothing was sent")
+
 // checkOnlineGate runs ahead of every primary model call, next to the spend
 // cap: nothing reaches an online model before this project is approved for
 // it. Local sessions pass untouched. ask is true for the tool loop, where
@@ -306,7 +311,7 @@ func (a *Agent) checkOnlineGate(ctx context.Context, ask bool) error {
 	if unresolved {
 		// SetProvider without its paired model switch yet: whether the new
 		// provider is online is not known, so nothing goes out.
-		return errors.New("the provider switch has not finished; nothing was sent")
+		return errProviderUnresolved
 	}
 	name, online := a.Online()
 	if !online || a.OnlineApproved() {
