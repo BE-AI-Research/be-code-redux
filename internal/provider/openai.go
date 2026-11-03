@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,28 +24,52 @@ type OpenAICompat struct {
 	APIKey       string
 	// Headers are sent on every request after the Authorization header
 	// (config providers.<name>.headers).
-	Headers    map[string]string
+	Headers map[string]string
+	// Anthropic is set by NewOpenAICompat for api.anthropic.com: the key
+	// goes in x-api-key and anthropic-version rides every request.
+	Anthropic  bool
 	HTTPClient *http.Client
 }
 
-// NewOpenAICompat builds a client with a generous timeout suited to local
-// inference (first-token latency on CPU/consumer GPUs can be long).
+// AnthropicVersion is the API version header Anthropic's endpoints ask
+// for; the Models listing refuses some accounts without it.
+const AnthropicVersion = "2023-06-01"
+
+// IsAnthropicHost reports whether baseURL is Anthropic's own API, which
+// takes the key in x-api-key (a Bearer value that does not parse as a key
+// is answered "Invalid bearer token") and wants anthropic-version.
+func IsAnthropicHost(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && strings.EqualFold(u.Hostname(), "api.anthropic.com")
+}
+
 // setAuth puts the key and the endpoint's extra headers on a request.
+// Anthropic gets its own header style; everyone else a Bearer token.
 func (p *OpenAICompat) setAuth(req *http.Request) {
 	if p.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		if p.Anthropic {
+			req.Header.Set("x-api-key", p.APIKey)
+		} else {
+			req.Header.Set("Authorization", "Bearer "+p.APIKey)
+		}
+	}
+	if p.Anthropic {
+		req.Header.Set("anthropic-version", AnthropicVersion)
 	}
 	for k, v := range p.Headers {
 		req.Header.Set(k, v)
 	}
 }
 
+// NewOpenAICompat builds a client with a generous timeout suited to local
+// inference (first-token latency on CPU/consumer GPUs can be long).
 func NewOpenAICompat(name, baseURL, apiKey string) *OpenAICompat {
 	return &OpenAICompat{
 		ProviderName: name,
 		BaseURL:      strings.TrimRight(baseURL, "/"),
 		APIKey:       apiKey,
 		HTTPClient:   &http.Client{Timeout: 30 * time.Minute},
+		Anthropic:    IsAnthropicHost(baseURL),
 	}
 }
 

@@ -125,3 +125,26 @@ func TestExtraHeadersRideEveryRequest(t *testing.T) {
 		t.Fatalf("requests: %v", got)
 	}
 }
+
+func TestAnthropicHostUsesItsOwnHeaders(t *testing.T) {
+	if !IsAnthropicHost("https://api.anthropic.com/v1") || IsAnthropicHost("https://openrouter.ai/api/v1") || IsAnthropicHost("http://127.0.0.1:11434/v1") {
+		t.Fatal("host rule")
+	}
+	if !NewOpenAICompat("anthropic", "https://api.anthropic.com/v1", "k").Anthropic || NewOpenAICompat("or", "https://openrouter.ai/api/v1", "k").Anthropic {
+		t.Fatal("constructor flag")
+	}
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Write([]byte(`{"data":[{"id":"m"}]}`))
+	}))
+	defer srv.Close()
+	p := NewOpenAICompat("anthropic", srv.URL+"/v1", "sk-ant-k")
+	p.Anthropic = true
+	if _, err := p.ListModels(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("x-api-key") != "sk-ant-k" || got.Get("anthropic-version") != AnthropicVersion || got.Get("Authorization") != "" {
+		t.Fatalf("headers: %v", got)
+	}
+}
