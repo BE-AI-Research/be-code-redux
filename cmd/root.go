@@ -276,6 +276,7 @@ func buildAgent(cfg *config.Config, headless bool) (provider.Provider, *agent.Ag
 
 	notes := loadProjectNotes(reg.Root)
 	ag := agent.New(cfg, p, model, reg, notes)
+	ag.Headless = headless
 
 	for _, w := range cfg.OnlineWarnings() {
 		fmt.Fprintf(os.Stderr, "warn: %s\n", w)

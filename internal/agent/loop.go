@@ -124,6 +124,10 @@ type Agent struct {
 	Events   Events
 	// Session, when set, is auto-saved after every completed request.
 	Session *store.Session
+	// Headless is a scripted run (`be-code run`), set by cmd's buildAgent:
+	// nobody reads the transcript as it happens, so the job supervisor
+	// stops a stalled job at its second stall rather than its third.
+	Headless bool
 	// Checkpoints, when set, snapshots files before each turn's edits.
 	Checkpoints *checkpoint.Checkpointer
 	// API is the application API's serving side (cmd/api.go); nil when this

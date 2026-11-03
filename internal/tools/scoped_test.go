@@ -302,3 +302,25 @@ func TestScopedCheckAfterAParentPageAsks(t *testing.T) {
 		t.Fatalf("a denied check asked: %q", asked)
 	}
 }
+
+// TestScopedOnAskBracketsTheApproval: a sub-agent's question to the person
+// is a wait on someone else, so the scoped registry tells its owner when the
+// question starts and when it ends — around the parent's own Approve.
+func TestScopedOnAskBracketsTheApproval(t *testing.T) {
+	var events []string
+	sub, _ := scopedReg(t, func(action, detail string) bool { events = append(events, "approve"); return true })
+	sub.OnAsk = func(start bool) {
+		if start {
+			events = append(events, "start")
+		} else {
+			events = append(events, "end")
+		}
+	}
+	res := sub.Dispatch(context.Background(), call("write_file", `{"path":"internal/scan/b.go","content":"x\n"}`))
+	if res.IsError {
+		t.Fatal(res.Content)
+	}
+	if got := strings.Join(events, ","); got != "start,approve,end" {
+		t.Fatalf("events %q", got)
+	}
+}

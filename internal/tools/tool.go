@@ -116,6 +116,13 @@ type Registry struct {
 	// a read is not work on a file.
 	OnWrote func(absPath string)
 
+	// OnAsk, on a scoped registry only, is told when one of its approvals
+	// goes to a person (start true) and when the answer comes back (start
+	// false): a sub-agent waiting on someone else is not stalled, so its
+	// stall clock pauses for the question (dispatch-jobs spec §6). Read at
+	// call time; Scoped's Approve closure is the only caller.
+	OnAsk func(start bool)
+
 	// OnBeforeWrite runs after approval, before a file is modified —
 	// the checkpoint hook. A returned error aborts the write.
 	OnBeforeWrite func(absPath string) error
@@ -319,6 +326,10 @@ func (r *Registry) Scoped(scope, checks []string, label string) *Registry {
 	if r.Approve != nil {
 		parent := r.Approve
 		sub.Approve = func(action, detail string) bool {
+			if on := sub.OnAsk; on != nil {
+				on(true)
+				defer on(false)
+			}
 			return parent(action, "sub-agent "+label+":\n"+detail)
 		}
 	}

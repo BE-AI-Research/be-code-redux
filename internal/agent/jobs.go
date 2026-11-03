@@ -560,13 +560,13 @@ func (a *Agent) JobReply(id, text string) error {
 		return fmt.Errorf("job %s has not started yet", id)
 	}
 	// A reply restarts the clock but not the stall count (spec §6).
-	now := time.Now()
+	now := a.subNow()
 	s.mu.Lock()
 	if s.runs[id] != run {
 		s.mu.Unlock()
 		return fmt.Errorf("job %s has already finished", id)
 	}
-	run.lastActivity, run.lastIntervention = now, now
+	run.lastActivity, run.lastIntervention, run.clockFrom = now, now, now
 	s.mu.Unlock()
 	scratch.EnqueueHarness(text)
 	return nil
@@ -580,7 +580,7 @@ func (a *Agent) JobExtend(id string) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
+	now := a.subNow()
 	s := a.subs
 	s.mu.Lock()
 	if s.runs[id] != run {
@@ -590,6 +590,7 @@ func (a *Agent) JobExtend(id string) error {
 	run.stalled = false
 	run.lastActivity = now
 	run.lastIntervention = now
+	run.clockFrom = now
 	s.mu.Unlock()
 	return nil
 }

@@ -120,6 +120,9 @@ type subAgents struct {
 	// once with its hand-back. Written in the same critical section that
 	// deletes the run from runs.
 	jobsDone map[string]*subRun
+	// sup is the stall supervisor (supervisor.go), made with the runner and
+	// ticking between StartSubAgents and StopAllSubAgents.
+	sup *supervisor
 }
 
 type subRun struct {
@@ -169,6 +172,16 @@ type subRun struct {
 	stalls           int           // times the run has been reported stalled
 	stalled          bool          // currently past stall_after without activity
 	lastIntervention time.Time     // last time the main model intervened
+	// The supervisor's own bookkeeping (supervisor.go), stamped from
+	// Agent.subNow: clockFrom is where the stall clock last started (install,
+	// progress, an intervention, a wait's end, a stall line); meterAt is when
+	// runFor was last brought up to date; calls counts finished tool calls;
+	// stallAt and stallLine are the last stall line's time and text.
+	clockFrom time.Time
+	meterAt   time.Time
+	calls     int
+	stallAt   time.Time
+	stallLine string
 
 	// events carries a job's hand-back, ask and stall lines to JobWait, each
 	// sent after the same line is queued (so the queue stays the truth and a
@@ -240,6 +253,7 @@ func (a *Agent) EnableSubAgents(cws []config.CoworkerConfig, primaryServer strin
 		}
 		a.subs = &subAgents{lanes: lanes, runs: map[string]*subRun{}, refused: map[string]bool{},
 			hold: map[string]bool{}, pending: map[string]bool{}, root: ctx, cancel: cancel}
+		a.subs.sup = newSupervisor(a)
 	}
 	s := a.subs
 	s.mu.Lock()
@@ -404,6 +418,7 @@ func (a *Agent) StartSubAgents() {
 	if a.subs == nil {
 		return
 	}
+	a.startSupervisor()
 	a.resumeSubAgents()
 	a.startupResumeGate()
 	a.ScheduleSubAgents()
@@ -426,6 +441,7 @@ func (a *Agent) StartSubAgentsAsync() {
 	if a.subs == nil {
 		return
 	}
+	a.startSupervisor()
 	a.resumeSubAgents()
 	go func() {
 		defer func() {
@@ -909,9 +925,10 @@ func (a *Agent) dispatchPicked(steps []subagent.Step, c subagent.Candidate, cw c
 	// Under mu because root is reassigned on resume — and because deriving
 	// a context calls into neither the store nor a notice.
 	ctx, cancel := context.WithCancel(s.root)
+	now := a.subNow()
 	run := &subRun{d: d, cw: cw, ctx: ctx, cancel: cancel, started: time.Now(), job: job,
 		reply: make(chan string, 1), done: make(chan struct{}), drift: workledger.NewRun(a.Tools.Root),
-		events: make(chan jobEvent, 8)}
+		events: make(chan jobEvent, 8), clockFrom: now, meterAt: now}
 	s.runs[c.ID] = run
 	delete(s.jobsDone, c.ID)
 	s.wg.Add(1)
@@ -1157,7 +1174,10 @@ func (a *Agent) subConsent(run *subRun) (ok, held bool) {
 	}
 	detail := fmt.Sprintf("coworker: %s (%s/%s)\norigin: sub-agent %s\nscope: %s\nstep: %s\nit will read the repository and write files under the scope; the step's text, the project notes and the task notes go with it",
 		cw.Name, cw.Provider, cw.Model, run.d.Node, strings.Join(run.d.Scope, ", "), run.d.Text)
-	if a.Tools.Approve("consult", detail) {
+	a.setWaiting(run, "consent")
+	yes := a.Tools.Approve("consult", detail)
+	a.setWaiting(run, "")
+	if yes {
 		return true, false
 	}
 	if run.ctx.Err() == nil {
@@ -1198,6 +1218,14 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 		}
 		drift.Wrote(p)
 	}
+	// A question to a person is a wait on someone else, not a stall.
+	reg.OnAsk = func(start bool) {
+		if start {
+			a.setWaiting(run, "approval")
+		} else {
+			a.setWaiting(run, "")
+		}
+	}
 	reg.AddTool(tools.NewAskMain(func(ctx context.Context, q string) (string, error) { return a.askMain(run, ctx, q) }))
 	reg.AddTool(tools.NewTaskUnder(a.TaskLedger(), d.Node))
 	cfg := *a.Cfg
@@ -1234,12 +1262,28 @@ func (a *Agent) subAgent(cp provider.Provider, run *subRun, window int) *Agent {
 		}
 		return footer
 	}
-	scratch.Events = Events{OnTransient: func(msg string) { a.transient("%s", msg) }}
+	// Progress for the stall supervisor: a tool call finishing (named with
+	// the path its arguments gave, kept from OnToolStart) or a streamed or
+	// reasoning delta. Tool calls run one at a time on the scratch agent's
+	// own goroutine, so lastArgs needs no lock of its own.
+	var lastArgs string
+	scratch.Events = Events{
+		OnTransient: func(msg string) { a.transient("%s", msg) },
+		OnToolStart: func(_, args string) { lastArgs = args },
+		OnToolEnd:   func(name string, _ tools.Result) { a.noteActivity(run, name, toolFile(lastArgs)) },
+		OnDelta:     func(string) { a.noteActivity(run, "", "") },
+		OnReasoning: func(string) { a.noteActivity(run, "", "") },
+	}
 	a.subs.mu.Lock()
 	server := a.subs.cards[d.Owner].Server
 	a.subs.mu.Unlock()
 	lanes := a.subs.lanes
-	scratch.laneAcquire = func(ctx context.Context) (func(), error) { return lanes.Acquire(ctx, server, false) }
+	// Queued behind the primary for the server is a wait, not a stall.
+	scratch.laneAcquire = func(ctx context.Context) (func(), error) {
+		a.setWaiting(run, "lane")
+		defer a.setWaiting(run, "")
+		return lanes.Acquire(ctx, server, false)
+	}
 	scratch.knownTools = map[string]bool{}
 	for _, n := range reg.Names() {
 		scratch.knownTools[n] = true
@@ -1293,6 +1337,10 @@ func (a *Agent) askMain(run *subRun, ctx context.Context, q string) (string, err
 	if a.Events.OnSubAgentAsk != nil {
 		a.Events.OnSubAgentAsk(subagent.Ask{Node: run.d.Node, Owner: run.d.Owner, Question: q})
 	}
+	// Parked on the main model: the stall clock and the run-time meter stop
+	// until the answer (or the timeout, or a cancel) ends the wait.
+	a.setWaiting(run, "ask_main")
+	defer a.setWaiting(run, "")
 	timeout := time.Duration(a.Cfg.SubAgents.AskTimeout) * time.Second
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1547,6 +1595,7 @@ func (a *Agent) StopAllSubAgents(reason string) {
 	if s == nil {
 		return
 	}
+	a.stopSupervisor()
 	s.mu.Lock()
 	// Set before anything is cancelled: an interrupted node goes back to
 	// todo, and the finishing run's own schedule must not take it up again.
