@@ -36,6 +36,12 @@ type ToolCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"` // raw JSON object
+	// Extra is the provider's own data on the call, carried back verbatim
+	// when the call is replayed: Gemini's thought signature
+	// (extra_content.google.thought_signature), which Gemini 3 demands on
+	// every later request or refuses the conversation. Opaque here, and
+	// saved with the session so a resumed conversation still carries it.
+	Extra json.RawMessage `json:"extra_content,omitempty"`
 }
 
 // ToolSpec describes a tool the model may call.

@@ -313,7 +313,10 @@ type Agent struct {
 	queuedNotices []string
 	queuedMu      sync.Mutex
 	knownTools    map[string]bool
-	compat        bool // current session uses embedded tool calls
+	// nativeToolsWorked: a reply carried native tool calls this session,
+	// so no later error is read as "the server rejects the tools field".
+	nativeToolsWorked bool
+	compat            bool // current session uses embedded tool calls
 
 	// Co-working state (see cowork.go). coworkers is the usable co-worker
 	// list, resolved once at New and read-only thereafter; consults is the
@@ -1370,7 +1373,7 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 			}
 			// Some servers reject the tools field outright — fall back to
 			// embedded tool calls for the rest of the session.
-			if !a.compat && a.Cfg.CompatToolCalls != "never" && looksLikeToolsUnsupported(err) {
+			if !a.compat && a.Cfg.CompatToolCalls != "never" && !a.nativeToolsWorked && looksLikeToolsUnsupported(err) {
 				a.compat = true
 				a.notice("backend rejected native tool calls; switching to embedded format")
 				continue
@@ -1470,6 +1473,9 @@ func (a *Agent) run(ctx context.Context, userInput string, newTurn bool) (string
 		}
 
 		if len(resp.ToolCalls) > 0 {
+			// The server honoured the tools field: a later 400 is about the
+			// request, never about native tool calls being unsupported.
+			a.nativeToolsWorked = true
 			a.runNativeCalls(ctx, resp)
 		} else {
 			a.runEmbeddedCalls(ctx, resp.Content, content, calls)
@@ -2272,6 +2278,11 @@ const compactSystemPrompt = "Summarize this coding-agent conversation for contex
 
 func looksLikeToolsUnsupported(err error) bool {
 	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "thought_signature") {
+		// Gemini 3 refusing a replayed call without its signature: the
+		// tools field works, the replay was incomplete.
+		return false
+	}
 	return strings.Contains(s, "tool") &&
 		(strings.Contains(s, "not support") || strings.Contains(s, "unsupported") ||
 			strings.Contains(s, "invalid") || strings.Contains(s, "unknown field"))

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -299,5 +300,14 @@ func TestCompactKeepsTaskAndNewestWork(t *testing.T) {
 	}
 	if !strings.HasPrefix(ag.History.Messages[0].Content, "[Conversation summary") {
 		t.Fatalf("summary not installed: %q", ag.History.Messages[0].Content[:40])
+	}
+}
+
+func TestToolsUnsupportedClassifierIgnoresThoughtSignatureErrors(t *testing.T) {
+	if looksLikeToolsUnsupported(errors.New(`gemini: HTTP 400: Function call is missing a thought_signature in functionCall parts. This is required for tools to work correctly ... "status": "INVALID_ARGUMENT"`)) {
+		t.Fatal("a missing thought signature is not an unsupported tools field")
+	}
+	if !looksLikeToolsUnsupported(errors.New(`server: HTTP 400: "tools" is not supported by this model`)) {
+		t.Fatal("the genuine case must still match")
 	}
 }

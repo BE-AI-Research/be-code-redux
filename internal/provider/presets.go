@@ -23,7 +23,7 @@ var presets = []Preset{
 	{Name: "groq", BaseURL: "https://api.groq.com/openai/v1", KeyEnv: "GROQ_API_KEY", Docs: "https://console.groq.com/docs"},
 	{Name: "deepseek", BaseURL: "https://api.deepseek.com/v1", KeyEnv: "DEEPSEEK_API_KEY", Docs: "https://api-docs.deepseek.com"},
 	{Name: "mistral", BaseURL: "https://api.mistral.ai/v1", KeyEnv: "MISTRAL_API_KEY", Docs: "https://docs.mistral.ai"},
-	{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai", KeyEnv: "GEMINI_API_KEY", Docs: "https://ai.google.dev/gemini-api/docs/openai", KeysURL: "https://aistudio.google.com/apikey"},
+	{Name: "gemini", BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai", KeyEnv: "GEMINI_API_KEY", Docs: "https://ai.google.dev/gemini-api/docs/openai", KeysURL: "https://aistudio.google.com/apikey", Window: 1048576},
 	{Name: "anthropic", BaseURL: "https://api.anthropic.com/v1", KeyEnv: "ANTHROPIC_API_KEY", Docs: "https://docs.anthropic.com", KeysURL: "https://console.anthropic.com/settings/keys"},
 }
 

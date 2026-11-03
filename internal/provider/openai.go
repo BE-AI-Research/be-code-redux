@@ -96,6 +96,9 @@ type oaToolCall struct {
 		Name      string `json:"name,omitempty"`
 		Arguments string `json:"arguments,omitempty"`
 	} `json:"function"`
+	// ExtraContent is Gemini's per-call envelope (thought signature);
+	// kept verbatim and echoed on replay. Other servers ignore it.
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type oaMessage struct {
@@ -110,12 +113,14 @@ type oaMessage struct {
 }
 
 type oaRequest struct {
-	Model       string      `json:"model"`
-	Messages    []oaMessage `json:"messages"`
-	Tools       []oaTool    `json:"tools,omitempty"`
-	Temperature float64     `json:"temperature"`
-	MaxTokens   int         `json:"max_tokens,omitempty"`
-	Stream      bool        `json:"stream"`
+	Model    string      `json:"model"`
+	Messages []oaMessage `json:"messages"`
+	Tools    []oaTool    `json:"tools,omitempty"`
+	// Temperature is a pointer so it can be left off the wire: Anthropic
+	// refuses any value for its current models.
+	Temperature *float64 `json:"temperature,omitempty"`
+	MaxTokens   int      `json:"max_tokens,omitempty"`
+	Stream      bool     `json:"stream"`
 	// ReasoningEffort: OpenAI's field; Ollama's OpenAI endpoint passes it
 	// to thinking models (verified: low cuts a Qwen3 reply's reasoning by
 	// roughly six times), unknown elsewhere and harmlessly ignored.
@@ -147,7 +152,7 @@ func toWire(msgs []Message) []oaMessage {
 	for _, m := range msgs {
 		om := oaMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID, Name: m.Name}
 		for _, tc := range m.ToolCalls {
-			w := oaToolCall{ID: tc.ID, Type: "function"}
+			w := oaToolCall{ID: tc.ID, Type: "function", ExtraContent: tc.Extra}
 			w.Function.Name = tc.Name
 			w.Function.Arguments = tc.Arguments
 			om.ToolCalls = append(om.ToolCalls, w)
@@ -160,11 +165,16 @@ func toWire(msgs []Message) []oaMessage {
 // Chat streams a completion, accumulating text and tool calls.
 func (p *OpenAICompat) Chat(ctx context.Context, req ChatRequest, onDelta StreamFunc) (*ChatResponse, error) {
 	wire := oaRequest{
-		Model:       req.Model,
-		Messages:    toWire(req.Messages),
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
-		Stream:      true,
+		Model:     req.Model,
+		Messages:  toWire(req.Messages),
+		MaxTokens: req.MaxTokens,
+		Stream:    true,
+	}
+	if !p.Anthropic {
+		// Anthropic's current models answer 400 to any temperature (and
+		// top_p); the request names none and the model's default applies.
+		t := req.Temperature
+		wire.Temperature = &t
 	}
 	wire.ReasoningEffort = req.ReasoningEffort
 	wire.ResponseFormat = openAIResponseFormat(req)
@@ -276,6 +286,9 @@ func (p *OpenAICompat) consumeStream(r io.Reader, onDelta, onReasoning StreamFun
 				if tc.Function.Name != "" {
 					cur.Name = tc.Function.Name
 				}
+				if len(tc.ExtraContent) > 0 {
+					cur.Extra = tc.ExtraContent
+				}
 				cur.Arguments += tc.Function.Arguments
 			}
 			if ch.FinishReason != "" {
@@ -307,7 +320,7 @@ func (p *OpenAICompat) consumeStream(r io.Reader, onDelta, onReasoning StreamFun
 				if id == "" {
 					id = fmt.Sprintf("call_%d", n)
 				}
-				out.ToolCalls = append(out.ToolCalls, ToolCall{ID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+				out.ToolCalls = append(out.ToolCalls, ToolCall{ID: id, Name: tc.Function.Name, Arguments: tc.Function.Arguments, Extra: tc.ExtraContent})
 			}
 			if onDelta != nil && out.Content != "" {
 				onDelta(out.Content)

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,5 +204,94 @@ func TestChatSendsReasoningEffortOnlyWhenSet(t *testing.T) {
 	}
 	if !strings.Contains(bodies[1], `"reasoning_effort":"low"`) {
 		t.Fatalf("effort not sent: %s", bodies[1])
+	}
+}
+
+func TestAnthropicOmitsTemperature(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1<<16)
+		n, _ := r.Body.Read(b)
+		bodies = append(bodies, string(b[:n]))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"x"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	msgs := []Message{{Role: RoleUser, Content: "hi"}}
+	p := NewOpenAICompat("test", srv.URL, "")
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: msgs, Temperature: 0.2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	p.Anthropic = true
+	if _, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: msgs, Temperature: 0.2}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bodies[0], `"temperature":0.2`) {
+		t.Fatalf("temperature missing for a plain server: %s", bodies[0])
+	}
+	if strings.Contains(bodies[1], "temperature") || strings.Contains(bodies[1], "top_p") {
+		t.Fatalf("temperature sent to Anthropic: %s", bodies[1])
+	}
+}
+
+func TestStreamKeepsGeminiThoughtSignatureAndEchoesIt(t *testing.T) {
+	const sig = `{"google":{"thought_signature":"EvEFCu4F"}}`
+	srv := sse(t,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_dir","arguments":""},"extra_content":`+sig+`}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	defer srv.Close()
+	p := NewOpenAICompat("gemini", srv.URL, "")
+	resp, err := p.Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "ls"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.ToolCalls) != 1 || string(resp.ToolCalls[0].Extra) != sig {
+		t.Fatalf("signature not kept: %+v", resp.ToolCalls)
+	}
+	// Saved with the session and back: the field survives a JSON round trip.
+	b, _ := json.Marshal(Message{Role: RoleAssistant, ToolCalls: resp.ToolCalls})
+	var back Message
+	if err := json.Unmarshal(b, &back); err != nil || string(back.ToolCalls[0].Extra) != sig {
+		t.Fatalf("round trip: %s %v", b, err)
+	}
+	// Replayed, the assistant message carries extra_content on the call.
+	var body string
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 1<<16)
+		n, _ := r.Body.Read(buf)
+		body = string(buf[:n])
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer echo.Close()
+	p2 := NewOpenAICompat("gemini", echo.URL, "")
+	_, err = p2.Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{
+		{Role: RoleUser, Content: "ls"},
+		back,
+		{Role: RoleTool, ToolCallID: "call_1", Content: "a.go"},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `"extra_content":`+sig) {
+		t.Fatalf("signature not echoed: %s", body)
+	}
+	// A call with no signature sends no extra_content at all.
+	if strings.Count(body, "extra_content") != 1 {
+		t.Fatalf("extra_content count: %s", body)
+	}
+}
+
+func TestNonStreamingKeepsThoughtSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c","type":"function","function":{"name":"f","arguments":"{}"},"extra_content":{"google":{"thought_signature":"abc"}}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	defer srv.Close()
+	resp, err := NewOpenAICompat("gemini", srv.URL, "").Chat(context.Background(), ChatRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "x"}}}, nil)
+	if err != nil || len(resp.ToolCalls) != 1 || !strings.Contains(string(resp.ToolCalls[0].Extra), "abc") {
+		t.Fatalf("%+v %v", resp, err)
 	}
 }
