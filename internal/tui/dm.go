@@ -55,19 +55,27 @@ func (s *Session) online(id string) bool {
 	if s.onlineFn != nil {
 		return s.onlineFn(id)
 	}
+	return s.liveUsers()[id]
+}
+
+// liveUsers is every user attached to any session host on this machine,
+// from one read of the live records (liveUsersFn is the test seam).
+func (s *Session) liveUsers() map[string]bool {
+	if s.liveUsersFn != nil {
+		return s.liveUsersFn()
+	}
+	users := map[string]bool{}
 	dir, err := live.Dir()
 	if err != nil {
-		return false
+		return users
 	}
 	recs, _ := live.List(dir)
 	for _, r := range recs {
 		for _, u := range r.Users {
-			if u == id {
-				return true
-			}
+			users[u] = true
 		}
 	}
-	return false
+	return users
 }
 
 // dmState is one terminal's view state for the inbox and threads.
@@ -193,11 +201,24 @@ func (m *View) openThread(with string) {
 	}
 	m.dm.with = with
 	m.dm.msgs, _ = inbox.Thread(m.inboxDir, m.userID(), with)
-	m.dm.unreadFrom = len(m.dm.msgs)
+	// Unread counts incoming lines after the read mark, so the first unread
+	// line is found by counting incoming lines back from the end — a line
+	// of your own sent from another device may sit among them.
+	unread := 0
 	for _, t := range m.dm.threads {
-		if t.With == with && t.Unread > 0 && t.Unread <= len(m.dm.msgs) {
-			m.dm.unreadFrom = len(m.dm.msgs) - t.Unread
+		if t.With == with {
+			unread = t.Unread
 		}
+	}
+	m.dm.unreadFrom = len(m.dm.msgs)
+	for i := len(m.dm.msgs) - 1; i >= 0 && unread > 0; i-- {
+		if m.dm.msgs[i].From != m.userID() {
+			unread--
+			m.dm.unreadFrom = i
+		}
+	}
+	if unread > 0 {
+		m.dm.unreadFrom = 0
 	}
 	if n := len(m.dm.msgs); n > 0 {
 		_ = inbox.MarkRead(m.inboxDir, m.userID(), with, m.dm.msgs[n-1].TS)
@@ -327,7 +348,7 @@ func (m *View) layoutDM() {
 	var b strings.Builder
 	var prev time.Time
 	for i, x := range m.dm.msgs {
-		if d := m.divider(prev, x.TS); d != "" {
+		if d := m.divider(prev, x.TS, w); d != "" {
 			b.WriteString(d)
 			b.WriteString("\n")
 		}
@@ -339,11 +360,15 @@ func (m *View) layoutDM() {
 	m.dm.vp.SetContent(strings.TrimRight(b.String(), "\n"))
 }
 
-// inboxRowHeight is the rows one thread takes in the list (its row and the
-// rule under it), so a selected row can be found in the viewport's own
-// coordinates. The compact layout has no title inside the list; the full
-// one carries it in the frame.
-const inboxRowHeight = 2
+// inboxRowHeight is the rows one thread takes in the list — its row and
+// the thin rule under it, or the row alone without the frame — so a
+// selected row can be found in the viewport's own coordinates.
+func (m *View) inboxRowHeight() int {
+	if m.framed() {
+		return 2
+	}
+	return 1
+}
 
 // layoutInbox sizes the thread list the same way layoutChat sizes the room —
 // everything above the input rows and the footer — and keeps the selected
@@ -355,12 +380,13 @@ func (m *View) layoutInbox() {
 	}
 	m.dm.listVP.Width, m.dm.listVP.Height = m.width, h
 	m.dm.listVP.SetContent(m.renderInbox())
-	row := m.dm.sel * inboxRowHeight
+	rh := m.inboxRowHeight()
+	row := m.dm.sel * rh
 	switch {
 	case row < m.dm.listVP.YOffset:
 		m.dm.listVP.SetYOffset(row)
-	case row+1 >= m.dm.listVP.YOffset+h:
-		m.dm.listVP.SetYOffset(row + inboxRowHeight - h)
+	case row+rh-1 >= m.dm.listVP.YOffset+h:
+		m.dm.listVP.SetYOffset(row + rh - h)
 	}
 }
 
@@ -373,11 +399,17 @@ func (m *View) renderInbox() string {
 		b.WriteString(m.st.Dim.Render(" no messages yet · /dm <name> to send one") + "\n")
 	}
 	for i, t := range m.dm.threads {
-		dot := " "
+		dot, cur := " ", " "
 		if t.Unread > 0 {
 			dot = m.st.Mention.Render("●")
 		}
-		lead := " " + dot + " " + m.chipFor(t.With) + "  " + m.presence(t.With) + "  " + m.st.Dim.Render(t.Latest.TS.Format("15:04")) + "  "
+		if i == m.dm.sel {
+			// A cursor, not a background: the row is made of styled pieces,
+			// and the first reset inside it would end a background after
+			// one cell.
+			cur = m.st.Accent.Bold(true).Render("▸")
+		}
+		lead := cur + dot + " " + m.chipFor(t.With) + "  " + m.presence(t.With) + "  " + m.st.Dim.Render(t.Latest.TS.Format("15:04")) + "  "
 		if t.Unread > 0 {
 			lead += m.st.Mention.Render(fmt.Sprintf("%d new", t.Unread)) + "  "
 		}
@@ -403,11 +435,10 @@ func (m *View) renderInbox() string {
 		if t.Latest.From != m.userID() {
 			row = lead + string(snippet)
 		}
-		row = padToWidth(row, m.width)
-		if i == m.dm.sel {
-			row = m.st.Status.Padding(0).Render(row)
+		b.WriteString(padToWidth(row, m.width) + "\n")
+		if m.framed() {
+			b.WriteString(m.thinRule() + "\n")
 		}
-		b.WriteString(row + "\n" + m.thinRule() + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

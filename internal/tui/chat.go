@@ -340,7 +340,7 @@ func (m *View) renderRoom() string {
 	var b strings.Builder
 	var prev time.Time
 	for _, l := range m.room {
-		if d := m.divider(prev, l.TS); d != "" {
+		if d := m.divider(prev, l.TS, m.width); d != "" {
 			b.WriteString(d)
 			b.WriteString("\n")
 		}
@@ -359,7 +359,9 @@ func (m *View) renderChatLine(l store.ChatLine) string {
 	if l.User == "" {
 		return " " + ts + " " + m.st.ChatSystem.Render("· "+l.Text)
 	}
-	named := l.User != m.userID() && m.namesMe(l.Text)
+	// The bar follows the pings rule (PostLocked): a person's line that
+	// names you, never your own and never the model's reply.
+	named := l.User != m.userID() && l.User != inbox.Reserved && m.namesMe(l.Text)
 	chip := m.chipFor(l.User)
 	// bar, time, space, chip, space
 	used := 1 + 5 + 1 + lipgloss.Width(chip) + 1

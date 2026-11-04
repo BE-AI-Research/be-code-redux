@@ -21,11 +21,16 @@ import (
 // frameRows is how many rows the frame takes above the input: the title
 // row and the two rules, or none in the compact layout.
 func (m *View) frameRows() int {
-	if m.compact() {
+	if m.compact() || m.height-m.inputRows()-2-3 < 3 {
+		// Compact, or a layout forced to full on a terminal too short to
+		// hold the frame and three rows of content: the plain footer.
 		return 0
 	}
 	return 3
 }
+
+// framed reports whether the frame is drawn: frameRows() > 0.
+func (m *View) framed() bool { return m.frameRows() > 0 }
 
 // neonRule is the heavy accent rule across the terminal.
 func (m *View) neonRule() string {
@@ -125,14 +130,15 @@ func (m *View) titleRow(title, detail string) string {
 // frameTop is the title row and the rule under it; frameBottom the rule
 // above the input. Both are empty in the compact layout.
 func (m *View) frameTop(title, detail string) string {
-	if m.compact() {
+	if !m.framed() {
+		m.btnZones = m.btnZones[:0]
 		return ""
 	}
 	return m.titleRow(title, detail) + "\n" + m.neonRule() + "\n"
 }
 
 func (m *View) frameBottom() string {
-	if m.compact() {
+	if !m.framed() {
 		return ""
 	}
 	return m.neonRule() + "\n"
@@ -141,23 +147,40 @@ func (m *View) frameBottom() string {
 // clickButton acts on a left click at (x, y) on the title row: the button
 // there, if any. It reports whether the click was taken.
 func (m *View) clickButton(x, y int) (tea.Model, tea.Cmd, bool) {
-	if y != 0 || m.compact() {
+	if y != 0 || !m.framed() {
 		return m, nil, false
 	}
+	active := map[mode]string{modeChat: "room", modeInbox: "inbox", modeDM: "dm"}[m.mode]
 	for _, bt := range m.btnZones {
 		if x < bt.x0 || x >= bt.x1 {
 			continue
 		}
+		if bt.action == active {
+			return m, nil, true // already here: the draft stays as it is
+		}
+		// A switch keeps whatever was being typed: enterChat and enterInbox
+		// reset the input for a keyboard entry, which a click is not.
+		keep := func(mm tea.Model, cmd tea.Cmd, draft string) (tea.Model, tea.Cmd, bool) {
+			if v, ok := mm.(*View); ok && draft != "" && v.input.Value() == "" {
+				v.input.SetValue(draft)
+				v.input.CursorEnd()
+			}
+			return mm, cmd, true
+		}
 		switch bt.action {
 		case "room":
+			draft := m.input.Value()
 			mm, cmd := m.enterChat()
-			return mm, cmd, true
+			return keep(mm, cmd, draft)
 		case "inbox":
+			draft := m.input.Value()
 			mm, cmd := m.enterInbox()
-			return mm, cmd, true
+			return keep(mm, cmd, draft)
 		case "dm":
-			m.input.SetValue("/dm ")
-			m.input.CursorEnd()
+			if m.input.Value() == "" {
+				m.input.SetValue("/dm ")
+				m.input.CursorEnd()
+			}
 			return m, nil, true
 		case "pings":
 			arg := "off"
@@ -167,8 +190,9 @@ func (m *View) clickButton(x, y int) (tea.Model, tea.Cmd, bool) {
 			mm, cmd := m.chatPings([]string{arg})
 			return mm, cmd, true
 		case "back":
+			draft := m.input.Value()
 			mm, cmd := m.leaveMode()
-			return mm, cmd, true
+			return keep(mm, cmd, draft)
 		}
 	}
 	return m, nil, false
@@ -206,7 +230,7 @@ func (m *View) nameStyle(id string) lipgloss.Style {
 	case id == m.userID():
 		return m.st.NameYou
 	case id == inbox.Reserved:
-		return m.st.Cowork
+		return m.st.NameAgent
 	}
 	if len(m.st.Names) == 0 {
 		return m.st.NameYou
@@ -214,17 +238,22 @@ func (m *View) nameStyle(id string) lipgloss.Style {
 	return m.st.Names[userColorIndex(id, len(m.st.Names))]
 }
 
-// colorMentions draws every @name in text in that person's colour.
+// colorMentions draws every @name in text in that person's colour, the
+// name spelled as typed ("@Alice." keeps its capital and its full stop).
+// "@agent" is the model's own mention and takes the model's colour.
 func (m *View) colorMentions(text string) string {
 	return userMentionRe.ReplaceAllStringFunc(text, func(s string) string {
 		at := strings.Index(s, "@")
 		lead, name := s[:at], s[at+1:]
-		id, err := inbox.ValidID(strings.TrimRight(name, ".-_"))
-		if err != nil {
-			return s
+		trimmed := strings.TrimRight(name, ".-_")
+		id := strings.ToLower(trimmed)
+		if id != inbox.Reserved {
+			var err error
+			if id, err = inbox.ValidID(trimmed); err != nil {
+				return s
+			}
 		}
-		tail := name[len(id):]
-		return lead + m.nameStyle(id).Bold(true).Render("@"+id) + tail
+		return lead + m.nameStyle(id).Bold(true).Render("@"+trimmed) + name[len(trimmed):]
 	})
 }
 
@@ -247,7 +276,7 @@ const dividerGap = 10 * time.Minute
 
 // divider is the dim centred marker between prev and cur: the day when it
 // changed, the time when more than dividerGap passed, else "".
-func (m *View) divider(prev, cur time.Time) string {
+func (m *View) divider(prev, cur time.Time, width int) string {
 	if prev.IsZero() {
 		return ""
 	}
@@ -269,7 +298,7 @@ func (m *View) divider(prev, cur time.Time) string {
 	default:
 		return ""
 	}
-	w := m.width
+	w := width
 	if w <= 0 {
 		w = 40
 	}
@@ -298,14 +327,12 @@ func (m *View) presence(id string) string {
 		on = m.withOnline()
 	} else {
 		if m.dm.presenceAt.IsZero() || m.now().Sub(m.dm.presenceAt) > onlineTTL {
-			m.dm.presence = map[string]bool{}
+			// One read of the live records answers every row until the
+			// TTL passes, however many correspondents the inbox lists.
+			m.dm.presence = m.liveUsers()
 			m.dm.presenceAt = m.now()
 		}
-		var ok bool
-		if on, ok = m.dm.presence[id]; !ok {
-			on = m.online(id)
-			m.dm.presence[id] = on
-		}
+		on = m.dm.presence[id]
 	}
 	if on {
 		return m.st.OK.Render("● online")

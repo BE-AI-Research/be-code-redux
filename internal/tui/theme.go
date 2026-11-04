@@ -72,7 +72,7 @@ type styles struct {
 	// that names you.
 	Chips, Names       []lipgloss.Style
 	ChipYou, ChipAgent lipgloss.Style
-	NameYou            lipgloss.Style
+	NameYou, NameAgent lipgloss.Style
 	Button, ChipOn     lipgloss.Style
 	Mention            lipgloss.Style
 	name               string
@@ -81,10 +81,12 @@ type styles struct {
 // User colours for the chat frame: neon on a dark theme, the same hues
 // deepened for a light one, in a fixed order a name hashes into.
 var (
-	neonUsers      = []string{"#2ee6ff", "#9dff3d", "#ff3df2", "#b48bff", "#ff8c3d", "#3dffb5"}
-	neonUsersLight = []string{"#0077b6", "#2d7d00", "#b5179e", "#5a189a", "#c75000", "#007f5f"}
+	neonUsers      = []string{"#2ee6ff", "#9dff3d", "#ff3df2", "#ff6b6b", "#ff8c3d", "#3dffb5"}
+	neonUsersLight = []string{"#0077b6", "#2d7d00", "#b5179e", "#c0392b", "#c75000", "#007f5f"}
 	neonYou        = "#ffc53d"
 	neonYouLight   = "#9a6700"
+	neonAgent      = "#b48bff" // violet, in no user set, on every theme
+	neonAgentLight = "#5a189a"
 )
 
 // Name is the theme this styles value was built from.
@@ -114,7 +116,7 @@ func newStyles(name string) (styles, bool) {
 		// One way of standing out: reverse video for a chip, bold for a name.
 		rev := lipgloss.NewStyle().Reverse(true).Bold(true)
 		st.Chips, st.Names = []lipgloss.Style{rev}, []lipgloss.Style{st.User}
-		st.ChipYou, st.ChipAgent, st.NameYou = rev, rev, st.User
+		st.ChipYou, st.ChipAgent, st.NameYou, st.NameAgent = rev, rev, st.User, st.User
 		st.Button, st.ChipOn, st.Mention = lipgloss.NewStyle().Bold(true), rev, lipgloss.NewStyle().Bold(true)
 		return st, true
 	}
@@ -137,9 +139,9 @@ func newStyles(name string) (styles, bool) {
 		border = lipgloss.NormalBorder()
 	}
 	st.Border = lipgloss.NewStyle().Border(border).BorderForeground(lipgloss.Color(p.Border)).Padding(0, 1)
-	users, you, ink := neonUsers, neonYou, "#0b0d12"
+	users, you, agent, ink := neonUsers, neonYou, neonAgent, "#0b0d12"
 	if p.Light {
-		users, you, ink = neonUsersLight, neonYouLight, "#ffffff"
+		users, you, agent, ink = neonUsersLight, neonYouLight, neonAgentLight, "#ffffff"
 	}
 	chip := func(c string) lipgloss.Style {
 		return lipgloss.NewStyle().Background(lipgloss.Color(c)).Foreground(lipgloss.Color(ink)).Bold(true)
@@ -149,7 +151,7 @@ func newStyles(name string) (styles, bool) {
 		st.Names = append(st.Names, fg(c))
 	}
 	st.ChipYou, st.NameYou = chip(you), fg(you)
-	st.ChipAgent = chip(p.Cowork)
+	st.ChipAgent, st.NameAgent = chip(agent), fg(agent)
 	st.Button = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent)).Bold(true)
 	st.ChipOn = chip(p.Accent)
 	st.Mention = fg(p.User).Bold(true)

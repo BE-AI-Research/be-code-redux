@@ -147,6 +147,9 @@ type Session struct {
 	// live-registry scan).
 	inboxDir string
 	onlineFn func(id string) bool
+	// liveUsersFn is the test seam for liveUsers (one scan behind every
+	// inbox row's presence); nil means the real live records.
+	liveUsersFn func() map[string]bool
 	// switchPending is set between asking the host to switch a terminal and
 	// the roster that shows whether anyone is left (see SetClients).
 	switchPending bool

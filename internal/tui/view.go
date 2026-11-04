@@ -23,6 +23,7 @@ import (
 	"github.com/brown-enterprises/be-code/internal/agent"
 	"github.com/brown-enterprises/be-code/internal/commands"
 	"github.com/brown-enterprises/be-code/internal/config"
+	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/provider"
 	"github.com/brown-enterprises/be-code/internal/store"
@@ -588,7 +589,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatVP.GotoBottom()
 		} else if msg.line.Kind != "join" && msg.line.Kind != "leave" {
 			m.chatUnseen++
-			if msg.line.User != "" && msg.line.User != m.userID() && m.namesMe(msg.line.Text) {
+			// The same rule as a ping (PostLocked): a person's line, not
+			// your own and not the model's reply.
+			if msg.line.User != "" && msg.line.User != m.userID() && msg.line.User != inbox.Reserved && m.namesMe(msg.line.Text) {
 				m.chatMentions++
 			}
 		}
@@ -597,7 +600,7 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// view's own copy follows, the same as the session's (see
 		// slashCommand's "/clear" case).
 		m.room = nil
-		m.chatUnseen = 0
+		m.chatUnseen, m.chatMentions = 0, 0
 		if m.mode == modeChat {
 			m.layoutChat()
 		}

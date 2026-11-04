@@ -9,7 +9,8 @@
   and dividers where a day or ten quiet minutes passed. Inbox rows carry the unread mark, the
   chip, presence, the time, `N new` and the last line; an opened thread bars the lines that were
   unread. The bottom line counts mentions since you last looked (`@ (2)`), and the compact
-  layout now shows the unread-DM count too. Compact terminals keep the plain footer.
+  layout now shows the unread-DM count too. Compact terminals keep the plain footer and
+  one-line inbox rows.
 - **Chat pings.** A person's room line that names you with `@name` prints a dim
   `User replied: <who> (chat)` in your transcript, on your terminals only, so someone watching
   the agent work knows to look; the rest of the room, and the model's own replies, print
