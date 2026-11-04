@@ -32,7 +32,10 @@ func AddCoworker(cfg *config.Config, ag *agent.Agent, cw config.CoworkerConfig) 
 	cws := ag.Coworkers()
 	added := cws[len(cws)-1] // the agent's copy carries the online flag it decided
 	cfg.Coworkers = append(cfg.Coworkers, added)
-	if err := cfg.Save(); err != nil {
+	// The file is changed on its own copy (config.Update): the session's
+	// Config carries the "a" key's session-only approvals under keys the
+	// file has, so it is never what gets saved.
+	if err := config.Update(func(c *config.Config) { c.Coworkers = append(c.Coworkers, added) }); err != nil {
 		return "", err
 	}
 	line := fmt.Sprintf("co-worker %s added (%s/%s); consult it with /consult %s <question>, or the agent will when it needs to", added.Name, added.Provider, added.Model, added.Name)
@@ -50,14 +53,17 @@ func RemoveCoworker(cfg *config.Config, ag *agent.Agent, name string) (string, e
 	if err := ag.RemoveCoworker(name); err != nil {
 		return "", err
 	}
-	kept := cfg.Coworkers[:0]
-	for _, cw := range cfg.Coworkers {
-		if cw.Name != name {
-			kept = append(kept, cw)
+	without := func(cws []config.CoworkerConfig) []config.CoworkerConfig {
+		kept := make([]config.CoworkerConfig, 0, len(cws))
+		for _, cw := range cws {
+			if cw.Name != name {
+				kept = append(kept, cw)
+			}
 		}
+		return kept
 	}
-	cfg.Coworkers = kept
-	if err := cfg.Save(); err != nil {
+	cfg.Coworkers = without(cfg.Coworkers)
+	if err := config.Update(func(c *config.Config) { c.Coworkers = without(c.Coworkers) }); err != nil {
 		return "", err
 	}
 	return "co-worker " + name + " removed", nil

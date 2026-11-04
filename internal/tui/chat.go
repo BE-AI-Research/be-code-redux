@@ -370,6 +370,11 @@ func (m *View) viewChat() string {
 			footer += " · agent is working on " + m.mentionBusy + "'s question"
 		}
 	}
+	// The room has no toast row of its own: a live toast (a DM for this
+	// terminal, a /chat pings confirmation typed here) takes the footer.
+	if t := m.shownToast(); t != "" {
+		footer = " " + t
+	}
 	return m.chatVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
 }
 

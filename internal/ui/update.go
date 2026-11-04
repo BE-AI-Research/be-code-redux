@@ -70,7 +70,9 @@ func UpdateCheckCommand(cfg *config.Config, arg string) string {
 	if !on {
 		msg = "update check off — BE-Code makes no network call at start"
 	}
-	if err := cfg.Save(); err != nil {
+	// config.Update, never cfg.Save(): the session's Config carries the "a"
+	// key's session-only approvals under keys the file has.
+	if err := config.Update(func(c *config.Config) { c.UpdateCheck = &on }); err != nil {
 		return msg + " (this session only: could not save config: " + err.Error() + ")"
 	}
 	return msg

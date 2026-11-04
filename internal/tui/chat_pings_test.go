@@ -115,15 +115,20 @@ func TestChatPingsOffIsPerUserAndNeverSilencesDMs(t *testing.T) {
 	if strings.Contains(vb.transcriptText(), "New DM") {
 		t.Fatal("bob's transcript carries alice's DM line")
 	}
+	// The DM's toast would take the room's footer (as it should); clear it
+	// to read the footer itself.
+	va.ownToast = ""
 	va.slashCommand("/chat")
 	if !strings.Contains(va.View(), "pings off") {
 		t.Fatalf("the room footer does not say pings are off:\n%s", va.View())
 	}
+	// Typed inside the room, the confirmation is drawn there (as the
+	// footer), not into the hidden transcript.
 	va.slashCommand("/chat pings on")
 	if !s.cfg.Chat.PingsOn("alice") {
 		t.Fatal("alice's switch not restored")
 	}
-	if strings.Contains(va.View(), "pings off") {
-		t.Fatal("the footer still says pings are off")
+	if v := va.View(); !strings.Contains(v, "chat pings on for alice") || strings.Contains(v, "pings off") {
+		t.Fatalf("the room did not show the confirmation:\n%s", v)
 	}
 }

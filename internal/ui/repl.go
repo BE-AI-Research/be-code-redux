@@ -292,7 +292,9 @@ func (r *REPL) approveCtx(ctx context.Context, action, detail string) bool {
 			// Standing consent for this machine's server, persisted: it is a
 			// statement about the server, not about one run.
 			r.Cfg.ReloadOnMismatch = "always"
-			if err := r.Cfg.Save(); err != nil {
+			// Through config.Update: r.Cfg also carries this session's
+			// shell and file-write answers, which must not reach the file.
+			if err := config.Update(func(c *config.Config) { c.ReloadOnMismatch = "always" }); err != nil {
 				fmt.Println(dim("could not save reload_on_mismatch: " + err.Error()))
 			} else {
 				fmt.Println(dim("reload_on_mismatch: always (config saved)"))
@@ -949,7 +951,8 @@ func (r *REPL) command(ctx context.Context, input string) bool {
 			break
 		}
 		r.Cfg.Theme = strings.ToLower(fields[1])
-		if err := r.Cfg.Save(); err != nil {
+		theme := r.Cfg.Theme
+		if err := config.Update(func(c *config.Config) { c.Theme = theme }); err != nil {
 			fmt.Printf("%s %v\n", red("error>"), err)
 			break
 		}

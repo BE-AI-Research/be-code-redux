@@ -954,7 +954,8 @@ watching the agent work knows to look; the rest of the room prints nothing, and 
 own reply pings nobody (it is already in the transcript). `/chat pings off` switches those
 lines off for your user ID (saved in the host's config as `chat.pings`, so every terminal of
 yours through that host agrees; the room's footer says `pings off`), and `/chat pings on`
-restores them. DMs span every session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
+restores them. DMs span every session on the machine: `/dm <name>` opens a thread, `/inbox`
+lists them newest first
 (`●` unread), a DM to someone attached prints `New DM (carol)` in their transcript (no
 switch), and a message to someone not attached anywhere waits for them. Your name
 comes from `chat.name` in your own config, else the name already bound to your address;

@@ -8,11 +8,12 @@
   nothing. A DM to you while you are attached prints `New DM (<who>)`. `/chat pings on|off` is
   your own switch for the mention lines, saved in the host's config as `chat.pings`; the room's
   footer says `pings off` while it is.
-- A setting changed from inside a session (`/theme`, `/chat pings`, the standing `model_reload`
-  consent) is written by loading the config file afresh and saving that, so the session's own
-  copy — which carries the `a` key's "always run shell commands" and "approve every write" for
-  the session under the same keys — is never written to disk by it. `/theme` used to make a
-  session's `a` permanent.
+- A setting changed from inside a session — `/theme`, `/chat pings`, `/update check on|off`,
+  `/coworkers add|remove`, and the standing `model_reload` consent, in both UIs — is written by
+  loading the config file afresh and saving that, so the session's own copy, which carries the
+  `a` key's "always run shell commands" and "approve every write" for the session under the
+  same keys, is never written to disk by it. Any of those used to make a session's `a`
+  permanent.
 - A job's own compaction summary — a model call that streams nothing back — no longer counts as
   silence for the stall clock: it is a wait like a tool call, shown as `waiting (compaction)`,
   on the run-time meter, until it has run for twice `stall_after` (a hung summary call is
