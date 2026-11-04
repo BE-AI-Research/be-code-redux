@@ -252,7 +252,7 @@ func (m *View) enterChat() (tea.Model, tea.Cmd) {
 			m.PostLocked("", m.chatName()+" joined", "join")
 		}
 		m.mode = modeChat
-		m.chatUnseen = 0
+		m.chatUnseen, m.chatMentions = 0, 0
 		// A selection belongs to the transcript this mode covers: left alive
 		// it would keep highlighting lines nobody can see, and Ctrl+C in the
 		// room would copy them instead of clearing the draft.
@@ -326,7 +326,7 @@ func (m *View) handleChatKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // layoutChat sizes the room viewport: everything above the input rows and
 // the footer.
 func (m *View) layoutChat() {
-	h := m.height - m.inputRows() - 2
+	h := m.height - m.inputRows() - 2 - m.frameRows()
 	if h < 3 {
 		h = 3
 	}
@@ -334,25 +334,37 @@ func (m *View) layoutChat() {
 	m.chatVP.SetContent(m.renderRoom())
 }
 
+// renderRoom draws the room: a divider where a day or more than dividerGap
+// passed between lines, then each line (chatframe.go).
 func (m *View) renderRoom() string {
 	var b strings.Builder
+	var prev time.Time
 	for _, l := range m.room {
+		if d := m.divider(prev, l.TS); d != "" {
+			b.WriteString(d)
+			b.WriteString("\n")
+		}
+		prev = l.TS
 		b.WriteString(m.renderChatLine(l))
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// renderChatLine is one room line: the bar when it names you, the time,
+// the person's chip, the text with every @name in its person's colour. A
+// system line (join, leave) is dim with a leading dot.
 func (m *View) renderChatLine(l store.ChatLine) string {
 	ts := m.st.Dim.Render(l.TS.Format("15:04"))
-	switch {
-	case l.User == "":
-		return ts + " " + m.st.ChatSystem.Render(l.Text)
-	case l.User == "agent":
-		return ts + " " + m.st.Cowork.Render("agent: ") + wrapTo(l.Text, m.width-15)
-	default:
-		return ts + " " + m.st.ChatUser.Render(l.User+": ") + wrapTo(l.Text, m.width-8-lipgloss.Width(l.User))
+	if l.User == "" {
+		return " " + ts + " " + m.st.ChatSystem.Render("· "+l.Text)
 	}
+	named := l.User != m.userID() && m.namesMe(l.Text)
+	chip := m.chipFor(l.User)
+	// bar, time, space, chip, space
+	used := 1 + 5 + 1 + lipgloss.Width(chip) + 1
+	text := m.colorMentions(l.Text)
+	return m.mentionBar(named) + ts + " " + chip + " " + wrapTo(text, m.width-used)
 }
 
 func (m *View) viewChat() string {
@@ -375,7 +387,8 @@ func (m *View) viewChat() string {
 	if t := m.shownToast(); t != "" {
 		footer = " " + t
 	}
-	return m.chatVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
+	top := m.frameTop("ROOM", m.st.Dim.Render(fmt.Sprintf("· %d here", here)))
+	return top + m.chatVP.View() + "\n" + m.frameBottom() + m.inputView() + "\n" + m.footerLine(footer)
 }
 
 // footerLine is the last row of the room, the inbox and a DM thread: cut to

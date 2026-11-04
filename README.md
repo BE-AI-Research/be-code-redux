@@ -969,6 +969,20 @@ Messages live under `~/.be-code/inbox/`;
 identity is advisory, not security — anyone with a shell on the host can read them. Plain
 mode and headless runs have neither.
 
+The room, the inbox and a DM thread share one frame on a full-size terminal: a title row
+(`▌ ROOM · 3 here`, `▌ INBOX · you`, `▌ DM [carol] ● online`) with clickable buttons on its
+right — `Room`, `Inbox ●2` (unread DMs), `DM ▸` (puts `/dm ` in the input), `@ pings on|off`
+and `← Back` — a heavy rule in the theme's accent under it and another above the input. Every
+person gets a colour chip from a set of six (the same colour on every terminal, by a hash of
+the name; you are always amber, the model violet), an `@name` in a line is drawn in that
+person's colour, a line that names you carries a bar on its left, and a dim divider marks a
+day change or more than ten minutes of quiet. Inbox rows show the unread mark, the chip,
+presence (`● online` / `○ away`), the newest line's time, how many are new and that line cut
+to fit; a thread opened from it carries the bar on the lines that were unread. The transcript's
+bottom line counts room lines that named you since you last opened the room (`@ (2)`) beside
+`chat (N new)` and `inbox (N)`. A compact terminal (under 70 columns or 20 rows) keeps the
+plain footer: no buttons, no rules.
+
 ## Checkpoints & undo
 
 Every agent turn snapshots files before they're touched. `/undo` rolls back the last

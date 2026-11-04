@@ -31,7 +31,7 @@ func TestInboxListsThreadsAndEnterOpensOne(t *testing.T) {
 	inbox.Send(s.inboxDir, "carol", "alice", "lunch?")
 	v.slashCommand("/inbox")
 	out := v.View()
-	if v.mode != modeInbox || !strings.Contains(out, "● carol") || !strings.Contains(out, "lunch?") || strings.Index(out, "carol") > strings.Index(out, "bob") {
+	if v.mode != modeInbox || !strings.Contains(out, "●  carol ") || !strings.Contains(out, "lunch?") || strings.Index(out, "carol") > strings.Index(out, "bob") {
 		t.Fatalf("mode %v:\n%s", v.mode, out)
 	}
 	if v.unreadDMs() != 2 || !strings.Contains(v.bottomLine(), "inbox (2)") {
@@ -61,7 +61,7 @@ func TestDMSendsAFileAndAgentMentionIsPlainText(t *testing.T) {
 	if started || s.ag.Pending() != 0 {
 		t.Fatal("a DM reached the agent")
 	}
-	if !strings.Contains(v.View(), "alice: @agent") {
+	if !strings.Contains(v.View(), " alice  @agent") {
 		t.Fatalf("own message not shown:\n%s", v.View())
 	}
 }

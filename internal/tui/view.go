@@ -214,6 +214,12 @@ type View struct {
 	room       []store.ChatLine
 	chatVP     viewport.Model
 	chatUnseen int
+	// chatMentions counts room lines that named this terminal's user since
+	// it last opened the room: the bottom line's "@ (N)".
+	chatMentions int
+	// btnZones is where the chat frame drew its buttons on the last render
+	// (chatframe.go), so a click on the title row finds the one under it.
+	btnZones []chatButton
 	// ownToast is a notice for this terminal alone (a DM for its identity);
 	// the session's toast is shared by every view. Same expiry.
 	ownToast      string
@@ -582,6 +588,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatVP.GotoBottom()
 		} else if msg.line.Kind != "join" && msg.line.Kind != "leave" {
 			m.chatUnseen++
+			if msg.line.User != "" && msg.line.User != m.userID() && m.namesMe(msg.line.Text) {
+				m.chatMentions++
+			}
 		}
 	case roomResetMsg:
 		// /clear starts a fresh session with an empty room; every attached
@@ -1360,6 +1369,9 @@ func (m *View) bottomLine() string {
 	}
 	if m.chatUnseen > 0 && m.mode != modeChat {
 		line += m.st.Accent.Render(fmt.Sprintf(" · chat (%d new)", m.chatUnseen))
+	}
+	if m.chatMentions > 0 && m.mode != modeChat {
+		line += m.st.Mention.Render(fmt.Sprintf(" · @ (%d)", m.chatMentions))
 	}
 	if n := m.unreadDMs(); n > 0 {
 		line += m.st.Accent.Render(fmt.Sprintf(" · inbox (%d)", n))

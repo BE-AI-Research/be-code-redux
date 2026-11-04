@@ -60,6 +60,14 @@ func (m *View) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			*vp, cmd = vp.Update(msg)
 			return m, cmd
+		case tea.MouseButtonLeft:
+			// The frame's button row (chatframe.go) is the one thing a
+			// click does in these modes.
+			if msg.Action == tea.MouseActionPress {
+				if mm, cmd, ok := m.clickButton(msg.X, msg.Y); ok {
+					return mm, cmd
+				}
+			}
 		}
 		return m, nil
 	}

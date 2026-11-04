@@ -56,7 +56,7 @@ func TestTwoTerminalsChatDMAndMention(t *testing.T) {
 	a.input.SetValue("tests are red")
 	a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	drainAll(t, a, b)
-	if !strings.Contains(b.View(), "alice: tests are red") {
+	if !strings.Contains(b.View(), " alice  tests are red") { // the chip " alice " then the text
 		t.Fatalf("bob's room:\n%s", b.View())
 	}
 	b.input.SetValue("/dm alice")
@@ -85,7 +85,7 @@ func TestTwoTerminalsChatDMAndMention(t *testing.T) {
 	if n := strings.Count(transcriptText(s), "max_dist"); n != 1 {
 		t.Fatalf("transcript has the answer %d times", n)
 	}
-	if !strings.Contains(b.View(), "agent: The picking tests") {
+	if !strings.Contains(b.View(), " agent  The picking tests") {
 		t.Fatalf("bob did not see the reply:\n%s", b.View())
 	}
 }

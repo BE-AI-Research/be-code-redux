@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The room, the inbox and a DM thread wear one frame.** A title row with clickable buttons
+  (`Room`, `Inbox ●N`, `DM ▸`, `@ pings on|off`, `← Back`), heavy accent rules above and below,
+  a colour chip per person (six neon tones by a hash of the name, the same everywhere; you amber,
+  the model violet), `@name` drawn in that person's colour, a bar on any line that names you,
+  and dividers where a day or ten quiet minutes passed. Inbox rows carry the unread mark, the
+  chip, presence, the time, `N new` and the last line; an opened thread bars the lines that were
+  unread. The bottom line counts mentions since you last looked (`@ (2)`), and the compact
+  layout now shows the unread-DM count too. Compact terminals keep the plain footer.
 - **Chat pings.** A person's room line that names you with `@name` prints a dim
   `User replied: <who> (chat)` in your transcript, on your terminals only, so someone watching
   the agent work knows to look; the rest of the room, and the model's own replies, print

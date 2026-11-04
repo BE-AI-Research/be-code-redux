@@ -87,6 +87,14 @@ type dmState struct {
 	// live record each frame is a disk scan for nothing.
 	online   bool
 	onlineAt time.Time
+	// presence is the inbox rows' "online"/"away" answers, one scan per
+	// onlineTTL for every row (chatframe.go's presence).
+	presence   map[string]bool
+	presenceAt time.Time
+	// unreadFrom is the index of the first line that was unread when the
+	// open thread was opened: those lines carry the mention bar for this
+	// visit, so a reader sees what they came for.
+	unreadFrom int
 }
 
 // onlineTTL is how long a thread's online answer is trusted.
@@ -185,6 +193,12 @@ func (m *View) openThread(with string) {
 	}
 	m.dm.with = with
 	m.dm.msgs, _ = inbox.Thread(m.inboxDir, m.userID(), with)
+	m.dm.unreadFrom = len(m.dm.msgs)
+	for _, t := range m.dm.threads {
+		if t.With == with && t.Unread > 0 && t.Unread <= len(m.dm.msgs) {
+			m.dm.unreadFrom = len(m.dm.msgs) - t.Unread
+		}
+	}
 	if n := len(m.dm.msgs); n > 0 {
 		_ = inbox.MarkRead(m.inboxDir, m.userID(), with, m.dm.msgs[n-1].TS)
 	}
@@ -297,74 +311,84 @@ const contactWidth = 18
 
 func (m *View) showContacts() bool { return m.width >= 70 }
 
+// layoutDM sizes and draws the open thread: dividers where a day or more
+// than dividerGap passed, each line with its chip, and the mention bar on
+// the lines that were unread when the thread was opened.
 func (m *View) layoutDM() {
 	w := m.width
 	if m.showContacts() {
 		w = m.width - contactWidth - 1
 	}
-	h := m.height - m.inputRows() - 2
+	h := m.height - m.inputRows() - 2 - m.frameRows()
 	if h < 3 {
 		h = 3
 	}
 	m.dm.vp.Width, m.dm.vp.Height = w, h
 	var b strings.Builder
-	for _, x := range m.dm.msgs {
-		who := x.From
-		style := m.st.ChatUser
-		if x.From == m.userID() {
-			style = m.st.Accent
+	var prev time.Time
+	for i, x := range m.dm.msgs {
+		if d := m.divider(prev, x.TS); d != "" {
+			b.WriteString(d)
+			b.WriteString("\n")
 		}
-		b.WriteString(m.st.Dim.Render(x.TS.Format("15:04")) + " " + style.Render(who+": ") + wrapTo(x.Text, w-8-len(who)) + "\n")
+		prev = x.TS
+		chip := m.chipFor(x.From)
+		used := 1 + 5 + 1 + lipgloss.Width(chip) + 1
+		b.WriteString(m.mentionBar(i >= m.dm.unreadFrom && x.From != m.userID()) + m.st.Dim.Render(x.TS.Format("15:04")) + " " + chip + " " + wrapTo(x.Text, w-used) + "\n")
 	}
 	m.dm.vp.SetContent(strings.TrimRight(b.String(), "\n"))
 }
 
-// inboxHeaderRows is how many rows renderInbox puts above the first thread
-// (the title and the blank line under it), so a selected row can be found in
-// the viewport's own coordinates.
-const inboxHeaderRows = 2
+// inboxRowHeight is the rows one thread takes in the list (its row and the
+// rule under it), so a selected row can be found in the viewport's own
+// coordinates. The compact layout has no title inside the list; the full
+// one carries it in the frame.
+const inboxRowHeight = 2
 
 // layoutInbox sizes the thread list the same way layoutChat sizes the room —
 // everything above the input rows and the footer — and keeps the selected
 // row on screen.
 func (m *View) layoutInbox() {
-	h := m.height - m.inputRows() - 2
+	h := m.height - m.inputRows() - 2 - m.frameRows()
 	if h < 3 {
 		h = 3
 	}
 	m.dm.listVP.Width, m.dm.listVP.Height = m.width, h
 	m.dm.listVP.SetContent(m.renderInbox())
-	row := inboxHeaderRows + m.dm.sel
+	row := m.dm.sel * inboxRowHeight
 	switch {
 	case row < m.dm.listVP.YOffset:
 		m.dm.listVP.SetYOffset(row)
-	case row >= m.dm.listVP.YOffset+h:
-		m.dm.listVP.SetYOffset(row - h + 1)
+	case row+1 >= m.dm.listVP.YOffset+h:
+		m.dm.listVP.SetYOffset(row + inboxRowHeight - h)
 	}
 }
 
+// renderInbox is one row per thread: the unread mark, the chip, presence,
+// the newest line's time, how many are new, and that line cut to fit, the
+// selected row highlighted and a thin rule under each.
 func (m *View) renderInbox() string {
 	var b strings.Builder
-	b.WriteString(m.st.ModalTi.Render("Inbox — "+m.userID()) + "\n\n")
 	if len(m.dm.threads) == 0 {
-		b.WriteString(m.st.Dim.Render("no messages yet · /dm <name> to send one") + "\n")
+		b.WriteString(m.st.Dim.Render(" no messages yet · /dm <name> to send one") + "\n")
 	}
 	for i, t := range m.dm.threads {
-		cur, dot := "  ", " "
-		if i == m.dm.sel {
-			cur = "> "
-		}
+		dot := " "
 		if t.Unread > 0 {
-			dot = "●"
+			dot = m.st.Mention.Render("●")
+		}
+		lead := " " + dot + " " + m.chipFor(t.With) + "  " + m.presence(t.With) + "  " + m.st.Dim.Render(t.Latest.TS.Format("15:04")) + "  "
+		if t.Unread > 0 {
+			lead += m.st.Mention.Render(fmt.Sprintf("%d new", t.Unread)) + "  "
 		}
 		// Runes, not bytes: a snippet cut mid-rune renders as a replacement
 		// character, and one cut by byte count is the wrong length in any
 		// language that needs more than one byte a letter.
 		snippet := []rune(strings.SplitN(t.Latest.Text, "\n", 2)[0])
-		room := m.width - 30
-		if room > 80 {
-			room = 80
+		if t.Latest.From == m.userID() {
+			snippet = append([]rune("you: "), snippet...)
 		}
+		room := m.width - lipgloss.Width(lead) - 1
 		if room < 0 {
 			room = 0
 		}
@@ -375,7 +399,15 @@ func (m *View) renderInbox() string {
 				snippet = append(snippet[:room-1:room-1], '…')
 			}
 		}
-		b.WriteString(fmt.Sprintf("%s%s %-16s %s  %s\n", cur, dot, t.With, m.st.Dim.Render(t.Latest.TS.Format("15:04")), string(snippet)))
+		row := lead + m.st.Dim.Render(string(snippet))
+		if t.Latest.From != m.userID() {
+			row = lead + string(snippet)
+		}
+		row = padToWidth(row, m.width)
+		if i == m.dm.sel {
+			row = m.st.Status.Padding(0).Render(row)
+		}
+		b.WriteString(row + "\n" + m.thinRule() + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -384,9 +416,10 @@ func (m *View) viewInbox() string {
 	m.layoutInbox()
 	footer := " inbox · Esc"
 	if !m.compact() {
-		footer = " inbox · Enter open · d mark read · Esc back"
+		footer = " inbox · ↑↓ pick · Enter open · d mark read · /dm <name> new DM · Esc back"
 	}
-	return m.dm.listVP.View() + "\n" + m.inputView() + "\n" + m.footerLine(footer)
+	top := m.frameTop("INBOX", m.st.Dim.Render("· "+m.userID()))
+	return top + m.dm.listVP.View() + "\n" + m.frameBottom() + m.inputView() + "\n" + m.footerLine(footer)
 }
 
 func (m *View) viewDM() string {
@@ -427,5 +460,9 @@ func (m *View) viewDM() string {
 			footer += " next thread"
 		}
 	}
-	return body + "\n" + m.inputView() + "\n" + m.footerLine(footer)
+	if t := m.shownToast(); t != "" {
+		footer = " " + t
+	}
+	top := m.frameTop("DM", m.chipFor(m.dm.with)+" "+m.presence(m.dm.with))
+	return top + body + "\n" + m.frameBottom() + m.inputView() + "\n" + m.footerLine(footer)
 }

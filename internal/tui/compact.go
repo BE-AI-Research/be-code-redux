@@ -142,6 +142,12 @@ func (m *View) compactBottomLine() string {
 	if m.chatUnseen > 0 && m.mode != modeChat {
 		line += m.st.Accent.Render(fmt.Sprintf(" · chat %d", m.chatUnseen))
 	}
+	if m.chatMentions > 0 && m.mode != modeChat {
+		line += m.st.Mention.Render(fmt.Sprintf(" · @%d", m.chatMentions))
+	}
+	if n := m.unreadDMs(); n > 0 {
+		line += m.st.Accent.Render(fmt.Sprintf(" · inbox %d", n))
+	}
 	return line
 }
 
