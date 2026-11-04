@@ -326,8 +326,9 @@ func (m *View) nameBound(msg nameBoundMsg) (tea.Model, tea.Cmd) {
 	m.recordBoundLocked(msg.client, msg.id)
 	// Entries for one user (entry.For) are rendered by ID, so a terminal
 	// that has just become somebody re-renders: pings for the new ID
-	// appear, an old ID's disappear.
+	// appear, an old ID's disappear. Parked drafts were the old ID's.
 	m.rebuild()
+	m.parked = nil
 	if old := m.nameRename; old != "" {
 		m.appendEntryLocked(entry{Kind: entryDim, Text: fmt.Sprintf("you are now %s (was %s)", msg.id, old)})
 		m.nameRename = ""

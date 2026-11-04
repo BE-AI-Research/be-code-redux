@@ -381,3 +381,25 @@ func TestFramedViewsFitTheirTerminal(t *testing.T) {
 		}
 	}
 }
+
+// Tab to the next thread parks the draft with the thread it was typed for.
+func TestTabBetweenThreadsParksTheDraft(t *testing.T) {
+	s, va, _ := pingPair(t)
+	inbox.Send(s.inboxDir, "bob", "alice", "one")
+	time.Sleep(2 * time.Millisecond)
+	inbox.Send(s.inboxDir, "carol", "alice", "two")
+	va.slashCommand("/dm carol")
+	va.input.SetValue("private to carol")
+	va.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if va.dm.with != "bob" || va.input.Value() != "" || !strings.Contains(va.input.Placeholder, "message bob") {
+		t.Fatalf("after Tab: with %q input %q placeholder %q", va.dm.with, va.input.Value(), va.input.Placeholder)
+	}
+	va.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if th, _ := inbox.Thread(s.inboxDir, "alice", "bob"); len(th) != 1 {
+		t.Fatalf("something was sent to bob: %+v", th)
+	}
+	va.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if va.dm.with != "carol" || va.input.Value() != "private to carol" {
+		t.Fatalf("back in carol's thread: with %q input %q", va.dm.with, va.input.Value())
+	}
+}

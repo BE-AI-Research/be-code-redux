@@ -298,7 +298,15 @@ func (m *View) handleDMKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyTab:
 		if n := len(m.dm.threads); n > 1 {
-			m.openThread(m.dm.threads[(m.dm.sel+1)%n].With)
+			// The draft stays with the thread it was typed for: parked
+			// here, back when this thread is reopened, never sent to the
+			// next correspondent.
+			m.parkDraft()
+			next := m.dm.threads[(m.dm.sel+1)%n].With
+			m.openThread(next)
+			m.input.Reset()
+			m.input.Placeholder = "message " + next + "… (/back to return)"
+			m.restoreDraft()
 		}
 		return m, nil
 	case tea.KeyEnter:
