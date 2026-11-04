@@ -2,11 +2,17 @@
 
 ## Unreleased
 
-- **Chat pings.** A room line that names you with `@name` prints `User replied: <who> (chat)`
-  in your transcript, on your terminals only, so someone watching the agent work knows to look;
-  the rest of the room prints nothing. A new DM always prints `New DM (<who>)` for its
-  recipient. `/chat pings on|off` is your own switch for the mention lines, saved in the host's
-  config as `chat.pings`; the room's footer says `pings off` while it is.
+- **Chat pings.** A person's room line that names you with `@name` prints a dim
+  `User replied: <who> (chat)` in your transcript, on your terminals only, so someone watching
+  the agent work knows to look; the rest of the room, and the model's own replies, print
+  nothing. A DM to you while you are attached prints `New DM (<who>)`. `/chat pings on|off` is
+  your own switch for the mention lines, saved in the host's config as `chat.pings`; the room's
+  footer says `pings off` while it is.
+- A setting changed from inside a session (`/theme`, `/chat pings`, the standing `model_reload`
+  consent) is written by loading the config file afresh and saving that, so the session's own
+  copy — which carries the `a` key's "always run shell commands" and "approve every write" for
+  the session under the same keys — is never written to disk by it. `/theme` used to make a
+  session's `a` permanent.
 - A job's own compaction summary — a model call that streams nothing back — no longer counts as
   silence for the stall clock: it is a wait like a tool call, shown as `waiting (compaction)`,
   on the run-time meter, until it has run for twice `stall_after` (a hung summary call is

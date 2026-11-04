@@ -39,7 +39,11 @@ func (s *Session) deliverDM(m inbox.Message) {
 	// One line in the recipient's transcript, on their terminals only
 	// (entry.For) and with no switch: a DM is always worth a line. The
 	// text itself stays in the thread.
-	s.appendEntryLocked(entry{Kind: entryPing, Text: "New DM (" + m.From + ")", For: m.To})
+	// The sender's name comes from the message file as written; only one
+	// shaped like an ID goes into the transcript.
+	if from, err := inbox.ValidID(m.From); err == nil {
+		s.appendEntryLocked(entry{Kind: entryPing, Text: "New DM (" + from + ")", For: m.To})
+	}
 	// No session-wide toast: several terminals may be attached under
 	// different identities, and a DM is for one of them. Each view raises
 	// its own toast when it sees the message is for its ID.

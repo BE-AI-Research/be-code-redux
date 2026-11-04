@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/brown-enterprises/be-code/internal/agent"
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/live"
 	"github.com/brown-enterprises/be-code/internal/ui"
 )
@@ -222,7 +223,19 @@ func (m *View) applyTheme(name string, asDefault bool) (tea.Model, tea.Cmd) {
 		m.themeOrigin = fmt.Sprintf("remembered for %q", key)
 		confirm = "theme set to " + name
 	}
-	if err := m.cfg.Save(); err != nil {
+	// Through config.Update, never m.cfg.Save(): the session's Config also
+	// holds the "a" key's session-only approvals under keys the file has.
+	err := config.Update(func(c *config.Config) {
+		if asDefault {
+			c.Theme = name
+		} else {
+			if c.ClientThemes == nil {
+				c.ClientThemes = map[string]string{}
+			}
+			c.ClientThemes[live.LabelKey(m.label)] = name
+		}
+	})
+	if err != nil {
 		m.renderEntryLocal(entry{Kind: entryWarn, Text: confirm + " for this session; could not save config: " + err.Error()})
 	} else {
 		m.renderEntryLocal(entry{Kind: entryOK, Text: confirm})

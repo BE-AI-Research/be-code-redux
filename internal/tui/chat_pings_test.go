@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/brown-enterprises/be-code/internal/config"
 	"github.com/brown-enterprises/be-code/internal/inbox"
 	"github.com/brown-enterprises/be-code/internal/live"
 )
@@ -28,7 +29,8 @@ func pingPair(t *testing.T) (*Session, *View, *View) {
 }
 
 func TestMentionedUsersNamesPeopleNotTheAgent(t *testing.T) {
-	got := MentionedUsers("hey @Alice. and @bob-2, not @agent, a@b.c, @alice again")
+	long := "@" + strings.Repeat("x", 33)
+	got := MentionedUsers("hey @Alice. and @bob-2, not @agent, @agent., a@b.c, " + long + ", @alice again")
 	want := []string{"alice", "bob-2"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %q want %q", got, want)
@@ -44,7 +46,17 @@ func TestAMentionPingsOnlyTheNamedUsersTranscript(t *testing.T) {
 	s.Post("bob", "@alice look at this", "")
 	s.Post("bob", "hello everyone", "")
 	s.Post("alice", "@alice talking to myself", "")
+	s.Post("agent", "@alice here is the answer", "reply")
+	s.Post("bob", "@carol are you there", "")
 	drainAll(t, va, vb)
+	for _, e := range s.entries {
+		if e.For == "carol" {
+			t.Fatal("a ping was filed for a user nobody is attached as")
+		}
+	}
+	if strings.Contains(va.transcriptText(), "User replied: agent") {
+		t.Fatal("the model's own reply pinged alice")
+	}
 	if n := strings.Count(va.transcriptText(), "User replied: bob (chat)"); n != 1 {
 		t.Fatalf("alice saw %d pings:\n%s", n, va.transcriptText())
 	}
@@ -67,9 +79,21 @@ func TestAMentionPingsOnlyTheNamedUsersTranscript(t *testing.T) {
 // that user alone; a DM always prints New DM (<from>) for its recipient.
 func TestChatPingsOffIsPerUserAndNeverSilencesDMs(t *testing.T) {
 	s, va, vb := pingPair(t)
+	// The "a" key's session-only approval must not reach the file with it.
+	s.cfg.AutoApproveShell = true
 	va.slashCommand("/chat pings off")
 	if on := s.cfg.Chat.PingsOn("alice"); on {
 		t.Fatal("alice's switch not saved")
+	}
+	saved, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Chat.PingsOn("alice") {
+		t.Fatal("the switch did not reach config.json")
+	}
+	if saved.AutoApproveShell {
+		t.Fatal("a session-only approval was written to config.json")
 	}
 	if !s.cfg.Chat.PingsOn("bob") {
 		t.Fatal("bob's switch moved with alice's")

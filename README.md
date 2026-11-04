@@ -947,15 +947,15 @@ unix socket in your own dotdir, so remote access means SSH, not a network port.
 Every terminal attached to a session shares a chat room: `/chat` opens it on your terminal
 (the session keeps running underneath; `Esc` or `/back` returns), Enter posts, and `@agent`
 in a line hands it — with the last `chat.mention_context` lines of the room — to the
-session's model, whose answer appears in the transcript and in the room. A room line that
-names a person with `@name` prints one line in that person's transcript, on their terminals
-only — `User replied: bob (chat)`, never the text — so someone watching the agent work knows
-to look; the rest of the room prints nothing. `/chat pings off` switches those lines off for
-your user ID (saved in the host's config as `chat.pings`, so every terminal of yours through
-that host agrees; the room's footer says `pings off`), and `/chat pings on` restores them.
-DMs span every
-session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
-(`●` unread), a new DM always prints `New DM (carol)` in the recipient's transcript (no
+session's model, whose answer appears in the transcript and in the room. A person's line that
+names another person with `@name` prints one dim line in that person's transcript, on the
+terminals attached under that name — `User replied: bob (chat)`, never the text — so someone
+watching the agent work knows to look; the rest of the room prints nothing, and the model's
+own reply pings nobody (it is already in the transcript). `/chat pings off` switches those
+lines off for your user ID (saved in the host's config as `chat.pings`, so every terminal of
+yours through that host agrees; the room's footer says `pings off`), and `/chat pings on`
+restores them. DMs span every session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
+(`●` unread), a DM to someone attached prints `New DM (carol)` in their transcript (no
 switch), and a message to someone not attached anywhere waits for them. Your name
 comes from `chat.name` in your own config, else the name already bound to your address;
 a terminal that attaches with neither is asked for one straight away — pick a name already

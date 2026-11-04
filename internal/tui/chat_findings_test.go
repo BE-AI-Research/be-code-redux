@@ -230,8 +230,9 @@ func TestChatDisabledSaysSoBeforeAskingForAName(t *testing.T) {
 // M1: the four commands that take no argument run straight from the palette
 // rather than filling the input line; only /dm takes one.
 func TestChatSlashCommandArgs(t *testing.T) {
-	// /chat takes "pings on|off" since chat pings; the rest open a view and take nothing.
-	want := map[string]bool{"/chat": true, "/inbox": false, "/back": false, "/whoami": false, "/dm": true}
+	// /chat pings on|off exists, but the palette entry opens the room (M1):
+	// an Args entry would only fill "/chat " into the input.
+	want := map[string]bool{"/chat": false, "/inbox": false, "/back": false, "/whoami": false, "/dm": true}
 	seen := 0
 	for _, c := range ui.SlashCommandTable {
 		if args, ok := want[c.Name]; ok {

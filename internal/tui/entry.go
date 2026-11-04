@@ -34,7 +34,7 @@ const (
 	entryCoworkAsk // Label = co-worker name ("<name>? "), Text = the question
 	entryCowork    // Label = co-worker name ("<name>> "), Text = the Markdown answer
 	entrySchedule  // Label = schedule name, Text = the fired request
-	entryPing      // Text in the room's user colour: "User replied: <who> (chat)", "New DM (<who>)"
+	entryPing      // Text dim, for one user only (For): "User replied: <who> (chat)", "New DM (<who>)"
 )
 
 type entry struct {
@@ -84,7 +84,7 @@ func renderEntry(e entry, st styles, width int, compact, richText bool) string {
 	case entryNote:
 		return st.Warn.Render("note ") + e.Text
 	case entryPing:
-		return st.ChatUser.Render(e.Text)
+		return st.Dim.Render(e.Text)
 	case entryError:
 		return st.Err.Render(e.Label) + e.Text
 	case entryQueued:

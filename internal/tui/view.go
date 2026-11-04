@@ -927,7 +927,7 @@ func (m *View) handleAskKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// "this box is mine to reshape". It is not consent to send code
 			// anywhere, which is why it is a key of its own.
 			m.cfg.ReloadOnMismatch = "always"
-			if err := m.cfg.Save(); err != nil {
+			if err := config.Update(func(c *config.Config) { c.ReloadOnMismatch = "always" }); err != nil {
 				ans = askAnswer{OK: true, Note: "reloading; could not save reload_on_mismatch: " + err.Error()}
 			} else {
 				ans = askAnswer{OK: true, Note: "reload_on_mismatch: always (config saved)"}

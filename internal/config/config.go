@@ -794,6 +794,21 @@ func (c *Config) ValidCoworkers() ([]CoworkerConfig, []string) {
 }
 
 // Save writes the config atomically.
+// Update changes a setting on disk: it loads the file afresh, applies
+// mutate to that copy and saves it. A running session's Config is never
+// the thing saved, because it also carries session-only state under keys
+// the file has — the "a" answer to a shell prompt sets AutoApproveShell
+// for the session, and saving that Config would make it permanent. The
+// caller applies the same change to its own Config in memory.
+func Update(mutate func(*Config)) error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	mutate(cfg)
+	return cfg.Save()
+}
+
 func (c *Config) Save() error {
 	p, err := Path()
 	if err != nil {
