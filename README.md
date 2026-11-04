@@ -947,9 +947,16 @@ unix socket in your own dotdir, so remote access means SSH, not a network port.
 Every terminal attached to a session shares a chat room: `/chat` opens it on your terminal
 (the session keeps running underneath; `Esc` or `/back` returns), Enter posts, and `@agent`
 in a line hands it — with the last `chat.mention_context` lines of the room — to the
-session's model, whose answer appears in the transcript and in the room. DMs span every
+session's model, whose answer appears in the transcript and in the room. A room line that
+names a person with `@name` prints one line in that person's transcript, on their terminals
+only — `User replied: bob (chat)`, never the text — so someone watching the agent work knows
+to look; the rest of the room prints nothing. `/chat pings off` switches those lines off for
+your user ID (saved in the host's config as `chat.pings`, so every terminal of yours through
+that host agrees; the room's footer says `pings off`), and `/chat pings on` restores them.
+DMs span every
 session on the machine: `/dm <name>` opens a thread, `/inbox` lists them newest first
-(`●` unread), and a message to someone not attached anywhere waits for them. Your name
+(`●` unread), a new DM always prints `New DM (carol)` in the recipient's transcript (no
+switch), and a message to someone not attached anywhere waits for them. Your name
 comes from `chat.name` in your own config, else the name already bound to your address;
 a terminal that attaches with neither is asked for one straight away — pick a name already
 seen from its address or type a new one — as soon as it is idle (never over another question,
@@ -1611,7 +1618,9 @@ hand; `/config` prints what the running session actually resolved.
   outside its own terminal.
 - `chat.enabled` (true) — `/chat`, `/inbox` and `/dm`; `chat.mention_context` (10) — room lines
   sent with an `@agent` mention; `chat.name` — this device's user ID for chat and DMs (unset:
-  the host offers the IDs seen from your IP, or asks once).
+  the host offers the IDs seen from your IP, or asks once); `chat.pings` — each user's own
+  switch for the transcript line an `@name` mention prints, keyed by user ID (`{"bob": false}`;
+  absent means on; written by `/chat pings on|off`).
 - `live_idle_limit` (0) — minutes a served session may sit with no attached clients
   and no run in progress before it exits (0 = never)
 - `stall_notice_seconds` (45) — seconds of backend silence before the yellow "waiting for

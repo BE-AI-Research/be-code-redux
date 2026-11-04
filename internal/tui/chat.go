@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -58,11 +59,96 @@ func (s *Session) PostLocked(user, text, kind string) {
 	room := s.room
 	s.ag.UpdateSession(func(ss *store.Session) { ss.Chat = append([]store.ChatLine(nil), room...) })
 	s.broadcast(chatMsg{line: line})
+	// A line naming a person pings that person's transcript — one line
+	// stating who and where, never the text — on every terminal attached
+	// under their ID (entry.For) and nobody else's. Never for the rest of
+	// the room, never for one's own line, and not for a user who switched
+	// their pings off (chat.pings in the host's config).
+	if user != "" {
+		for _, who := range MentionedUsers(line.Text) {
+			if who == user || !s.cfg.Chat.PingsOn(who) {
+				continue
+			}
+			s.appendEntryLocked(entry{Kind: entryPing, Text: "User replied: " + user + " (chat)", For: who})
+		}
+	}
 	if line.Kind == "mention" {
 		// The request must include the mention itself, so this runs after
 		// the line has already been appended to the room above.
 		s.noteMentionLocked(line)
 	}
+}
+
+// userMentionRe finds @name in a room line: a chat user ID (inbox.ValidID's
+// alphabet), not preceded by a word character, a dot or another @ (an
+// e-mail address is not a mention). Case is folded: IDs are lower-case.
+var userMentionRe = regexp.MustCompile(`(?i)(^|[^\w.@])@([a-z0-9_.-]+)`)
+
+// MentionedUsers is every user ID a room line names with @, in order,
+// once each, trailing punctuation dropped ("@alice." names alice); "agent"
+// is the model's own mention (IsMention) and is never a user.
+func MentionedUsers(text string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range userMentionRe.FindAllStringSubmatch(text, -1) {
+		id := strings.ToLower(strings.TrimRight(m[2], ".-_"))
+		if id == "" || id == "agent" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// shows reports whether this terminal renders e: every entry but one that
+// is for a user ID this terminal is not attached under.
+func (m *View) shows(e entry) bool {
+	return e.For == "" || e.For == m.userID()
+}
+
+// chatPings is /chat pings [on|off]: this terminal's user's own switch for
+// the transcript line a mention prints, saved in the host's config so every
+// terminal of theirs through this host agrees. Reached from Update, so mu
+// is held; cfg.Save is a file write, not a broadcast.
+func (m *View) chatPings(args []string) (tea.Model, tea.Cmd) {
+	if m.chatOff() {
+		return m, nil
+	}
+	return m.needName(func(m *View) (tea.Model, tea.Cmd) {
+		me := m.userID()
+		state := func() string {
+			if m.cfg.Chat.PingsOn(me) {
+				return "on"
+			}
+			return "off"
+		}
+		if len(args) == 0 {
+			m.renderEntryLocal(entry{Kind: entryDim, Text: "chat pings are " + state() + " for " + me + " (/chat pings on|off)"})
+			return m, nil
+		}
+		var on bool
+		switch args[0] {
+		case "on":
+			on = true
+		case "off":
+			on = false
+		default:
+			m.renderEntryLocal(entry{Kind: entryWarn, Text: "usage: /chat pings on|off"})
+			return m, nil
+		}
+		if m.cfg.Chat.Pings == nil {
+			m.cfg.Chat.Pings = map[string]bool{}
+		}
+		m.cfg.Chat.Pings[me] = on
+		confirm := "chat pings " + state() + " for " + me
+		if err := m.cfg.Save(); err != nil {
+			m.renderEntryLocal(entry{Kind: entryWarn, Text: confirm + " for this session; could not save config: " + err.Error()})
+		} else {
+			m.renderEntryLocal(entry{Kind: entryOK, Text: confirm})
+		}
+		return m, nil
+	})
 }
 
 // Room is a snapshot of the room.
@@ -243,6 +329,9 @@ func (m *View) viewChat() string {
 	footer := " chat · Esc"
 	if !m.compact() {
 		footer = fmt.Sprintf(" chat · %d here · Esc back", here)
+		if !m.cfg.Chat.PingsOn(m.userID()) {
+			footer += " · pings off"
+		}
 		if m.mentionBusy != "" {
 			footer += " · agent is working on " + m.mentionBusy + "'s question"
 		}

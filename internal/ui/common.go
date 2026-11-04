@@ -102,7 +102,7 @@ var SlashCommandTable = []SlashCommandInfo{
 	{"/copy", "copy selection, last reply, tool output or all: /copy [reply|tool|all]", true},
 	{"/clients", "list terminals attached to this session", false},
 	{"/detach", "detach this terminal (the session keeps running)", false},
-	{"/chat", "the session's chat room (@agent to ask the model)", false},
+	{"/chat", "the session's chat room (@agent asks the model, @name pings a person); /chat pings on|off", true},
 	{"/inbox", "your DMs from every session on this machine", false},
 	{"/dm", "message a person directly: /dm [name]", true},
 	{"/back", "return to the transcript", false},

@@ -468,7 +468,9 @@ func (m *View) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// rebuild has overtaken it (see renderedN and entryMsg.n), in which
 		// case it is already on screen and this copy is dropped.
 		if msg.n >= m.renderedN {
-			m.renderEntryLocal(msg.e)
+			if m.shows(msg.e) {
+				m.renderEntryLocal(msg.e)
+			}
 			m.renderedN = msg.n + 1
 		}
 	case deltaMsg:
@@ -1103,6 +1105,9 @@ func (m *View) renderEntryLocal(e entry) {
 func (m *View) rebuild() {
 	m.rendered.Reset()
 	for _, e := range m.entries {
+		if !m.shows(e) {
+			continue
+		}
 		m.rendered.WriteString(renderEntry(e, m.st, m.width, m.compact(), m.richText))
 		m.rendered.WriteString("\n")
 	}
@@ -1700,6 +1705,9 @@ func (m *View) slashCommand(text string) (tea.Model, tea.Cmd) {
 	case "/menu":
 		return m.openMenu()
 	case "/chat":
+		if args := fields[1:]; len(args) > 0 && args[0] == "pings" {
+			return m.chatPings(args[1:])
+		}
 		return m.enterChat()
 	case "/inbox":
 		return m.enterInbox()

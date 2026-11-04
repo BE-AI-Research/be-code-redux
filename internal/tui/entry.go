@@ -34,11 +34,17 @@ const (
 	entryCoworkAsk // Label = co-worker name ("<name>? "), Text = the question
 	entryCowork    // Label = co-worker name ("<name>> "), Text = the Markdown answer
 	entrySchedule  // Label = schedule name, Text = the fired request
+	entryPing      // Text in the room's user colour: "User replied: <who> (chat)", "New DM (<who>)"
 )
 
 type entry struct {
 	Kind        entryKind
 	Label, Text string
+	// For names the one user ID this entry is for — a chat ping, a DM
+	// line — and every other terminal leaves it out when it renders. The
+	// entries are shared (Session.entries), so a per-person line is one
+	// entry with For set rather than one entry per terminal.
+	For string
 }
 
 // renderEntry renders one entry for a terminal of the given width. Only
@@ -77,6 +83,8 @@ func renderEntry(e entry, st styles, width int, compact, richText bool) string {
 		return st.Err.Render(e.Text)
 	case entryNote:
 		return st.Warn.Render("note ") + e.Text
+	case entryPing:
+		return st.ChatUser.Render(e.Text)
 	case entryError:
 		return st.Err.Render(e.Label) + e.Text
 	case entryQueued:

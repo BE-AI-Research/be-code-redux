@@ -445,6 +445,17 @@ type ChatConfig struct {
 	// Name is this device's user ID. Empty means the host offers the IDs
 	// seen from this IP, or asks once.
 	Name string `json:"name,omitempty"`
+	// Pings is each user's own switch for the transcript line a room
+	// mention of them prints, keyed by user ID; absent means on. It lives
+	// in the host's config, so every terminal that joins through this host
+	// gets the same answer. DM lines have no switch.
+	Pings map[string]bool `json:"pings,omitempty"`
+}
+
+// PingsOn reports whether user has chat pings on: yes unless switched off.
+func (c ChatConfig) PingsOn(user string) bool {
+	v, ok := c.Pings[user]
+	return !ok || v
 }
 
 // Default returns the out-of-the-box configuration: Ollama on localhost,
