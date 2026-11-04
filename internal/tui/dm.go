@@ -161,6 +161,9 @@ func (m *View) enterInbox() (tea.Model, tea.Cmd) {
 		m.clearSelection() // the transcript this mode covers is not selectable from here
 		m.input.Reset()
 		m.layoutInbox()
+		// No restore here: a draft in the inbox's input takes the keys from
+		// the list (handleInboxKey), so the inbox never gets one back.
+		delete(m.parked, "inbox")
 		return m, nil
 	})
 }
@@ -188,6 +191,7 @@ func (m *View) enterDM(with string) (tea.Model, tea.Cmd) {
 		m.clearSelection() // the transcript this mode covers is not selectable from here
 		m.input.Reset()
 		m.input.Placeholder = "message " + id + "… (/back to return)"
+		m.restoreDraft()
 		return m, nil
 	})
 }

@@ -221,6 +221,10 @@ type View struct {
 	// btnZones is where the chat frame drew its buttons on the last render
 	// (chatframe.go), so a click on the title row finds the one under it.
 	btnZones []chatButton
+	// parked holds the draft a button click left behind, keyed by the view
+	// it was typed in (draftKey): a half-typed DM must never follow a
+	// click into the room, and comes back when that thread is reopened.
+	parked map[string]string
 	// ownToast is a notice for this terminal alone (a DM for its identity);
 	// the session's toast is shared by every view. Same expiry.
 	ownToast      string

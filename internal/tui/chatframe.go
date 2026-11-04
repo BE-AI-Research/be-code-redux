@@ -150,7 +150,7 @@ func (m *View) clickButton(x, y int) (tea.Model, tea.Cmd, bool) {
 	if y != 0 || !m.framed() {
 		return m, nil, false
 	}
-	active := map[mode]string{modeChat: "room", modeInbox: "inbox", modeDM: "dm"}[m.mode]
+	active := map[mode]string{modeChat: "room", modeInbox: "inbox"}[m.mode]
 	for _, bt := range m.btnZones {
 		if x < bt.x0 || x >= bt.x1 {
 			continue
@@ -158,25 +158,17 @@ func (m *View) clickButton(x, y int) (tea.Model, tea.Cmd, bool) {
 		if bt.action == active {
 			return m, nil, true // already here: the draft stays as it is
 		}
-		// A switch keeps whatever was being typed: enterChat and enterInbox
-		// reset the input for a keyboard entry, which a click is not.
-		keep := func(mm tea.Model, cmd tea.Cmd, draft string) (tea.Model, tea.Cmd, bool) {
-			if v, ok := mm.(*View); ok && draft != "" && v.input.Value() == "" {
-				v.input.SetValue(draft)
-				v.input.CursorEnd()
-			}
-			return mm, cmd, true
-		}
 		switch bt.action {
 		case "room":
-			draft := m.input.Value()
+			m.parkDraft()
 			mm, cmd := m.enterChat()
-			return keep(mm, cmd, draft)
+			return mm, cmd, true
 		case "inbox":
-			draft := m.input.Value()
+			m.parkDraft()
 			mm, cmd := m.enterInbox()
-			return keep(mm, cmd, draft)
+			return mm, cmd, true
 		case "dm":
+			// Inside a thread too: the way to start another conversation.
 			if m.input.Value() == "" {
 				m.input.SetValue("/dm ")
 				m.input.CursorEnd()
@@ -190,12 +182,53 @@ func (m *View) clickButton(x, y int) (tea.Model, tea.Cmd, bool) {
 			mm, cmd := m.chatPings([]string{arg})
 			return mm, cmd, true
 		case "back":
-			draft := m.input.Value()
+			m.parkDraft()
 			mm, cmd := m.leaveMode()
-			return keep(mm, cmd, draft)
+			return mm, cmd, true
 		}
 	}
 	return m, nil, false
+}
+
+// draftKey names the view a draft belongs to: the room, the inbox, one DM
+// thread, or the transcript.
+func (m *View) draftKey() string {
+	switch m.mode {
+	case modeChat:
+		return "room"
+	case modeInbox:
+		return "inbox"
+	case modeDM:
+		return "dm:" + m.dm.with
+	}
+	return "main"
+}
+
+// parkDraft puts aside what is being typed here before a click moves this
+// terminal elsewhere. The draft never travels: a line meant for a DM must
+// not land in the room, and a draft in the inbox's input would take its
+// keys from the list.
+func (m *View) parkDraft() {
+	if v := m.input.Value(); v != "" {
+		if m.parked == nil {
+			m.parked = map[string]string{}
+		}
+		m.parked[m.draftKey()] = v
+	}
+}
+
+// restoreDraft brings back the draft parked for the view just entered, if
+// its input is empty. Every entry point calls it, keyboard or click, so a
+// thread reopened by Enter in the inbox has its half-typed line back.
+func (m *View) restoreDraft() {
+	if m.input.Value() != "" {
+		return
+	}
+	if v, ok := m.parked[m.draftKey()]; ok {
+		delete(m.parked, m.draftKey())
+		m.input.SetValue(v)
+		m.input.CursorEnd()
+	}
 }
 
 // userColorIndex picks a stable colour for a user ID: the same ID lands on

@@ -261,6 +261,7 @@ func (m *View) enterChat() (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "message the room… (/back to return)"
 		m.layoutChat()
 		m.chatVP.GotoBottom()
+		m.restoreDraft()
 		return m, nil
 	})
 }
@@ -285,6 +286,7 @@ func (m *View) leaveMode() (tea.Model, tea.Cmd) {
 	m.mode = m.idleMode()
 	m.input.Reset()
 	m.input.Placeholder = inputPlaceholder
+	m.restoreDraft()
 	return m, nil
 }
 

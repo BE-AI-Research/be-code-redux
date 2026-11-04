@@ -287,13 +287,14 @@ func TestRoomResetClearsTheMentionCount(t *testing.T) {
 	}
 }
 
-// A click on a button keeps the draft, and the active button does nothing.
-func TestButtonClicksKeepTheDraft(t *testing.T) {
-	_, va, _ := pingPair(t)
-	va.slashCommand("/chat")
-	va.input.SetValue("half typed")
-	va.View()
+// A draft never follows a click into another view: a half-typed DM is
+// parked, the room gets nothing, and the draft is back when that thread is
+// reopened. The active button does nothing; DM ▸ fills only an empty input.
+func TestButtonClicksParkTheDraft(t *testing.T) {
+	s, va, _ := pingPair(t)
+	inbox.Send(s.inboxDir, "carol", "alice", "hey")
 	zone := func(action string) chatButton {
+		va.View()
 		for _, z := range va.btnZones {
 			if z.action == action {
 				return z
@@ -302,20 +303,53 @@ func TestButtonClicksKeepTheDraft(t *testing.T) {
 		t.Fatalf("no %s button", action)
 		return chatButton{}
 	}
-	z := zone("room")
+	va.slashCommand("/dm carol")
+	va.input.SetValue("private to carol")
+	// DM ▸ inside a thread leaves a draft alone, and fills an empty input.
+	z := zone("dm")
 	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
-	if va.mode != modeChat || va.input.Value() != "half typed" {
-		t.Fatalf("after clicking the active button: mode %v draft %q", va.mode, va.input.Value())
-	}
-	z = zone("dm")
-	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
-	if va.input.Value() != "half typed" {
+	if va.input.Value() != "private to carol" {
 		t.Fatalf("DM overwrote the draft: %q", va.input.Value())
 	}
+	z = zone("room")
+	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
+	if va.mode != modeChat || va.input.Value() != "" {
+		t.Fatalf("the DM draft followed the click into the room: mode %v input %q", va.mode, va.input.Value())
+	}
+	va.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	for _, l := range s.Room() {
+		if strings.Contains(l.Text, "private") {
+			t.Fatalf("a DM draft was posted to the room: %q", l.Text)
+		}
+	}
+	// The active button is a no-op and keeps the room's own draft.
+	va.input.SetValue("for the room")
+	z = zone("room")
+	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
+	if va.mode != modeChat || va.input.Value() != "for the room" {
+		t.Fatalf("after clicking the active button: mode %v draft %q", va.mode, va.input.Value())
+	}
+	// Into the inbox: the list keeps its keys (no draft in its input), and
+	// Enter on carol's row brings the DM draft back.
 	z = zone("inbox")
 	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
-	if va.mode != modeInbox || va.input.Value() != "half typed" {
-		t.Fatalf("after switching to the inbox: mode %v draft %q", va.mode, va.input.Value())
+	if va.mode != modeInbox || va.input.Value() != "" {
+		t.Fatalf("inbox: mode %v input %q", va.mode, va.input.Value())
+	}
+	va.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if va.mode != modeDM || va.dm.with != "carol" || va.input.Value() != "private to carol" {
+		t.Fatalf("the DM draft did not come back: mode %v with %q input %q", va.mode, va.dm.with, va.input.Value())
+	}
+	// And the room's draft is back when the room is reopened.
+	va.slashCommand("/chat")
+	if va.input.Value() != "for the room" {
+		t.Fatalf("the room's draft did not come back: %q", va.input.Value())
+	}
+	z = zone("dm")
+	va.input.Reset()
+	va.Update(mouse(z.x0+1, 0, tea.MouseButtonLeft, tea.MouseActionPress))
+	if va.input.Value() != "/dm " {
+		t.Fatalf("DM ▸ on an empty input filled %q", va.input.Value())
 	}
 }
 
