@@ -4,7 +4,7 @@ BE-Code Redux (Be-Code)
 
 **Offline-first "polymorphic" runtime & coding CLI for local LLMs.** Part of the BE-Continuum ecosystem.
 
-[![version](https://img.shields.io/badge/version-1.4.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.4.2-blue)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8)](go.mod)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![platforms](https://img.shields.io/badge/platforms-linux%20%C2%B7%20macOS%20%C2%B7%20windows-lightgrey)](#install--uninstall)
@@ -140,7 +140,7 @@ irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/install.
 
 Both download the current release's `be-code-windows-amd64.exe`, check it against the release's
 `SHA256SUMS`, install it to `%LOCALAPPDATA%\Programs\be-code`, add that to your user PATH (no
-administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.4.1` pins a release
+administrator rights needed) and offer the setup wizard. `BE_CODE_VERSION=1.4.2` pins a release
 and `BE_CODE_NO_SETUP=1` skips the wizard. Uninstall with
 `irm https://raw.githubusercontent.com/BE-AI-Research/be-code-redux/main/uninstall.ps1 | iex`.
 
@@ -1738,6 +1738,29 @@ and the workspace toolchain, which is usually the fastest way to find out why a 
 | [`docs/live-checklist.md`](docs/live-checklist.md), [`docs/vscode-live-checklist.md`](docs/vscode-live-checklist.md) | manual end-to-end checklists against a real backend |
 
 ## Status
+
+**v1.4.2 — Chat pings and a neon chat frame.** The chat system tells you when you are wanted,
+and looks the part.
+
+- **Chat pings.** A room line that names you with `@name` prints `User replied: <who> (chat)` in
+  your transcript, on your terminals only; a DM to you prints `New DM (<who>)`. `/chat pings
+  on|off` is your own switch, saved in the host's config. The bottom line counts mentions since
+  you last looked.
+- **One frame for the room, the inbox and a DM thread.** A title row with clickable buttons
+  (`Room`, `Inbox ●N`, `DM ▸`, `@ pings`, `← Back`), heavy accent rules, a colour chip per person
+  (you amber, the model violet), `@name` in that person's colour, a bar on any line that names
+  you, dividers where time passed, inbox rows with presence and the last line, and the unread
+  lines barred when a thread opens. Compact terminals keep the plain footer. See
+  [Chat and DMs](#chat-and-dms).
+- **Settings saved from inside a session no longer carry the session's approvals.** `/theme`,
+  `/chat pings`, `/update check`, `/coworkers add|remove`, `/online add` and the standing
+  `model_reload` consent load the config file afresh and save that copy; the `a` key's "always
+  run shell commands" used to go to disk with any of them.
+- **Jobs.** A job's own compaction is a wait, not a stall; a second session on the workspace no
+  longer closes a job the first is still running (each session's work record lists its jobs);
+  and a turn waiting behind a co-worker on the shared server says so on the status line.
+- **The VS Code extension is in the repository** under `extensions/`, and on every release from
+  v1.4.1 on.
 
 **v1.4.1 — Jobs for any co-worker.** The main model dispatches lighter models on scoped jobs
 and stays in charge of them.

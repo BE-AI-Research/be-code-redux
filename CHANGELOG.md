@@ -1,6 +1,6 @@
 # BE-Code Changelog
 
-## Unreleased
+## v1.4.2 — Chat pings and a neon chat frame (2026-11-03)
 
 - **The room, the inbox and a DM thread wear one frame.** A title row with clickable buttons
   (`Room`, `Inbox ●N`, `DM ▸`, `@ pings on|off`, `← Back`), heavy accent rules above and below,
@@ -36,6 +36,9 @@
   the status line says so after two seconds (`waiting for the shared server: big's request is
   in flight; the request goes out when it ends`) until the lane is free, instead of pausing in
   silence.
+- **The VS Code extension is in the repository.** The packaged `be-code-vscode-<version>.vsix`
+  is committed under `extensions/` (refreshed by the `vscode` build target) and attached to
+  every release from v1.4.1 on; the releases before it shipped without the file.
 
 ## v1.4.1 — Jobs for any co-worker (2026-11-03)
 
