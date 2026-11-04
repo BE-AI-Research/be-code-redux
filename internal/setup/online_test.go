@@ -323,3 +323,40 @@ func TestValidateAsksForTheWorkspaceThenSucceedsWithIt(t *testing.T) {
 		t.Fatalf("headers not saved: %+v", re.Providers["mine"])
 	}
 }
+
+// In a session, adding a provider writes the file's own copy: the session's
+// Config carries its "a" answers under keys the file has, and those must
+// not reach config.json with the provider.
+func TestAddOnlineInSessionLeavesSessionApprovalsOut(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := config.Default()
+	if err := cfg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AutoApproveShell = true
+	cfg.ApproveFileWrites = false
+	store, err := credentials.Open(filepath.Join(home, ".be-code"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, _, _ := ChoiceFor(cfg, "groq", "")
+	t.Setenv("GROQ_API_KEY", "")
+	added, err := AddOnlineInSession(cfg, store, ch, "gsk_1", "pasted", "llama", true)
+	if err != nil || added.Model != "llama" || !added.Default {
+		t.Fatalf("%+v %v", added, err)
+	}
+	if cfg.Providers["groq"].DefaultModel != "llama" || cfg.DefaultProvider != "groq" {
+		t.Fatal("the session's own copy was not changed")
+	}
+	reloaded, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Providers["groq"].DefaultModel != "llama" || reloaded.DefaultProvider != "groq" {
+		t.Fatalf("provider not saved: %+v", reloaded.Providers["groq"])
+	}
+	if reloaded.AutoApproveShell || !reloaded.ApproveFileWrites {
+		t.Fatal("session-only approvals were written to config.json")
+	}
+}

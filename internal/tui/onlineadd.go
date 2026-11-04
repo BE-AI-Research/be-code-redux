@@ -430,7 +430,7 @@ func (m *View) onlineFinish(makeDefault bool) (tea.Model, tea.Cmd) {
 	if err != nil {
 		return m.endOnlineAdd(err.Error())
 	}
-	added, err := setup.AddOnline(m.cfg, store, f.choice, f.key, f.source, f.model, makeDefault)
+	added, err := setup.AddOnlineInSession(m.cfg, store, f.choice, f.key, f.source, f.model, makeDefault)
 	if err != nil {
 		return m.endOnlineAdd(err.Error())
 	}

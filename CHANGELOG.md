@@ -9,7 +9,7 @@
   your own switch for the mention lines, saved in the host's config as `chat.pings`; the room's
   footer says `pings off` while it is.
 - A setting changed from inside a session — `/theme`, `/chat pings`, `/update check on|off`,
-  `/coworkers add|remove`, and the standing `model_reload` consent, in both UIs — is written by
+  `/coworkers add|remove`, `/online add`, and the standing `model_reload` consent, in both UIs — is written by
   loading the config file afresh and saving that, so the session's own copy, which carries the
   `a` key's "always run shell commands" and "approve every write" for the session under the
   same keys, is never written to disk by it. Any of those used to make a session's `a`

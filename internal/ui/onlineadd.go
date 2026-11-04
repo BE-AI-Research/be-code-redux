@@ -226,7 +226,7 @@ func OnlineAdd(ctx context.Context, cfg *config.Config, p Prompter, name string)
 	if err != nil {
 		return "", "", err
 	}
-	added, err := setup.AddOnline(cfg, store, ch, key, source, model, makeDefault)
+	added, err := setup.AddOnlineInSession(cfg, store, ch, key, source, model, makeDefault)
 	if err != nil {
 		return "", "", err
 	}

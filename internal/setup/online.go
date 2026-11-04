@@ -169,9 +169,32 @@ type Added struct {
 }
 
 // AddOnline stores the credential, then writes the provider block, then
-// the default. Nothing here validates: callers run Validate first, so a
-// cancel before this point leaves both files untouched.
+// the default, saving cfg whole: the wizard's, built for this purpose and
+// not on disk yet. Nothing here validates: callers run Validate first, so
+// a cancel before this point leaves both files untouched.
 func AddOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, source, model string, makeDefault bool) (Added, error) {
+	return addOnline(cfg, store, ch, key, source, model, makeDefault, func(apply func(*config.Config)) error {
+		apply(cfg)
+		return cfg.Save()
+	})
+}
+
+// AddOnlineInSession is AddOnline for a running session's Config: the
+// change is applied to it in memory and written through config.Update,
+// never by saving the session's copy — which carries the "a" key's
+// session-only approvals under keys the file has.
+func AddOnlineInSession(cfg *config.Config, store *credentials.Store, ch Choice, key, source, model string, makeDefault bool) (Added, error) {
+	return addOnline(cfg, store, ch, key, source, model, makeDefault, func(apply func(*config.Config)) error {
+		apply(cfg)
+		return config.Update(apply)
+	})
+}
+
+// addOnline is both: save applies the provider change to whatever copy is
+// to be written and writes it. The block is derived from the copy it is
+// applied to (an existing block's tuning is kept), so applying it to the
+// file's own copy keeps what the file has.
+func addOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, source, model string, makeDefault bool, save func(apply func(*config.Config)) error) (Added, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return Added{}, errors.New("no key to store")
@@ -179,39 +202,43 @@ func AddOnline(cfg *config.Config, store *credentials.Store, ch Choice, key, sou
 	if err := store.Put(ch.Name, credentials.Credential{Kind: credentials.KindAPIKey, Key: key, Source: source, Created: time.Now().UTC()}); err != nil {
 		return Added{}, err
 	}
-	var pc config.ProviderConfig
-	if ch.Preset {
-		pre, _ := provider.PresetByName(ch.Name)
-		pc = pre.ProviderConfig()
-	} else {
-		pc = config.ProviderConfig{Type: "openai", BaseURL: ch.BaseURL, Online: !config.LocalEndpoint(ch.BaseURL)}
-	}
-	if old, ok := cfg.Providers[ch.Name]; ok {
-		// Keep a person's tuning; only identity fields are ours.
-		pc.ContextWindow, pc.KeepAlive, pc.Options, pc.Headers = old.ContextWindow, old.KeepAlive, old.Options, old.Headers
-		if !ch.Preset {
-			// A custom block's consent fields are the person's: a key
-			// variable they named stays, and a hand-set online: true (a
-			// LAN endpoint they treat as off-site) is never recomputed away
-			// — that would silently drop the online-project gate.
-			pc.APIKeyEnv = old.APIKeyEnv
-			pc.Online = old.Online || !config.LocalEndpoint(ch.BaseURL)
+	model = strings.TrimSpace(model)
+	apply := func(c *config.Config) {
+		var pc config.ProviderConfig
+		if ch.Preset {
+			pre, _ := provider.PresetByName(ch.Name)
+			pc = pre.ProviderConfig()
+		} else {
+			pc = config.ProviderConfig{Type: "openai", BaseURL: ch.BaseURL, Online: !config.LocalEndpoint(ch.BaseURL)}
+		}
+		if old, ok := c.Providers[ch.Name]; ok {
+			// Keep a person's tuning; only identity fields are ours.
+			pc.ContextWindow, pc.KeepAlive, pc.Options, pc.Headers = old.ContextWindow, old.KeepAlive, old.Options, old.Headers
+			if !ch.Preset {
+				// A custom block's consent fields are the person's: a key
+				// variable they named stays, and a hand-set online: true (a
+				// LAN endpoint they treat as off-site) is never recomputed away
+				// — that would silently drop the online-project gate.
+				pc.APIKeyEnv = old.APIKeyEnv
+				pc.Online = old.Online || !config.LocalEndpoint(ch.BaseURL)
+			}
+		}
+		if len(ch.Headers) > 0 {
+			pc.Headers = ch.Headers
+		}
+		pc.DefaultModel = model
+		if c.Providers == nil {
+			c.Providers = map[string]config.ProviderConfig{}
+		}
+		c.Providers[ch.Name] = pc
+		if makeDefault {
+			c.DefaultProvider = ch.Name
 		}
 	}
-	if len(ch.Headers) > 0 {
-		pc.Headers = ch.Headers
-	}
-	pc.DefaultModel = strings.TrimSpace(model)
-	if cfg.Providers == nil {
-		cfg.Providers = map[string]config.ProviderConfig{}
-	}
-	cfg.Providers[ch.Name] = pc
-	if makeDefault {
-		cfg.DefaultProvider = ch.Name
-	}
-	if err := cfg.Save(); err != nil {
+	if err := save(apply); err != nil {
 		return Added{}, err
 	}
+	pc := cfg.Providers[ch.Name]
 	added := Added{Model: pc.DefaultModel, Default: makeDefault}
 	if src, _ := cfg.KeySource(ch.Name); src == "env" {
 		added.Note = fmt.Sprintf("note: $%s is set and takes precedence", pc.APIKeyEnv)
